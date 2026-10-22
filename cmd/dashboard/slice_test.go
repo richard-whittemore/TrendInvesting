@@ -1,12 +1,16 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 // TestTheJournalSliceServesTheJournalQueryReportsOfEachCurrentRun: the
@@ -114,6 +118,61 @@ func TestTheJournalSliceTakesAWindowAndSaysWhatEachRunCovers(t *testing.T) {
 	for _, bad := range []string{"?from=yesterday", "?to=2024-01-01", "?from=2024-01-03T00:00:00Z&to=2024-01-01T00:00:00Z"} {
 		if rec := get(h, http.MethodGet, "/api/journal-slice"+bad); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s answered %d, want 400", bad, rec.Code)
+		}
+	}
+}
+
+// TestTheJournalSliceSaysWhichJournalRaisedTheAlert: asked for an alert by
+// its key's hash (the alert issue's hidden key line), the slice marks the
+// span line of the journal whose own alerts include it, so the triage job
+// takes coverage from the alert's own account and run, never another's.
+func TestTheJournalSliceSaysWhichJournalRaisedTheAlert(t *testing.T) {
+	path := writeJournal(t, t.TempDir())
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, envelopes, err := report.Load(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := report.Alerts(envelopes)
+	if err != nil || len(alerts) == 0 {
+		t.Fatalf("the fixture raises no alert: %v", err)
+	}
+	sum := sha256.Sum256([]byte(alerts[0].Key))
+	own := hex.EncodeToString(sum[:])
+	h := newHandlerFor([]string{path}, nil, nil, "SPY")
+	body := get(h, http.MethodGet, "/api/journal-slice?alert="+own).Body.String()
+	if !strings.Contains(body, "## joint.journal: covers 2024-01-02T21:00:00Z to 2024-01-02T21:00:00Z, and raised the alert\n") {
+		t.Errorf("the journal that raised the alert is not marked:\n%s", body)
+	}
+	other := get(h, http.MethodGet, "/api/journal-slice?alert="+strings.Repeat("0", 64)).Body.String()
+	if strings.Contains(other, "raised the alert") || !strings.Contains(other, ": covers ") {
+		t.Errorf("a journal that did not raise the alert is marked:\n%s", other)
+	}
+	if rec := get(h, http.MethodGet, "/api/journal-slice?alert=abc"); rec.Code != http.StatusBadRequest {
+		t.Errorf("a malformed alert key answered %d, want 400", rec.Code)
+	}
+}
+
+// TestTheJournalSliceRedactsTheLogsNames: a journal's file name is
+// redacted like every cell (docs/live-trading/plan.md section 7), so a log
+// named after an account id never carries it out.
+func TestTheJournalSliceRedactsTheLogsNames(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "U1234567.journal")
+	if err := os.Rename(writeJournal(t, dir), path); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(dir, "DU7654321.journal")
+	if err := os.WriteFile(broken, []byte("not a journal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := get(newHandlerFor([]string{path, broken}, nil, nil, "SPY"), http.MethodGet, "/api/journal-slice").Body.String()
+	for _, leak := range []string{"U1234567", "DU7654321"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("the slice names %s:\n%s", leak, body)
 		}
 	}
 }

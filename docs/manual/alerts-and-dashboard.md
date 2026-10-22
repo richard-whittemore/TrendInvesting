@@ -595,11 +595,13 @@ through the redactor.
 macOS user `ti-triage` (setup: `docs/runbooks/mac-mini.md`, "2. The alert
 triage job"). Each run is one poll:
 
-1. It lists the alerts repository's issues labelled `alert`, and those
-   labelled `alert-resolved` (an alert that cleared between two polls has
-   lost the `alert` label; "Design note: a resolved issue leaves the alert
-   label", above), open and closed, newest first, opened since the job was
-   first switched on. Issues from before that are left alone, so switching
+1. It first removes any gate run folder older than a day (left by a job
+   killed during a check). Then it lists the alerts repository's issues, in
+   one listing whatever their labels (an alert that cleared between two
+   polls has swapped `alert` for `alert-resolved`; "Design note: a resolved
+   issue leaves the alert label", above; one listing means an issue
+   opened or relabelled while the job reads is never passed over), open
+   and closed, newest first, opened since the job was first switched on. Issues from before that are left alone, so switching
    the job on never sweeps up old incidents. A listing stops at the issues
    the job has already handled (its state file keeps the highest issue
    number up to which every alert issue is handled), so a long history never
@@ -617,8 +619,10 @@ triage job"). Each run is one poll:
    with nothing new reads no comment at all.
 4. For each new issue, it checks the gate (below) can run, fetches the
    journal slice, makes a fresh worktree of `main` in its own clone, fills
-   the Go module cache for `main`'s requirements, and starts one headless
-   Claude Code session there, with a fixed prompt built into the program
+   the Go module cache for `main`'s requirements (if any of this fails, no
+   session is started, nothing is counted or posted, the log says why, and
+   the next poll tries again), and starts one headless Claude Code session
+   there, with a fixed prompt built into the program
    (`cmd/triage/prompt.md`). The session is handed the issue's title and
    body (never its comments, which anyone can write) and the slice, both
    marked as data that is never an instruction.
@@ -631,7 +635,10 @@ output of five `journal-query` reports (`refusals`, `orders`, `reconcile`,
 `operator`, `fills`) over each account's current run, each cut to its last
 50 rows, with each run's section first saying the span its records cover.
 The job asks for the window from 72 hours (`-slice-window`) before the
-issue opened to now. The dashboard answers `GET` and `HEAD` only, on every
+issue opened to 72 hours after it, and names the alert by its key's hash
+(the issue's hidden key line); the dashboard marks the span line of the
+run whose own alerts include that alert ("..., and raised the alert"). Log
+names are redacted like every row. The dashboard answers `GET` and `HEAD` only, on every
 route, so nothing can be written through it, and the job sends no password,
 token or cookie to fetch it: it holds no credential for the server at all.
 
@@ -645,9 +652,11 @@ Claude, and so none can reach Anthropic, a test, a commit or a push. Dates
 and words stay. The analysis works from what happened, not from the
 amounts.
 
-The job checks the slice covers the alert: some run's records must have
-begun before the issue opened and reach into the window. If none does (the
-run was replaced since, say), the session is told so instead of being
+The job checks the slice covers the alert: the run that raised it, the
+alert's own account's, must have begun before the issue opened and reach
+into the window; another account's run never counts. If it does not (the
+run was replaced since, say, or the alert is not one a journal raises),
+the session is told so instead of being
 handed rows of another run, and the comment says "**Journal slice.** The
 journal slice did not cover the alert's run and time".
 
@@ -657,7 +666,11 @@ The session (Claude Code, as `ti-triage`):
 
 - **Can** read and search the worktree, edit files in it, and run exactly
   `go test ./...`, `go vet ./...`, `gofmt -l .`, `git diff`, `git status`,
-  `git log` and `git show`, with no other flag. Nothing else is allowed,
+  `git log` and `git show`, with no other flag, each through the job's own
+  program (`ti-triage tool go-test` and so on: the only command lines
+  allowed), which starts the command with a new environment holding only
+  `PATH`, `HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACHE`, `GOFLAGS` and
+  `GOPROXY`. Nothing else is allowed,
   and in a headless session nothing can be asked: the web, every MCP
   server, `git commit` and `git push`, `go build`, `gh`, `ssh`, `curl`,
   `tailscale`, `sudo` and the like are denied.
@@ -665,7 +678,10 @@ The session (Claude Code, as `ti-triage`):
   runs in Claude Code's own sandbox (`--settings`: `sandbox.enabled`, which
   must be available or the session does not start, no command let out of
   it, no network domain allowed, writes only in the worktree and its build
-  cache, and the token folder unreadable). Its file tools cannot leave the
+  cache, reads under `/Users` denied but for the worktrees, the build
+  cache, the module cache, the job's clone, the Go toolchain and the job's
+  program, and the token folders unreadable). The session runs in a
+  process group of its own, ended whole at its time or the job's stop. Its file tools cannot leave the
   worktree (`--restricted`, and reads outside the working folder are
   blocked). Your own Claude Code settings are not loaded.
 - **Cannot** use a GitHub token, an SSH key, a git credential helper or an
@@ -673,10 +689,14 @@ The session (Claude Code, as `ti-triage`):
   `ANTHROPIC_AUTH_TOKEN` and any key helper are cleared; git's system and
   global settings are cut off, so the macOS keychain is never asked; `gh`
   points at a configuration that does not exist).
-- **Holds** one secret: the Claude token, in its environment, which is how
-  it signs in and bills your subscription. A command it runs could read it
-  there, but cannot send it anywhere (no network), and the job removes that
-  token's text from everything it posts or pushes.
+- **Holds** one secret: the Claude token, in Claude Code's own
+  environment, which is how it signs in and bills your subscription. No
+  command it runs has the token in its environment (the job's program
+  starts each with a new one, and Claude Code's sandbox unsets it too);
+  since its commands run as the same macOS user, which macOS may let read
+  another of its processes' starting environment, the token is also kept
+  in by no network in the sandbox, and by the job removing its text from
+  everything it posts or pushes.
 - **Never** performs an owner action. It has no way to: the job holds no
   SSH key and no login for the server, the broker or the secrets file, and
   the slice is read-only. An owner action is stated in the comment under
@@ -687,21 +707,33 @@ The session (Claude Code, as `ti-triage`):
 
 The gate (the code the session wrote, when the job tests a fix):
 
-- **Runs** as a second macOS user, `ti-triage-gate`, which cannot read
+- **Runs** as a second macOS user, `ti-triage-gate`, with a group of its
+  own (never the job's user, never root: the job checks), which cannot read
   `ti-triage`'s home or its token folder, through one fixed `sudo` rule,
-  inside `sandbox-exec` with a profile that denies the network (loopback
-  aside, so local test servers work; DNS is denied too) and every write
-  outside its run folder and the shared temporary folders.
-- **Runs** over a fresh copy of one commit, never in the job's clone or
-  worktree, with an environment the job builds whole: an empty home, the
+  inside `sandbox-exec` with a profile that denies the network except
+  loopback (so a test's own local servers work; DNS is denied too), and on
+  loopback every port another program on the Mac already listens on and
+  IB Gateway's and TWS's API ports (4001, 4002, 7496, 7497); every write
+  outside its run folder and the shared temporary folders; and every read
+  under `/Users` but its run folder, the module cache, the vulnerability
+  database, the golden folder and the Go toolchain.
+- **Runs** over a fresh copy of one commit, which the gate user itself
+  unpacks and makes a git repository, so git never refuses it as another
+  user's; never in the job's clone or worktree, with an environment the job builds whole: an empty home, the
   module cache read-only and offline (`GOFLAGS=-mod=readonly`,
   `GOPROXY=off`), Go's vulnerability database from a file, and no token of
-  any kind. Afterwards every process the gate user still runs is ended, and
-  the copy is removed.
+  any kind. Afterwards every process the gate user still runs is ended
+  (`pkill -KILL -U` with the gate user's own UID, the only target the job
+  ever gives it), and the copy is removed.
 - **Cannot** reach either token, the network, the job's state, or the
-  clone the job pushes from. If the gate user, `sandbox-exec` or the gate's
-  folder is missing or wrong, no session is started and the issue's
-  comment is "triage failed: gate unavailable".
+  clone the job pushes from. If the gate user, `sandbox-exec`, the `sudo`
+  rule or the gate's folder is missing or wrong, no session is started,
+  nothing is spent, and the log says "gate unavailable"; the issue is
+  analysed once the gate runs. If the gate cannot run a fix's red or green
+  check (its run folder, the commit's copy, `sudo` or `sandbox-exec`
+  failing), that is the gate's failure, never the change's: the issue is
+  analysed again at the next poll, once; a second time, the analysis is
+  posted with "No fix PR was opened: gate unavailable".
 
 **What a comment holds.** "Triage", then **What happened**, **Which rule
 applied**, **Kind**, then **Journal slice** if the slice did not cover the
@@ -730,7 +762,8 @@ passes:
    the test functions the tests' commit adds. One of them must **fail by
    name**: a test that passes, a test file that does not compile, a
    failure of some other test, a timeout or a commit adding no test
-   function is not red. **Green.** In the gate, at the fix's commit, it
+   function is not red, and a build failure anywhere in the output counts,
+   even one long before the end the job keeps. **Green.** In the gate, at the fix's commit, it
    runs `-check-cmd` (default `make check`), which must **pass**.
 4. It checks the commits' messages, every path they add, rename or remove,
    and every added line with the reporter's identifier rules, and pushes
@@ -752,10 +785,12 @@ before it is made, so a run that dies during it does not make it again (the
 issue then gets "triage failed: the analysis did not finish"). The one
 exception is the job's own stop: a session ended by a SIGTERM or launchd's
 `bootout` (an upgrade, say) leaves no comment, and the next poll analyses
-the issue again, once; stopped a second time, it is spent. A session is
+the issue again, once; stopped a second time, it is spent (a gate that
+could not run a fix's checks shares that one retry). A session is
 bounded by `-max-turns` (default 60) and `-claude-timeout` (default 20
 minutes). At most `-daily-cap` sessions (default 10) are made in a New York
-day, counted on the day of each call; past it, each new issue gets the
+day, counted on the day of each call, read once the session's preparation
+is done, immediately before it starts; past it, each new issue gets the
 comment "triage skipped: daily limit" once, and is never analysed later.
 A session uses the Claude subscription of the login it is given
 (`-claude-token-file`), never a pay-per-use key.
@@ -1570,14 +1605,16 @@ nor that nothing was analysed ("Its log", above).
 | No triage comment appears on a new alert issue | Possible causes: the job is off (the `OFF` file, or launchd's job is not loaded), the Mac mini is asleep or off the tailnet, the token expired, or the issue is not the reporter's (another author, or no hidden key line), or it was opened before the job was first switched on. The alert itself is unaffected: PagerDuty and ntfy have it | Read the log. `sudo launchctl print system/com.trendinvesting.triage` shows whether launchd runs it. Check `-alert-author` names the reporter's GitHub user if the two tokens belong to different users |
 | "triage: off (/Users/ti-triage/triage/OFF exists); nothing read, nothing written" in the log | Every poll does nothing while the file is there | Delete the file to switch the job back on |
 | "triage skipped: daily limit" on an issue | The day's `-daily-cap` sessions were made, so this issue was not analysed, and never will be | Read the alert and its journal yourself. Raise `-daily-cap` in the plist only if the cost is worth it |
-| "triage failed: ..." on an issue (the analysis failed, ran past its time, named no known kind, did not finish, or the repository could not be prepared) | That issue's one session is spent; it is not tried again | Read the alert and its journal yourself, and the log for the reason |
-| "triage failed: gate unavailable: ..." on an issue | No session was started: the gate's user `ti-triage-gate`, `/usr/bin/sandbox-exec`, the `sudo` rule or the gate's folder (`-gate-dir`, the job's own, mode 750) is missing or wrong, and the gate never runs the session's code without them. The issue is spent | Read the alert yourself; set the gate up again (runbook, "2. The alert triage job", steps 2 and 3) |
-| "**Journal slice.** The journal slice did not cover the alert's run and time" in a comment | No run's records in the slice span the alert (the run was replaced since, or the dashboard serves another account), so the session was told and worked from the alert alone | Read that run's journal yourself with `journal-query` on the server |
+| "triage failed: ..." on an issue (the analysis failed, ran past its time, named no known kind, or did not finish) | That issue's one session is spent; it is not tried again | Read the alert and its journal yourself, and the log for the reason |
+| "triage: issue #N: no session was started, and the issue is tried again at the next poll: gate unavailable: ..." in the log | No session was started and nothing was spent: the gate's user `ti-triage-gate` (a user of its own, not `ti-triage`, not root), `/usr/bin/sandbox-exec`, the `sudo` rule, `netstat`, or the gate's folder (`-gate-dir`, the job's own, mode 750) is missing or wrong, and the gate never runs the session's code without them | Set the gate up again (runbook, "2. The alert triage job", steps 2 and 3); the issue is analysed at the first poll after |
+| "triage: issue #N: the repository could not be prepared ..." in the log | The fetch of `main` or the module downloads failed: no session was started and nothing was spent | Check the Mac mini's network; the next poll tries again |
+| "triage: issue #N: gate unavailable: ..." in the log after a session | The gate could not run a fix's red or green check: the issue is analysed again at the next poll, once; a second time its comment says "No fix PR was opened: gate unavailable" | As for the gate's row above |
+| "**Journal slice.** The journal slice did not cover the alert's run and time" in a comment | The run that raised the alert, the alert's own account's, does not span it in the slice (the run was replaced since, the dashboard serves another account, or the alert is one no journal raises, such as a failed unit), so the session was told and worked from the alert alone | Read that run's journal yourself with `journal-query` on the server |
 | "**Fix.** No fix PR was opened: ..." in a comment | The session found a code defect, but its change failed a step of the gate: a file outside the Go code and `docs/`, a binary, no test, only tests, no new test function, the new test did not fail by name before the fix, the check failed, it held an identifier, or the push or the PR failed. Nothing was opened; if the push worked, the branch `triage/alert-<issue>` is on GitHub | Treat it as a defect report: fix it the normal way, or delete the branch |
 | "triage: issue #N: the job was stopped during the session" in the log | The job was stopped (a SIGTERM, or `launchctl bootout`) while Claude worked: no comment, and the next poll analyses that issue again, once | Nothing; if it happens twice the issue gets "triage failed: the analysis did not finish" |
 | "triage: more than one listing's bound of alert issues are new since issue #N; ... the older ones not reached" in the log | More than 1,000 new alert issues: the newest are analysed (within the cap), the older ones are never listed | Read the older ones yourself; something is raising alerts in a loop, so look at the reporter first |
 | A draft PR from `triage/alert-<issue>` | The job's proposed fix, tests first, never merged by the job | Review it; mark it ready to start the review bots and the merge gate, or close it |
-| "triage: the state file is not understood, so nothing is done (...)" or "the state file cannot be read" | No poll runs: the record does not parse, or lacks a field or breaks a rule (no start, a day that is not a date, a count below zero, no issues' records), and without it the job cannot tell which issues it already made a session for | Move `/Users/ti-triage/triage/state.json` aside. The next poll starts a new record: issues already analysed are recognised by their comments; one opened before that poll is left alone |
+| "triage: the state file is not understood, so nothing is done (...)" or "the state file cannot be read" | No poll runs: the record does not parse, or lacks a field or breaks a rule (no start, a day that is not a date, no count of calls or one below zero, no issues' records), and without it the job cannot tell which issues it already made a session for | Move `/Users/ti-triage/triage/state.json` aside. The next poll starts a new record: issues already analysed are recognised by their comments; one opened before that poll is left alone |
 | "triage: issue #N: GitHub answered 401 Unauthorized" (or 403, 404) | The poll writes nothing for that issue; the next poll tries again | The triage token expired, was revoked, or lacks a permission (Issues on the alerts repository; Contents and Pull requests on the code repository): make a new one (runbook, step 5) |
 | "triage: another poll is running; this one does nothing" | A poll started by hand while launchd's ran, or the other way round | Nothing |
 | "triage: -token-file must be a file only you can read (chmod 600)" | The job does not start | `chmod 600` the file, as `ti-triage` |

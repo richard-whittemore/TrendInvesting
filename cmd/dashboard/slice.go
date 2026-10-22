@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
@@ -55,6 +59,44 @@ func sliceRedactor() report.Redactor {
 	return report.NewRedactor(names)
 }
 
+// alertKeyHash is the hash of an alert's key as the reporter writes it in
+// the issue's hidden key line: SHA-256, in lowercase hex.
+var alertKeyHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// sliceAlert reads the route's optional alert: the hash of the alert's key,
+// so the span line of the log whose own alerts include it says so, and the
+// triage job takes coverage from the alert's own account and run only.
+func sliceAlert(r *http.Request) (string, error) {
+	v := r.URL.Query().Get("alert")
+	if v != "" && !alertKeyHash.MatchString(v) {
+		return "", fmt.Errorf("alert must be the 64 hexadecimal digits of the alert key's hash")
+	}
+	return v, nil
+}
+
+// raises reports whether the log's own alerts (report.Alerts, the reporter's
+// rules over its records) include the one whose key hashes to want.
+func raises(loaded journalquery.Journal, want string) bool {
+	if want == "" {
+		return false
+	}
+	envelopes := make([]event.Envelope, 0, len(loaded.Records))
+	for _, rec := range loaded.Records {
+		envelopes = append(envelopes, rec.Envelope)
+	}
+	alerts, err := report.Alerts(envelopes)
+	if err != nil {
+		return false
+	}
+	for _, a := range alerts {
+		sum := sha256.Sum256([]byte(a.Key))
+		if hex.EncodeToString(sum[:]) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // sliceWindow reads the route's optional window: from and to, RFC 3339
 // instants, either may be absent. The rows kept are those of the UTC days
 // the window touches, journal-query's own filter.
@@ -90,10 +132,12 @@ func sliceWindow(r *http.Request) (journalquery.Filter, error) {
 }
 
 // serveSlice answers the slice: for each fixed journal and each engine
-// directory's current run, the span its records cover, then each report's
-// last rows in the window, headed by the log's file name (never its path). A
-// source that cannot be read is said so in one line, as the page says it,
-// and the others are still served.
+// directory's current run, the span its records cover (and, asked for an
+// alert, whether this log raised it), then each report's last rows in the
+// window, headed by the log's file name (never its path), with every
+// account id, token and host taken out of it (report.Redactor.Identifiers;
+// its digits stay, so a run's file name still reads). A source that cannot be read is said so in one line, as the page
+// says it, and the others are still served.
 func serveSlice(sources source, logs *logCache) http.HandlerFunc {
 	redactor := sliceRedactor()
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -102,17 +146,22 @@ func serveSlice(sources source, logs *logCache) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		alert, err := sliceAlert(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		var b strings.Builder
 		for _, path := range sources.journals {
-			sliceOf(&b, filepath.Base(path), path, logs, filter, redactor)
+			sliceOf(&b, filepath.Base(path), path, logs, filter, alert, redactor)
 		}
 		for _, dir := range sources.dirs {
 			path, _, err := currentLogIn(dir, logs)
 			if err != nil {
-				fmt.Fprintf(&b, "## %s: %s\n\n", filepath.Base(dir), reason(err))
+				fmt.Fprintf(&b, "## %s: %s\n\n", redactor.Identifiers(filepath.Base(dir)), redactor.Text(reason(err)))
 				continue
 			}
-			sliceOf(&b, filepath.Base(path), path, logs, filter, redactor)
+			sliceOf(&b, filepath.Base(path), path, logs, filter, alert, redactor)
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(b.String()))
@@ -122,25 +171,30 @@ func serveSlice(sources source, logs *logCache) http.HandlerFunc {
 // sliceOf writes one log's span and reports. Reconcile returns its table
 // with the disagreement it found, which is the reason to show it, so a
 // report's error is printed under whatever table came back.
-func sliceOf(b *strings.Builder, name, path string, logs *logCache, filter journalquery.Filter, r report.Redactor) {
+func sliceOf(b *strings.Builder, name, path string, logs *logCache, filter journalquery.Filter, alert string, r report.Redactor) {
+	shown := r.Identifiers(name)
 	raw, err := logs.readFile(path)
 	if err != nil {
-		fmt.Fprintf(b, "## %s: journal unavailable\n\n", name)
+		fmt.Fprintf(b, "## %s: journal unavailable\n\n", shown)
 		return
 	}
 	loaded, err := journalquery.Load(name, raw)
 	if err != nil {
-		fmt.Fprintf(b, "## %s: %s\n\n", name, reason(err))
+		fmt.Fprintf(b, "## %s: %s\n\n", shown, r.Text(reason(err)))
 		return
 	}
 	if n := len(loaded.Records); n > 0 {
-		fmt.Fprintf(b, "## %s: covers %s to %s\n\n", name,
-			loaded.Records[0].Envelope.RecordedAt.UTC().Format(time.RFC3339), loaded.Records[n-1].Envelope.RecordedAt.UTC().Format(time.RFC3339))
+		raised := ""
+		if raises(loaded, alert) {
+			raised = ", and raised the alert"
+		}
+		fmt.Fprintf(b, "## %s: covers %s to %s%s\n\n", shown,
+			loaded.Records[0].Envelope.RecordedAt.UTC().Format(time.RFC3339), loaded.Records[n-1].Envelope.RecordedAt.UTC().Format(time.RFC3339), raised)
 	}
 	journals := []journalquery.Journal{loaded}
 	for _, q := range sliceReports {
 		table, qerr := q.run(journals, filter)
-		fmt.Fprintf(b, "## %s: journal-query %s\n\n", name, q.name)
+		fmt.Fprintf(b, "## %s: journal-query %s\n\n", shown, q.name)
 		var text bytes.Buffer
 		if len(table.Columns) > 0 {
 			_ = redactedTable(table, r).WriteText(&text) // a bytes.Buffer never fails a write

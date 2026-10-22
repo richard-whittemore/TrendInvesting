@@ -45,15 +45,19 @@ func newHTTPSlicer(raw, allow string, client *http.Client) (*httpSlicer, error) 
 	return &httpSlicer{url: raw, client: &c, limit: maxSlice}, nil
 }
 
-// Fetch is the slice's text for the window from to to (either zero: open);
-// the route answers each run's span and the window's rows.
-func (s *httpSlicer) Fetch(ctx context.Context, from, to time.Time) (string, error) {
+// Fetch is the slice's text for the window from to to (either zero: open),
+// for the alert whose key hashes to alert ("" none); the route answers each
+// run's span, marking the one that raised the alert, and the window's rows.
+func (s *httpSlicer) Fetch(ctx context.Context, from, to time.Time, alert string) (string, error) {
 	q := url.Values{}
 	if !from.IsZero() {
 		q.Set("from", from.UTC().Format(time.RFC3339))
 	}
 	if !to.IsZero() {
 		q.Set("to", to.UTC().Format(time.RFC3339))
+	}
+	if alert != "" {
+		q.Set("alert", alert)
 	}
 	target := s.url
 	if len(q) > 0 {

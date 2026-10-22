@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/procgroup"
 )
 
 // runner runs one program in dir with exactly env, and returns the last
@@ -49,7 +52,7 @@ func (r execRunner) Run(ctx context.Context, dir string, env []string, name stri
 		if r.stop != nil {
 			r.stop()
 		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return procgroup.Kill(cmd.Process.Pid)
 	}
 	cmd.WaitDelay = waitDelay
 	out := &tailBuffer{}
@@ -58,10 +61,30 @@ func (r execRunner) Run(ctx context.Context, dir string, env []string, name stri
 	return out.String(), err
 }
 
-// tailBuffer keeps the last maxOutput bytes written to it.
-type tailBuffer struct{ buf []byte }
+// disqualifiers are what go test prints for a package that failed to build
+// or set up, or a test run out of time: each fails a run whatever the tests
+// said (redShown).
+var disqualifiers = []string{"[build failed]", "[setup failed]", "panic: test timed out"}
+
+// tailBuffer keeps the last maxOutput bytes written to it, and notes every
+// disqualifier anywhere in the whole output, even one long cut from the
+// tail, which String then names at the end.
+type tailBuffer struct {
+	buf   []byte
+	carry []byte
+	seen  []string
+}
 
 func (t *tailBuffer) Write(p []byte) (int, error) {
+	scan := append(slices.Clone(t.carry), p...)
+	longest := 0
+	for _, d := range disqualifiers {
+		longest = max(longest, len(d))
+		if !slices.Contains(t.seen, d) && bytes.Contains(scan, []byte(d)) {
+			t.seen = append(t.seen, d)
+		}
+	}
+	t.carry = append([]byte(nil), scan[max(0, len(scan)-longest+1):]...)
 	n := len(p)
 	if len(p) >= maxOutput {
 		t.buf = append(t.buf[:0], p[len(p)-maxOutput:]...)
@@ -74,7 +97,15 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (t *tailBuffer) String() string { return string(t.buf) }
+func (t *tailBuffer) String() string {
+	s := string(t.buf)
+	for _, d := range t.seen {
+		if !strings.Contains(s, d) {
+			s += "\n" + d + "\n"
+		}
+	}
+	return s
+}
 
 // gitWorkspace is the job's own clone of the repository, a fresh worktree of
 // main for each analysis, and the gate a fix goes through before it is
@@ -147,6 +178,9 @@ func (w *gitWorkspace) gitOutput(ctx context.Context, dir string, args ...string
 func (w *gitWorkspace) goEnv() []string {
 	return append(slices.Clone(w.env), "GOMODCACHE="+w.gate.modCache(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local")
 }
+
+// Sweep removes the gate's run folders a killed job left behind.
+func (w *gitWorkspace) Sweep(ctx context.Context) error { return w.gate.Sweep(ctx) }
 
 // GateAvailable reports whether the gate can run at all.
 func (w *gitWorkspace) GateAvailable(ctx context.Context) error {
@@ -279,29 +313,42 @@ func (w *gitWorkspace) Gate(ctx context.Context, dir string, tests, fix []string
 		return errNoNewTest
 	}
 	out, err := w.inGate(ctx, dir, "HEAD~1", []string{"go", "test", "-count=1", "-run", "^(" + strings.Join(names, "|") + ")$", "./..."})
+	if errors.Is(err, errGateUnavailable) {
+		return err
+	}
 	if ctx.Err() != nil || !redShown(out, err, names) {
 		return errNotRed
 	}
 	if err := w.fetchVulnDB(ctx, w.gate.vulnDB()); err != nil {
-		return errors.New("the vulnerability database could not be fetched for the check")
+		return fmt.Errorf("%w: the vulnerability database could not be fetched for the check", errGateUnavailable)
 	}
 	if _, err := w.inGate(ctx, dir, "HEAD", w.checkCmd); err != nil {
+		if errors.Is(err, errGateUnavailable) {
+			return err
+		}
 		return fmt.Errorf("`%s` failed at the fix's commit", strings.Join(w.checkCmd, " "))
 	}
 	return nil
 }
 
-// inGate runs argv in a fresh run of the gate over a copy of rev.
+// inGate runs argv in a fresh run of the gate over a copy of rev. A run
+// folder, a copy or a command that cannot be started is the gate's failure
+// (errGateUnavailable), never the change's.
 func (w *gitWorkspace) inGate(ctx context.Context, dir, rev string, argv []string) (string, error) {
 	runDir, done, err := w.gate.newRun(ctx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", errGateUnavailable, err)
 	}
 	defer done()
-	if err := exportTree(ctx, dir, w.env, rev, filepath.Join(runDir, "tree")); err != nil {
+	if err := w.exportTree(ctx, dir, rev, runDir); err != nil {
 		return "", err
 	}
-	return w.gate.Run(ctx, runDir, argv)
+	out, err := w.gate.Run(ctx, runDir, argv)
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) && ctx.Err() == nil {
+		return out, fmt.Errorf("%w: the check could not be started", errGateUnavailable)
+	}
+	return out, err
 }
 
 // redShown reports whether a go test run shows one of the new tests failing:
@@ -313,7 +360,7 @@ func redShown(out string, err error, names []string) bool {
 	if err == nil || !errors.As(err, &exit) || exit.ExitCode() != 1 {
 		return false
 	}
-	for _, bad := range []string{"[build failed]", "[setup failed]", "panic: test timed out"} {
+	for _, bad := range disqualifiers {
 		if strings.Contains(out, bad) {
 			return false
 		}

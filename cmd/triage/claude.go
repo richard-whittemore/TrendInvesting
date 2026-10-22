@@ -11,7 +11,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/procgroup"
 )
 
 // prompt is the fixed prompt of every session: built into the program, so
@@ -20,19 +23,50 @@ import (
 //go:embed prompt.md
 var prompt string
 
+// sessionTools are the only commands the session may run, by name, each a
+// fixed command line: the tests, vet, gofmt's listing and git's read-only
+// commands, with no flag of the session's choosing, so no -exec, -toolexec,
+// -vettool or -o runs or leaves another program. Each runs through the
+// job's own program (runTool), which hands it a whole new environment, so
+// no command the session runs, and no test it wrote, sees the Claude token
+// (docs/manual/alerts-and-dashboard.md, "What the session and the gate can
+// and cannot do").
+var sessionTools = map[string][]string{
+	"go-test":    {"go", "test", "./..."},
+	"go-vet":     {"go", "vet", "./..."},
+	"gofmt":      {"gofmt", "-l", "."},
+	"git-diff":   {"git", "-c", "core.fsmonitor=false", "--no-pager", "diff"},
+	"git-status": {"git", "-c", "core.fsmonitor=false", "--no-pager", "status"},
+	"git-log":    {"git", "-c", "core.fsmonitor=false", "--no-pager", "log"},
+	"git-show":   {"git", "-c", "core.fsmonitor=false", "--no-pager", "show"},
+}
+
+// toolCommand is the job's subcommand that runs one of sessionTools.
+const toolCommand = "tool"
+
+// sessionToolNames is sessionTools' names, in order.
+func sessionToolNames() []string {
+	names := make([]string, 0, len(sessionTools))
+	for n := range sessionTools {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	return names
+}
+
 // allowedTools are the only tools the session may use without asking, and
 // in a headless session nothing can be asked (--permission-mode dontAsk,
 // --permission-prompts none): reading the worktree, changing files in it
-// (file tools are confined to the working folder by --restricted), and a
-// few exact command lines: the tests, vet, gofmt's listing and git's
-// read-only commands, with no flag of the session's choosing, so no -exec,
-// -toolexec, -vettool or -o runs or leaves another program. The sandbox
-// (sessionSettings) is the boundary; the list keeps the session to what it
-// needs.
-var allowedTools = []string{
-	"Read", "Grep", "Glob", "Edit", "Write",
-	"Bash(go test ./...)", "Bash(go vet ./...)", "Bash(gofmt -l .)",
-	"Bash(git diff)", "Bash(git status)", "Bash(git log)", "Bash(git show)",
+// (file tools are confined to the working folder by --restricted), and the
+// exact invocations of the job's wrapper, tool, one per sessionTools name.
+// The sandbox (sessionSettings) is the boundary; the list keeps the session
+// to what it needs.
+func allowedTools(tool string) []string {
+	out := []string{"Read", "Grep", "Glob", "Edit", "Write"}
+	for _, n := range sessionToolNames() {
+		out = append(out, "Bash("+tool+" "+toolCommand+" "+n+")")
+	}
+	return out
 }
 
 // disallowedTools are denied outright, whatever any other rule allows: the
@@ -69,24 +103,36 @@ const (
 
 // sessionSettings is the session's own settings (--settings): Claude Code's
 // sandbox around every command the session runs, required
-// (failIfUnavailable), with no command let out of it, no network, the
-// token folders unreadable and writes allowed only in the worktree and the
-// build cache; and file reads kept to the working folder.
-func sessionSettings(denyRead, allowWrite []string) string {
+// (failIfUnavailable), with no command let out of it, no network, reads
+// under /Users denied but for allowRead (the worktrees, the build cache,
+// the module cache, the job's clone, the Go toolchain, the job's program),
+// the token folders (denyRead) denied again, writes allowed only in the
+// worktree and the build cache, and the Claude token unset for every
+// command (sandbox.credentials); and file reads kept to the working folder.
+func sessionSettings(denyRead, allowRead, allowWrite []string) string {
 	type network struct {
 		AllowedDomains []string `json:"allowedDomains"`
 	}
 	type filesystem struct {
 		DenyRead   []string `json:"denyRead"`
+		AllowRead  []string `json:"allowRead"`
 		AllowWrite []string `json:"allowWrite"`
 	}
+	type envVar struct {
+		Name string `json:"name"`
+		Mode string `json:"mode"`
+	}
+	type credentials struct {
+		EnvVars []envVar `json:"envVars"`
+	}
 	type sandbox struct {
-		Enabled                  bool       `json:"enabled"`
-		FailIfUnavailable        bool       `json:"failIfUnavailable"`
-		AllowUnsandboxedCommands bool       `json:"allowUnsandboxedCommands"`
-		AutoAllowBashIfSandboxed bool       `json:"autoAllowBashIfSandboxed"`
-		Network                  network    `json:"network"`
-		Filesystem               filesystem `json:"filesystem"`
+		Enabled                  bool        `json:"enabled"`
+		FailIfUnavailable        bool        `json:"failIfUnavailable"`
+		AllowUnsandboxedCommands bool        `json:"allowUnsandboxedCommands"`
+		AutoAllowBashIfSandboxed bool        `json:"autoAllowBashIfSandboxed"`
+		Network                  network     `json:"network"`
+		Filesystem               filesystem  `json:"filesystem"`
+		Credentials              credentials `json:"credentials"`
 	}
 	type permissions struct {
 		BlockReads bool `json:"blockReadsOutsideWorkingDirectories"`
@@ -96,7 +142,9 @@ func sessionSettings(denyRead, allowWrite []string) string {
 		Permissions permissions `json:"permissions"`
 	}{
 		Sandbox: sandbox{Enabled: true, FailIfUnavailable: true, Network: network{AllowedDomains: []string{}},
-			Filesystem: filesystem{DenyRead: append([]string{}, denyRead...), AllowWrite: append([]string{}, allowWrite...)}},
+			Filesystem: filesystem{DenyRead: append([]string{"/Users"}, denyRead...), AllowRead: append([]string{}, allowRead...),
+				AllowWrite: append([]string{}, allowWrite...)},
+			Credentials: credentials{EnvVars: []envVar{{Name: "CLAUDE_CODE_OAUTH_TOKEN", Mode: "deny"}}}},
 		Permissions: permissions{BlockReads: true},
 	}) // a struct of strings and bools always encodes
 	return string(raw)
@@ -120,6 +168,9 @@ type claudeCLI struct {
 	// settings (sessionSettings).
 	env      []string
 	settings string
+	// tool is the job's own program, the wrapper every command of the
+	// session runs through (runTool).
+	tool string
 }
 
 // claudeArgs is the session's fixed command line.
@@ -137,7 +188,7 @@ func (c claudeCLI) claudeArgs() []string {
 	if c.settings != "" {
 		args = append(args, "--settings", c.settings)
 	}
-	args = append(append(args, "--allowedTools"), allowedTools...)
+	args = append(append(args, "--allowedTools"), allowedTools(c.tool)...)
 	return append(append(args, "--disallowedTools"), disallowedTools...)
 }
 
@@ -150,8 +201,12 @@ func (c claudeCLI) Analyse(parent context.Context, req analysisRequest) (analysi
 	cmd := exec.CommandContext(ctx, c.path, c.claudeArgs()...)
 	cmd.Dir = req.Dir
 	cmd.Env = c.env
+	// Its own process group, killed whole at its time or the job's stop, so
+	// no command it started outlives it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return procgroup.Kill(cmd.Process.Pid) }
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Stdin = strings.NewReader(prompt +
+	cmd.Stdin = strings.NewReader(prompt + c.commands() +
 		"\n\n## The alert issue\n\n" + data("Title: "+req.Issue.Title+"\n\n"+req.Issue.Body) +
 		"\n\n## The journal slice\n\n" + data(req.Slice) + "\n")
 	var out bytes.Buffer
@@ -184,6 +239,16 @@ func (c claudeCLI) Analyse(parent context.Context, req analysisRequest) (analysi
 		return analysis{}, errors.New("the session's answer was not the shape asked for")
 	}
 	return a, nil
+}
+
+// commands is the prompt's list of the session's exact command lines.
+func (c claudeCLI) commands() string {
+	var b strings.Builder
+	b.WriteString("\n\n## Your commands\n\nRun each exactly as written, nothing else:\n\n")
+	for _, n := range sessionToolNames() {
+		fmt.Fprintf(&b, "- `%s %s %s`: `%s`\n", c.tool, toolCommand, n, strings.Join(sessionTools[n], " "))
+	}
+	return b.String()
 }
 
 // limitedBuffer keeps at most left bytes and drops the rest, so a runaway
@@ -225,11 +290,12 @@ func kept(environ, names []string) []string {
 // sessionEnv is a session's whole environment: the kept variables, git cut
 // off from every credential helper (gitEnv), gh pointed at a configuration
 // that does not exist, so it is not logged in, Go offline and read-only
-// (the job filled the module cache), and Claude Code's own OAuth token when
-// one is given, so the session bills the subscription and never an API key.
+// (the job filled the module cache), Claude Code's scrub of its commands'
+// environment, and Claude Code's own OAuth token when one is given, so the
+// session bills the subscription and never an API key.
 func sessionEnv(environ []string, oauthToken string) []string {
 	env := append(gitEnv(kept(environ, keptNames)), "GH_CONFIG_DIR=/var/empty/ti-triage-no-gh",
-		"GOFLAGS=-mod=readonly", "GOPROXY=off", "GOTOOLCHAIN=local", "GOWORK=off")
+		"GOFLAGS=-mod=readonly", "GOPROXY=off", "GOTOOLCHAIN=local", "GOWORK=off", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1")
 	if oauthToken != "" {
 		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+oauthToken)
 	}

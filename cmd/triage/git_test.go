@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -52,9 +53,10 @@ func script(t *testing.T, dir, name, body string) string {
 }
 
 // standInGate is a gate whose sudo and sandbox-exec are stand-ins that run
-// the command as this user, unconfined: the command line the job builds is
-// the real one, checked by TestTheGateCommandRunsAsItsOwnUserInASandbox;
-// the sandbox itself is checked on macOS by TestTheSandboxDeniesTheNetwork.
+// the command as this user, unconfined (sameUser: tests only): the command
+// line the job builds is the real one, checked by
+// TestTheGateCommandRunsAsItsOwnUserInASandbox; the sandbox itself is
+// checked on macOS by TestTheSandboxDeniesTheNetwork.
 func standInGate(t *testing.T) *gateBox {
 	t.Helper()
 	me, err := user.Current()
@@ -65,10 +67,54 @@ func standInGate(t *testing.T) *gateBox {
 	root := t.TempDir()
 	cache := t.TempDir()
 	return &gateBox{
-		user: me.Username, root: root, path: os.Getenv("PATH"), gocache: cache,
-		sudo:        script(t, bin, "sudo", "[ \"$1\" = -n ] && [ \"$2\" = -u ] || exit 98\nshift 3\nexec \"$@\"\n"),
-		sandboxExec: script(t, bin, "sandbox-exec", "[ \"$1\" = -p ] || exit 97\nshift 2\nexec \"$@\"\n"),
+		user: me.Username, root: root, path: os.Getenv("PATH"), gocache: cache, sameUser: true,
+		sudo:        script(t, bin, "sudo", refuseSignals+"[ \"$1\" = -n ] && [ \"$2\" = -u ] || exit 98\nshift 3\nexec \"$@\"\n"),
+		sandboxExec: script(t, bin, "sandbox-exec", refuseSignals+"[ \"$1\" = -p ] || exit 97\nshift 2\nexec \"$@\"\n"),
 		run:         execRunner{},
+		// The stand-in runs every command as the test's own user: ending
+		// "the gate user's" processes would end the test's user's, so the
+		// stand-in's end of them does nothing.
+		endGateProcesses: func(context.Context) error { return nil },
+	}
+}
+
+// refuseSignals begins every stand-in sudo and sandbox-exec: a stand-in runs
+// its command as the test's own user, so a command line naming a program
+// that sends signals (kill, pkill, killall) is refused before anything
+// runs, whatever its target.
+const refuseSignals = `for a in "$@"; do
+  case "${a##*/}" in kill|pkill|killall) echo "stand-in: refused $a" >&2; exit 97 ;; esac
+done
+`
+
+// TestTheStandInsRefuseEverySignallingProgram: the stand-in sudo and
+// sandbox-exec refuse kill, pkill and killall whatever their arguments; a
+// harmless line (kill -l) is tried first, so a broken guard fails here
+// before the line that would end every process of the test's user is ever
+// handed to it.
+func TestTheStandInsRefuseEverySignallingProgram(t *testing.T) {
+	g := standInGate(t)
+	exitOf := func(prog string, args ...string) int {
+		err := exec.Command(prog, args...).Run()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exit.ExitCode()
+		}
+		return 0
+	}
+	for _, prog := range []string{g.sudo, g.sandboxExec} {
+		lead := []string{"-n", "-u", "x"}
+		if prog == g.sandboxExec {
+			lead = []string{"-p", "(version 1)"}
+		}
+		if code := exitOf(prog, append(lead, "/bin/kill", "-l")...); code != 97 {
+			t.Fatalf("%s ran kill -l (exit %d): its guard is broken, so nothing more is tried", prog, code)
+		}
+		for _, line := range [][]string{{"/bin/kill", "-KILL", "-1"}, {"/usr/bin/pkill", "-KILL", "-U", "0"}, {"killall", "-KILL", "Dock"}, {"/usr/bin/env", "-i", "kill", "-KILL", "-1"}} {
+			if code := exitOf(prog, append(lead, line...)...); code != 97 {
+				t.Errorf("%s did not refuse %q (exit %d)", prog, line, code)
+			}
+		}
 	}
 }
 
@@ -250,24 +296,47 @@ func TestRedShownNeedsATestFailureOfANewTest(t *testing.T) {
 
 // TestTheGateCommandRunsAsItsOwnUserInASandbox: every gate command runs as
 // the gate's own macOS user, through sudo with no password, inside
-// sandbox-exec with a profile denying the network (loopback aside), writes
-// outside its run folder and /tmp, and reads of the job's own folders, and
-// with an environment the job builds whole: an empty home, the module cache
-// read-only and offline, and no credential.
+// sandbox-exec with a profile denying the network (loopback aside, but no
+// port another program on the Mac already listens on, nor IB Gateway's or
+// TWS's), writes outside its run folder and /tmp, and reads under /Users
+// but for its run folder, the module cache, the vulnerability database,
+// the golden folder and the Go toolchain, with the job's own folders
+// denied again; and with an environment the job builds whole: an empty
+// home, the module cache read-only and offline, and no credential.
 func TestTheGateCommandRunsAsItsOwnUserInASandbox(t *testing.T) {
 	g := &gateBox{user: "ti-triage-gate", root: "/Users/Shared/ti-triage-gate", path: "/opt/homebrew/bin:/usr/bin:/bin",
-		sudo: "/usr/bin/sudo", sandboxExec: "/usr/bin/sandbox-exec", denyRead: []string{"/Users/ti-triage"}, golden: "/Users/Shared/golden"}
-	name, args := g.command("/Users/Shared/ti-triage-gate/runs/r1", []string{"make", "check"})
+		sudo: "/usr/bin/sudo", sandboxExec: "/usr/bin/sandbox-exec", denyRead: []string{"/Users/ti-triage"}, golden: "/Users/Shared/golden",
+		toolchain: "/Users/Shared/go"}
+	name, args := g.command("/Users/Shared/ti-triage-gate/runs/r1", []string{"make", "check"}, []int{50267})
 	argv := append([]string{name}, args...)
 	if !slices.Equal(argv[:6], []string{"/usr/bin/sudo", "-n", "-u", "ti-triage-gate", "/usr/bin/sandbox-exec", "-p"}) {
 		t.Fatalf("argv %q", argv)
 	}
 	profile := argv[6]
 	for _, want := range []string{"(deny network*)", `(remote ip "localhost:*")`, "(deny file-write*)",
-		`(subpath "/Users/Shared/ti-triage-gate/runs/r1")`, `(deny file-read* (subpath "/Users/ti-triage"))`} {
+		`(subpath "/Users/Shared/ti-triage-gate/runs/r1")`,
+		`(deny network-outbound (remote ip "localhost:50267"))`,
+		`(deny network-outbound (remote ip "localhost:4001"))`, `(deny network-outbound (remote ip "localhost:4002"))`,
+		`(deny network-outbound (remote ip "localhost:7496"))`, `(deny network-outbound (remote ip "localhost:7497"))`,
+		`(allow file-read-metadata (literal "/Users/Shared"))`} {
 		if !strings.Contains(profile, want) {
 			t.Errorf("profile lacks %s:\n%s", want, profile)
 		}
+	}
+	denyUsers := strings.Index(profile, `(deny file-read* (subpath "/Users"))`)
+	if denyUsers < 0 {
+		t.Fatalf("profile does not deny reads under /Users:\n%s", profile)
+	}
+	var lastAllow int
+	for _, p := range []string{"/Users/Shared/ti-triage-gate/runs/r1", "/Users/Shared/ti-triage-gate/modcache", "/Users/Shared/ti-triage-gate/vulndb", "/Users/Shared/golden", "/Users/Shared/go"} {
+		i := strings.Index(profile, `(allow file-read* (subpath "`+p+`"))`)
+		if i < denyUsers {
+			t.Errorf("profile does not allow reading %s after denying /Users:\n%s", p, profile)
+		}
+		lastAllow = max(lastAllow, i)
+	}
+	if i := strings.Index(profile, `(deny file-read* (subpath "/Users/ti-triage"))`); i < lastAllow {
+		t.Errorf("the job's own folder is not denied after the allowed ones:\n%s", profile)
 	}
 	if !slices.Equal(argv[7:9], []string{"/usr/bin/env", "-i"}) || !slices.Equal(argv[len(argv)-2:], []string{"make", "check"}) {
 		t.Fatalf("argv %q", argv)
@@ -284,8 +353,24 @@ func TestTheGateCommandRunsAsItsOwnUserInASandbox(t *testing.T) {
 			t.Errorf("env holds %s", e)
 		}
 	}
-	if _, args := g.command(`/tmp/a"b`, []string{"true"}); args != nil {
+	if _, args := g.command(`/tmp/a"b`, []string{"true"}, nil); args != nil {
 		t.Errorf("a folder whose name would break the profile was accepted: %q", args)
+	}
+}
+
+// TestListeningPortsAreReadFromNetstat: the ports the profile denies are
+// every TCP port in LISTEN and every bound UDP port netstat shows, on any
+// address, IPv4 or IPv6.
+func TestListeningPortsAreReadFromNetstat(t *testing.T) {
+	out := "Active Internet connections (including servers)\n" +
+		"Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)\n" +
+		"tcp4       0      0  127.0.0.1.50267        *.*                    LISTEN\n" +
+		"tcp6       0      0  *.22                   *.*                    LISTEN\n" +
+		"tcp4       0      0  192.168.1.5.59499      17.1.2.3.443           ESTABLISHED\n" +
+		"udp4       0      0  127.0.0.1.8125         *.*\n" +
+		"udp6       0      0  fe80::1%lo0.5353       *.*\n"
+	if got := listeningPorts(out); !slices.Equal(got, []int{22, 5353, 8125, 50267}) {
+		t.Fatalf("ports %v", got)
 	}
 }
 
@@ -322,11 +407,48 @@ func TestTheSandboxDeniesTheNetwork(t *testing.T) {
 	if out, err := g.Run(context.Background(), runDir, []string{"/usr/bin/curl", "-sS", "-m", "5", "-o", "/dev/null", "https://example.com"}); err == nil {
 		t.Errorf("the sandbox let a command reach the network: %s", out)
 	}
+	// A program already listening on loopback (IB Gateway, the dashboard's
+	// rehearsal) is out of reach; a server the command starts itself, as a
+	// test's httptest does, is not.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.listening = netstatListening("/usr/sbin/netstat")
+	if ports, err := g.listening(context.Background()); err != nil || !slices.Contains(ports, l.Addr().(*net.TCPAddr).Port) {
+		// netstat is kept from this process (macOS can): the port is named
+		// as netstat would name it, so the profile is still the real one.
+		t.Logf("netstat did not show the listener (%v); naming its port directly", err)
+		g.listening = func(context.Context) ([]int, error) { return []int{l.Addr().(*net.TCPAddr).Port}, nil }
+	}
+	defer func() { _ = l.Close() }()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	if out, err := g.Run(context.Background(), runDir, []string{"/usr/bin/curl", "-sS", "-m", "5", "-o", "/dev/null", "http://" + l.Addr().String() + "/"}); err == nil || !strings.Contains(out, "connect") {
+		t.Errorf("the sandbox let a command reach a port already listening on loopback: %v %s", err, out)
+	}
+	own := "import socket\ns = socket.socket()\ns.bind(('127.0.0.1', 0))\ns.listen()\nc = socket.create_connection(s.getsockname())\nprint('own server reached')\n"
+	if out, err := g.Run(context.Background(), runDir, []string{"/usr/bin/python3", "-c", own}); err != nil || !strings.Contains(out, "own server reached") {
+		t.Errorf("the sandbox refused a server of the command's own: %v %s", err, out)
+	}
+	// Reads under /Users are denied but for the folders the gate needs.
+	if src, err := filepath.Abs("gate.go"); err == nil && strings.HasPrefix(src, "/Users/") {
+		if out, err := g.Run(context.Background(), runDir, []string{"/bin/cat", src}); err == nil {
+			t.Errorf("the sandbox let a command read %s: %s", src, out[:min(len(out), 80)])
+		}
+	}
 }
 
-// TestAnUnavailableGateRefuses: without the gate's user, its sandbox, or a
-// folder only the job can change, the gate is unavailable and nothing is
-// run.
+// TestAnUnavailableGateRefuses: without the gate's user (another than the
+// job's own, and not root), its sandbox, or a folder only the job can
+// change, the gate is unavailable and nothing is run.
 func TestAnUnavailableGateRefuses(t *testing.T) {
 	ctx := context.Background()
 	if err := standInGate(t).Available(ctx); err != nil {
@@ -342,7 +464,14 @@ func TestAnUnavailableGateRefuses(t *testing.T) {
 	}
 	failing := standInGate(t)
 	failing.sudo = script(t, t.TempDir(), "sudo", "exit 1\n")
-	for name, g := range map[string]*gateBox{"no user": noUser, "no sandbox": noSandbox, "open root": openRoot, "sudo refuses": failing} {
+	// The gate's user must not be the job's own, whose processes and files
+	// the gate's code would then share, nor root.
+	ownUser := standInGate(t)
+	ownUser.sameUser = false
+	root := standInGate(t)
+	root.user = "root"
+	for name, g := range map[string]*gateBox{"no user": noUser, "no sandbox": noSandbox, "open root": openRoot, "sudo refuses": failing,
+		"the job's own user": ownUser, "root": root} {
 		if err := g.Available(ctx); err == nil {
 			t.Errorf("%s: the gate was available", name)
 		}
@@ -471,5 +600,128 @@ func TestACommandsOutputIsKeptToItsLastBytes(t *testing.T) {
 	}
 	if len(out) > maxOutput || !strings.HasSuffix(out, "the-end\n") {
 		t.Fatalf("kept %d bytes ending %q", len(out), out[max(0, len(out)-20):])
+	}
+}
+
+// deployLikeCheck does to the gate's copy what the deployment tests do to
+// their checkout (deploy/rehearsal/test-build.sh): clone it, commit in the
+// clone, describe it as the build stamp does, and build.
+const deployLikeCheck = `set -e
+git clone -q --shared "$PWD" "$TMPDIR/clone"
+git -C "$TMPDIR/clone" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "the build script under test"
+git describe --always --dirty
+go build ./...
+`
+
+// TestTheGatesCopyIsTheGateUsersOwnAndServesTheDeploymentTests: the copy
+// of a commit the gate checks is made by the gate's user (the archive
+// unpacked and made a repository in its sandbox), never by the job, so git,
+// run as the gate user, owns the repository it reads and never refuses it
+// as another user's; and the deployment tests' own use of their checkout (a
+// clone, a commit in it, the build stamp, a build) passes there.
+func TestTheGatesCopyIsTheGateUsersOwnAndServesTheDeploymentTests(t *testing.T) {
+	w, r, _ := gitWorld(t)
+	w.checkCmd = []string{"/bin/sh", "-c", deployLikeCheck}
+	ctx := context.Background()
+	dir, err := w.Prepare(ctx, "triage/alert-48")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove(ctx, dir)
+	write(t, dir, "internal/x/x.go", fixedCode)
+	write(t, dir, "internal/x/x_test.go", fixedTest)
+	if err := w.Gate(ctx, dir, []string{"internal/x/x_test.go"}, []string{"internal/x/x.go"}, "t"); err != nil {
+		t.Fatal(err)
+	}
+	var unpacked, initialised int
+	for _, argv := range r.argv {
+		line := strings.Join(argv, " ")
+		switch {
+		case argv[0] == w.gate.sudo && strings.Contains(line, "/usr/bin/tar -xf commit.tar") && strings.Contains(line, " init "):
+			unpacked++
+		case argv[0] == "git" && (slices.Contains(argv, "init") || slices.Contains(argv, "commit") && strings.Contains(line, "under the gate")):
+			initialised++
+		}
+	}
+	if unpacked != 2 || initialised != 0 {
+		t.Fatalf("copies made as the gate user %d, by the job %d; want both checks' copies made by the gate user: %q", unpacked, initialised, r.argv)
+	}
+}
+
+// TestARedCheckTheGateCannotRunIsGateUnavailable: a red check that never
+// ran (no run folder, sudo or sandbox-exec refusing) is the gate's failure,
+// not the change's: it is "gate unavailable", never "not red".
+func TestARedCheckTheGateCannotRunIsGateUnavailable(t *testing.T) {
+	for name, breakGate := range map[string]func(g *gateBox){
+		"sudo refuses": func(g *gateBox) {
+			g.sudo = script(t, t.TempDir(), "sudo", "echo 'sudo: a password is required' >&2\nexit 1\n")
+		},
+		"no run folder": func(g *gateBox) { g.root = script(t, t.TempDir(), "not-a-folder", "") },
+		"no sandbox":    func(g *gateBox) { g.sandboxExec = filepath.Join(t.TempDir(), "absent") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			w, _, _ := gitWorld(t)
+			ctx := context.Background()
+			dir, err := w.Prepare(ctx, "triage/alert-49")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Remove(ctx, dir)
+			write(t, dir, "internal/x/x.go", fixedCode)
+			write(t, dir, "internal/x/x_test.go", fixedTest)
+			breakGate(w.gate)
+			err = w.Gate(ctx, dir, []string{"internal/x/x_test.go"}, []string{"internal/x/x.go"}, "t")
+			if !errors.Is(err, errGateUnavailable) || errors.Is(err, errNotRed) {
+				t.Fatalf("err = %v, want gate unavailable", err)
+			}
+		})
+	}
+}
+
+// TestStaleGateRunsAreSweptAsTheGateUser: a run folder a killed job left
+// (older than a day) is emptied as the gate user, through the same sudo
+// rule, and removed; a fresh one, which a running check may still use, is
+// left.
+func TestStaleGateRunsAreSweptAsTheGateUser(t *testing.T) {
+	g := standInGate(t)
+	r := &recordingRunner{}
+	g.run = r
+	runs := filepath.Join(g.root, "runs")
+	for _, d := range []string{"stale/home", "fresh/home"} {
+		if err := os.MkdirAll(filepath.Join(runs, d), 0o770); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(t, filepath.Join(runs, "stale"), "tree/left.go", "package x\n")
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(filepath.Join(runs, "stale"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(runs, "stale")); !os.IsNotExist(err) {
+		t.Errorf("the stale run is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runs, "fresh")); err != nil {
+		t.Errorf("the fresh run was swept: %v", err)
+	}
+	if len(r.argv) == 0 || r.argv[0][0] != g.sudo {
+		t.Errorf("the sweep did not run as the gate user: %q", r.argv)
+	}
+}
+
+// TestRedShownSeesABuildFailureBeyondTheTail: the output is kept to its
+// last bytes, but a build failure, a setup failure or a timeout anywhere in
+// it is still seen, so a long run of failures after an early build failure
+// never passes for red.
+func TestRedShownSeesABuildFailureBeyondTheTail(t *testing.T) {
+	out, err := execRunner{}.Run(context.Background(), t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, "sh", "-c",
+		`echo "FAIL	example.com/y [build failed]"; yes -- "--- FAIL: TestOther (0.00s)" | head -c 200000; echo; echo "--- FAIL: TestFixed (0.00s)"; exit 1`)
+	if err == nil {
+		t.Fatal("no failure")
+	}
+	if redShown(out, err, []string{"TestFixed"}) {
+		t.Fatal("a build failure beyond the kept tail passed for red")
 	}
 }

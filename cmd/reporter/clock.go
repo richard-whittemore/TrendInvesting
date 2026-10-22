@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/richard-whittemore/TrendInvesting/internal/procgroup"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
@@ -61,7 +62,7 @@ func runClockCheck(command string, now time.Time) report.ClockCheck {
 	// Its own process group, killed whole at the timeout, so a child such as
 	// curl cannot keep it running.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.Cancel = func() error { return procgroup.Kill(cmd.Process.Pid) }
 	cmd.WaitDelay = clockCheckWaitDelay
 	out, err := cmd.CombinedOutput()
 	said := strings.TrimSpace(string(out))

@@ -200,11 +200,12 @@ func (g *githubTracker) Self(ctx context.Context) (string, error) {
 	return me.Login, nil
 }
 
-// AlertIssues lists label's issues in the alerts repository, open and
-// closed, newest first, to the first one opened before since or numbered at
-// or below through (already handled). Past maxPages pages it returns what it
-// read, cut, rather than fail: the job then analyses the newest.
-func (g *githubTracker) AlertIssues(ctx context.Context, label string, since time.Time, through int) ([]issue, bool, error) {
+// AlertIssues lists the alerts repository's issues, whatever their labels,
+// open and closed, newest first, in one listing, to the first one opened
+// before since or numbered at or below through (already handled). Past
+// maxPages pages it returns what it read, cut, rather than fail: the job
+// then analyses the newest.
+func (g *githubTracker) AlertIssues(ctx context.Context, since time.Time, through int) ([]issue, bool, error) {
 	var out []issue
 	for page := 1; ; page++ {
 		if page > maxPages {
@@ -218,7 +219,7 @@ func (g *githubTracker) AlertIssues(ctx context.Context, label string, since tim
 			CreatedAt   time.Time       `json:"created_at"`
 			PullRequest json.RawMessage `json:"pull_request"`
 		}
-		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues?labels=%s&state=all&sort=created&direction=desc&per_page=%d&page=%d", g.alerts, url.QueryEscape(label), pageSize, page), maxPageAnswer, nil, &items)
+		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues?state=all&sort=created&direction=desc&per_page=%d&page=%d", g.alerts, pageSize, page), maxPageAnswer, nil, &items)
 		if err != nil {
 			return nil, false, err
 		}

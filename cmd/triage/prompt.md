@@ -37,12 +37,14 @@ go wrong" table), the ADRs in `docs/adr/`, and the code.
 
 ## What you may and may not do
 
-- You may read anything in the worktree, and run exactly these commands,
-  with no other flag: `go test ./...`, `go vet ./...`, `gofmt -l .`,
-  `git diff`, `git status`, `git log` and `git show`. Your commands run in
-  a sandbox with no network at all, loopback included, so a test that
-  starts a local server fails there; the job's own gate runs the tests
-  again where loopback works.
+- You may read anything in the worktree, and run exactly the command
+  lines listed under "Your commands" at the end of this prompt, each as
+  written: the job's own program, which runs `go test ./...`,
+  `go vet ./...`, `gofmt -l .`, `git diff`, `git status`, `git log` or
+  `git show` for you. No other command and no other flag is allowed. Your
+  commands run in a sandbox with no network at all, loopback included, so
+  a test that starts a local server fails there; the job's own gate runs
+  the tests again where loopback works.
 - You never perform an owner action, and you never try to. You hold no way
   to reach the server, the broker or the secrets, and you must not look for
   one. For an owner action, state the step in `owner_action`, in the words

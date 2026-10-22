@@ -15,16 +15,27 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
-// alertBody is an alert issue's body as the reporter writes it: its text,
-// then the hidden line tying it to its alert key.
-const alertBody = "The risk gate refused one order.\n\n<!-- ti-alert-key:abc123 -->"
+// alertKey is the hash of an alert's key, as the reporter writes it in the
+// issue's hidden key line; alertBody is an alert issue's body as the
+// reporter writes it: its text, then that line.
+const (
+	alertKey  = "5f2b0c1d9e8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c"
+	alertBody = "The risk gate refused one order.\n\n<!-- ti-alert-key:" + alertKey + " -->"
+)
 
 var pollTime = time.Date(2026, time.October, 22, 15, 0, 0, 0, time.UTC)
+
+// alertLabel and resolvedLabel are the reporter's labels: an open
+// incident's issue, and one the reporter resolved.
+const (
+	alertLabel    = "alert"
+	resolvedLabel = "alert-resolved"
+)
 
 // fakeTracker is GitHub's issues and pulls held in memory.
 type fakeTracker struct {
 	self     string
-	issues   map[string][]issue // by label, newest first
+	issues   map[string][]issue // by label
 	comments map[int][]comment
 	pulls    []fakePull
 	// failComments fails every comment write.
@@ -32,6 +43,10 @@ type fakeTracker struct {
 	// bound is the most issues one listing returns before it is cut; 0 is
 	// no bound. listed counts the issues every listing returned.
 	bound, listed int
+	// afterListing, when set, runs after each listing with its ordinal, as
+	// GitHub changing while the job reads it.
+	afterListing func(n int)
+	listings     int
 }
 
 type comment struct{ author, body string }
@@ -40,9 +55,24 @@ type fakePull struct{ head, title, body string }
 
 func (f *fakeTracker) Self(context.Context) (string, error) { return f.self, nil }
 
-func (f *fakeTracker) AlertIssues(_ context.Context, label string, since time.Time, through int) ([]issue, bool, error) {
+func (f *fakeTracker) AlertIssues(_ context.Context, since time.Time, through int) ([]issue, bool, error) {
+	f.listings++
+	if f.afterListing != nil {
+		defer f.afterListing(f.listings)
+	}
+	// One listing of every issue, whatever its label, newest first, as
+	// GitHub answers it.
+	var all []issue
+	for _, list := range f.issues {
+		for _, is := range list {
+			if !slices.ContainsFunc(all, func(o issue) bool { return o.Number == is.Number }) {
+				all = append(all, is)
+			}
+		}
+	}
+	slices.SortFunc(all, func(a, b issue) int { return b.Created.Compare(a.Created) })
 	var out []issue
-	for _, is := range f.issues[label] {
+	for _, is := range all {
 		if is.Created.Before(since) || is.Number <= through {
 			break
 		}
@@ -108,16 +138,18 @@ type fakeSlicer struct {
 	slice    string
 	calls    int
 	from, to time.Time
+	alert    string
 }
 
-func (f *fakeSlicer) Fetch(_ context.Context, from, to time.Time) (string, error) {
+func (f *fakeSlicer) Fetch(_ context.Context, from, to time.Time, alert string) (string, error) {
 	f.calls++
-	f.from, f.to = from, to
+	f.from, f.to, f.alert = from, to, alert
 	return f.slice, nil
 }
 
-// covering is a slice whose run covers the alerts of newWorld.
-const covering = "## boost.log: covers 2026-10-22T14:00:00Z to 2026-10-22T15:30:00Z\n\n## boost.log: journal-query refusals\n\nrefused order-size"
+// covering is a slice whose run, the one that raised the alert, covers the
+// alerts of newWorld.
+const covering = "## boost.log: covers 2026-10-22T14:00:00Z to 2026-10-22T15:30:00Z, and raised the alert\n\n## boost.log: journal-query refusals\n\nrefused order-size"
 
 // fakeFixer is the repository workspace: the files the session changed and
 // what each step did.
@@ -131,14 +163,26 @@ type fakeFixer struct {
 	prepared []string
 	// dir, when set, is the worktree Prepare returns.
 	dir string
-	// unavailable is the gate's answer to GateAvailable.
-	unavailable error
+	// unavailable is the gate's answer to GateAvailable; prepareErr
+	// Prepare's.
+	unavailable, prepareErr error
+	// swept counts the sweeps of stale gate runs; onPrepare runs in Prepare.
+	swept     int
+	onPrepare func()
 }
 
 func (f *fakeFixer) GateAvailable(context.Context) error { return f.unavailable }
 
+func (f *fakeFixer) Sweep(context.Context) error { f.swept++; return nil }
+
 func (f *fakeFixer) Prepare(_ context.Context, branch string) (string, error) {
 	f.prepared = append(f.prepared, branch)
+	if f.onPrepare != nil {
+		f.onPrepare()
+	}
+	if f.prepareErr != nil {
+		return "", f.prepareErr
+	}
 	if f.dir != "" {
 		return f.dir, nil
 	}
@@ -266,8 +310,8 @@ func TestAPollWithNothingNewSpendsNoModelUsage(t *testing.T) {
 
 // TestAResolvedIssueNeverAnalysedIsAnalysed: the reporter swaps the alert
 // label for alert-resolved when the alert clears, so an incident that
-// cleared between two polls is found by the resolved label, and analysed
-// once even when the two listings both show it.
+// cleared between two polls is found whatever its label, and analysed once
+// even when it carried both.
 func TestAResolvedIssueNeverAnalysedIsAnalysed(t *testing.T) {
 	w := newWorld(t)
 	resolved := issue{Number: 44, Title: "boost: no engine heartbeat", Body: alertBody, Author: "owner", Created: pollTime.Add(time.Minute)}
@@ -510,7 +554,7 @@ func TestNoSecretAccountIDOrFigureReachesACommentOrPR(t *testing.T) {
 	w.job.redactor = report.NewRedactor([]string{"s3cret-token-value"})
 	leaky := "Account DU1234567 at lightsail.tail1a2b3.ts.net (100.101.102.103) held 39 shares at $101.25, token s3cret-token-value, @coderabbitai review"
 	w.slicer.slice = "refused DU1234567 39 101.25 lightsail.tail1a2b3.ts.net"
-	w.tracker.issues[alertLabel][0].Body = "U7654321 refused\n\n<!-- ti-alert-key:abc123 -->"
+	w.tracker.issues[alertLabel][0].Body = "U7654321 refused\n\n<!-- ti-alert-key:" + alertKey + " -->"
 	w.analyst.result = analysis{Kind: kindDefect, WhatHappened: leaky, Rule: leaky, OwnerAction: leaky, FixTitle: leaky, FixSummary: leaky}
 	w.fixer.changed = []string{"internal/x/a.go", "internal/x/a_test.go"}
 	w.fixer.added = "+x"
@@ -552,7 +596,7 @@ func TestClaudeIsHandedTheSliceAndTheIssueWithEveryFigureRemoved(t *testing.T) {
 	w := newWorld(t)
 	w.slicer.slice = covering + "\nrefused order-size on 2026-10-22: 39 shares at 101.25, cash $12,345.67"
 	w.tracker.issues[alertLabel][0].Title = "boost: refused 39 at 101.25"
-	w.tracker.issues[alertLabel][0].Body = "bought 39 at 101.25\n\n<!-- ti-alert-key:abc123 -->"
+	w.tracker.issues[alertLabel][0].Body = "bought 39 at 101.25\n\n<!-- ti-alert-key:" + alertKey + " -->"
 	w.poll(t)
 	req := w.analyst.requests[0]
 	for _, leak := range []string{"39", "101.25", "12,345.67"} {
@@ -613,6 +657,8 @@ func TestAnIncompleteOrInvalidStateFileStopsTheJob(t *testing.T) {
 		"bad day":        `{"since":"2026-10-22T15:00:00Z","day":"Thursday","calls":0,"issues":{}}`,
 		"negative calls": `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":-1,"issues":{}}`,
 		"no issues":      `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":0}`,
+		"no calls":       `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","issues":{}}`,
+		"null calls":     `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":null,"issues":{}}`,
 		"bad key":        `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":0,"issues":{"x":{"done":true}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -785,38 +831,180 @@ func TestHandledIssuesAreNeverListedAgain(t *testing.T) {
 	}
 }
 
-// TestAnUnavailableGateFailsTheIssueBeforeAnySession: without the gate's
-// own user and sandbox, no session is started: the issue's one comment is
-// "triage failed: gate unavailable".
-func TestAnUnavailableGateFailsTheIssueBeforeAnySession(t *testing.T) {
+// TestAnUnavailableGateSpendsNothing: without the gate's own user and
+// sandbox no session is started, nothing is counted and nothing is posted:
+// the poll reports "gate unavailable" in the log, and the issue is analysed
+// once the gate can run.
+func TestAnUnavailableGateSpendsNothing(t *testing.T) {
 	w := newWorld(t)
-	w.fixer.unavailable = errors.New("no user ti-triage-gate")
+	w.fixer.unavailable = fmt.Errorf("%w: no macOS user ti-triage-gate", errGateUnavailable)
+	err := w.job.poll(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "gate unavailable") {
+		t.Fatalf("err = %v, want gate unavailable", err)
+	}
+	st, serr := loadState(w.job.statePath)
+	if serr != nil {
+		t.Fatal(serr)
+	}
+	if len(w.analyst.requests) != 0 || len(w.tracker.ownComments(41)) != 0 || *st.Calls != 0 || st.Issues["41"].Invoked {
+		t.Fatalf("model calls %d, comments %v, calls counted %d, record %+v; want nothing spent", len(w.analyst.requests), w.tracker.ownComments(41), *st.Calls, st.Issues["41"])
+	}
+	w.fixer.unavailable = nil
+	w.poll(t)
+	if own := w.tracker.ownComments(41); len(w.analyst.requests) != 1 || len(own) != 1 || !strings.Contains(own[0], "The order was larger than the limit.") {
+		t.Fatalf("model calls %d, comments %v; want the issue analysed once the gate runs", len(w.analyst.requests), own)
+	}
+}
+
+// TestARepositoryThatCannotBePreparedSpendsNothing: a fetch or a module
+// download that fails before the session starts makes no call and posts
+// nothing; the next poll tries the issue again.
+func TestARepositoryThatCannotBePreparedSpendsNothing(t *testing.T) {
+	w := newWorld(t)
+	w.fixer.prepareErr = errors.New("git fetch of main failed")
+	if err := w.job.poll(context.Background()); err == nil {
+		t.Fatal("a repository that could not be prepared was not an error")
+	}
+	if len(w.analyst.requests) != 0 || len(w.tracker.ownComments(41)) != 0 {
+		t.Fatalf("model calls %d, comments %v; want nothing spent", len(w.analyst.requests), w.tracker.ownComments(41))
+	}
+	w.fixer.prepareErr = nil
+	w.poll(t)
+	if len(w.analyst.requests) != 1 || len(w.tracker.ownComments(41)) != 1 {
+		t.Fatalf("model calls %d, comments %v; want the issue analysed on the next poll", len(w.analyst.requests), w.tracker.ownComments(41))
+	}
+}
+
+// TestAGateThatCannotRunTheChecksDoesNotSpendTheIssue: a gate that cannot
+// run the red or the green check (its run folder, the commit's copy, sudo or
+// sandbox-exec failing) is said "gate unavailable" in the log, and the
+// issue is analysed again at the next poll, once, as for the job's own
+// stop; a second time, the analysis is posted with the fix said not opened
+// because the gate was unavailable.
+func TestAGateThatCannotRunTheChecksDoesNotSpendTheIssue(t *testing.T) {
+	defect := func(w *world) {
+		w.analyst.result = analysis{Kind: kindDefect, WhatHappened: "The gate compared the wrong side.", Rule: "ADR 0026", FixTitle: "t", FixSummary: "s"}
+		w.fixer.changed = []string{"internal/x/a.go", "internal/x/a_test.go"}
+		w.fixer.added = "+ok"
+		w.fixer.gateErr = fmt.Errorf("%w: sudo refused the red check", errGateUnavailable)
+	}
+	w := newWorld(t)
+	defect(w)
+	if err := w.job.poll(context.Background()); !errors.Is(err, errGateUnavailable) {
+		t.Fatalf("err = %v, want gate unavailable", err)
+	}
+	if own := w.tracker.ownComments(41); len(own) != 0 {
+		t.Fatalf("the issue was spent on a gate that could not run: %v", own)
+	}
+	w.fixer.gateErr = nil
+	w.poll(t)
+	if own := w.tracker.ownComments(41); len(w.analyst.requests) != 2 || len(own) != 1 || len(w.tracker.pulls) != 1 {
+		t.Fatalf("model calls %d, comments %v, pulls %d; want the issue analysed again and its fix opened", len(w.analyst.requests), own, len(w.tracker.pulls))
+	}
+
+	w = newWorld(t)
+	defect(w)
+	_ = w.job.poll(context.Background())
+	_ = w.job.poll(context.Background())
 	w.poll(t)
 	own := w.tracker.ownComments(41)
-	if len(w.analyst.requests) != 0 || len(own) != 1 || !strings.Contains(own[0], "triage failed: gate unavailable") {
-		t.Fatalf("model calls %d, comments %v", len(w.analyst.requests), own)
+	if len(w.analyst.requests) != 2 || len(own) != 1 || !strings.Contains(own[0], "gate unavailable") || !strings.Contains(own[0], "The gate compared the wrong side.") {
+		t.Fatalf("model calls %d, comments %v; want two tries, then the analysis posted with the gate said unavailable", len(w.analyst.requests), own)
+	}
+}
+
+// TestTheDailyCapChargesTheDayOfTheModelCallNotOfItsPreparation: the day is
+// read, the cap checked and the call recorded only once the preparation
+// (the gate's probe, the slice, the worktree, the module downloads) is
+// done, immediately before the session starts, so a preparation that
+// crosses midnight charges its call to the new day and the new day's cap
+// holds.
+func TestTheDailyCapChargesTheDayOfTheModelCallNotOfItsPreparation(t *testing.T) {
+	w := newWorld(t)
+	w.job.dailyCap = 1
+	beforeMidnight := time.Date(2026, time.October, 22, 23, 59, 0, 0, time.UTC)
+	w.tracker.issues[alertLabel] = []issue{
+		{Number: 46, Body: alertBody, Author: "owner", Created: beforeMidnight.Add(-2 * time.Minute)},
+		{Number: 45, Body: alertBody, Author: "owner", Created: beforeMidnight.Add(-3 * time.Minute)},
+	}
+	// The job began earlier that evening.
+	if err := saveState(w.job.statePath, &state{Since: beforeMidnight.Add(-time.Hour), Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{}}); err != nil {
+		t.Fatal(err)
+	}
+	clock := beforeMidnight
+	w.job.now = func() time.Time { return clock }
+	w.fixer.onPrepare = func() { clock = beforeMidnight.Add(2 * time.Minute) } // the first preparation ends after midnight
+	_ = w.job.poll(context.Background())
+	if len(w.analyst.requests) != 1 {
+		t.Fatalf("model calls %d; want one: both calls fall on the new day, whose cap is one", len(w.analyst.requests))
+	}
+	st, err := loadState(w.job.statePath)
+	if err != nil || st.Day != "2026-10-23" || *st.Calls != 1 {
+		t.Fatalf("state %+v (err %v); want the call charged to 2026-10-23", st, err)
+	}
+	if own := w.tracker.ownComments(46); len(own) != 1 || !strings.Contains(own[0], "daily limit") {
+		t.Fatalf("the second issue: %v; want it skipped at the new day's cap", own)
+	}
+}
+
+// TestEachPollSweepsStaleGateRuns: every poll first sweeps the gate's run
+// folders a killed job left behind.
+func TestEachPollSweepsStaleGateRuns(t *testing.T) {
+	w := newWorld(t)
+	w.poll(t)
+	w.poll(t)
+	if w.fixer.swept != 2 {
+		t.Fatalf("swept %d times in two polls", w.fixer.swept)
+	}
+}
+
+// TestAnAlertOpenedBetweenListingsIsNeverSkipped: the job reads the alert
+// issues in one consistent listing, so an alert opened while it reads (one
+// still open, another opened and resolved at once) is never passed over by
+// the handled-through mark: each gets its comment.
+func TestAnAlertOpenedBetweenListingsIsNeverSkipped(t *testing.T) {
+	w := newWorld(t)
+	w.tracker.issues = map[string][]issue{}
+	w.tracker.afterListing = func(n int) {
+		if n != 1 {
+			return
+		}
+		w.tracker.issues[alertLabel] = []issue{{Number: 101, Body: alertBody, Author: "owner", Created: pollTime.Add(time.Minute)}}
+		w.tracker.issues[resolvedLabel] = []issue{{Number: 102, Body: alertBody, Author: "owner", Created: pollTime.Add(2 * time.Minute)}}
+	}
+	_ = w.job.poll(context.Background())
+	w.poll(t)
+	w.poll(t)
+	for _, n := range []int{101, 102} {
+		if own := w.tracker.ownComments(n); len(own) != 1 {
+			t.Errorf("issue %d has %d comments; want one", n, len(own))
+		}
 	}
 }
 
 // TestASliceThatDoesNotCoverTheAlertIsSaidSo: the slice is asked for the
-// window before the alert, and checked to cover the alert: a run whose
-// records span the issue's opening. A slice that does not is not handed to
-// Claude as if it did: the analysis is told, and the comment says so.
+// window centred on the alert, naming the alert by its key's hash, and
+// checked to cover it: the run that raised the alert (the alert's own
+// account's journal, never another's) must span the issue's opening. A
+// slice that does not is not handed to Claude as if it did: the analysis is
+// told, and the comment says so.
 func TestASliceThatDoesNotCoverTheAlertIsSaidSo(t *testing.T) {
 	w := newWorld(t)
 	w.poll(t)
 	created := w.tracker.issues[alertLabel][0].Created
-	if !w.slicer.from.Equal(created.Add(-72*time.Hour)) || w.slicer.to.Before(created) {
-		t.Errorf("slice asked for %s to %s; want the window ending at the alert", w.slicer.from, w.slicer.to)
+	if !w.slicer.from.Equal(created.Add(-72*time.Hour)) || !w.slicer.to.Equal(created.Add(72*time.Hour)) || w.slicer.alert != alertKey {
+		t.Errorf("slice asked for %s to %s, alert %q; want the window centred on the alert, and the alert named", w.slicer.from, w.slicer.to, w.slicer.alert)
 	}
 	if req := w.analyst.requests[0]; !strings.Contains(req.Slice, "journal-query refusals") || strings.Contains(req.Slice, "did not cover") {
 		t.Errorf("a covering slice was not handed over: %q", req.Slice)
 	}
 
 	for name, slice := range map[string]string{
-		"another run":   "## boost.log: covers 2026-10-23T00:00:00Z to 2026-10-23T01:00:00Z\n\nrows",
-		"an older run":  "## boost.log: covers 2026-10-01T00:00:00Z to 2026-10-02T00:00:00Z\n\nrows",
-		"no span given": "## boost.log: journal-query refusals\n\nrows",
+		"another run":       "## boost.log: covers 2026-10-23T00:00:00Z to 2026-10-23T01:00:00Z, and raised the alert\n\nrows",
+		"an older run":      "## boost.log: covers 2026-10-01T00:00:00Z to 2026-10-02T00:00:00Z, and raised the alert\n\nrows",
+		"no span given":     "## boost.log: journal-query refusals\n\nrows",
+		"another account's": "## joint.journal: covers 2026-10-22T14:00:00Z to 2026-10-22T15:30:00Z\n\n## boost.log: covers 2026-10-01T00:00:00Z to 2026-10-02T00:00:00Z, and raised the alert\n\nrows",
+		"no journal raised": "## boost.log: covers 2026-10-22T14:00:00Z to 2026-10-22T15:30:00Z\n\nrows",
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := newWorld(t)

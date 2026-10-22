@@ -34,10 +34,19 @@ func newEndToEnd(t *testing.T) *endToEnd {
 			return
 		}
 		now := time.Now().UTC()
-		_, _ = io.WriteString(w, "## boost.log: covers "+now.Add(-time.Hour).Format(time.RFC3339)+" to "+now.Add(2*time.Hour).Format(time.RFC3339)+"\n\n## boost.log: journal-query refusals\n\nrefused DU1234567 order-size\n")
+		raised := ""
+		if r.URL.Query().Get("alert") == alertKey {
+			raised = ", and raised the alert"
+		}
+		_, _ = io.WriteString(w, "## boost.log: covers "+now.Add(-time.Hour).Format(time.RFC3339)+" to "+now.Add(2*time.Hour).Format(time.RFC3339)+raised+"\n\n## boost.log: journal-query refusals\n\nrefused DU1234567 order-size\n")
 	}))
 	t.Cleanup(dash.Close)
 	ws, _, _ := gitWorld(t)
+	// The gate user is nobody, a user that is not the test's own, as the
+	// job requires; the stand-in sudo runs every command as the test's user
+	// all the same, and refuses any signalling program, so the job's end of
+	// the gate user's processes never reaches one (pkillGateUser refuses
+	// nobody's UID on macOS, and the stand-in refuses pkill elsewhere).
 	gate := standInGate(t)
 	claude, record := fakeClaude(t, `{"type":"result","subtype":"success","is_error":false,"structured_output":{"kind":"data-problem","what_happened":"The bar arrived late.","rule":"ADR 0025","owner_action":"","fix_title":"","fix_summary":""}}`, 0)
 	stateDir := t.TempDir()
@@ -50,12 +59,13 @@ func newEndToEnd(t *testing.T) *endToEnd {
 	e := &endToEnd{
 		github: f, client: srv.Client(), stateDir: stateDir, record: record,
 		environ: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + stateDir, "TI_GITHUB_API_URL=" + srv.URL, "TI_GITHUB_API_ALLOW_HOST=" + gh.Host, "TI_TRIAGE_SLICE_ALLOW_HOST=" + du.Host,
-			"TI_TRIAGE_SUDO=" + gate.sudo, "TI_TRIAGE_SANDBOX_EXEC=" + gate.sandboxExec},
+			"TI_TRIAGE_SUDO=" + gate.sudo, "TI_TRIAGE_SANDBOX_EXEC=" + gate.sandboxExec,
+			"TI_TRIAGE_NETSTAT=" + script(t, t.TempDir(), "netstat", "echo 'tcp4       0      0  127.0.0.1.4002         *.*                    LISTEN'\n")},
 		args: []string{"-alerts-repo", "owner/repo", "-repo-dir", ws.repoDir, "-state-dir", stateDir, "-token-file", token,
-			"-slice-url", dash.URL + "/api/journal-slice", "-claude", claude, "-gate-dir", gate.root, "-gate-user", gate.user},
+			"-slice-url", dash.URL + "/api/journal-slice", "-claude", claude, "-gate-dir", gate.root, "-gate-user", "nobody"},
 	}
 	// The job's state starts before the issue, as a job switched on earlier.
-	if err := saveState(filepath.Join(stateDir, "state.json"), &state{Since: time.Now().Add(-time.Hour), Day: "2026-10-22", Issues: map[string]issueRecord{}}); err != nil {
+	if err := saveState(filepath.Join(stateDir, "state.json"), &state{Since: time.Now().Add(-time.Hour), Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{}}); err != nil {
 		t.Fatal(err)
 	}
 	return e

@@ -9,8 +9,10 @@
 // memory at its start, and nothing that reaches the server, the broker or
 // the secrets: the journal slice comes from the dashboard's read-only route
 // over the tailnet, with no credential and no figure. The session runs in
-// Claude Code's sandbox, with exact commands; the code it writes runs only
-// in the gate, as another macOS user in a sandbox with no network (gateBox);
+// Claude Code's sandbox, with exact commands, each through this program's
+// own wrapper with no token in its environment (runTool); the code it writes
+// runs there, and in the gate, as another macOS user in a sandbox with no
+// network but loopback (gateBox);
 // it never performs an owner action, only states it; a code defect's fix
 // goes through the repository's normal flow, tests first, as a draft PR the
 // job never merges. Every rule lives where the comments name it; this is
@@ -37,6 +39,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == toolCommand {
+		fmt.Fprintln(os.Stderr, runTool(os.Args[2:], os.Environ(), syscall.Exec))
+		os.Exit(2)
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	if err := run(os.Args[1:], os.Environ(), os.Stderr, client); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -65,7 +71,7 @@ func run(args, environ []string, log io.Writer, client *http.Client) error {
 	checkTimeout := flags.Duration("check-timeout", 45*time.Minute, "the longest one gate command may run")
 	gateDir := flags.String("gate-dir", "", "the gate's folder: yours, group the gate user's, mode 750 (runs, module cache, vulnerability database)")
 	gateUser := flags.String("gate-user", "ti-triage-gate", "the macOS user the gate's commands run as, through sudo")
-	sliceWindow := flags.Duration("slice-window", 72*time.Hour, "how far before the alert the journal slice reaches")
+	sliceWindow := flags.Duration("slice-window", 72*time.Hour, "how far before and after the alert the journal slice reaches")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -164,21 +170,40 @@ func run(args, environ []string, log io.Writer, client *http.Client) error {
 	if home := getenv("HOME"); home != "" {
 		denyGate = append(denyGate, home)
 	}
+	gpath := gatePath(getenv("PATH"), getenv("HOME"))
+	toolchain := goToolchain(gpath)
+	sudo := orDefault(getenv("TI_TRIAGE_SUDO"), "/usr/bin/sudo")
 	gate := &gateBox{
-		user: *gateUser, root: *gateDir, path: gatePath(getenv("PATH"), getenv("HOME")), golden: getenv("TI_GOLDEN_DIR"),
-		sudo: orDefault(getenv("TI_TRIAGE_SUDO"), "/usr/bin/sudo"), sandboxExec: orDefault(getenv("TI_TRIAGE_SANDBOX_EXEC"), "/usr/bin/sandbox-exec"),
+		user: *gateUser, root: *gateDir, path: gpath, golden: getenv("TI_GOLDEN_DIR"), toolchain: toolchain,
+		sudo: sudo, sandboxExec: orDefault(getenv("TI_TRIAGE_SANDBOX_EXEC"), "/usr/bin/sandbox-exec"),
 		denyRead: denyGate, run: timedRunner{execRunner{}, *checkTimeout},
+		listening: netstatListening(orDefault(getenv("TI_TRIAGE_NETSTAT"), "/usr/sbin/netstat")), endGateProcesses: pkillGateUser(sudo, *gateUser),
 	}
 	sessionCache := filepath.Join(*stateDir, "session-gocache")
 	env := withEnv(sessionEnv(environ, claudeToken), "GOCACHE", sessionCache)
 	env = withEnv(env, "GOMODCACHE", gate.modCache())
+	workRoot := filepath.Join(*stateDir, "work")
+	self, err := os.Executable()
+	if err == nil {
+		self, err = filepath.EvalSymlinks(self)
+	}
+	if err != nil {
+		return errors.New("triage: this program's own path cannot be told, so the session's commands cannot be pinned to it")
+	}
+	// What the session's commands may read under /Users: the worktrees,
+	// their build cache, the module cache, the job's clone, the Go toolchain
+	// and this program, the wrapper they run through.
+	readable := []string{workRoot, sessionCache, gate.modCache(), *repoDir, self}
+	if toolchain != "" {
+		readable = append(readable, toolchain)
+	}
 	j := &job{
 		tracker: gh,
 		slicer:  journalSlice,
-		analyst: claudeCLI{path: *claude, model: *model, timeout: *claudeTimeout, maxTurns: *maxTurns, env: env,
-			settings: sessionSettings(secretDirs, []string{sessionCache})},
+		analyst: claudeCLI{path: *claude, model: *model, timeout: *claudeTimeout, maxTurns: *maxTurns, env: env, tool: self,
+			settings: sessionSettings(secretDirs, readable, []string{sessionCache})},
 		fixer: &gitWorkspace{
-			repoDir: *repoDir, workRoot: filepath.Join(*stateDir, "work"), run: timedRunner{execRunner{}, *checkTimeout},
+			repoDir: *repoDir, workRoot: workRoot, run: timedRunner{execRunner{}, *checkTimeout},
 			env: gitEnv(kept(environ, keptNames)), gate: gate, checkCmd: strings.Fields(*checkCmd),
 			pushURL: "https://github.com/" + code + ".git", token: codeToken, fetchVulnDB: httpVulnDB(client),
 		},
@@ -190,6 +215,41 @@ func run(args, environ []string, log io.Writer, client *http.Client) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	return j.poll(ctx)
+}
+
+// toolEnvNames are the variables of its own environment the wrapper hands
+// a session's command; toolEnvFixed are set by the job whatever the
+// session's environment says.
+var (
+	toolEnvNames = []string{"PATH", "HOME", "TMPDIR", "GOCACHE", "GOMODCACHE"}
+	toolEnvFixed = []string{"GOFLAGS=-mod=readonly", "GOPROXY=off"}
+)
+
+// runTool is the wrapper every command of the session runs through
+// (sessionTools): it takes exactly one name, finds the command's program on
+// an absolute folder of PATH, and replaces itself with it (exec), handing
+// it a whole new environment of toolEnvNames from its own and toolEnvFixed,
+// so no command the session runs, and no test it wrote, sees the Claude
+// token or any other variable of the session's. It returns only on failure.
+func runTool(args, environ []string, exec func(string, []string, []string) error) error {
+	if len(args) != 1 || sessionTools[args[0]] == nil {
+		return fmt.Errorf("triage tool: name one of %s", strings.Join(sessionToolNames(), ", "))
+	}
+	argv := sessionTools[args[0]]
+	env := append(kept(environ, toolEnvNames), toolEnvFixed...)
+	var path string
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, "PATH="); ok {
+			path = v
+		}
+	}
+	for _, d := range filepath.SplitList(path) {
+		p := filepath.Join(d, argv[0])
+		if info, err := os.Stat(p); filepath.IsAbs(d) && err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return fmt.Errorf("triage tool: %w", exec(p, argv, env))
+		}
+	}
+	return fmt.Errorf("triage tool: %s is on no absolute folder of PATH", argv[0])
 }
 
 // readSecret reads a token from a file only its owner can read; a file
@@ -267,6 +327,19 @@ func gatePath(path, home string) string {
 		keep = append(keep, p)
 	}
 	return strings.Join(keep, string(filepath.ListSeparator))
+}
+
+// goToolchain is the folder of the Go installation the gate's PATH finds
+// (its bin folder's parent), which the sandboxes let commands read; "" when
+// there is none.
+func goToolchain(path string) string {
+	for _, d := range filepath.SplitList(path) {
+		p, err := filepath.EvalSymlinks(filepath.Join(d, "go"))
+		if err == nil && filepath.IsAbs(p) {
+			return filepath.Dir(filepath.Dir(p))
+		}
+	}
+	return ""
 }
 
 func orDefault(v, d string) string {

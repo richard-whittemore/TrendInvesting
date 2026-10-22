@@ -34,7 +34,7 @@ func TestTheSliceIsAPlainGETWithNoCredential(t *testing.T) {
 		_, _ = io.WriteString(w, "## boost.log: journal-query refusals\n")
 	}))
 	defer srv.Close()
-	got, err := slicerFor(t, srv).Fetch(context.Background(), time.Time{}, time.Time{})
+	got, err := slicerFor(t, srv).Fetch(context.Background(), time.Time{}, time.Time{}, "")
 	if err != nil || !strings.Contains(got, "journal-query refusals") {
 		t.Fatalf("slice %q, err %v", got, err)
 	}
@@ -96,7 +96,7 @@ func TestTheSliceRefusesARedirectAStatusAndAnOversizeAnswer(t *testing.T) {
 			defer srv.Close()
 			s := slicerFor(t, srv)
 			s.limit = 100
-			if _, err := s.Fetch(context.Background(), time.Time{}, time.Time{}); err == nil {
+			if _, err := s.Fetch(context.Background(), time.Time{}, time.Time{}, ""); err == nil {
 				t.Fatal("no error")
 			}
 		})
@@ -104,7 +104,8 @@ func TestTheSliceRefusesARedirectAStatusAndAnOversizeAnswer(t *testing.T) {
 }
 
 // TestTheSliceIsAskedForTheAlertsWindow: the job asks the route for the
-// rows of one window, as RFC 3339 instants in the query, and nothing else.
+// rows of one window, as RFC 3339 instants in the query, and for the alert
+// by its key's hash, and nothing else.
 func TestTheSliceIsAskedForTheAlertsWindow(t *testing.T) {
 	var query url.Values
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,10 +115,10 @@ func TestTheSliceIsAskedForTheAlertsWindow(t *testing.T) {
 	defer srv.Close()
 	from := time.Date(2026, time.October, 19, 15, 0, 0, 0, time.UTC)
 	to := time.Date(2026, time.October, 22, 15, 0, 0, 0, time.UTC)
-	if _, err := slicerFor(t, srv).Fetch(context.Background(), from, to); err != nil {
+	if _, err := slicerFor(t, srv).Fetch(context.Background(), from, to, alertKey); err != nil {
 		t.Fatal(err)
 	}
-	if query.Get("from") != "2026-10-19T15:00:00Z" || query.Get("to") != "2026-10-22T15:00:00Z" || len(query) != 2 {
+	if query.Get("from") != "2026-10-19T15:00:00Z" || query.Get("to") != "2026-10-22T15:00:00Z" || query.Get("alert") != alertKey || len(query) != 3 {
 		t.Errorf("query %v", query)
 	}
 }

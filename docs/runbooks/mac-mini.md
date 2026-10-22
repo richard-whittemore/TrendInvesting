@@ -117,43 +117,65 @@ If no such process exists any more, run up.sh again: it takes the lock over.
 ## 2. The alert triage job
 
 Not part of the container: it runs on the Mac itself, under launchd, as a
-macOS user of its own, and the code its sessions write runs only as a
-second user, in a sandbox. What it does, what the session and the gate can
+macOS user of its own. The code its sessions write runs in two places: in
+the session's own commands (`go test` and the like), as that user, inside
+Claude Code's sandbox, through the job's own program, which hands each
+command a new environment without the Claude token; and in the gate, as a
+second user, in a sandbox of its own. What it does, what the session and the gate can
 and cannot do, its cost cap and its off switch: the manual chapter
 [alerts and dashboard](../manual/alerts-and-dashboard.md), "Alerts analysed
 by Claude". **Owner steps** are marked **[OWNER]**; agents never create
 tokens or enter them.
 
-1. **[OWNER] A macOS user of its own.** System Settings, Users & Groups, Add
-   User: a Standard user named `ti-triage`. Never sign it in to iCloud,
-   never give it an SSH key, never run `gh auth login` as it. Close its home
-   to every other user (macOS opens new homes to the `staff` group):
+1. **[OWNER] A macOS user of its own, with a group of its own.** System
+   Settings, Users & Groups, Add User: a Standard user named `ti-triage`.
+   Never sign it in to iCloud, never give it an SSH key, never run
+   `gh auth login` as it. macOS gives a new user the shared `staff` group as
+   its primary group and opens its home to it; give it a group of its own
+   instead, and close its home to every other user:
 
    ```
+   sudo dseditgroup -o create ti-triage
+   sudo dscl . -create /Users/ti-triage PrimaryGroupID "$(dscl . -read /Groups/ti-triage PrimaryGroupID | awk '{print $2}')"
+   sudo chown -R ti-triage:ti-triage /Users/ti-triage
    sudo chmod 700 /Users/ti-triage
+   id ti-triage
    ```
+
+   `id` must name `gid=...(ti-triage)`, not `staff`.
 
    Keep the Mac mini awake (System Settings, Energy: prevent automatic
    sleeping) and on the tailnet.
 2. **[OWNER] The gate's user, group and sudo rule.** The gate runs the code
    a session wrote (`go test`, `make check`) as `ti-triage-gate`, a user
-   that cannot log in and cannot read `ti-triage`'s home or tokens:
+   that cannot log in, has a primary group of its own (not `staff`), and
+   cannot read `ti-triage`'s home or tokens:
 
    ```
    sudo sysadminctl -addUser ti-triage-gate -fullName "TrendInvesting triage gate" -shell /usr/bin/false -home /var/empty -password "$(openssl rand -base64 24)"
    sudo dseditgroup -o create ti-triage-gate
    sudo dseditgroup -o edit -a ti-triage-gate -t user ti-triage-gate
-   echo 'ti-triage ALL=(ti-triage-gate) NOPASSWD: /usr/bin/sandbox-exec, /bin/kill' | sudo tee /etc/sudoers.d/ti-triage-gate
+   sudo dscl . -create /Users/ti-triage-gate PrimaryGroupID "$(dscl . -read /Groups/ti-triage-gate PrimaryGroupID | awk '{print $2}')"
+   id ti-triage-gate
+   uid=$(id -u ti-triage-gate)
+   echo "ti-triage ALL=(ti-triage-gate) NOPASSWD: /usr/bin/sandbox-exec, /usr/bin/pkill -KILL -U $uid" | sudo tee /etc/sudoers.d/ti-triage-gate
    sudo chmod 440 /etc/sudoers.d/ti-triage-gate
    sudo visudo -cf /etc/sudoers.d/ti-triage-gate
    ```
 
-   The password is random and never used. The rule lets `ti-triage` run
-   two programs as the gate user and nothing else: `sandbox-exec` (every
+   `id` must name `gid=...(ti-triage-gate)`, not `staff`, and a UID that is
+   neither 0 nor `ti-triage`'s (the job refuses the gate otherwise). The
+   password is random and never used. The rule lets `ti-triage` run two
+   command lines as the gate user and nothing else: `sandbox-exec` (every
    gate command runs inside it, with a profile the job builds that denies
-   the network, loopback aside, and writes outside the gate's run folder
-   and the shared temporary folders) and `kill` (to end the gate user's
-   processes after each command). `visudo -c` must say "parsed OK".
+   the network except loopback, every loopback port another program on
+   the Mac already listens on and IB Gateway's and TWS's API ports, every
+   write outside the gate's run folder and the shared temporary folders,
+   and every read under `/Users` but the gate's own folders) and
+   `pkill -KILL -U <the gate user's UID>`, exactly, to end the gate user's
+   own processes after each command; nothing can end any other user's.
+   `visudo -c` must say "parsed OK". If you made the rule before this
+   change with `/bin/kill`, replace it with this one.
 3. **[OWNER] The gate's folder.** It holds the gate's runs, the module cache
    and Go's vulnerability database; the job owns it, the gate user may only
    read it and write in its `runs` folder:
@@ -233,10 +255,17 @@ tokens or enter them.
    token. Store it the same way, in
    `/Users/ti-triage/.config/ti-triage/claude-token`. Its reach: it makes
    model calls billed to that subscription, nothing more (it opens no
-   repository, server or broker). The job hands it to its sessions only, in
-   their environment, where a command the session runs could read it but
-   not send it anywhere (no network in the sandbox); the job removes its
-   text from every comment and every push; the gate never has it.
+   repository, server or broker). The job hands it to Claude Code only, in
+   its environment. No command the session runs has it in its
+   environment: each runs through the job's own program, which starts it
+   with a new environment of `PATH`, `HOME`, `TMPDIR`, `GOCACHE`,
+   `GOMODCACHE`, `GOFLAGS` and `GOPROXY` only, and Claude Code's sandbox
+   unsets it for every command as well. Commands run as `ti-triage`, and
+   macOS may let a process read the starting environment of another
+   process of the same user, so Claude Code's own copy is out of their
+   environment but not certainly out of their reach; what keeps it in is no network in the
+   sandbox and the job removing its text from every comment and every
+   push. The gate never has it.
 8. **Build the program** from the clone, at `main`, with no changes:
 
    ```
@@ -286,9 +315,10 @@ tokens or enter them.
     system/com.trendinvesting.triage` shows its runs and last exit status,
     and the issues' comments show what it analysed. The first poll records
     when the job began: only alert issues opened after it are analysed. The
-    next alert issue should have its comment within about five minutes; a
-    comment "triage failed: gate unavailable" means steps 2 or 3 need
-    another look.
+    next alert issue should have its comment within about five minutes. A
+    log line "triage: issue #N: ... gate unavailable: ..." means steps 2 or 3
+    need another look: no session is started and nothing is spent until the
+    gate runs.
 
 **Switching it off:** `sudo -u ti-triage touch /Users/ti-triage/triage/OFF`;
 delete the file to switch it on again. The manual chapter has the rest.

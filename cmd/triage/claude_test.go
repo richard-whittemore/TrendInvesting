@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -56,7 +60,7 @@ func requestIn(t *testing.T) analysisRequest {
 func TestTheClaudeSessionIsHeadlessWithItsToolsRestricted(t *testing.T) {
 	path, record := fakeClaude(t, goodAnswer, 0)
 	environ := []string{"PATH=" + os.Getenv("PATH"), "HOME=/Users/ti-triage", "TI_TRIAGE_GITHUB_TOKEN=ghp_x", "GH_TOKEN=ghp_y", "GITHUB_TOKEN=ghp_z", "SSH_AUTH_SOCK=/tmp/agent", "AWS_SECRET_ACCESS_KEY=k"}
-	c := claudeCLI{path: path, timeout: time.Minute, env: sessionEnv(environ, "oauth-token-value"), maxTurns: 40}
+	c := claudeCLI{path: path, timeout: time.Minute, env: sessionEnv(environ, "oauth-token-value"), maxTurns: 40, tool: "/Users/ti-triage/bin/ti-triage"}
 	req := requestIn(t)
 	a, err := c.Analyse(context.Background(), req)
 	if err != nil {
@@ -82,7 +86,7 @@ func TestTheClaudeSessionIsHeadlessWithItsToolsRestricted(t *testing.T) {
 		t.Errorf("args %q", args)
 	}
 	allowed := args[slices.Index(args, "--allowedTools")+1 : slices.Index(args, "--disallowedTools")]
-	if !slices.Equal(allowed, allowedTools) {
+	if !slices.Equal(allowed, allowedTools(c.tool)) {
 		t.Errorf("allowed tools %q", allowed)
 	}
 	for _, tool := range allowed {
@@ -116,7 +120,7 @@ func TestTheClaudeSessionIsHeadlessWithItsToolsRestricted(t *testing.T) {
 		t.Errorf("ran in %q, want the worktree %q", dir, req.Dir)
 	}
 	stdin := readRecord(t, record, "stdin")
-	for _, want := range []string{"never perform an owner action", "boost: halted", alertBody, "## boost.log: journal-query refusals"} {
+	for _, want := range []string{"never perform an owner action", "boost: halted", alertBody, "## boost.log: journal-query refusals", "`/Users/ti-triage/bin/ti-triage tool go-test`"} {
 		if !strings.Contains(stdin, want) {
 			t.Errorf("the prompt lacks %q", want)
 		}
@@ -174,16 +178,20 @@ func TestSessionEnvKeepsOnlyTheNamesItNeeds(t *testing.T) {
 
 // TestTheSessionRunsInClaudeCodesSandboxWithExactCommands: the session's
 // commands run in Claude Code's own sandbox, which must be there
-// (failIfUnavailable) and lets no command out of it, with the network denied
-// and the token folder unreadable; the Bash allow list is exact command
-// lines with no flags of the session's choosing, so no -exec, -toolexec or
-// -vettool runs another program; and the session bills the subscription
-// through its OAuth token only, never an API key.
+// (failIfUnavailable) and lets no command out of it, with the network
+// denied, reads under /Users denied but for the folders the session needs
+// (its worktree, its build cache, the module cache, the job's clone, the
+// Go toolchain and the job's own program), the token folders denied again,
+// and the Claude token unset for every command; the Bash allow list is
+// exact invocations of the job's fixed wrapper (runTool), so no flag of the
+// session's choosing runs another program; and the session bills the
+// subscription through its OAuth token only, never an API key.
 func TestTheSessionRunsInClaudeCodesSandboxWithExactCommands(t *testing.T) {
 	path, record := fakeClaude(t, goodAnswer, 0)
 	environ := []string{"PATH=" + os.Getenv("PATH"), "ANTHROPIC_API_KEY=sk-ant-api", "ANTHROPIC_AUTH_TOKEN=x", "CLAUDE_CODE_API_KEY_HELPER=/bin/echo"}
-	c := claudeCLI{path: path, timeout: time.Minute, env: sessionEnv(environ, "oauth-token-value"), maxTurns: 40,
-		settings: sessionSettings([]string{"/Users/ti-triage/.config/ti-triage"}, []string{"/Users/ti-triage/triage/gocache"})}
+	readable := []string{"/Users/ti-triage/triage/work", "/Users/Shared/ti-triage-gate/modcache", "/Users/ti-triage/TrendInvesting-triage", "/Users/ti-triage/bin/ti-triage"}
+	c := claudeCLI{path: path, timeout: time.Minute, env: sessionEnv(environ, "oauth-token-value"), maxTurns: 40, tool: "/Users/ti-triage/bin/ti-triage",
+		settings: sessionSettings([]string{"/Users/ti-triage/.config/ti-triage"}, readable, []string{"/Users/ti-triage/triage/gocache"})}
 	if _, err := c.Analyse(context.Background(), requestIn(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -203,8 +211,12 @@ func TestTheSessionRunsInClaudeCodesSandboxWithExactCommands(t *testing.T) {
 			} `json:"network"`
 			Filesystem struct {
 				DenyRead   []string `json:"denyRead"`
+				AllowRead  []string `json:"allowRead"`
 				AllowWrite []string `json:"allowWrite"`
 			} `json:"filesystem"`
+			Credentials struct {
+				EnvVars []struct{ Name, Mode string } `json:"envVars"`
+			} `json:"credentials"`
 		} `json:"sandbox"`
 		Permissions struct {
 			BlockReads *bool `json:"blockReadsOutsideWorkingDirectories"`
@@ -217,22 +229,26 @@ func TestTheSessionRunsInClaudeCodesSandboxWithExactCommands(t *testing.T) {
 	if sb.Enabled == nil || !*sb.Enabled || sb.FailIfUnavailable == nil || !*sb.FailIfUnavailable ||
 		sb.AllowUnsandboxedCommands == nil || *sb.AllowUnsandboxedCommands || sb.AutoAllowBashIfSandboxed == nil || *sb.AutoAllowBashIfSandboxed ||
 		sb.Network.AllowedDomains == nil || len(*sb.Network.AllowedDomains) != 0 ||
-		!slices.Equal(sb.Filesystem.DenyRead, []string{"/Users/ti-triage/.config/ti-triage"}) ||
+		!slices.Equal(sb.Filesystem.DenyRead, []string{"/Users", "/Users/ti-triage/.config/ti-triage"}) ||
+		!slices.Equal(sb.Filesystem.AllowRead, readable) ||
 		settings.Permissions.BlockReads == nil || !*settings.Permissions.BlockReads {
 		t.Errorf("settings %s", args[i+1])
 	}
-	for _, tool := range allowedTools {
-		if strings.HasPrefix(tool, "Bash(") && strings.ContainsAny(tool, "*-") && tool != "Bash(gofmt -l .)" {
-			t.Errorf("allowed %q takes flags or patterns of the session's choosing", tool)
+	if len(sb.Credentials.EnvVars) != 1 || sb.Credentials.EnvVars[0].Name != "CLAUDE_CODE_OAUTH_TOKEN" || sb.Credentials.EnvVars[0].Mode != "deny" {
+		t.Errorf("the Claude token is not unset for the session's commands: %s", args[i+1])
+	}
+	for _, tool := range allowedTools(c.tool) {
+		if strings.HasPrefix(tool, "Bash(") && !strings.HasPrefix(tool, "Bash(/Users/ti-triage/bin/ti-triage tool ") {
+			t.Errorf("allowed %q is not the job's wrapper", tool)
+		}
+		if strings.HasPrefix(tool, "Bash(") && strings.ContainsAny(strings.TrimPrefix(tool, "Bash(/Users/ti-triage/bin/ti-triage tool "), "* ") {
+			t.Errorf("allowed %q takes arguments or patterns of the session's choosing", tool)
 		}
 	}
-	for _, want := range []string{"Bash(go test ./...)", "Bash(go vet ./...)", "Bash(gofmt -l .)", "Bash(git diff)", "Bash(git status)"} {
-		if !slices.Contains(allowedTools, want) {
-			t.Errorf("not allowed: %s", want)
+	for _, name := range []string{"go-test", "go-vet", "gofmt", "git-diff", "git-status", "git-log", "git-show"} {
+		if !slices.Contains(allowedTools(c.tool), "Bash(/Users/ti-triage/bin/ti-triage tool "+name+")") {
+			t.Errorf("not allowed: %s", name)
 		}
-	}
-	if slices.ContainsFunc(allowedTools, func(s string) bool { return strings.Contains(s, "go build") }) {
-		t.Error("go build is allowed: it leaves programs in the worktree")
 	}
 	env := readRecord(t, record, "env")
 	for _, leak := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "API_KEY_HELPER", "sk-ant-api"} {
@@ -240,8 +256,89 @@ func TestTheSessionRunsInClaudeCodesSandboxWithExactCommands(t *testing.T) {
 			t.Errorf("the session's environment holds %s", leak)
 		}
 	}
-	if !strings.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=oauth-token-value") {
-		t.Error("the session's environment lacks its OAuth token")
+	if !strings.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=oauth-token-value") || !strings.Contains(env, "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1") {
+		t.Error("the session's environment lacks its OAuth token or the scrub of its commands' environment")
+	}
+}
+
+// TestTheWrappersCommandsSeeNoToken: every command the session may run goes
+// through the job's own program (runTool), which runs the fixed command
+// line of a fixed name with a whole new environment of PATH, HOME, TMPDIR,
+// GOCACHE and GOMODCACHE from its own, and GOFLAGS and GOPROXY the job's: a
+// test the session wrote that prints its environment sees no token and no
+// setting of the session's choosing.
+func TestTheWrappersCommandsSeeNoToken(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go is not installed")
+	}
+	bin := filepath.Join(t.TempDir(), "ti-triage")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	cache, err := exec.Command("go", "env", "GOCACHE").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mod := t.TempDir()
+	write(t, mod, "go.mod", "module example.com/leak\n\ngo 1.24\n")
+	write(t, mod, "leak_test.go", "package leak\n\nimport (\n\t\"os\"\n\t\"strings\"\n\t\"testing\"\n)\n\n"+
+		"func TestPrintTheEnvironment(t *testing.T) {\n\tt.Fatal(\"ENV<\" + strings.Join(os.Environ(), \"|\") + \">ENV\")\n}\n")
+	cmd := exec.Command(bin, "tool", "go-test")
+	cmd.Dir = mod
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir(), "GOCACHE=" + strings.TrimSpace(string(cache)),
+		"GOMODCACHE=" + t.TempDir(), "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-secretsecret", "TI_TRIAGE_GITHUB_TOKEN=ghp_secretsecretsecretsecret00",
+		"GOFLAGS=-toolexec=/evil", "GOPROXY=https://evil.example", "SSH_AUTH_SOCK=/tmp/agent"}
+	out, _ := cmd.CombinedOutput()
+	start, end := bytes.Index(out, []byte("ENV<")), bytes.Index(out, []byte(">ENV"))
+	if start < 0 || end < start {
+		t.Fatalf("the test did not print its environment:\n%s", out)
+	}
+	for _, e := range strings.Split(string(out)[start+4:end], "|") {
+		name, value, _ := strings.Cut(e, "=")
+		// go test itself adds PWD and its own GO settings to the test's.
+		kept := slices.Contains([]string{"PATH", "HOME", "TMPDIR", "PWD"}, name) || strings.HasPrefix(name, "GO")
+		if !kept || strings.Contains(value, "secret") || strings.Contains(value, "evil") {
+			t.Errorf("the session's test saw %s", e)
+		}
+	}
+	if code := exec.Command(bin, "tool", "go", "test").Run(); code == nil {
+		t.Error("the wrapper ran a command line of the session's choosing")
+	}
+}
+
+// TestASessionPastItsTimeIsKilledWithItsChildren: the session runs in its
+// own process group, and the whole group is killed at its time, so no
+// command it started outlives it.
+func TestASessionPastItsTimeIsKilledWithItsChildren(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	pidFile := filepath.Join(dir, "child")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nsleep 30 &\necho $! > '"+pidFile+"'\nwait\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cl := claudeCLI{path: path, timeout: 300 * time.Millisecond, env: sessionEnv([]string{"PATH=" + os.Getenv("PATH")}, ""), maxTurns: 5}
+	start := time.Now()
+	if _, err := cl.Analyse(context.Background(), requestIn(t)); err == nil {
+		t.Fatal("no error")
+	}
+	if time.Since(start) > 4*time.Second {
+		t.Fatalf("the session's child held the job for %s", time.Since(start))
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("the child's pid %q: %v", raw, err) // never signal 0, 1 or below
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatal("the session's child outlived it")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

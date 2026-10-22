@@ -28,6 +28,8 @@ type fakeGitHub struct {
 	auth     []string
 	selfID   int64
 	pageSize int
+	// listQueries are the issue listings' queries.
+	listQueries []string
 }
 
 func newFakeGitHub(t *testing.T) (*fakeGitHub, *httptest.Server) {
@@ -65,16 +67,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/user":
 		writeJSON(w, map[string]any{"login": "owner", "id": f.selfID})
 	case r.Method == http.MethodGet && repo != "" && rest == "/issues":
-		label := r.URL.Query().Get("labels")
-		var matching []map[string]any
-		for _, is := range f.issues {
-			for _, l := range is["labels"].([]map[string]any) {
-				if l["name"] == label {
-					matching = append(matching, is)
-				}
-			}
-		}
-		f.page(w, r, matching, page)
+		f.listQueries = append(f.listQueries, r.URL.RawQuery)
+		f.page(w, r, f.issues, page)
 	case r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "issues" && parts[2] == "comments":
 		n, _ := strconv.Atoi(parts[1])
 		f.page(w, r, f.comments[n], page)
@@ -163,28 +157,35 @@ func TestTheAPIAddressMustBeGitHubOverHTTPSOrTheNamedHost(t *testing.T) {
 	}
 }
 
-// TestAlertIssuesListsOneLabelUntilTheStartAndSkipsPulls: the listing is
-// newest first, stops at the first issue older than since, and never takes a
-// pull request for an issue.
-func TestAlertIssuesListsOneLabelUntilTheStartAndSkipsPulls(t *testing.T) {
+// TestAlertIssuesListsEveryIssueOnceUntilTheStartAndSkipsPulls: the
+// listing is one listing of every issue, whatever its label (so an issue
+// relabelled while the job reads is never missed), newest first; it stops
+// at the first issue older than since, and never takes a pull request for
+// an issue.
+func TestAlertIssuesListsEveryIssueOnceUntilTheStartAndSkipsPulls(t *testing.T) {
 	f, srv := newFakeGitHub(t)
 	f.pageSize = 2
 	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
 	f.addIssue(5, alertLabel, "owner", since.Add(3*time.Hour), alertBody)
 	f.addIssue(4, alertLabel, "owner", since.Add(2*time.Hour), alertBody)
+	f.addIssue(9, resolvedLabel, "owner", since.Add(90*time.Minute), alertBody)
 	f.issues = append(f.issues, map[string]any{"number": 3, "pull_request": map[string]any{"url": "x"}, "labels": []map[string]any{{"name": alertLabel}}, "created_at": since.Add(time.Hour).Format(time.RFC3339), "user": map[string]any{"login": "owner"}})
 	f.addIssue(2, alertLabel, "owner", since.Add(-time.Hour), alertBody)
 	f.addIssue(1, alertLabel, "owner", since.Add(-2*time.Hour), alertBody)
-	f.addIssue(9, resolvedLabel, "owner", since.Add(time.Hour), alertBody)
-	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since, 0)
+	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0)
 	if err != nil || cut {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].Number != 5 || got[1].Number != 4 || got[0].Author != "owner" || got[0].Body != alertBody {
+	if len(got) != 3 || got[0].Number != 5 || got[1].Number != 4 || got[2].Number != 9 || got[0].Author != "owner" || got[0].Body != alertBody {
 		t.Fatalf("listed %+v", got)
 	}
-	if n := len(f.sent()); n != 2 {
+	if n := len(f.sent()); n != 3 {
 		t.Errorf("%d requests; the listing should stop at the page holding an issue older than the start", n)
+	}
+	for _, q := range f.listQueries {
+		if strings.Contains(q, "labels=") {
+			t.Errorf("the listing is filtered by label: %s", q)
+		}
 	}
 }
 
@@ -198,12 +199,12 @@ func TestAListingLongerThanItsBoundIsCutNotFailed(t *testing.T) {
 	for n := maxPages + 2; n > 0; n-- {
 		f.addIssue(n, alertLabel, "owner", since.Add(time.Duration(n)*time.Minute), alertBody)
 	}
-	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since, 0)
+	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0)
 	if err != nil || !cut || len(got) != maxPages || got[0].Number != maxPages+2 {
 		t.Fatalf("listed %d, cut %v, err %v; want the newest %d and the cut said", len(got), cut, err, maxPages)
 	}
 	before := len(f.sent())
-	got, cut, err = trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since, maxPages)
+	got, cut, err = trackerFor(t, srv).AlertIssues(context.Background(), since, maxPages)
 	if err != nil || cut || len(got) != 2 || len(f.sent())-before != 3 {
 		t.Fatalf("listed %v, cut %v, err %v, %d requests; want the two past through, stopping at it", got, cut, err, len(f.sent())-before)
 	}
@@ -371,7 +372,7 @@ func TestAnIssueWithoutItsCreationTimeIsAnError(t *testing.T) {
 			}
 			f.issues = append(f.issues, bad)
 			f.addIssue(5, alertLabel, "owner", since.Add(time.Hour), alertBody)
-			if _, _, err := trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since, 0); err == nil || !strings.Contains(err.Error(), "creation time") {
+			if _, _, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0); err == nil || !strings.Contains(err.Error(), "creation time") {
 				t.Fatalf("err = %v, want the missing creation time named", err)
 			}
 		})

@@ -302,6 +302,31 @@ So when the corpus asks you to add scenarios, ask of each one whether the previo
 
 `-update-decision-corpus` never overwrites a changed hash for the CURRENT version, flag or no flag: that refusal is the tripwire itself. If it fired unexpectedly, the change was not the refactor it looked like; find out what state it changes before touching `RulesVersion`.
 
+## Ending processes
+
+A program that ends processes ends only the ones it started, never "every
+process it may signal" (owner rule, 2026-10-22, after a test's stand-in ran
+`kill -KILL -1` as the owner and ended every program of the owner's
+session):
+
+- A command started in a group of its own (`Setpgid`) is ended with
+  `procgroup.Kill(pid)` (`internal/procgroup`), which refuses any pid of 1 or
+  below, so its target is never -1 (every process) or 0 (the caller's own
+  group). Nothing else calls `kill(2)`.
+- The triage job's gate ends the gate user's processes in one function,
+  `pkillGateUser` (`cmd/triage`), which resolves the gate user's UID and
+  refuses unless it exists, is not the job's own and is not root, then runs
+  `pkill -KILL -U <that UID>` through the gate's fixed sudo rule. No other
+  source names `kill`, `pkill` or `killall`, and none passes `-1` beside
+  one.
+- A test never reaches either for real: a stand-in `sudo` or `sandbox-exec`
+  refuses (exit 97) any command line naming `kill`, `pkill` or `killall`,
+  and a gate built in a test ends its processes through a fake.
+
+`internal/procgroup`'s `TestNoKillOutsideTheGuardedFunctions` fails the
+build if any non-test source under `cmd/`, `internal/` or `transport/`
+breaks the first two rules.
+
 ## Package boundaries
 
 - `cmd/` contains executable composition only.
@@ -365,7 +390,8 @@ Bot reviews are metered, so:
   Skipped reviews are free. Scoping by path therefore saves money only on PRs
   that touch no safety path; a mixed PR still costs a full review. Listed in
   `ignorePatterns` ahead of need: `cmd/reporter/`, `cmd/dashboard/`,
-  `internal/report/`, `/tools/` (not all exist yet). The Turtle-only packages
+  `cmd/triage/`, `internal/report/`, `internal/procgroup/`, `/tools/` (not
+  all exist yet). The Turtle-only packages
   `internal/strategy`, `internal/sizing`, `internal/indicator` and
   `internal/universe` are ignored because they are off the live path (owner
   approved their retirement in principle, 2026-10-17); `/transport/` is the live
