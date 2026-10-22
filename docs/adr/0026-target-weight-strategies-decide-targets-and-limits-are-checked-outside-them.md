@@ -1468,8 +1468,25 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   the approval's retired count, the run's own retirements being recorded
   among the retired orders, so a run restarted from one restores it as the
   run held it and never attempts the sale again under a live attempt's
-  client order ID. A retirement frees only an attempt the run itself made,
-  never one the approval restored as an earlier run's. A recovered
+  client order ID. It is read when the decision is recorded, after the
+  session's own orders and the sale their refusal fires, so a decision
+  states an attempt its own session made. A sale the run attempted itself
+  and released that is still live (not ended, nothing filled, named by no
+  venue) is recorded with its order (`restored_sale.order`), so a run
+  restarted from the decision holds it as that run's own attempt,
+  released, and a retirement of it frees the attempt as in the full run;
+  an attempt withheld for a person, or one that reached IBKR, stays spent.
+  A retirement frees only an attempt this run, or the run whose decision
+  it was restarted from, made: never one the approval restored as an
+  earlier run's. Stated limit: a recovered decision states only the
+  attempts made by the time it was recorded, so one made before the
+  incident began, or before the run's later attempt of its sale, cannot
+  state that later attempt; the restarted run refuses a snapshot that
+  would fire the recorded incident's sale until its first bar or session,
+  as below, and holds the sale as not attempted after it. The owner checks
+  IBKR for an order under the incident's tag before letting such a run go
+  on and, if one is there, starts a fresh run from `operator approve`,
+  whose approval states the attempt (ADR 0027). A recovered
   decision comes before any broker snapshot that would fire the sale of an
   incident an earlier run's recorded engine state restored: such a
   snapshot read before the approval, before a recovered decision that
@@ -1498,10 +1515,20 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   so the engine ends the order and the record says whose it was. Found
   again after a stop under either name, that entry is never queued twice.
   It is queued only while the adapter holds its lock, only once IBKR shows
-  nothing under the order's tag (an order IBKR shows is marked never sent
-  and stops the adapter for `resolve --sent`, with nothing queued), and
-  only from a record that reads as a retirement the adapter writes: one of
-  the two reasons, a detail, and who retired it fitting the reason;
-  anything else stops the adapter.
+  nothing under the order's tag, and only from a record that reads as a
+  retirement the adapter writes: one of the two reasons, a detail, and who
+  retired it fitting the reason; anything else stops the adapter. IBKR
+  showing the order's tag wins on every path: every retirement of the
+  order still queued in the outbox, under either name, is struck off, the
+  order is marked never sent, and the adapter stops for `resolve --sent`,
+  so no retirement of an order IBKR shows ever reaches the engine. Stated
+  limit: an entry named after the order alone that already reached the
+  engine is struck from the outbox, so the adapter cannot tell whether the
+  engine applied it to this order; it tells the engine of this input's
+  release again, and an engine that already retired the order refuses the
+  second retirement, as it refuses every retirement of an order retired
+  already, rather than end an order twice. The owner checks that the
+  engine's log holds the order's first retirement and that IBKR shows
+  nothing under its tag, as the manual's redelivery chapter says.
 - **Replay.** Rules version 1.22.0 refused the input, so a journal holding
   a retirement decides differently and does not replay across the two.

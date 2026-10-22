@@ -1425,9 +1425,11 @@ def _finish_retirement(pending, order, input_id, now, today, at_broker):
     again after a stop before the record or the mark, so it is queued once
     (ADR 0026, amended 2026-10-22, "The adapter"). at_broker says whether
     IBKR shows an order or execution under cid's tag, which wins over the
-    record: no retirement is queued then, the order is only marked never
-    sent, and the relay stops at it (NeverSentAtBroker), since an order IBKR
-    shows is never retired (ADR 0026, amended 2026-10-22, "The adapter").
+    record on every path: no retirement is queued then, every one already
+    queued for cid and not yet delivered, in either ID form, is struck off
+    the outbox, the order is only marked never sent, and the relay stops at
+    it (NeverSentAtBroker), since an order IBKR shows is never retired (ADR
+    0026, amended 2026-10-22, "The adapter").
     The record is turned into an engine input only once it reads as a
     retirement the relay records (_recorded_retirement), so the engine is
     never sent one it would refuse (fail closed, AGENTS.md).
@@ -1438,15 +1440,21 @@ def _finish_retirement(pending, order, input_id, now, today, at_broker):
     own = any(d.get("input_id") == input_id for d in retired)
     unknown = not own and bool(retired) and not retired[-1].get("input_id")
     begun = own or unknown
-    entries = {e["id"]: e for e in Outbox(pending.path + OUTBOX_SUFFIX).load()}
+    outbox = Outbox(pending.path + OUTBOX_SUFFIX)
+    entries = {e["id"]: e for e in outbox.load()}
     this_input = entries.get(RETIRED_ID + cid + ":" + input_id) if unknown else None
     entry = this_input or entries.get(RETIRED_ID + cid)
     if not begun and entry is None:
         return False
+    if at_broker:
+        # IBKR shows the order, so it was never retired, whatever was queued:
+        # every retirement of it still in the outbox, in either ID form, is
+        # struck off before the relay stops at it, so none reaches the engine
+        # (ADR 0026, amended 2026-10-22, "The adapter"; fail closed, AGENTS.md).
+        outbox.strike_all([i for i in entries if i == RETIRED_ID + cid or i.startswith(RETIRED_ID + cid + ":")])
+        pending.mark(cid, NEVER_SENT)
+        return True
     if unknown and entry is None:
-        if at_broker:
-            pending.mark(cid, NEVER_SENT)
-            return True
         reason, detail, by = _recorded_retirement(pending, retired[-1])
         retire_order(pending, order, reason, detail, by, now, today, input_id,
                      entry_id=RETIRED_ID + cid + ":" + input_id)

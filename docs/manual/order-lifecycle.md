@@ -233,10 +233,13 @@ incident reach a person; an order IBKR never acknowledged is one.
   `TestRetiringARebalancesSellsNeverStartsItsBuys`.
 - `internal/targetweight`, `TestARetiredSaleBackTo98IsReattempted`,
   `TestARetiredUrgentSaleReleasedOutsideADecisionIsReattempted`,
-  `TestAVenueReportOnARetiredSaleIsRefused` and
-  `TestARetirementOfASaleAVenueReportedOnIsRefused`; `internal/risklimit`,
-  `TestARetiredSaleSpendsNoAttempt` and
-  `TestARetiredUrgentSaleIsAttemptedAgainWhileTheAlarmIsUrgent`;
+  `TestAVenueReportOnARetiredSaleIsRefused`,
+  `TestARetirementOfASaleAVenueReportedOnIsRefused`,
+  `TestADecisionRecordsTheSaleItsOwnSessionAttempts` and
+  `TestARunsOwnSaleRetiredAfterARestartIsAttemptedAgain`;
+  `internal/risklimit`, `TestARetiredSaleSpendsNoAttempt`,
+  `TestARetiredUrgentSaleIsAttemptedAgainWhileTheAlarmIsUrgent` and
+  `TestARunsOwnLiveSaleIsHeldAsItsOwnAfterARestart`;
   `internal/restart`, `TestReadEndStateFindsWhatAFreshRunMustBeToldOf`: a
   retired sale back to 98% spent no attempt and is tried again as a new
   order.

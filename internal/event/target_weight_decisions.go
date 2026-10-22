@@ -371,6 +371,36 @@ type BoostRestoredSale struct {
 	IncidentID      string `json:"incident_id"`
 	Attempted       bool   `json:"attempted"`
 	RetiredAttempts int    `json:"retired_attempts"`
+	// Order is the sale this run attempted itself and released, while it is
+	// still retirable: not ended, nothing filled and named by no venue. A run
+	// restarted from the decision restores it as this run's own attempt,
+	// released, never as one an earlier run spent, so its retirement as
+	// never sent frees the attempt as in the full run (ADR 0019, amended
+	// 2026-10-17, reading 4; ADR 0026, point 2, "Boost", and point 5:
+	// recovered, never recomputed). Omitted otherwise: an attempt that was
+	// withheld for a person, or reached IBKR, stays spent.
+	Order *BoostRestoredSaleOrder `json:"order,omitempty"`
+}
+
+// BoostRestoredSaleOrder is the sell a restored sale attempt released
+// (BoostRestoredSale.Order): its client order ID, shares, limit and what
+// fired it, so a retirement of it re-arms the sale by its own trigger.
+type BoostRestoredSaleOrder struct {
+	ClientOrderID string  `json:"client_order_id"`
+	Released      int64   `json:"released"`
+	LimitPrice    float64 `json:"limit_price"`
+	Trigger       string  `json:"trigger"`
+}
+
+// Equal reports whether s and o record the same sale attempt.
+func (s *BoostRestoredSale) Equal(o *BoostRestoredSale) bool {
+	if s == nil || o == nil {
+		return s == o
+	}
+	if s.IncidentID != o.IncidentID || s.Attempted != o.Attempted || s.RetiredAttempts != o.RetiredAttempts || (s.Order == nil) != (o.Order == nil) {
+		return false
+	}
+	return s.Order == nil || *s.Order == *o.Order
 }
 
 // carriesRelease reports whether o records any of the order as released.
@@ -1119,6 +1149,16 @@ func (b BoostFigures) validateRejections() []error {
 	}
 	if r := b.RestoredSale; r != nil && (r.IncidentID == "" || r.RetiredAttempts < 0) {
 		errs = append(errs, fmt.Errorf("a restored sale attempt names its incident and counts no fewer than no retired attempts; got %q and %d", r.IncidentID, r.RetiredAttempts))
+	}
+	if r := b.RestoredSale; r != nil && r.Order != nil {
+		switch o := r.Order; {
+		case !r.Attempted:
+			errs = append(errs, errors.New("a restored sale attempt that records its released order is attempted"))
+		case o.ClientOrderID == "" || o.Released <= 0 || !(o.LimitPrice > 0):
+			errs = append(errs, fmt.Errorf("a restored sale's order names its client order ID, shares released and limit; got %q, %d, %v", o.ClientOrderID, o.Released, o.LimitPrice))
+		case o.Trigger != SaleTriggerExit && o.Trigger != SaleTriggerMarginUrgent:
+			errs = append(errs, fmt.Errorf("a restored sale's order was fired by exit or margin-urgent, not %q", o.Trigger))
+		}
 	}
 	// A retired order is one retired as never sent: named once, in no list
 	// but Watched's of the orders still awaited or working, its release as

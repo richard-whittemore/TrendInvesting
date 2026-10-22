@@ -327,9 +327,25 @@ incident is in force records the count its approval carried, if any, and
 whether the sale has been attempted, by an earlier run or this one
 (`restored_sale`), whether or not the run was approved, so a run
 restarted from any of them, or a later fresh run, never gives an attempt
-a retired order's ID, nor attempts again a sale already attempted. A
-retirement frees only an attempt this run made: an attempt the approval
-says an earlier run made stays attempted. A restart from a decision reads
+a retired order's ID, nor attempts again a sale already attempted. The
+decision records the sale as it stands once the session's own orders are
+done, so a sale its own session fired is recorded as attempted. A sale
+the program placed that is still unsent when it restarts (not ended,
+nothing filled, not yet seen by IBKR) is recorded with its order, so the
+restarted run knows it as its own: if the adapter then retires it, it is
+tried again, as in a run that never restarted. A retirement frees only an
+attempt the program made in this run or the run it restarted from: an
+attempt the approval says an earlier run made stays attempted.
+
+*Limit.* A decision knows only the attempts made by the time it was
+recorded. If the run restarts from a decision made before the incident
+began, or before the sale was placed, the restarted run cannot know of
+that sale: it refuses an IBKR reading that would fire the incident's sale
+until its first bar or session, and treats the sale as not attempted after
+that. Before letting such a run go on, look in IBKR for an order whose
+`orderRef` carries the incident's sale; if there is one, stop the run and
+start a fresh one with `operator approve`, whose approval says the sale
+was attempted ([operator](operator.md)). A restart from a decision reads
 that decision before any IBKR reading that would fire the incident's
 sale; a reading that arrives first, or after a decision that records no
 attempt for that incident, is refused before it changes anything, so the

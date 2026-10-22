@@ -1036,3 +1036,62 @@ func TestBoostRestoredSaleValidate(t *testing.T) {
 		p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", RetiredAttempts: -1}
 	}, "restored sale")
 }
+
+// TestBoostRestoredSaleOrderValidate: a restored sale attempt that records
+// the run's own live sale is attempted, and the order names its client order
+// ID, shares, limit and a sale's trigger, so a run restarted from the
+// decision holds it as that run's own (ADR 0026, point 5: recovered, never
+// recomputed).
+func TestBoostRestoredSaleOrderValidate(t *testing.T) {
+	order := func() *event.BoostRestoredSaleOrder {
+		return &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit}
+	}
+	sale := func(o *event.BoostRestoredSaleOrder) *event.BoostRestoredSale {
+		return &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: o}
+	}
+	v := validTargetsDecided()
+	v.Boost.RestoredSale = sale(order())
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a restored sale with its own order is valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "not attempted", v, func(p *P) { p.Boost.RestoredSale = sale(order()); p.Boost.RestoredSale.Attempted = false }, "attempted")
+	for name, bad := range map[string]func(*event.BoostRestoredSaleOrder){
+		"no client order ID": func(o *event.BoostRestoredSaleOrder) { o.ClientOrderID = "" },
+		"no shares":          func(o *event.BoostRestoredSaleOrder) { o.Released = 0 },
+		"no limit":           func(o *event.BoostRestoredSaleOrder) { o.LimitPrice = 0 },
+	} {
+		expectInvalid(t, name, v, func(p *P) { o := order(); bad(o); p.Boost.RestoredSale = sale(o) }, "restored sale's order")
+	}
+	expectInvalid(t, "another trigger", v, func(p *P) { o := order(); o.Trigger = "manual"; p.Boost.RestoredSale = sale(o) }, "exit or margin-urgent")
+}
+
+// TestBoostRestoredSaleEqual: two records of a sale attempt are equal when
+// they state the same incident, attempt, retired attempts and own order.
+func TestBoostRestoredSaleEqual(t *testing.T) {
+	a := &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true,
+		Order: &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit}}
+	same := *a
+	order := *a.Order
+	same.Order = &order
+	if !a.Equal(&same) {
+		t.Error("the same record is not equal")
+	}
+	var none *event.BoostRestoredSale
+	if !none.Equal(nil) || none.Equal(a) || a.Equal(nil) {
+		t.Error("an absent record equals only an absent one")
+	}
+	for name, change := range map[string]func(*event.BoostRestoredSale){
+		"another incident": func(r *event.BoostRestoredSale) { r.IncidentID = "engine-state:joint:2" },
+		"not attempted":    func(r *event.BoostRestoredSale) { r.Attempted = false },
+		"one retired":      func(r *event.BoostRestoredSale) { r.RetiredAttempts = 1 },
+		"no order":         func(r *event.BoostRestoredSale) { r.Order = nil },
+		"another order":    func(r *event.BoostRestoredSale) { o := *r.Order; o.Released = 16; r.Order = &o },
+	} {
+		other := *a
+		change(&other)
+		if a.Equal(&other) {
+			t.Errorf("a record with %s is equal", name)
+		}
+	}
+}

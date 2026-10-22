@@ -718,9 +718,12 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	// The sale attempt the approved run's approval restored is restored as
 	// that run held it, before the sales it retired, so the next attempt's
 	// client order ID follows every retired one (ADR 0026, point 2, "Order
-	// identity", and point 5: recovered, never recomputed).
+	// identity", and point 5: recovered, never recomputed). A sale the run
+	// attempted itself and released, still live, is restored as that run's
+	// own attempt, below, never as one an earlier run spent, so its
+	// retirement frees it as in the full run.
 	if r := p.Boost.RestoredSale; r != nil {
-		if err := h.gate.RestoreSaleAttempt(r.IncidentID, r.Attempted, r.RetiredAttempts); err != nil {
+		if err := h.gate.RestoreSaleAttempt(r.IncidentID, r.Attempted && r.Order == nil, r.RetiredAttempts); err != nil {
 			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
 		}
 	}
@@ -752,6 +755,19 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 			}
 		}
 		h.retired = append(h.retired, r)
+	}
+	// The run's own live sale is restored after every retired one, so its
+	// client order ID is checked against the attempt that follows them (ADR
+	// 0026, point 2, "Order identity").
+	if r := p.Boost.RestoredSale; r != nil && r.Order != nil {
+		o := event.OrderReleasedPayload{
+			AccountID: h.cfg.AccountID, Tag: r.IncidentID, ClientOrderID: r.Order.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
+			Side: event.OrderSideSell, Quantity: r.Order.Released, LimitPrice: r.Order.LimitPrice, Mode: h.cfg.Mode,
+		}
+		if err := h.gate.RestoreOwnSale(o, r.Order.Trigger); err != nil {
+			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+		}
+		h.release(o)
 	}
 	// An order a venue named before the decision reached IBKR, so the
 	// restarted run refuses its retirement as the full run does (ADR 0026,
@@ -1739,10 +1755,28 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		UndecidedBeforeRejection: h.verdicts.olderThanRejection, RejectionsWhileStopped: h.verdicts.whileStopped, NoVenue: h.noVenue(),
 	}
 	b.NamedOrders = h.namedFigures(b)
-	if incident, attempted, retired, ok := h.gate.RestoredSaleAttempt(h.cfg.Boost.InstrumentID); ok {
-		b.RestoredSale = &event.BoostRestoredSale{IncidentID: incident, Attempted: attempted, RetiredAttempts: retired}
-	}
+	b.RestoredSale = h.restoredSale()
 	return b
+}
+
+// restoredSale is the incident's sale attempt as the gate holds it now
+// (BoostFigures.RestoredSale), read when the decision is recorded, after the
+// session's own orders and the sale they fire, so it states an attempt this
+// session made (ADR 0019, amended 2026-10-15: one attempt). A sale this run
+// released that is still live and that no venue has named is recorded with
+// its order, so a run restarted from the decision holds it as this run's
+// own and its retirement frees it (ADR 0026, point 5: recovered, never
+// recomputed); one a venue named reached IBKR, and stays spent.
+func (h *Handler) restoredSale() *event.BoostRestoredSale {
+	incident, attempted, retired, ok := h.gate.RestoredSaleAttempt(h.cfg.Boost.InstrumentID)
+	if !ok {
+		return nil
+	}
+	r := &event.BoostRestoredSale{IncidentID: incident, Attempted: attempted, RetiredAttempts: retired}
+	if o, live := h.gate.OwnLiveSale(incident, h.cfg.Boost.InstrumentID); attempted && live && !h.named[o.ClientOrderID] {
+		r.Order = &event.BoostRestoredSaleOrder{ClientOrderID: o.ClientOrderID, Released: o.Quantity, LimitPrice: o.LimitPrice, Trigger: o.Sale.Trigger}
+	}
+	return r
 }
 
 // namedFigures are the orders b restores as released, the watched, the
@@ -1862,13 +1896,13 @@ type emissions struct {
 // that leaves the engine Normal, setting it, and watches the order it
 // released.
 func (b *emissions) settleReplan(i int, decided event.TargetsDecidedPayload) {
-	watched, undecided, working := b.h.watchedFigures(), b.h.undecidedFigures(), b.h.workingFigures()
+	watched, undecided, working, sale := b.h.watchedFigures(), b.h.undecidedFigures(), b.h.workingFigures(), b.h.restoredSale()
 	if decided.Boost.ReplanPending == b.h.replan && decided.Boost.Watched.Equal(watched) && slices.Equal(decided.Boost.UndecidedOrders, undecided) &&
-		slices.EqualFunc(decided.Boost.WorkingOrders, working, event.BoostWatchedOrder.Equal) {
+		slices.EqualFunc(decided.Boost.WorkingOrders, working, event.BoostWatchedOrder.Equal) && decided.Boost.RestoredSale.Equal(sale) {
 		return
 	}
 	decided.Boost.ReplanPending, decided.Boost.Watched, decided.Boost.UndecidedOrders = b.h.replan, watched, undecided
-	decided.Boost.WorkingOrders = working
+	decided.Boost.WorkingOrders, decided.Boost.RestoredSale = working, sale
 	decided.Boost.NamedOrders = b.h.namedFigures(decided.Boost)
 	e, err := b.h.stamp(b.out[i].ID, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, b.at, b.in, decided)
 	b.fail(err)

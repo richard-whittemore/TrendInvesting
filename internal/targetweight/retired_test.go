@@ -737,3 +737,110 @@ func TestARecoveryRestoresTheApprovalsRetiredSalesBeforeTheRunsOwn(t *testing.T)
 		t.Fatalf("sales %+v, want one under %s, the third attempt's ID", sold, want)
 	}
 }
+
+// haltedExitSale restarts the full run from its boosted decision of session
+// 17 into an earlier run's Halted incident; the incident refuses Boost's
+// exit at session 20, whose decision fires the incident's sale back to 98%
+// within the same input. The adapter never sends the sale. It returns the
+// run, the incident, the sale released and session 20's decision.
+func haltedExitSale(t *testing.T) (r run, state event.Envelope, sale event.OrderReleasedPayload, decision event.Envelope) {
+	t.Helper()
+	full := simulate(t, options{brokers: true})
+	state = haltedState(t)
+	r = restartAt17(t, full, options{prelude: []event.Envelope{state}, unsentIDs: []string{orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 0)}})
+	rel := released(t, r.decisions)
+	if len(rel) != 1 || rel[0].ClientOrderID != orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 0) {
+		t.Fatalf("setup: released %+v, want the incident's first sale", rel)
+	}
+	var at time.Time
+	for _, e := range ofType(r.decisions, event.OrderReleasedEventType) {
+		at = e.EventTime
+	}
+	for _, e := range ofType(r.decisions, event.TargetsDecidedEventType) {
+		if e.EventTime.Equal(at) {
+			decision = e
+		}
+	}
+	if decision.ID == "" {
+		t.Fatalf("setup: no decision of the session that released the sale at %s", at)
+	}
+	return r, state, rel[0], decision
+}
+
+// TestADecisionRecordsTheSaleItsOwnSessionAttempts: the incident's sale
+// fired by the refusal of the session's own exit is attempted after the
+// session's decision is built, and the decision records the attempt as the
+// run holds it once the session's orders are processed, so a run restarted
+// from it never attempts the sale again (ADR 0019, amended 2026-10-15: one
+// attempt; ADR 0026, point 5: recovered, never recomputed).
+func TestADecisionRecordsTheSaleItsOwnSessionAttempts(t *testing.T) {
+	r, state, _, decision := haltedExitSale(t)
+	before := targets(t, r.decisions)[0]
+	if s := before.Boost.RestoredSale; s == nil || s.IncidentID != state.ID || s.Attempted {
+		t.Fatalf("setup: the first decision records %+v, want the incident's sale not attempted", s)
+	}
+	var d event.TargetsDecidedPayload
+	decode(t, decision, &d)
+	if s := d.Boost.RestoredSale; s == nil || s.IncidentID != state.ID || !s.Attempted {
+		t.Fatalf("the decision whose session attempted the sale records %+v, want it attempted", s)
+	}
+	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+	again := simulate(t, options{recovery: &decision, snapshots: r.inputs, brokers: true, prelude: []event.Envelope{state}, brokerMutate: urgent})
+	if sold := sales(t, again.decisions); len(sold) != 0 {
+		t.Fatalf("the run restarted from that decision sold %+v, want nothing: the incident's sale was attempted", sold)
+	}
+}
+
+// TestARunsOwnSaleRetiredAfterARestartIsAttemptedAgain: the incident's sale
+// this run attempted is still unsent when the run restarts from its
+// decision; the restarted run holds it as this run's own attempt, released
+// and not spent by an earlier run, so its retirement as never sent frees the
+// attempt as in the full run, and the sale is attempted again under the
+// second attempt's client order ID (ADR 0019, amended 2026-10-17, reading 4,
+// as the owner's decision of 2026-10-22 reads it; ADR 0026, point 2, "Order
+// identity", and point 5: recovered, never recomputed).
+func TestARunsOwnSaleRetiredAfterARestartIsAttemptedAgain(t *testing.T) {
+	first, state, sale, decision := haltedExitSale(t)
+	retire := map[int]func(apply func(typ string, version uint32, id string, at time.Time, payload any) error){
+		21: func(apply func(typ string, version uint32, id string, at time.Time, payload any) error) {
+			at := sessionEnd(21).Add(-6 * time.Hour)
+			p := event.OrderRetiredPayload{AccountID: sale.AccountID, ClientOrderID: sale.ClientOrderID, InstrumentID: sale.InstrumentID, Side: sale.Side,
+				Quantity: sale.Quantity, LimitPrice: sale.LimitPrice, Reason: event.OrderRetiredSessionOver, Detail: "session over",
+				RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at}
+			if err := apply(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:sale", at, p); err != nil {
+				t.Errorf("the retirement of the run's own unsent sale after the restart: %v, want it read", err)
+			}
+		},
+	}
+	// IBKR still holds the shares the unsent sale would have sold.
+	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) {
+		b.ExcessLiquidity = 0.1 * b.NetLiquidation
+		b.Positions[0].Quantity += sale.Quantity
+	}}
+	r := simulate(t, options{recovery: &decision, snapshots: first.inputs, brokers: true, prelude: []event.Envelope{state}, intrude: retire, brokerMutate: urgent})
+	second := orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 1)
+	if sold := sales(t, r.decisions); len(sold) != 1 || sold[0].ClientOrderID != second || sold[0].Tag != state.ID {
+		t.Fatalf("sales after the retirement %+v, want the incident's sale attempted again under %s", sold, second)
+	}
+}
+
+// TestARecoveredOwnSaleUnderAnotherAttemptsIDIsRefused: a recovered decision
+// recording the run's own live sale under a client order ID that is not the
+// next attempt's is refused, rather than hold an order the run never
+// released (ADR 0026, point 2, "Order identity"; fail closed, AGENTS.md).
+func TestARecoveredOwnSaleUnderAnotherAttemptsIDIsRefused(t *testing.T) {
+	_, state, _, decision := haltedExitSale(t)
+	var p event.TargetsDecidedPayload
+	decode(t, decision, &p)
+	if p.Boost.RestoredSale == nil || p.Boost.RestoredSale.Order == nil {
+		t.Fatalf("setup: the decision records %+v, want the run's own live sale", p.Boost.RestoredSale)
+	}
+	o := *p.Boost.RestoredSale.Order
+	o.ClientOrderID = orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 1)
+	p.Boost.RestoredSale.Order = &o
+	h, s := configured(t)
+	_, err := h.Apply(context.Background(), s.envelope(t, decision.Type, decision.SchemaVersion, decision.ID, decision.EventTime, p))
+	if err == nil || !strings.Contains(err.Error(), "next attempt") {
+		t.Errorf("an own sale recorded under another attempt's ID: %v, want the recovery refused", err)
+	}
+}
