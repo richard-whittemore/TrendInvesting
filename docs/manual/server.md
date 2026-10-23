@@ -22,14 +22,16 @@ client: the rendered IBC settings reject incoming connections from any address
 but the server's own and trust none. The firewall also denies those two ports,
 but that is a second layer, not the guard: Tailscale's own rules let tailnet
 traffic through before the firewall looks. On a server set up earlier, apply
-all of this with: `git pull`, `sudo deploy/provision.sh gateway`,
-`sudo deploy/provision.sh twsapi`, `sudo deploy/provision.sh firewall`, then
-`sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
-start expect an IBKR Mobile prompt). To check it from your Mac, run
-`nc -vz -G 5 trend-investing-1 4002`: it must not report a successful
-connection with a working API. The Gateway may accept the TCP connection and
-then drop it, so "succeeded" followed by silence is also correct, while a
-reply from the API is a failure to report. Each `provision.sh` step is safe to repeat.
+all of this with: `git pull`, `sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh` into `/usr/local/libexec/trend-investing`), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
+start expect an IBKR Mobile prompt). `services` copies the repository's engine
+files over `/etc/trend-investing/engines/` (see the caution under the file table):
+that costs nothing while the server is in dry-run with those files unedited, but
+not once they are edited for paper. To check it from your Mac, run
+`python3 deploy/ibapi-probe.py trend-investing-1 4002`. It sends only the API's opening
+handshake and closes, and prints `REJECTED` (exit 0), `EXPOSED` (exit 1) or
+`INCONCLUSIVE` (exit 2). Only `REJECTED` passes; `EXPOSED` means the Gateway
+answered a tailnet client, so stop and report it; `INCONCLUSIVE` proves nothing,
+so fix the connection and run it again. Each `provision.sh` step is safe to repeat.
 Everything that sets it up is in `deploy/`, run by `deploy/provision.sh`.
 
 One machine keeps the cost at about $170 a year (plan section 8). The price
