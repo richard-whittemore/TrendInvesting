@@ -207,7 +207,7 @@ ntfy_pages() { grep -c '^/rehearsal$' "$probe/posts" || true; }
 # and the text of a page is its form decoded.
 pushover_pages() { grep -c '^/1/messages.json$' "$probe/posts" || true; }
 decoded_bodies() { python3 -c 'import sys, urllib.parse; sys.stdout.write(urllib.parse.unquote_plus(sys.stdin.read()))' <"$probe/posts.bodies"; }
-last_page() { decoded_bodies | grep 'priority=2' | tail -1; }
+last_page() { grep 'priority=2' "$probe/posts.bodies" | tail -1 | python3 -c 'import sys, urllib.parse; sys.stdout.write(urllib.parse.unquote_plus(sys.stdin.read()).replace("\n", " "))'; }
 # wait_hook n: the hook has started n times and is no longer running.
 wait_hook() {
   for _ in $(seq 150); do
