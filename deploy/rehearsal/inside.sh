@@ -374,7 +374,7 @@ failed_run=(MONITOR_UNIT=ti-engine@boost.service MONITOR_INVOCATION_ID=012345678
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook, run as its unit runs it (as ti-trader), failed"
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook did not page both channels once"
-grep -q 'ti-engine@boost.service failed' "$rep/posts.bodies" || fail "the hook's page does not name the failed unit"
+grep -q 'ti-engine%40boost.service+failed' "$rep/posts.bodies" || fail "the hook's page does not name the failed unit"
 test -s "$rep/reports/unit-failures.json" || fail "the hook wrote no record of the page"
 grep -q 'unit-failed:ti-engine@boost.service/0123456789abcdef0123456789abcdef' "$rep/reports/unit-failures.json" || fail "the hook's record is not keyed by the failed run"
 # shellcheck disable=SC2086
