@@ -129,6 +129,7 @@ else
   test -x /var/lib/ti-gateway/Jts/ibgateway/1050/ibgateway || fail "gateway not installed"
 fi
 test -f /opt/ibc/scripts/ibcstart.sh || fail "IBC not installed"
+runuser -u ti-gateway -- test -r /opt/ibc/config.ini || fail "IBC config.ini is not readable by ti-gateway"
 test -x /usr/local/bin/tailscaled || fail "tailscaled not installed"
 if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" != 1; then
   test "$(stat -c %U /var/lib/ti-gateway/Jts/ibgateway/1050/ibgateway)" = ti-gateway || fail "gateway files not owned by ti-gateway"
@@ -204,6 +205,8 @@ grep -qx 'ReadOnlyApi=yes' "$run/config.ini" || fail "read-only API not rendered
 grep -qx 'AutoRestartTime=11:45 PM' "$run/config.ini" || fail "nightly restart not rendered"
 grep -qx 'ColdRestartTime=09:00' "$run/config.ini" || fail "Sunday cold restart not rendered"
 grep -qx 'ReloginAfterSecondFactorAuthenticationTimeout=yes' "$run/config.ini" || fail "2FA relogin not rendered"
+grep -qx 'AcceptIncomingConnectionAction=reject' "$run/config.ini" || fail "incoming API connections are not rejected"
+grep -qx 'TrustedTwsApiClientIPs=' "$run/config.ini" || fail "trusted API client addresses not empty"
 if grep -rqF fakePW /etc/trend-investing /var/log 2>/dev/null; then fail "fake secret found on disk outside the runtime dir"; fi
 pass "renderer writes credentials only to a 0600 file and prints none"
 

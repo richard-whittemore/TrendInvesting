@@ -520,6 +520,18 @@ test "$(grep -n 'secrets-migrate' "$work/calls" | cut -d: -f1)" -gt "$(grep -n '
 
 scenario "" x86_64 firewall || fail "Lightsail firewall failed: $(cat "$work/out")"
 said "Tailscale is not signed in" || fail "Lightsail's firewall step no longer checks Tailscale: $(cat "$work/out")"
+# Signed in to Tailscale: the Gateway's API ports (4002 paper, 4001 live) are
+# denied on every interface before the tailscale0 allow, so no tailnet device
+# reaches them; local clients on 127.0.0.1 are not filtered by ufw.
+TEST_LEAK='ip() { record ip "$@"; }; tailscale() { record tailscale "$@"; }' \
+  scenario "" x86_64 firewall || fail "Lightsail firewall (signed in) failed: $(cat "$work/out")"
+allow_line=$(grep -n '^ufw allow in on tailscale0' "$work/calls" | head -1 | cut -d: -f1 || true)
+test -n "$allow_line" || fail "Lightsail's firewall step no longer allows tailscale0: $(cat "$work/calls")"
+for port in 4001 4002; do
+  deny_line=$(grep -n "^ufw deny in proto tcp to any port $port\$" "$work/calls" | head -1 | cut -d: -f1 || true)
+  test -n "$deny_line" || fail "Lightsail's firewall step does not deny inbound TCP $port: $(cat "$work/calls")"
+  test "$deny_line" -lt "$allow_line" || fail "the deny of $port comes after the tailscale0 allow: $(cat "$work/calls")"
+done
 
 FAKE_SYSTEMD=1 scenario "" x86_64 clock || fail "Lightsail clock failed: $(cat "$work/out")"
 called "time-sync.sh" || fail "Lightsail's clock step no longer syncs time where systemd runs"

@@ -129,7 +129,7 @@ containing "password", "secret" or "token".
 
 IB Gateway only lets a program connect if you say so. In Gateway's
 Configure > Settings > API > Settings (on the server there is no screen:
-`render-ibc-config.sh` sets only the trading mode and the read-only flag, so
+`render-ibc-config.sh` sets the trading mode, the read-only flag and the refusal of non-local clients, so
 the rest are Gateway's own settings and the listening check below is how you
 know they are right):
 
@@ -152,6 +152,11 @@ check the login (A3), then Gateway's API settings above (Enable ActiveX and
 Socket Clients, port 4002), and run the check again. If the address is
 `0.0.0.0` or `*` (every interface), "Allow connections from localhost only"
 is off: turn it on and check again before going on.
+Then check, as the owner: the Gateway log shows `Login has completed`, and `sudo grep -E '^(AcceptIncomingConnectionAction|TrustedTwsApiClientIPs)=' /run/ti-gateway/config.ini` (run on the server, not the Mac: it is the Linux IBC runtime file) prints `AcceptIncomingConnectionAction=reject` and `TrustedTwsApiClientIPs=` (an empty list). The guards are: the IBC files' modes; those two settings (the real guard); the Gateway's read-only API, which holds in dry-run only (once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices before turning read-only off); and the firewall's deny of ports 4001 and 4002, a second layer that Tailscale's own input rules may bypass. Closing the port at the network level for tailnet devices is done with Tailscale access rules, a separate owner step.
+The
+firewall's deny of 4001 and 4002 is only a second layer, since Tailscale's own
+rules accept tailnet traffic first; IBC's `BindAddress` is the command
+server's address and is not used.
 Also confirm the paper account was given trading permissions for US stocks
 and ETFs in Account Management (SPY is one); a missing permission shows up
 later as an IBKR refusal (part D).
@@ -277,14 +282,15 @@ holding no order explains found at the next start.
 Order of starting, each on the server, each an explicit step of yours:
 
 1. The Gateway is running and logged in (A3).
-2. **Turn the Read-Only API off, now, and not before.** On the server:
+2. **Close the Gateway's ports to your other tailnet devices.** Read-only holds only in dry-run. Once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices now, before the next step turns the Read-Only API off.
+3. **Turn the Read-Only API off, now, and not before.** On the server:
    `sudo ti-secrets edit ibkr-login.env`, set
    `TWS_READONLY_API=no`, then `sudo systemctl restart ti-gateway` and
    approve the phone prompt if it comes; wait until the check in A4 shows
    port 4002 listening again. On the Mac: untick Read-Only API in
    Gateway's API settings. From here until you turn it back on (C), the
    Gateway accepts orders from the adapter.
-3. **Approve the account's first run with its starting book.** In IBKR
+4. **Approve the account's first run with its starting book.** In IBKR
    (Client Portal or TWS), read the paper account's holdings, share for
    share, and its total cash (`TotalCashValue` in USD, cash including
    unsettled proceeds: the adapter reads IBKR's cash in USD, and `operator
@@ -304,12 +310,12 @@ Order of starting, each on the server, each an explicit step of yours:
    or cash in or out between two runs, approve the fresh run with the book
    you then check in IBKR the same way (`operator approve -log ...
    -positions ... -cash ... -currency USD`).
-4. Write the run file the engine reads, exactly as the "Restarting an engine"
+5. Write the run file the engine reads, exactly as the "Restarting an engine"
    section of `docs/runbooks/durable-log.md` says: a new `TI_RUN`, a
    `TI_AS_OF`, and, for a first run, `TI_RESTART_ARGS=-approval
    /var/lib/trend-investing/engines/boost/first-run-approval.json`. A log is
    never reused.
-5. Start the engine, then the adapter: `sudo systemctl start ti-engine@boost`,
+6. Start the engine, then the adapter: `sudo systemctl start ti-engine@boost`,
    then, once the engine's log (`journalctl -u ti-engine@boost`) shows its
    start, `sudo systemctl start ti-adapter-boost`. The adapter refuses to
    start until the engine's socket is open and its durable log exists; for a
@@ -341,7 +347,7 @@ Order of starting, each on the server, each an explicit step of yours:
    the price band compares a buy with it when it is there. If the paper
    login has no market data for SPY, the band compares the close with
    itself and always passes, and nothing else changes.
-6. Confirm the engine's log begins with the paper configuration and the
+7. Confirm the engine's log begins with the paper configuration and the
    first run's approval (its starting book), and that the
    adapter says it connected on 4002, read the account's balances in full
    and matched IBKR's open orders and today's trades to the orders the
@@ -658,7 +664,7 @@ commands below are on `main` now **[NOW]**.
     for a first run, `TI_RESTART_ARGS=-approval <the first run's approval>`.
   - **A first paper run without its starting book** ("decides nothing until
     the owner's approval states the starting book"): write the first run's
-    approval as B4 step 3 says and give it with `-approval`.
+    approval as B4 step 4 says and give it with `-approval`.
   - **A repeated start** (the `TI_AS_OF` and configuration an earlier log in
     the folder already opens with): pick a new `TI_AS_OF`, or, if the latest
     log holds nothing past its configuration, resume that log instead
