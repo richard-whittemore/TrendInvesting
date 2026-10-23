@@ -310,7 +310,7 @@ step_clock() {
 # fix_ibc_modes DIR: the IBC tree is root's and readable by every service
 # user: ti-gateway runs IBC's scripts and reads config.ini, whatever modes the
 # zip or root's umask gave the files. The template holds no secrets; the
-# credentials are injected into the unit's runtime copy (ADR 0028).
+# credentials are injected into the unit's runtime copy.
 fix_ibc_modes() {
   local dir=$1
   chown -R root:root "$dir"
@@ -772,7 +772,10 @@ step_firewall() {
   # The Gateway's API ports (4002 paper, 4001 live) are for the server's own
   # engines and adapters on 127.0.0.1, which ufw does not filter. The denies
   # come first, so the tailscale0 allow below never reaches them; the reset
-  # above keeps a rerun from stacking duplicates.
+  # above keeps a rerun from stacking duplicates. This is a second layer, not
+  # the guard: tailscaled's own input chain accepts tailscale0 traffic before
+  # ufw's chains, so the Gateway refuses non-local API clients itself
+  # (render-ibc-config.sh: AcceptIncomingConnectionAction=reject).
   ufw deny in proto tcp to any port 4001 >/dev/null
   ufw deny in proto tcp to any port 4002 >/dev/null
   ufw allow in on tailscale0 >/dev/null

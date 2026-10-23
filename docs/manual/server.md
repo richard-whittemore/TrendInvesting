@@ -16,10 +16,20 @@ IB Gateway for Linux x64 only), US East, the 2 GB plan (plan sections 3 and
 accounts, the market-data step, one engine and one IBKR adapter per account
 (only Boost's exist today), the reporter and the dashboard. It is reachable only over
 Tailscale, your private network: the firewall refuses everything else. The
-Gateway's API port (4002 for paper, 4001 for live) is closed even to the
-tailnet: only programs on the server itself, the engines and adapters, can
-reach it. To apply or re-apply this, run `sudo deploy/provision.sh firewall`
-on the server; it resets and rebuilds the rules, and is safe to repeat.
+Gateway's API port (4002 for paper, 4001 for live) is for programs on the
+server itself, the engines and adapters, and the Gateway refuses every other
+client: the rendered IBC settings reject incoming connections from any address
+but the server's own and trust none. The firewall also denies those two ports,
+but that is a second layer, not the guard: Tailscale's own rules let tailnet
+traffic through before the firewall looks. On a server set up earlier, apply
+all of this with: `git pull`, `sudo deploy/provision.sh gateway`,
+`sudo deploy/provision.sh twsapi`, `sudo deploy/provision.sh firewall`, then
+`sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
+start expect an IBKR Mobile prompt). To check it from your Mac, run
+`nc -vz -G 5 trend-investing-1 4002`: it must not report a successful
+connection with a working API. The Gateway may accept the TCP connection and
+then drop it, so "succeeded" followed by silence is also correct, while a
+reply from the API is a failure to report. Each `provision.sh` step is safe to repeat.
 Everything that sets it up is in `deploy/`, run by `deploy/provision.sh`.
 
 One machine keeps the cost at about $170 a year (plan section 8). The price

@@ -129,7 +129,7 @@ containing "password", "secret" or "token".
 
 IB Gateway only lets a program connect if you say so. In Gateway's
 Configure > Settings > API > Settings (on the server there is no screen:
-`render-ibc-config.sh` sets only the trading mode and the read-only flag, so
+`render-ibc-config.sh` sets the trading mode, the read-only flag and the refusal of non-local clients, so
 the rest are Gateway's own settings and the listening check below is how you
 know they are right):
 
@@ -152,6 +152,15 @@ check the login (A3), then Gateway's API settings above (Enable ActiveX and
 Socket Clients, port 4002), and run the check again. If the address is
 `0.0.0.0` or `*` (every interface), "Allow connections from localhost only"
 is off: turn it on and check again before going on.
+Then, from the Mac, check that the tailnet cannot use the API:
+`nc -vz -G 5 trend-investing-1 4002`. A connection that fails or times out is
+right; one that reports success and then stays silent is also right (the
+Gateway accepts the connection and refuses the client, because the rendered IBC
+settings reject incoming connections from any address but the server's own).
+If you can complete an API session from the Mac, stop and report it. The
+firewall's deny of 4001 and 4002 is only a second layer, since Tailscale's own
+rules accept tailnet traffic first; IBC's `BindAddress` is the command
+server's address and is not used.
 Also confirm the paper account was given trading permissions for US stocks
 and ETFs in Account Management (SPY is one); a missing permission shows up
 later as an IBKR refusal (part D).

@@ -205,6 +205,8 @@ grep -qx 'ReadOnlyApi=yes' "$run/config.ini" || fail "read-only API not rendered
 grep -qx 'AutoRestartTime=11:45 PM' "$run/config.ini" || fail "nightly restart not rendered"
 grep -qx 'ColdRestartTime=09:00' "$run/config.ini" || fail "Sunday cold restart not rendered"
 grep -qx 'ReloginAfterSecondFactorAuthenticationTimeout=yes' "$run/config.ini" || fail "2FA relogin not rendered"
+grep -qx 'AcceptIncomingConnectionAction=reject' "$run/config.ini" || fail "incoming API connections are not rejected"
+grep -qx 'TrustedTwsApiClientIPs=' "$run/config.ini" || fail "trusted API client addresses not empty"
 if grep -rqF fakePW /etc/trend-investing /var/log 2>/dev/null; then fail "fake secret found on disk outside the runtime dir"; fi
 pass "renderer writes credentials only to a 0600 file and prints none"
 

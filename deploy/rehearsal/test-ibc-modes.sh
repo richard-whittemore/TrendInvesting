@@ -2,7 +2,7 @@
 # Tests for install_ibc_tree and fix_ibc_modes in deploy/provision.sh: the
 # IBC tree is root's and readable by ti-gateway, whatever modes the zip or the
 # umask gave its files; the gateway step repairs an existing tree without
-# downloading again (ADR 0028: the template holds no secrets).
+# downloading again (the template holds no secrets).
 # Unprivileged: chown is a stand-in that records its arguments; the stand-in
 # zip's tree holds a 0600 config.ini, as the real one came out on the server.
 set -euo pipefail
@@ -54,12 +54,48 @@ if test "$(id -u)" -ne 0; then
   expect "others can read config.ini" 4 "$(( $(mode "$dest/config.ini") % 10 & 4 ))"
 fi
 
-# A rerun repairs a tree that is already there, from the files in place.
+# A rerun goes through step_gateway itself: with the version marker present it
+# must repair the tree in place and neither download nor unpack again. The
+# function is run with its paths moved into the test's tree and every outside
+# effect recorded.
 chmod 0600 "$dest/config.ini"
 chmod 0700 "$dest/sub"
-run "$dest" fix_ibc_modes "$dest"
-expect "a rerun repairs config.ini" 644 "$(mode "$dest/config.ini")"
-expect "a rerun repairs a folder" 755 "$(mode "$dest/sub")"
+gw="$work/gw"
+mkdir -p "$gw/Jts/ibgateway/1050"
+touch "$dest/.version-9.9.9" "$gw/Jts/ibgateway/1050/.installed-gwsha"
+step=$(awk '/^step_gateway\(\)/,/^}/' "$here/../provision.sh" | sed -e "s#/opt/ibc#$dest#g" -e "s#/var/lib/ti-gateway#$gw#g")
+test -n "$step" || { echo "FAIL: provision.sh has no step_gateway" >&2; exit 1; }
+export EFFECTS="$work/effects"
+: >"$EFFECTS"
+bash -c '
+  log() { :; }
+  mac_mini() { return 1; }
+  fetch() { echo "fetch $*" >>"$EFFECTS"; }
+  unzip() { echo "unzip $*" >>"$EFFECTS"; }
+  chown() { echo "chown $*" >>"$CHOWN_LOG"; }
+  IBC_VERSION=9.9.9 IBC_URL=u IBC_SHA256=s GATEWAY_BUILD=b GATEWAY_MAJOR=1050 GATEWAY_SHA256=gwsha
+  dl_cache=/nonexistent
+  eval "$1"; fix_fns=$2; eval "$fix_fns"; step_gateway' _ "$step" "$fns" >"$work/out" 2>&1 \
+  || { cat "$work/out" >&2; echo "FAIL: step_gateway failed on an existing tree" >&2; failures=$((failures + 1)); }
+expect "step_gateway repairs config.ini on a rerun" 644 "$(mode "$dest/config.ini")"
+expect "step_gateway repairs a folder on a rerun" 755 "$(mode "$dest/sub")"
+expect "step_gateway unpacks nothing on a rerun" "" "$(grep '^unzip' "$work/effects" || true)"
+
+# The rendered config makes the Gateway itself refuse API clients that are not
+# on the server: Tailscale's own firewall rules accept the tailnet before ufw
+# looks, so the firewall is not the guard. (BindAddress is IBC's command
+# server's address, not the API's, so it is not set.)
+render="$here/../libexec/render-ibc-config.sh"
+cred="$work/cred"; run_dir="$work/run"
+mkdir -p "$cred" "$run_dir"
+printf 'TWS_USERID=u\nTWS_PASSWORD=p\n' >"$cred/ibkr-login"
+printf '%s\n' '# comment' 'IbLoginId=' 'IbPassword=' 'TradingMode=live' 'ReadOnlyApi=no' \
+  'AutoRestartTime=' 'ColdRestartTime=' 'ReloginAfterSecondFactorAuthenticationTimeout=no' \
+  'AcceptNonBrokerageAccountWarning=no' 'CommandServerPort=7462' \
+  'TrustedTwsApiClientIPs=100.64.0.1' 'AcceptIncomingConnectionAction=manual' >"$work/template.ini"
+CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run_dir IBC_TEMPLATE=$work/template.ini "$render" >/dev/null
+grep -qx 'AcceptIncomingConnectionAction=reject' "$run_dir/config.ini" || expect "incoming API connections are rejected" reject "$(grep '^AcceptIncomingConnectionAction' "$run_dir/config.ini" || echo missing)"
+grep -qx 'TrustedTwsApiClientIPs=' "$run_dir/config.ini" || expect "no trusted API client addresses" "TrustedTwsApiClientIPs=" "$(grep '^TrustedTwsApiClientIPs' "$run_dir/config.ini" || echo missing)"
 
 test "$failures" -eq 0 || exit 1
 echo "ibc modes tests ok"

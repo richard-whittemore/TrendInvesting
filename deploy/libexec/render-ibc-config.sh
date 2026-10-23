@@ -42,6 +42,11 @@ fi
 case $mode in paper|live) ;; *) echo "render-ibc-config: TWS_TRADING_MODE must be paper or live" >&2; exit 64 ;; esac
 case $readonly_api in yes|no) ;; *) echo "render-ibc-config: TWS_READONLY_API must be yes or no" >&2; exit 64 ;; esac
 
+# The Gateway itself refuses API clients that are not on the server (127.0.0.1
+# is always allowed): IBC rejects the "incoming connection" dialog and trusts no
+# other address. The firewall is not the guard, because Tailscale's own input
+# rules accept tailnet traffic before ufw looks. BindAddress is not set: in
+# IBC 3.24.2 it is the command server's address, not the API's.
 # Values go to awk through the environment, never the command line (ps).
 IBC_V_IbLoginId=$userid \
 IBC_V_IbPassword=$password \
@@ -52,6 +57,8 @@ IBC_V_ColdRestartTime=${TI_GATEWAY_COLD_RESTART:-09:00} \
 IBC_V_ReloginAfterSecondFactorAuthenticationTimeout=yes \
 IBC_V_AcceptNonBrokerageAccountWarning=yes \
 IBC_V_CommandServerPort=0 \
+IBC_V_AcceptIncomingConnectionAction=reject \
+IBC_V_TrustedTwsApiClientIPs='' \
 awk '
   BEGIN { n = 0 }
   {
