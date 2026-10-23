@@ -8,50 +8,106 @@ runbook ordering is checked here too: the access-rule step of
 docs/runbooks/first-paper-order.md B4 comes before the Read-Only switch.
 """
 import json
-import re
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 POLICY = Path(__file__).resolve().parent / "policy.hujson"
 SERVER = "tag:trend-server"
+MINI = "tag:trend-mac-mini"
+RESCUE = Path(__file__).resolve().parent / "rescue.hujson"
 
 
 def strip_hujson(text):
-    """Remove // and /* */ comments (outside strings) and trailing commas."""
-    out = []
-    i, n, in_str = 0, len(text), False
+    """Remove // and /* */ comments and trailing commas, leaving strings alone."""
+    out = []  # (kind, text): kind is "comma" for a comma outside any string
+    i, n = 0, len(text)
     while i < n:
         c = text[i]
-        if in_str:
-            out.append(c)
-            if c == "\\":
-                out.append(text[i + 1])
-                i += 1
-            elif c == '"':
-                in_str = False
-        elif c == '"':
-            in_str = True
-            out.append(c)
+        if c == '"':
+            j = i + 1
+            while text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            out.append(("str", text[i:j + 1]))
+            i = j + 1
         elif text.startswith("//", i):
             while i < n and text[i] != "\n":
                 i += 1
-            continue
         elif text.startswith("/*", i):
             i = text.index("*/", i) + 2
-            continue
+        elif c == ",":
+            out.append(("comma", c))
+            i += 1
         else:
-            out.append(c)
-        i += 1
-    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+            out.append(("other", c))
+            i += 1
+    kept = []
+    for idx, (kind, tok) in enumerate(out):
+        if kind == "comma":
+            nxt = next((t for k, t in out[idx + 1:] if not t.isspace()), "")
+            if nxt in ("}", "]"):
+                continue
+        kept.append(tok)
+    return "".join(kept)
 
 
 def load():
     return json.loads(strip_hujson(POLICY.read_text()))
 
 
+def load_rescue():
+    return json.loads(strip_hujson(RESCUE.read_text()))
+
+
 def to_server(rule):
     return SERVER in rule.get("dst", [])
+
+
+# Destinations that cannot include the server: the owner's own devices and the
+# other tag. Anything else (the server tag, "*", an address or CIDR, a host
+# alias, another autogroup) could include it.
+NOT_THE_SERVER = {"autogroup:self", MINI}
+GATEWAY_PORTS = (4001, 4002)
+INTENDED = {
+    (("autogroup:member",), ("tcp:22", "tcp:443", "tcp:2586")),
+    ((MINI,), ("tcp:443",)),
+}
+
+
+def server_grants(policy):
+    return [g for g in policy.get("grants", []) if set(g["dst"]) - NOT_THE_SERVER]
+
+
+def exposes(ip_entries, port):
+    """True if any grant ip entry could cover this TCP port."""
+    for entry in ip_entries:
+        proto, _, ports = entry.rpartition(":") if ":" in entry else ("", "", entry)
+        if proto not in ("", "tcp", "udp", "*"):
+            continue
+        if ports == "*":
+            return True
+        lo, _, hi = ports.partition("-")
+        if lo.isdigit() and int(lo) <= port <= int(hi or lo):
+            return True
+    return False
+
+
+def audit(policy):
+    """List what is wrong with a policy; empty means it exposes only the intended ports."""
+    problems = []
+    extra = set(policy) - {"tagOwners", "grants", "ssh"}
+    if extra:
+        problems.append(f"unreviewed sections {sorted(extra)}")
+    for grant in policy.get("grants", []):
+        if set(grant) - {"src", "dst", "ip"}:
+            problems.append(f"unreviewed grant fields {grant}")
+    for grant in server_grants(policy):
+        if grant["dst"] != [SERVER] or (tuple(grant["src"]), tuple(grant["ip"])) not in INTENDED:
+            problems.append(f"unintended grant that could reach the server: {grant}")
+        for port in GATEWAY_PORTS:
+            if exposes(grant["ip"], port):
+                problems.append(f"grant exposes {port}: {grant}")
+    return problems
 
 
 class PolicyTest(unittest.TestCase):
@@ -59,8 +115,19 @@ class PolicyTest(unittest.TestCase):
         got = json.loads(strip_hujson('{"a": "http://x", /* c */ "b": [1,], // t\n}'))
         self.assertEqual(got, {"a": "http://x", "b": [1]})
 
+    def test_strip_keeps_commas_inside_strings(self):
+        got = json.loads(strip_hujson('{"v": "abc,]", "w": "x,}", "k": ["a,",],}'))
+        self.assertEqual(got, {"v": "abc,]", "w": "x,}", "k": ["a,"]})
+
+    def test_strip_handles_escaped_quotes_and_comments_between_comma_and_bracket(self):
+        got = json.loads(strip_hujson('{"v": "a\\",]", "k": [1, /* c */ ],}'))
+        self.assertEqual(got, {"v": 'a",]', "k": [1]})
+
     def test_server_tag_is_owned_by_the_admin(self):
-        self.assertEqual(load()["tagOwners"], {SERVER: ["autogroup:admin"]})
+        self.assertEqual(load()["tagOwners"][SERVER], ["autogroup:admin"])
+
+    def test_policy_has_only_the_reviewed_sections(self):
+        self.assertLessEqual(set(load()), {"tagOwners", "grants", "ssh"})
 
     def test_owner_devices_reach_each_other(self):
         rules = [g for g in load()["grants"] if g.get("dst") == ["autogroup:self"]]
@@ -68,34 +135,84 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(rules[0]["src"], ["autogroup:member"])
         self.assertEqual(rules[0]["ip"], ["*"])
 
-    def test_server_ports_are_exactly_ssh_dashboard_ntfy(self):
-        ports = set()
-        for rule in load()["grants"]:
-            if to_server(rule):
-                self.assertEqual(rule["src"], ["autogroup:member"])
-                ports.update(rule["ip"])
-        self.assertEqual(ports, {"tcp:22", "tcp:443", "tcp:2586"})
+    def test_the_real_policy_exposes_only_the_intended_ports(self):
+        self.assertEqual(audit(load()), [])
 
-    def test_nothing_grants_everything(self):
-        policy = load()
-        for rule in policy["grants"]:
-            self.assertNotIn("*", rule["dst"], rule)
-        self.assertNotIn("acls", policy)
-        self.assertNotIn(f"{SERVER}:*", json.dumps(policy))
-        self.assertNotIn("*:*", json.dumps(policy))
+    def test_server_grants_are_exactly_the_two_intended(self):
+        got = sorted((tuple(g["src"]), tuple(g["ip"])) for g in server_grants(load()))
+        self.assertEqual(got, [
+            (("autogroup:member",), ("tcp:22", "tcp:443", "tcp:2586")),
+            (("tag:trend-mac-mini",), ("tcp:443",)),
+        ])
+
+    def test_injected_grants_that_reach_the_gateway_ports_are_caught(self):
+        injected = [
+            {"src": ["autogroup:member"], "dst": ["100.64.0.0/10"], "ip": ["tcp:4000-4010"]},
+            {"src": ["autogroup:member"], "dst": ["100.64.0.0/10"], "ip": ["*"]},
+            {"src": ["autogroup:member"], "dst": ["*"], "ip": ["tcp:4001"]},
+            {"src": ["autogroup:member"], "dst": ["tag:trend-server"], "ip": ["tcp:4002"]},
+            {"src": ["autogroup:member"], "dst": ["tag:trend-server"], "ip": ["*"]},
+            {"src": ["autogroup:member"], "dst": ["trend-host"], "ip": ["tcp:1-65535"]},
+            {"src": ["autogroup:member"], "dst": ["autogroup:tagged"], "ip": ["4001"]},
+            {"src": ["tag:trend-mac-mini"], "dst": ["tag:trend-server"], "ip": ["tcp:4002"]},
+        ]
+        for grant in injected:
+            policy = load()
+            policy["grants"].append(grant)
+            self.assertNotEqual(audit(policy), [], grant)
+
+    def test_an_added_hosts_or_acls_section_is_caught(self):
+        for extra in ({"acls": []}, {"hosts": {"trend-host": "100.64.0.1"}}):
+            policy = load()
+            policy.update(extra)
+            self.assertNotEqual(audit(policy), [], extra)
 
     def test_no_gateway_port_is_named(self):
         text = json.dumps(load())
         for port in ("4001", "4002"):
             self.assertNotIn(port, text)
 
-    def test_tailscale_ssh_for_the_owner_as_ubuntu_only(self):
-        rules = load()["ssh"]
+    def test_default_ssh_rule_for_the_owners_own_devices_is_kept(self):
+        rules = [r for r in load()["ssh"] if r["dst"] == ["autogroup:self"]]
+        self.assertEqual(rules, [{
+            "action": "check",
+            "src": ["autogroup:member"],
+            "dst": ["autogroup:self"],
+            "users": ["autogroup:nonroot", "root"],
+        }])
+
+    def test_tailscale_ssh_for_the_owner_to_the_server_as_ubuntu_only(self):
+        rules = [r for r in load()["ssh"] if to_server(r)]
         self.assertEqual(len(rules), 1)
         self.assertEqual(rules[0]["action"], "accept")
         self.assertEqual(rules[0]["src"], ["autogroup:member"])
         self.assertEqual(rules[0]["dst"], [SERVER])
         self.assertEqual(rules[0]["users"], ["ubuntu"])
+        self.assertEqual(len(load()["ssh"]), 2)
+
+    def test_mac_mini_gets_no_ssh(self):
+        self.assertNotIn(MINI, json.dumps(load()["ssh"]))
+
+
+class RescueTest(unittest.TestCase):
+    def test_rescue_parses_with_the_same_tag_owners(self):
+        self.assertEqual(load_rescue()["tagOwners"][SERVER], ["autogroup:admin"])
+        self.assertEqual(load_rescue()["tagOwners"], load()["tagOwners"])
+
+    def test_rescue_grants_the_tagged_server_every_port_to_the_owner(self):
+        grants = [g for g in load_rescue()["grants"] if g["dst"] == [SERVER]]
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(grants[0]["src"], ["autogroup:member"])
+        self.assertEqual(grants[0]["ip"], ["*"])
+
+    def test_rescue_admits_ssh_to_the_tagged_server_and_to_own_devices(self):
+        ssh = load_rescue()["ssh"]
+        server = [r for r in ssh if r["dst"] == [SERVER]]
+        self.assertEqual(len(server), 1)
+        self.assertEqual(server[0]["action"], "accept")
+        self.assertEqual(server[0]["src"], ["autogroup:member"])
+        self.assertTrue({"ubuntu", "autogroup:nonroot"} & set(server[0]["users"]))
+        self.assertTrue([r for r in ssh if r["dst"] == ["autogroup:self"]])
 
 
 class RunbookOrderTest(unittest.TestCase):
@@ -115,8 +232,9 @@ class RunbookOrderTest(unittest.TestCase):
         paste = sec.index("Access controls")
         tag = sec.index("Edit ACL tags")
         self.assertLess(paste, tag)
-        for needle in ("deploy/tailscale/policy.hujson", "ssh ubuntu@trend-investing-1",
-                       "nc -vz -G 5 trend-investing-1 4002", "history"):
+        for needle in ("deploy/tailscale/policy.hujson", "deploy/tailscale/rescue.hujson",
+                       "Disable key expiry", "do not restore the previous policy", "ssh ubuntu@trend-investing-1",
+                       "nc -vz -G 5 trend-investing-1 4002"):
             self.assertIn(needle, sec)
 
 

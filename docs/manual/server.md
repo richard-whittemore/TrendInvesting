@@ -521,25 +521,47 @@ only guard inside it.
 
 The policy is `deploy/tailscale/policy.hujson`. It lets your own devices reach
 each other, and reach the server on three ports only: 22 (SSH), 443 (the
-dashboard, which `tailscale serve` publishes) and 2586 (your ntfy server). It
-also keeps the Tailscale SSH login as `ubuntu` working, which is how you
-connect today (the server joined with `tailscale up --ssh`). A device with a
-tag stops belonging to a user, so the tagged server is not covered by the rule
-for your own devices; it has its own rule.
+dashboard, which `tailscale serve` publishes) and 2586 (your ntfy server). The
+Mac mini (the alert triage job) is tagged `tag:trend-mac-mini` and may reach
+443 only. It keeps Tailscale's default SSH rule for your own devices, and adds
+one for the tagged server, so `ssh ubuntu@trend-investing-1` keeps working as
+ubuntu (the server joined with `tailscale up --ssh`). A device with a tag stops
+belonging to a user, so the tagged server is not covered by the rules for your
+own devices; it has its own.
 
-Do the steps in this order. The tag must be defined (step 1) before the server
-can be given it (step 2).
+The server's public SSH port is closed, so Tailscale is your only way in. Take
+these steps so you cannot lock yourself out:
 
+0. Open an SSH session to the server (`ssh ubuntu@trend-investing-1`) in one
+   terminal and leave it open throughout. Keep the admin console open in your
+   browser: pasting a policy there does not depend on SSH.
 1. In the Tailscale admin console, open **Access controls** and replace the
    policy with the contents of `deploy/tailscale/policy.hujson`. The default
    policy allows everything; replacing it is the point. If you added rules of
    your own, merge them in by hand, and keep nothing that admits
-   `tag:trend-server` on any port but 22, 443 and 2586. Save.
+   `tag:trend-server` on any port but 22, 443 and 2586. Save. What changes: the
+   allow-everything rule is gone, and the policy now defines the two tags. The
+   server is not tagged yet, so it is still one of your own devices: your
+   devices still reach it on every port, including 4001 and 4002, and SSH to it
+   still works (the default SSH rule is kept). The Gateway's ports are not
+   closed until step 2.
 2. Open **Machines**, find `trend-investing-1`, choose **Edit ACL tags** and add
-   `tag:trend-server`. Save. (Until this step the new rules do not apply to the
-   server, so nothing has changed yet.)
-3. From the Mac, check each of these:
-   - `ssh ubuntu@trend-investing-1` still logs you in.
+   `tag:trend-server`. Save. What changes: the server leaves your own devices
+   and the policy's rules for the tag apply to it, so 4001 and 4002 are closed
+   to your devices. Its row in the machine list no longer shows you as its
+   owner; that is expected. Do the same for the Mac mini with
+   `tag:trend-mac-mini`.
+3. Open a NEW terminal and check `ssh ubuntu@trend-investing-1` logs you in
+   before you close the first one. If it does not, paste
+   `deploy/tailscale/rescue.hujson` into Access controls (below) and try again.
+4. Still in **Machines**, choose the **...** menu on `trend-investing-1` and
+   **Disable key expiry**. Tagging in the console does not change a key's
+   expiry: if it was on when the server joined, the server leaves the tailnet on
+   that date and SSH, the dashboard and ntfy all go dark with the public door
+   closed. Never re-authenticate the server as a user (`tailscale up` signing in
+   again): that drops the tag, and the rules above stop applying to it.
+5. From the Mac, check each of these:
+   - `ssh ubuntu@trend-investing-1` logs you in (in the new terminal).
    - The dashboard address still opens in a browser.
    - The ntfy app on your iPhone still receives a test message (server manual,
      "Your own ntfy server", step 5).
@@ -547,8 +569,13 @@ can be given it (step 2).
      blocked port is not refused, it simply times out, so "timed out" is the
      right result. (Before this change it said the connection succeeded.)
 
-**If SSH stops working**, open the admin console's Access controls page and
-restore the previous policy from its history, then fix the cause.
+**If SSH stops working**, do not restore the previous policy: the default
+policy has no SSH rule for a tagged server, so it would not bring SSH back.
+Open the admin console's Access controls page, paste the contents of
+`deploy/tailscale/rescue.hujson` and save, then try `ssh ubuntu@trend-investing-1`
+again. The rescue policy lets your devices reach every port of the tagged
+server, including 4001 and 4002, so paste `policy.hujson` again as soon as you
+have found the cause.
 
 ## What you start by hand
 
