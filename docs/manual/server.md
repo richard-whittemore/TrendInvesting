@@ -508,6 +508,48 @@ ends with the last check's time and result ([alerts and
 dashboard](alerts-and-dashboard.md), "Alerts this chapter explains"). Running it
 by hand is how you confirm the fix.
 
+## Closing the Gateway's ports to your other devices
+
+Tailscale lets every device on your tailnet reach every port on the server
+unless a rule says otherwise, and the server's own firewall cannot stop that.
+The Gateway's API ports (4001 live, 4002 paper) should be reachable from the
+server alone. Tailscale's access rules are enforced before traffic reaches the
+server, so they close those ports to your Mac, your phone and any device you
+add later. Do this before the Read-Only API is turned off (first-paper-order
+runbook, B4 step 2): after that, the Gateway's `reject` setting would be the
+only guard inside it.
+
+The policy is `deploy/tailscale/policy.hujson`. It lets your own devices reach
+each other, and reach the server on three ports only: 22 (SSH), 443 (the
+dashboard, which `tailscale serve` publishes) and 2586 (your ntfy server). It
+also keeps the Tailscale SSH login as `ubuntu` working, which is how you
+connect today (the server joined with `tailscale up --ssh`). A device with a
+tag stops belonging to a user, so the tagged server is not covered by the rule
+for your own devices; it has its own rule.
+
+Do the steps in this order. The tag must be defined (step 1) before the server
+can be given it (step 2).
+
+1. In the Tailscale admin console, open **Access controls** and replace the
+   policy with the contents of `deploy/tailscale/policy.hujson`. The default
+   policy allows everything; replacing it is the point. If you added rules of
+   your own, merge them in by hand, and keep nothing that admits
+   `tag:trend-server` on any port but 22, 443 and 2586. Save.
+2. Open **Machines**, find `trend-investing-1`, choose **Edit ACL tags** and add
+   `tag:trend-server`. Save. (Until this step the new rules do not apply to the
+   server, so nothing has changed yet.)
+3. From the Mac, check each of these:
+   - `ssh ubuntu@trend-investing-1` still logs you in.
+   - The dashboard address still opens in a browser.
+   - The ntfy app on your iPhone still receives a test message (server manual,
+     "Your own ntfy server", step 5).
+   - `nc -vz -G 5 trend-investing-1 4002` now fails. With Tailscale filtering, a
+     blocked port is not refused, it simply times out, so "timed out" is the
+     right result. (Before this change it said the connection succeeded.)
+
+**If SSH stops working**, open the admin console's Access controls page and
+restore the previous policy from its history, then fix the cause.
+
 ## What you start by hand
 
 - **Once:** create the instance, join Tailscale (`sudo tailscale up --ssh`),

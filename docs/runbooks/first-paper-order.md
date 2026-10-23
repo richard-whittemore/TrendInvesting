@@ -282,7 +282,7 @@ holding no order explains found at the next start.
 Order of starting, each on the server, each an explicit step of yours:
 
 1. The Gateway is running and logged in (A3).
-2. **Close the Gateway's ports to your other tailnet devices.** Read-only holds only in dry-run. Once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices now, before the next step turns the Read-Only API off.
+2. **Close the Gateway's ports to your other tailnet devices.** Read-only holds only in dry-run. Once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices now, before the next step turns the Read-Only API off. The steps, the policy to paste and the checks are in `docs/manual/server.md`, "Closing the Gateway's ports to your other devices"; do not go on to step 3 until its checks pass.
 3. **Turn the Read-Only API off, now, and not before.** On the server:
    `sudo ti-secrets edit ibkr-login.env`, set
    `TWS_READONLY_API=no`, then `sudo systemctl restart ti-gateway` and

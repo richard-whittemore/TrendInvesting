@@ -1,0 +1,52 @@
+// Example Tailscale access policy for a single-owner tailnet whose one server
+// (the Lightsail machine, "trend-investing-1") runs the Gateway, the engines,
+// the dashboard and ntfy. Paste it into the admin console's Access controls
+// page (docs/manual/server.md, "Closing the Gateway's ports to your other
+// devices"). Syntax: https://tailscale.com/kb/1337/policy-syntax and
+// https://tailscale.com/kb/1193/tailscale-ssh
+//
+// Tailscale enforces these rules before traffic reaches the server, so the
+// Gateway's API ports (4001, 4002) are closed to every tailnet device: only
+// 22, 443 and 2586 are open to the owner's devices, and nothing is open to
+// anything else. Replacing the default allow-all policy with this one is
+// intended (docs/runbooks/lightsail-deployment.md, provisioning step 12).
+{
+	// Only an admin may put the tag on a device. A tagged device loses user
+	// ownership, so the server is not in autogroup:self and the rule that
+	// lets the owner's devices reach each other does not cover it; it has its
+	// own rule below.
+	"tagOwners": {
+		"tag:trend-server": ["autogroup:admin"],
+	},
+
+	"grants": [
+		// The owner's own devices (the Mac, the phone) reach each other.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["autogroup:self"],
+			"ip":  ["*"],
+		},
+
+		// The owner's devices reach the server on SSH (22), the dashboard
+		// that `tailscale serve` publishes over HTTPS (443) and the owner's
+		// ntfy server (2586). No other port, so not 4001 or 4002.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:trend-server"],
+			"ip":  ["tcp:22", "tcp:443", "tcp:2586"],
+		},
+	],
+
+	// The server joined with `tailscale up --ssh`, so the owner connects with
+	// `ssh ubuntu@trend-investing-1` and Tailscale SSH authenticates it. This
+	// keeps that login working as ubuntu; no root login is admitted. It also
+	// needs the tcp:22 grant above.
+	"ssh": [
+		{
+			"action": "accept",
+			"src":    ["autogroup:member"],
+			"dst":    ["tag:trend-server"],
+			"users":  ["ubuntu"],
+		},
+	],
+}
