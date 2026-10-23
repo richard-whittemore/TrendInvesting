@@ -532,9 +532,12 @@ own devices; it has its own.
 The server's public SSH port is closed, so Tailscale is your only way in. Take
 these steps so you cannot lock yourself out:
 
-0. Open an SSH session to the server (`ssh ubuntu@trend-investing-1`) in one
-   terminal and leave it open throughout. Keep the admin console open in your
-   browser: pasting a policy there does not depend on SSH.
+0. Open the Tailscale admin console in your browser and keep it open, with
+   `deploy/tailscale/rescue.hujson` to hand. That is your protection: pasting a
+   policy there does not depend on SSH. An open SSH session is not: every login
+   to the server is a Tailscale SSH login, and Tailscale ends a session the
+   moment a policy change revokes the access that allowed it, so it dies in
+   exactly the case it would be meant to cover. Open one only for convenience.
 1. In the Tailscale admin console, open **Access controls** and replace the
    policy with the contents of `deploy/tailscale/policy.hujson`. The default
    policy allows everything; replacing it is the point. If you added rules of
@@ -549,10 +552,12 @@ these steps so you cannot lock yourself out:
    `tag:trend-server`. Save. What changes: the server leaves your own devices
    and the policy's rules for the tag apply to it, so 4001 and 4002 are closed
    to your devices. Its row in the machine list no longer shows you as its
-   owner; that is expected. Do the same for the Mac mini with
-   `tag:trend-mac-mini`.
-3. Open a NEW terminal and check `ssh ubuntu@trend-investing-1` logs you in
-   before you close the first one. If it does not, paste
+   owner; that is expected. The Mac mini is not tagged yet (the alert triage job
+   is not set up), and the policy's lines for `tag:trend-mac-mini` do nothing
+   until it is; it is tagged when that job is set up
+   (`docs/runbooks/mac-mini.md`, "2. The alert triage job").
+3. Open a NEW terminal and check `ssh ubuntu@trend-investing-1` logs you in.
+   If it does not, paste
    `deploy/tailscale/rescue.hujson` into Access controls (below) and try again.
 4. Still in **Machines**, choose the **...** menu on `trend-investing-1` and
    **Disable key expiry**. Tagging in the console does not change a key's
@@ -573,9 +578,11 @@ these steps so you cannot lock yourself out:
 policy has no SSH rule for a tagged server, so it would not bring SSH back.
 Open the admin console's Access controls page, paste the contents of
 `deploy/tailscale/rescue.hujson` and save, then try `ssh ubuntu@trend-investing-1`
-again. The rescue policy lets your devices reach every port of the tagged
-server, including 4001 and 4002, so paste `policy.hujson` again as soon as you
-have found the cause.
+again. The rescue policy restores SSH and nothing else: it grants the same
+ports as `policy.hujson` (22, 443 and 2586 to your devices, 443 to the Mac
+mini), so 4001 and 4002 stay closed, and its SSH rules are the most permissive
+safe ones (your devices as ubuntu or root, with no re-check on the server).
+Paste `policy.hujson` again once you have found the cause.
 
 ## What you start by hand
 

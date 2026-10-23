@@ -188,10 +188,27 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(rules[0]["src"], ["autogroup:member"])
         self.assertEqual(rules[0]["dst"], [SERVER])
         self.assertEqual(rules[0]["users"], ["ubuntu"])
-        self.assertEqual(len(load()["ssh"]), 2)
+        self.assertEqual(len(load()["ssh"]), 3)
 
-    def test_mac_mini_gets_no_ssh(self):
-        self.assertNotIn(MINI, json.dumps(load()["ssh"]))
+    def test_mac_mini_gets_no_ssh_to_anything(self):
+        for rule in load()["ssh"]:
+            self.assertNotIn(MINI, rule["src"])
+
+    def test_owner_keeps_the_mac_mini_once_it_is_tagged(self):
+        check_mini_access(self, load())
+
+
+def check_mini_access(test, policy):
+    """A tagged Mac mini leaves autogroup:member, so the owner needs rules of their own to it."""
+    grants = [g for g in policy["grants"] if g["dst"] == [MINI]]
+    test.assertEqual(grants, [{"src": ["autogroup:member"], "dst": [MINI], "ip": ["*"]}])
+    ssh = [r for r in policy["ssh"] if r["dst"] == [MINI]]
+    test.assertEqual(ssh, [{
+        "action": "check",
+        "src": ["autogroup:member"],
+        "dst": [MINI],
+        "users": ["autogroup:nonroot"],
+    }])
 
 
 class RescueTest(unittest.TestCase):
@@ -199,20 +216,47 @@ class RescueTest(unittest.TestCase):
         self.assertEqual(load_rescue()["tagOwners"][SERVER], ["autogroup:admin"])
         self.assertEqual(load_rescue()["tagOwners"], load()["tagOwners"])
 
-    def test_rescue_grants_the_tagged_server_every_port_to_the_owner(self):
-        grants = [g for g in load_rescue()["grants"] if g["dst"] == [SERVER]]
-        self.assertEqual(len(grants), 1)
-        self.assertEqual(grants[0]["src"], ["autogroup:member"])
-        self.assertEqual(grants[0]["ip"], ["*"])
+    def test_rescue_exposes_only_the_intended_ports_and_never_the_gateway(self):
+        self.assertEqual(audit(load_rescue()), [])
+        self.assertNotIn("4001", json.dumps(load_rescue()))
+        self.assertNotIn("4002", json.dumps(load_rescue()))
 
-    def test_rescue_admits_ssh_to_the_tagged_server_and_to_own_devices(self):
-        ssh = load_rescue()["ssh"]
-        server = [r for r in ssh if r["dst"] == [SERVER]]
-        self.assertEqual(len(server), 1)
-        self.assertEqual(server[0]["action"], "accept")
-        self.assertEqual(server[0]["src"], ["autogroup:member"])
-        self.assertTrue({"ubuntu", "autogroup:nonroot"} & set(server[0]["users"]))
-        self.assertTrue([r for r in ssh if r["dst"] == ["autogroup:self"]])
+    def test_rescue_server_grants_are_the_main_policys_exactly(self):
+        key = lambda g: json.dumps(g, sort_keys=True)
+        self.assertEqual(sorted(map(key, server_grants(load_rescue()))),
+                         sorted(map(key, server_grants(load()))))
+
+    def test_rescue_keeps_the_mac_minis_443(self):
+        got = [g for g in server_grants(load_rescue()) if g["src"] == [MINI]]
+        self.assertEqual(got, [{"src": [MINI], "dst": [SERVER], "ip": ["tcp:443"]}])
+
+    def test_rescue_has_the_reviewed_sections_only(self):
+        self.assertLessEqual(set(load_rescue()), {"tagOwners", "grants", "ssh"})
+
+    def test_rescue_ssh_to_own_devices_is_the_default_check_rule(self):
+        rules = [r for r in load_rescue()["ssh"] if r["dst"] == ["autogroup:self"]]
+        self.assertEqual(rules, [{
+            "action": "check",
+            "src": ["autogroup:member"],
+            "dst": ["autogroup:self"],
+            "users": ["autogroup:nonroot", "root"],
+        }])
+
+    def test_rescue_ssh_to_the_tagged_server_is_accept_for_ubuntu_and_root(self):
+        rules = [r for r in load_rescue()["ssh"] if r["dst"] == [SERVER]]
+        self.assertEqual(rules, [{
+            "action": "accept",
+            "src": ["autogroup:member"],
+            "dst": [SERVER],
+            "users": ["ubuntu", "root"],
+        }])
+
+    def test_rescue_grants_the_owner_the_tagged_mac_mini(self):
+        check_mini_access(self, load_rescue())
+
+    def test_rescue_gives_the_mac_mini_no_ssh(self):
+        for rule in load_rescue()["ssh"]:
+            self.assertNotIn(MINI, rule["src"])
 
 
 class RunbookOrderTest(unittest.TestCase):
@@ -236,6 +280,40 @@ class RunbookOrderTest(unittest.TestCase):
                        "Disable key expiry", "do not restore the previous policy", "ssh ubuntu@trend-investing-1",
                        "nc -vz -G 5 trend-investing-1 4002"):
             self.assertIn(needle, sec)
+
+    def test_step_zero_does_not_rely_on_an_open_ssh_session(self):
+        text = (ROOT / "docs/manual/server.md").read_text()
+        start = text.index("## Closing the Gateway's ports to your other devices")
+        sec = text[start:text.index("\n## ", start + 5)]
+        step0 = sec[sec.index("\n0. "):sec.index("\n1. ")]
+        self.assertNotIn("leave it open", step0)
+        self.assertIn("ends", step0)
+        self.assertIn("admin console", step0)
+        self.assertIn("rescue.hujson", step0)
+
+    def test_server_section_says_the_mac_mini_is_not_tagged_yet(self):
+        text = (ROOT / "docs/manual/server.md").read_text()
+        start = text.index("## Closing the Gateway's ports to your other devices")
+        sec = text[start:text.index("\n## ", start + 5)]
+        self.assertIn("not tagged yet", sec)
+        self.assertNotIn("Do the same for the Mac mini", sec)
+        self.assertIn("mac-mini.md", sec)
+
+    def test_mac_mini_runbook_tags_it_and_disables_its_key_expiry(self):
+        text = (ROOT / "docs/runbooks/mac-mini.md").read_text()
+        sec = text[text.index("## 2. The alert triage job"):text.index("## Checking the launcher itself")]
+        for needle in ("tag:trend-mac-mini", "Edit ACL tags", "Disable key expiry",
+                       "no longer reachable", "autogroup:member"):
+            self.assertIn(needle, sec)
+
+    def test_no_runbook_tells_the_owner_to_advertise_tags(self):
+        for rel in ("docs/runbooks/lightsail-deployment.md", "docs/runbooks/mac-mini.md",
+                    "docs/manual/server.md"):
+            self.assertNotIn("advertise-tags", (ROOT / rel).read_text(), rel)
+        step12 = (ROOT / "docs/runbooks/lightsail-deployment.md").read_text()
+        step12 = step12[step12.index("\n12. "):step12.index("**The data step.**")]
+        self.assertIn("docs/manual/server.md", step12)
+        self.assertIn("mac-mini.md", step12)
 
 
 if __name__ == "__main__":

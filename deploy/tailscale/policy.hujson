@@ -48,6 +48,15 @@
 			"dst": ["tag:trend-server"],
 			"ip":  ["tcp:443"],
 		},
+
+		// The owner's devices reach the tagged Mac mini on every port (screen
+		// sharing, files). A tagged device leaves autogroup:self, so without
+		// this the owner would lose the Mac mini once it is tagged.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:trend-mac-mini"],
+			"ip":  ["*"],
+		},
 	],
 
 	"ssh": [
@@ -70,6 +79,15 @@
 			"src":    ["autogroup:member"],
 			"dst":    ["tag:trend-server"],
 			"users":  ["ubuntu"],
+		},
+
+		// The owner's SSH to the tagged Mac mini, with a periodic re-check
+		// (the Mac mini itself never gets an SSH rule).
+		{
+			"action": "check",
+			"src":    ["autogroup:member"],
+			"dst":    ["tag:trend-mac-mini"],
+			"users":  ["autogroup:nonroot"],
 		},
 	],
 }

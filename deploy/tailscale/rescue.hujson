@@ -1,10 +1,11 @@
 // Rescue policy for a locked-out server. Paste it into the admin console's
 // Access controls page when `ssh ubuntu@trend-investing-1` stops working after
 // the server was tagged (docs/manual/server.md, "Closing the Gateway's ports
-// to your other devices"). It is deliberately open: the owner's devices reach
-// every port of the tagged server and may SSH to it, which includes the
-// Gateway's API ports (4001, 4002). Use it only to get back in, then paste
-// policy.hujson again once the cause is fixed.
+// to your other devices"). It restores SSH and nothing else: its grants are
+// policy.hujson's exactly, so the Gateway's API ports (4001, 4002) stay closed,
+// and the Mac mini keeps its dashboard access. Only the SSH rules are looser
+// (root too, no re-check on the server). Paste policy.hujson again once the
+// cause is fixed.
 {
 	"tagOwners": {
 		"tag:trend-server":   ["autogroup:admin"],
@@ -20,6 +21,16 @@
 		{
 			"src": ["autogroup:member"],
 			"dst": ["tag:trend-server"],
+			"ip":  ["tcp:22", "tcp:443", "tcp:2586"],
+		},
+		{
+			"src": ["tag:trend-mac-mini"],
+			"dst": ["tag:trend-server"],
+			"ip":  ["tcp:443"],
+		},
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:trend-mac-mini"],
 			"ip":  ["*"],
 		},
 	],
@@ -35,7 +46,13 @@
 			"action": "accept",
 			"src":    ["autogroup:member"],
 			"dst":    ["tag:trend-server"],
-			"users":  ["autogroup:nonroot", "root"],
+			"users":  ["ubuntu", "root"],
+		},
+		{
+			"action": "check",
+			"src":    ["autogroup:member"],
+			"dst":    ["tag:trend-mac-mini"],
+			"users":  ["autogroup:nonroot"],
 		},
 	],
 }

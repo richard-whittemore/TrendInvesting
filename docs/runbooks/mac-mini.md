@@ -157,6 +157,22 @@ tokens or enter them.
 
    Keep the Mac mini awake (System Settings, Energy: prevent automatic
    sleeping) and on the tailnet.
+
+   **[OWNER] Tag it on the tailnet.** The job reads the server's dashboard
+   over the tailnet, and the access policy (`deploy/tailscale/policy.hujson`;
+   `docs/manual/server.md`, "Closing the Gateway's ports to your other
+   devices") admits only the tag `tag:trend-mac-mini` to it, on 443. In the
+   Tailscale admin console, open **Machines**, find the Mac mini, choose
+   **Edit ACL tags** and add `tag:trend-mac-mini`, then choose the **...**
+   menu and **Disable key expiry**: tagging in the console does not change a key's
+   expiry, and when an expiring key lapses the Mac mini leaves the tailnet and
+   the job stops reading the dashboard. A tagged Mac mini stops belonging to
+   you, so it is no longer reachable from your other devices unless the policy
+   grants it. The policy does: a grant from `autogroup:member` to
+   `tag:trend-mac-mini` (all ports) and an SSH rule (check, your devices as a
+   non-root user), so your Mac and phone keep their access. If you wrote your
+   own policy, add both. Never sign the Mac mini in again as a user
+   afterwards: that drops the tag.
 2. **[OWNER] The gate's user, group and sudo rule.** The gate runs the code
    a session wrote (`go test`, `make check`) as `ti-triage-gate`, a user
    that cannot log in, has a primary group of its own (not `staff`), and
