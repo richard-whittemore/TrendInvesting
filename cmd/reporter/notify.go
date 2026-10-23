@@ -60,6 +60,8 @@ func publicNtfy(server string) (bool, error) {
 
 const defaultPagerDutyURL = "https://events.pagerduty.com/v2/enqueue"
 
+const defaultPushoverURL = "https://api.pushover.net/1/messages.json"
+
 // withSecretsFile returns a lookup that answers from getenv, and, for a name
 // the environment leaves empty, from the KEY=VALUE lines of the secrets file
 // at path: under systemd the secrets arrive as a credential file
@@ -128,10 +130,12 @@ func buildSenders(channels string, getenv func(string) string, client *http.Clie
 			s, err = ntfyFrom(getenv, client)
 		case "pagerduty":
 			s, err = pagerDutyFrom(getenv, client)
+		case "pushover":
+			s, err = pushoverFrom(getenv, client)
 		case issuesChannel:
 			s, err = githubIssuesFrom(getenv, client)
 		default:
-			err = fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty, github-issues)", c)
+			err = fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty, pushover, github-issues)", c)
 		}
 		if err != nil {
 			faults = append(faults, channelFault{channel: name, err: err})
@@ -145,7 +149,7 @@ func buildSenders(channels string, getenv func(string) string, client *http.Clie
 		for _, f := range faults {
 			errs = append(errs, f.err)
 		}
-		errs = append(errs, errors.New("reporter: no delivery channel named; stdout only shows alerts on the terminal and reaches no one, so add ntfy or pagerduty"))
+		errs = append(errs, errors.New("reporter: no delivery channel named; stdout only shows alerts on the terminal and reaches no one, so add ntfy, pagerduty or pushover"))
 		return nil, faults, errors.Join(errs...)
 	}
 	return senders, faults, nil
@@ -186,6 +190,29 @@ func pagerDutyFrom(getenv func(string) string, client *http.Client) (sender, err
 		return nil, errors.New("reporter: TI_PAGERDUTY_URL must be an absolute URL such as https://events.pagerduty.com/v2/enqueue")
 	}
 	return pagerDutySender{url: endpoint, routingKey: key, client: client}, nil
+}
+
+// pushoverFrom builds the Pushover channel from its secrets: the application's
+// API token and the owner's user key, and the messages endpoint, Pushover's own
+// when unset. An endpoint that is not an absolute URL is refused here, where it
+// names the channel, rather than failing every send.
+func pushoverFrom(getenv func(string) string, client *http.Client) (sender, error) {
+	token := getenv("TI_PUSHOVER_APP_TOKEN")
+	if token == "" {
+		return nil, errors.New("reporter: the pushover channel needs TI_PUSHOVER_APP_TOKEN (the application's API token; it is a secret)")
+	}
+	user := getenv("TI_PUSHOVER_USER_KEY")
+	if user == "" {
+		return nil, errors.New("reporter: the pushover channel needs TI_PUSHOVER_USER_KEY (the owner's user key; it is a secret)")
+	}
+	endpoint := getenv("TI_PUSHOVER_URL")
+	if endpoint == "" {
+		endpoint = defaultPushoverURL
+	}
+	if u, err := url.Parse(endpoint); err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return nil, errors.New("reporter: TI_PUSHOVER_URL must be an absolute URL such as https://api.pushover.net/1/messages.json")
+	}
+	return pushoverSender{url: endpoint, token: token, user: user, client: client}, nil
 }
 
 // channelKey is the state-file key recording that one channel took one alert.
@@ -502,6 +529,90 @@ func (p pagerDutySender) post(body []byte) error {
 	}
 	if err := json.Unmarshal(answer, &ack); err != nil || ack.Status != "success" {
 		return errors.New("the answer did not acknowledge the event")
+	}
+	return nil
+}
+
+// Pushover's documented limits (https://pushover.net/api): a message of at
+// most 1024 characters, a title of at most 250, and for an emergency a retry
+// of at least 30 seconds and an expire of at most 10800.
+const (
+	pushoverMessageLimit = 1024
+	pushoverTitleLimit   = 250
+	pushoverRetry        = 60 * time.Second
+	pushoverExpire       = 30 * time.Minute
+)
+
+// pushoverSender sends an alert through the Pushover messages API
+// (https://pushover.net/api). A page (an urgent alert) is an emergency,
+// priority 2: the phone repeats it every pushoverRetry until it is
+// acknowledged on the phone or pushoverExpire passes. Every other alert is
+// priority 1. It carries what the PagerDuty payload carries (title, detail,
+// alert key and account) and nothing more: no account number and no secret.
+// An alert is one message, cut to Pushover's limits, never several, so a long
+// page never opens a second emergency. A retried delivery follows the
+// reporter's rules (ADR 0019, ADR 0026): a message Pushover did not accept is
+// sent again on the next firing, and a repeat of an unacknowledged alert is a
+// new emergency only when the repeat interval says so, until the journal
+// records the acknowledgement. The answer is read back: only a 2xx with
+// "status":1 is a delivery. The token and user key are credentials and never
+// appear in an error or in output.
+type pushoverSender struct {
+	url, token, user string
+	client           *http.Client
+}
+
+func (pushoverSender) name() string { return "pushover" }
+
+// cutRunes shortens text to at most limit characters, ending in an ellipsis
+// when it was cut, and never inside a UTF-8 character.
+func cutRunes(text string, limit int) string {
+	if utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	return string([]rune(text)[:limit-1]) + "\u2026"
+}
+
+func (p pushoverSender) send(a report.Alert, repeat int) error {
+	detail := a.Body + "\n\nAlert: " + a.Key
+	if a.AccountID != "" {
+		detail += " (" + a.AccountID + ")"
+	}
+	form := url.Values{
+		"token":    {p.token},
+		"user":     {p.user},
+		"title":    {cutRunes(a.Title, pushoverTitleLimit)},
+		"message":  {cutRunes(detail, pushoverMessageLimit)},
+		"priority": {"1"},
+	}
+	if a.Severity == report.Urgent {
+		form.Set("priority", "2")
+		form.Set("retry", fmt.Sprint(int(pushoverRetry.Seconds())))
+		form.Set("expire", fmt.Sprint(int(pushoverExpire.Seconds())))
+	}
+	req, err := http.NewRequest(http.MethodPost, p.url, strings.NewReader(form.Encode()))
+	if err != nil {
+		return errors.New("build request")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			return fmt.Errorf("post failed: %w", urlErr.Err)
+		}
+		return errors.New("post failed")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	answer, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("server answered %s", resp.Status)
+	}
+	var ack struct {
+		Status int `json:"status"`
+	}
+	if err := json.Unmarshal(answer, &ack); err != nil || ack.Status != 1 {
+		return errors.New("the answer did not acknowledge the message")
 	}
 	return nil
 }

@@ -95,8 +95,8 @@ func TestTheHookAsItsUnitRunsItPagesOnceThroughTheChannels(t *testing.T) {
 	}
 	var ntfy, pager countingServer
 	ntfyServer := ntfy.serve(t, http.StatusOK, "")
-	pagerServer := pager.serve(t, http.StatusAccepted, `{"status":"success"}`)
-	secrets := "TI_NTFY_TOPIC=topic\nTI_NTFY_SERVER=" + ntfyServer.URL + "\nTI_PAGERDUTY_ROUTING_KEY=key\nTI_PAGERDUTY_URL=" + pagerServer.URL + "\n"
+	pagerServer := pager.serve(t, http.StatusOK, `{"status":1}`)
+	secrets := "TI_NTFY_TOPIC=topic\nTI_NTFY_SERVER=" + ntfyServer.URL + "\nTI_PUSHOVER_APP_TOKEN=token\nTI_PUSHOVER_USER_KEY=user\nTI_PUSHOVER_URL=" + pagerServer.URL + "\n"
 	if err := os.WriteFile(filepath.Join(credentials, "secrets"), []byte(secrets), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestTheHookAsItsUnitRunsItPagesOnceThroughTheChannels(t *testing.T) {
 		}
 	}
 	if ntfy.count() != 1 || pager.count() != 1 {
-		t.Errorf("ntfy took %d and PagerDuty %d pages for one failure, want 1 each", ntfy.count(), pager.count())
+		t.Errorf("ntfy took %d and Pushover %d pages for one failure, want 1 each", ntfy.count(), pager.count())
 	}
 	if _, err := os.Stat(filepath.Join(reports, "unit-failures.json")); err != nil {
 		t.Errorf("no record beside the reporters' state: %v", err)

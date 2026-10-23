@@ -30,7 +30,7 @@ wait_system() {
   echo "${s:-none}"
 }
 
-# The stand-in for ntfy and PagerDuty runs on the Mac (test-container.sh
+# The stand-in for ntfy and Pushover runs on the Mac (test-container.sh
 # starts it), reached as host.docker.internal on SINK_PORT, so it is there
 # from the container's first boot, across restarts and re-creations, before
 # the reporter's timer can fire. It records each request's path; GET /posts
@@ -114,7 +114,8 @@ ENGINE
     test "${SINK_PORT:-0}" != 0 || fail "SINK_PORT is not set: run this from test-container.sh"
     sed -i -e 's|^TI_NTFY_TOPIC=.*|TI_NTFY_TOPIC=rehearsal|' \
       -e "s|^TI_NTFY_SERVER=.*|TI_NTFY_SERVER=$sink|" \
-      -e "s|^TI_PAGERDUTY_ROUTING_KEY=.*|TI_PAGERDUTY_ROUTING_KEY=fake\\nTI_PAGERDUTY_URL=$sink/v2/enqueue|" \
+      -e "s|^TI_PUSHOVER_APP_TOKEN=.*|TI_PUSHOVER_APP_TOKEN=fake|" \
+      -e "s|^TI_PUSHOVER_USER_KEY=.*|TI_PUSHOVER_USER_KEY=fake\\nTI_PUSHOVER_URL=$sink/1/messages.json|" \
       /etc/trend-investing/secrets.env
     echo '# filled in by the owner (test sentinel)' >>/etc/trend-investing/secrets.env
     sed -i 's/"mark_timeout": 15/"mark_timeout": 16/' /etc/trend-investing/adapters/boost.json
@@ -190,12 +191,12 @@ ENGINE
     # The fixture log is old: both channels begin recorded long before it, as
     # on a server whose reporter has run since before the log's events (a
     # channel with no record is sent none of the log's earlier alerts).
-    printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pagerduty":"2000-01-01T00:00:00Z"}}' >"$state/reports/boost.reporter.json"
+    printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pushover":"2000-01-01T00:00:00Z"}}' >"$state/reports/boost.reporter.json"
     chown ti-trader:ti-trader "$state/reports/boost.reporter.json"
     systemctl start ti-reporter@boost.service || fail "ti-reporter@boost failed: $(journalctl -u ti-reporter@boost -n 10 --no-pager -o cat)"
     posts=$(sink_posts) || fail "the stand-in on the Mac does not list its requests"
     grep -q '^/rehearsal$' <<<"$posts" || fail "the reporter reached no ntfy stand-in: $posts"
-    grep -q '^/v2/enqueue$' <<<"$posts" || fail "the reporter reached no PagerDuty stand-in: $posts"
+    grep -q '^/1/messages.json$' <<<"$posts" || fail "the reporter reached no Pushover stand-in: $posts"
     test "$(stat -c %U "$state/reports/boost.reporter.json")" = ti-trader || fail "the reporter's state is not ti-trader's"
     pass "ti-reporter@boost runs under its unit, reads its secrets through LoadCredential and delivers to both stand-ins"
 

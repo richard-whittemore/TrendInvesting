@@ -110,7 +110,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	flags := flag.NewFlagSet("reporter notify-unit-failed", flag.ContinueOnError)
 	flags.SetOutput(out)
 	statePath := flags.String("state", "", "the host's record of failed-unit pages (unit-failures.json beside the reporters' state files)")
-	channels := flags.String("channel", "ntfy,pagerduty", "comma-separated channels: ntfy, pagerduty, github-issues (one issue per page, with every secret removed)")
+	channels := flags.String("channel", "ntfy,pushover", "comma-separated channels: ntfy, pagerduty, pushover, github-issues (one issue per page, with every secret removed)")
 	secretsFile := flags.String("secrets-file", "", "KEY=VALUE file of channel secrets (under systemd: %d/secrets, the credential file)")
 	journalctl := flags.String("journalctl", "journalctl", "the journal reader")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that names the failed run when systemd did not (MONITOR_INVOCATION_ID)")
@@ -391,7 +391,7 @@ func journalLines(out string) []string {
 // and every line of the secrets file.
 func secretValues(getenv func(string) string, secretsFile string) []string {
 	var values []string
-	for _, k := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_PAGERDUTY_URL", "TI_HEARTBEAT_URL", "TI_GITHUB_ISSUES_TOKEN"} {
+	for _, k := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_PAGERDUTY_URL", "TI_PUSHOVER_APP_TOKEN", "TI_PUSHOVER_USER_KEY", "TI_PUSHOVER_URL", "TI_HEARTBEAT_URL", "TI_GITHUB_ISSUES_TOKEN"} {
 		if v := getenv(k); v != "" {
 			values = append(values, v)
 		}

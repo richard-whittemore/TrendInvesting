@@ -181,7 +181,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		"-journal":      state + "/" + env["TI_RUN"] + ".log",
 		"-state":        reports + "/boost.reporter.json",
 		"-secrets-file": credentials + "/secrets",
-		"-channel":      "ntfy,pagerduty",
+		"-channel":      "ntfy,pushover",
 		"-account":      "boost",
 		"-clock-state":  reports + "/host-clock.json",
 		"-cash-ledger":  "/var/lib/trend-investing/flex/boost/cash-movements.jsonl",
@@ -219,8 +219,8 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	}
 	var ntfy, pager countingServer
 	ntfyServer := ntfy.serve(t, http.StatusOK, "")
-	pagerServer := pager.serve(t, http.StatusAccepted, `{"status":"success"}`)
-	secrets := "TI_NTFY_TOPIC=topic\nTI_NTFY_SERVER=" + ntfyServer.URL + "\nTI_PAGERDUTY_ROUTING_KEY=key\nTI_PAGERDUTY_URL=" + pagerServer.URL + "\n"
+	pagerServer := pager.serve(t, http.StatusOK, `{"status":1}`)
+	secrets := "TI_NTFY_TOPIC=topic\nTI_NTFY_SERVER=" + ntfyServer.URL + "\nTI_PUSHOVER_APP_TOKEN=token\nTI_PUSHOVER_USER_KEY=user\nTI_PUSHOVER_URL=" + pagerServer.URL + "\n"
 	if err := os.WriteFile(filepath.Join(credentials, "secrets"), []byte(secrets), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		t.Fatalf("the reporter as the unit runs it: %v", err)
 	}
 	if ntfy.count() == 0 || pager.count() == 0 {
-		t.Errorf("ntfy took %d and PagerDuty %d alerts, want both reached", ntfy.count(), pager.count())
+		t.Errorf("ntfy took %d and Pushover %d alerts, want both reached", ntfy.count(), pager.count())
 	}
 	if _, err := os.Stat(filepath.Join(reports, "boost.reporter.json")); err != nil {
 		t.Errorf("no state file in the reports directory: %v", err)
@@ -312,14 +312,14 @@ func TestTheSecretsExampleNamesWhatTheReporterReads(t *testing.T) {
 		}
 		return "x"
 	}
-	if _, faults, err := buildSenders("ntfy,pagerduty,github-issues", recording, http.DefaultClient, io.Discard); err != nil || len(faults) != 0 {
+	if _, faults, err := buildSenders("ntfy,pagerduty,pushover,github-issues", recording, http.DefaultClient, io.Discard); err != nil || len(faults) != 0 {
 		t.Fatal(err, faults)
 	}
 	// The outside heartbeat's address, read when a firing ends; a stand-in
 	// transport answers, so nothing leaves this machine.
 	pingHeartbeat(recording, &http.Client{Transport: &relay{sent: map[string][]string{}}}, io.Discard)
 	example := readAssignments(t, secretsExample)
-	for _, need := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_GITHUB_ISSUES_TOKEN", "TI_GITHUB_ISSUES_REPO", "TI_HEARTBEAT_URL"} {
+	for _, need := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_PUSHOVER_APP_TOKEN", "TI_PUSHOVER_USER_KEY", "TI_GITHUB_ISSUES_TOKEN", "TI_GITHUB_ISSUES_REPO", "TI_HEARTBEAT_URL"} {
 		if _, ok := example[need]; !ok {
 			t.Errorf("secrets.env.example has no %s line", need)
 		}

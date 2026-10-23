@@ -527,19 +527,21 @@ Lightsail VM (Ubuntu, $12/month, US East)
 ## 7. Operations
 
 - Daily: data refresh after the close, decisions, a summary to the phone
-  (the owner's own ntfy server over Tailscale; never PagerDuty, never the
+  (the owner's own ntfy server over Tailscale; never Pushover, never the
   public relay; owner decision 2026-10-22), heartbeat
   to Healthchecks.io; an alert if the heartbeat is missed (*the reporter
   pings `TI_HEARTBEAT_URL` at the end of every clean firing; the owner's
-  check pages through PagerDuty; docs/manual/server.md, "The outside
+  check pages through Pushover; docs/manual/server.md, "The outside
   heartbeat"*).
-- Alert channels (owner decision, 2026-10-17): ntfy plus PagerDuty as the
-  second channel (the owner signs up; the reporter uses the Events API and
-  reads the acknowledgement back). An alert is delivered only when every real
+- Alert channels (owner decision, 2026-10-17; the second channel changed from
+  PagerDuty to Pushover on 2026-10-23, since PagerDuty's sign-up refuses
+  personal email addresses): ntfy plus Pushover (the owner buys the app; the
+  reporter uses its messages API at emergency priority for a page and reads the
+  answer back). An alert is delivered only when every real
   channel has taken it, a failure on one channel never counts as delivered,
   and `stdout` is a terminal echo, never a channel. The daily summary carries
   balances: it goes to the owner's own ntfy server only (owner decision
-  2026-10-22), opens no PagerDuty incident, and is not sent without that
+  2026-10-22), opens no Pushover page, and is not sent without that
   server. See
   `docs/manual/alerts-and-dashboard.md`.
 - Weekly: approve IBC's 2FA prompt on the phone (Sunday).

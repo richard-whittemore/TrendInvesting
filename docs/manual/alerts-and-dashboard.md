@@ -137,7 +137,7 @@ before the engine writes that session's records, so 1 would page every
 trading day. A reporter running on the engine's
 own machine cannot catch that machine dying, so every firing that finishes
 without a fault also pings an outside service (Healthchecks), which pages you
-through PagerDuty when the pings stop: that page comes from Healthchecks, not
+through Pushover when the pings stop: that page comes from Healthchecks, not
 from the reporter, names your check and no account, and means no clean firing
 for 20 minutes: the server, the timer or the reporter's firings, or, most
 likely, an engine or adapter left failed for 20 minutes, which first paged you
@@ -181,15 +181,17 @@ you see a `.refused` note saying why in the engine's notes folder beside its inb
 on the engine's output (`journalctl -u ti-engine@<instance>`). Record the
 acknowledgement again with the right account and the current time.
 
-On both channels, ntfy and PagerDuty, repeats come every `-repeat-interval` (default 30 minutes). On PagerDuty, each repeat opens a **new incident**: the first alert's
-incident is named by the alert key, and each repeat's by the alert key with
-`#repeat-1`, `#repeat-2` and so on, while the alert key itself is shown in
-the incident's details. So until the acknowledgement is recorded in the
-journal you will see one more incident, and one more page, every
-`-repeat-interval`. Acknowledging or resolving a PagerDuty incident on your
-phone stops that incident's escalation only; it does not stop the repeats,
-which follow the log. Once the journal records the acknowledgement, no further
-incidents open; resolve the ones already open in PagerDuty yourself.
+On both channels, ntfy and Pushover, repeats come every `-repeat-interval` (default 30 minutes). On Pushover, each repeat is a **new emergency message**:
+until the acknowledgement is recorded in the journal you will get one more
+page, every `-repeat-interval`, and each page, if you do not acknowledge it in
+the Pushover app, itself repeats on your phone every 60 seconds for 30 minutes
+(the page's `retry` and `expire`, below). Acknowledging a page in the Pushover
+app stops that message's own ringing only; it does not stop the reporter's
+repeats, which follow the log. Once the journal records the acknowledgement, no
+further message is sent, and the ones already sent expire on their own.
+(The optional `pagerduty` channel opens a new incident for each repeat, named
+by the alert key with `#repeat-1`, `#repeat-2` and so on, and you resolve
+those in PagerDuty yourself.)
 
 A repeat is timed per channel from when that channel last took the alert, and
 recorded in the state file with how many repeats that channel has taken. A
@@ -219,8 +221,7 @@ decision to make: narrow the timer's `OnCalendar=` and record the choice
 here. A run that takes more than 4 minutes is stopped, so the next firing is
 never skipped; each delivery is saved as it is made, so a run stopped
 between a channel taking an alert and the save sends that one alert again on
-that one channel (delivery is at-least-once: PagerDuty folds the repeat by
-its key, ntfy posts it twice); every other alert is not sent again. `TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue`
+that one channel (delivery is at-least-once: ntfy and Pushover post it twice); every other alert is not sent again. `TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue`
 (`cmd/reporter`) checks that the timer runs around the clock, that its
 period divides the repeat interval and is at most half the acknowledgement
 bound, and that a run is stopped before the next firing.
@@ -232,7 +233,8 @@ Alerts go to real channels. You choose them with `-channel`, comma-separated.
 | Channel | What it is | Secret |
 | --- | --- | --- |
 | `ntfy` | Push to your phone through ntfy. With `TI_NTFY_SERVER` set to **your own ntfy server** (on the Lightsail box, reachable only over Tailscale; [server](server.md), "Your own ntfy server") it carries every alert **and the daily summary**. With it empty, or naming the public ntfy.sh relay, it carries incident alerts only | `TI_NTFY_TOPIC`, an unguessable topic name; `TI_NTFY_SERVER`, your own server's URL |
-| `pagerduty` | The second channel, chosen by the owner: PagerDuty, through its Events API. **Incidents only**: the daily summary never goes here | `TI_PAGERDUTY_ROUTING_KEY`, the integration key; optionally `TI_PAGERDUTY_URL` |
+| `pushover` | The second channel, chosen by the owner: Pushover, through its messages API. A page (an urgent alert) is an **emergency** (priority 2): the Pushover app repeats it every 60 seconds until you acknowledge it in the app or 30 minutes pass; any other alert is **high priority** (priority 1). **Incidents only**: the daily summary never goes here | `TI_PUSHOVER_APP_TOKEN`, the application's API token; `TI_PUSHOVER_USER_KEY`, your user key; optionally `TI_PUSHOVER_URL` |
+| `pagerduty` | An optional channel the server no longer names (Pushover replaced it, because PagerDuty's sign-up refuses personal email addresses): PagerDuty, PagerDuty, through its Events API. **Incidents only**: the daily summary never goes here | `TI_PAGERDUTY_ROUTING_KEY`, the integration key; optionally `TI_PAGERDUTY_URL` |
 | `github-issues` | One GitHub Issue per alert, readable on your phone in the GitHub app. **Incidents only**: the daily summary never goes here ("Alerts as GitHub Issues", below) | `TI_GITHUB_ISSUES_TOKEN`, an issues-only fine-grained token; `TI_GITHUB_ISSUES_REPO`, the repository as `owner/name`; optionally `TI_GITHUB_API_URL` (https, or http for a listed loopback host such as `127.0.0.1`; any host other than `api.github.com` must also be named in `TI_GITHUB_API_ALLOW_HOST`, with its port when the URL has one, so the token is never sent anywhere you did not name; the reporter never follows a redirect, so the token goes nowhere else) |
 | `stdout` | Prints to the terminal or the system log | none |
 
@@ -269,31 +271,31 @@ The delivery rules:
   stalled channel cannot hold up the other alerts.
 - On the public ntfy.sh relay, a reconciliation alert is sent in a shorter
   form that names what is in doubt (the instruments and the cash) but no
-  figure; the figures go to PagerDuty and to your own ntfy server. When the
+  figure; the figures go to Pushover and to your own ntfy server. When the
   reconciliation could not be verified (Halted), the short form says only
   that, and that you should look at the private channel: the reasons it could
-  not compare can carry amounts and share counts, so they go to PagerDuty and
+  not compare can carry amounts and share counts, so they go to Pushover and
   your own ntfy server alone.
-- **A page always means an incident.** PagerDuty opens an incident for every
+- **A page always means an incident.** Pushover pages you for every
   alert it is sent, so it is sent incidents only. The daily summary is routine
   and carries your balances, so it goes to your own ntfy server and nowhere
-  else: never to PagerDuty, and never to the public ntfy.sh relay, which
+  else: never to Pushover or PagerDuty, and never to the public ntfy.sh relay, which
   anyone who learns the topic can read. A summary never opens an incident and
   is never resolved.
 - With no ntfy server of your own taking the summary (ntfy absent, only the
   public ntfy.sh relay, or your server's channel set aside for a bad secret),
   the summary is not sent. The reporter tells you once, as a routine message
   on the incident channels, "<account>: the daily summary has no channel:
-  name your own ntfy server" (on PagerDuty it is a low-urgency `info` event),
+  name your own ntfy server" (on Pushover it is a high-priority message, not an emergency),
   and in the unit's output (`journalctl -u ti-reporter@boost`). It is said
   only in a run whose journal reads, since it names the account. Incident
   alerts are unaffected. When the route is simply absent (ntfy not named, or
   only the public relay), the run is not an error; when your server's channel
   is set aside for a bad secret, the run still ends with an error naming that
   channel, as for any channel set aside. Once your server takes the summary,
-  the notice's PagerDuty incident is resolved and the notice forgotten (if
-  PagerDuty is set aside then, or its resolve fails, its record is kept and
-  the resolve retried at a later firing). It tells you again only if your
+  the notice is forgotten (a PagerDuty incident, if that channel is named, is
+  resolved first, and if PagerDuty is set aside then, or its resolve fails,
+  its record is kept and the resolve retried at a later firing). It tells you again only if your
   server is later left out or set aside.
 - ntfy takes a message of at most 4096 bytes. A longer one (an alert naming
   many instruments, or a long summary) is sent as numbered parts, each titled
@@ -356,8 +358,8 @@ The delivery rules:
   alert (a Degraded, Halted or reconciliation alert you have not
   acknowledged) is then sent to it, its title beginning "state at reporter
   start:", and repeats every `-repeat-interval` until you acknowledge it, as
-  on any channel. This is per channel: adding PagerDuty to an account that has
-  run for weeks starts PagerDuty at that moment with the state in force, and
+  on any channel. This is per channel: adding Pushover to an account that has
+  run for weeks starts Pushover at that moment with the state in force, and
   ntfy, which already has its record, is not sent anything again. A channel
   set aside for a bad secret is recorded too, so what it missed while set
   aside, and the state in force, reach it once it works. A channel that
@@ -365,10 +367,9 @@ The delivery rules:
   is not new. If the reporter cannot write the file at that moment, the
   baseline is dropped and that channel is sent every alert the log holds,
   acknowledged Halted and Degraded incidents included, once each as it would
-  have been at the time (urgent on PagerDuty); and since nothing could be
+  have been at the time (an emergency on Pushover); and since nothing could be
   recorded, the same happens again at every firing until the file can be
-  written (PagerDuty folds the repeats into the incidents already open under
-  the same keys; ntfy shows each again). This is noisy but never silent, and
+  written (ntfy and Pushover show each again). This is noisy but never silent, and
   each such run ends with an error naming the write (the "reporter: write
   state" row below). The daily summary is keyed by
   its day, not an event, so a new state file sends the latest closed day's
@@ -378,9 +379,33 @@ The delivery rules:
   before the run ends, so a power cut cannot leave it empty. If it is
   unreadable the reporter stops rather than starting over, because starting
   over would resend every alert.
-- Secrets (the ntfy topic, the PagerDuty key) never appear in output or errors.
+- Secrets (the ntfy topic, the Pushover token and user key, the PagerDuty key) never appear in output or errors.
 
-PagerDuty details: you sign up for PagerDuty and create a service with an
+Pushover details: you buy the Pushover app once, create an application named
+"Trend server" (its API token is `TI_PUSHOVER_APP_TOKEN`) and copy your user
+key from the dashboard (`TI_PUSHOVER_USER_KEY`); [server](server.md), "The
+pager", has the steps. The reporter posts a form to
+`https://api.pushover.net/1/messages.json` (`TI_PUSHOVER_URL` names another
+endpoint, which must be an absolute URL) with the token, the user key, the
+alert's title (at most 250 characters), a message and a priority. The message
+is the alert's text followed by its key and account, cut with an ellipsis to
+Pushover's 1024 characters: one alert is always one message, so a long alert
+never opens a second emergency. A page carries priority 2 with `retry` 60
+(seconds between the phone's repeats; Pushover's minimum is 30) and `expire`
+1800 (when it stops; Pushover's maximum is 10800); anything else is priority 1.
+It carries what the PagerDuty payload carries and nothing more: no account
+number and no secret. The reporter reads Pushover's answer back: only a 2xx
+answer with `"status":1` is a delivery. Any other answer, or none, is a failure
+that is retried at the next firing, and the error says only the HTTP status,
+never the token or the user key. Pushover has no de-duplication key, so the
+rule against a second emergency is the reporter's own: an alert Pushover
+accepted is never sent again except by the repeat rule above, and a message
+Pushover did not accept opens nothing. The one exception is an answer lost
+after Pushover accepted the message (the connection dropped, or a run stopped
+between the send and the save): the next firing then sends it once more.
+Pushover has nothing to resolve, so a page just expires on your phone.
+
+PagerDuty details (the optional channel): you sign up for PagerDuty and create a service with an
 Events API v2 integration, which gives the routing key. The reporter triggers
 an incident for each alert, using the alert's own key as PagerDuty's
 de-duplication key, so a resend joins the incident it would have opened.
@@ -398,9 +423,9 @@ the reporter has no way to listen for it.
 With `github-issues` in `-channel`, every alert also becomes an issue in the
 repository named by `TI_GITHUB_ISSUES_REPO`, with the label `alert`. It is a
 third place to read the alert, with the context beside it, in the GitHub app
-on your phone. PagerDuty still pages you, and ntfy still pushes; the issue is
+on your phone. Pushover still pages you, and ntfy still pushes; the issue is
 not a replacement for either, and a fault in it never holds them back: every
-alert of a firing goes to PagerDuty and ntfy before any goes to GitHub, and
+alert of a firing goes to Pushover and ntfy before any goes to GitHub, and
 so does every reminder of a failed unit. A firing's work on GitHub, every
 request of every alert together, is bounded by one `-send-timeout`, counted
 only while GitHub is being asked (the firing's own work between two alerts,
@@ -528,14 +553,14 @@ issue carries no link to it, and the closed issue is found by the label
 If you close an issue yourself, the reporter leaves it closed. An alert that
 goes on repeating after that, because it is not yet acknowledged in the
 journal, neither reopens that issue nor opens another, and nor does a
-first delivery the reporter tries again: its repeats still reach PagerDuty
+first delivery the reporter tries again: its repeats still reach Pushover
 and ntfy. Only once the alert has resolved (acknowledged, cleared or
 recovered, as above; the reporter then adds its closing comment to your
 closed issue) and then happens again is it a new incident with a new issue.
 An issue whose `alert` label you remove, or that you delete, is out of the
 reporter's sight: a repeat or reminder of it opens no new issue.
 
-**If issues stop appearing.** PagerDuty and ntfy still get every alert, but
+**If issues stop appearing.** Pushover and ntfy still get every alert, but
 a firing whose GitHub work failed ends with an error: the reporter's unit
 fails, so you get its urgent `<host>: ti-reporter@boost.service failed` page
 (and its hourly reminders while every firing fails), and the firing sends no
@@ -912,7 +937,7 @@ with:
 /opt/trend-investing/bin/ti-reporter \
   -journal /var/lib/trend-investing/engines/boost/${TI_RUN}.log \
   -state /var/lib/trend-investing/reports/boost.reporter.json \
-  -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account boost \
+  -secrets-file %d/secrets -channel ntfy,pushover -summary -account boost \
   -cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl
 ```
 
@@ -928,9 +953,9 @@ configuration yet.
 On the Mac, from the repository root, against a copy of a log:
 
 ```
-TI_NTFY_TOPIC=... TI_PAGERDUTY_ROUTING_KEY=... \
+TI_NTFY_TOPIC=... TI_PUSHOVER_APP_TOKEN=... TI_PUSHOVER_USER_KEY=... \
   go run ./cmd/reporter -journal boost.log -state boost.reporter.json \
-  -channel ntfy,pagerduty -summary
+  -channel ntfy,pushover -summary
 ```
 
 Flags: `-journal` and `-state` are required; `-secrets-file` (a
@@ -1621,7 +1646,7 @@ and whether the alert is urgent:
 | `<account>: a restored log looks newer than the current run` | A log the chain of runs names as an earlier run has a newer modification time than the current run, usually a log restored from a backup with the time of the restore. The body reads "<restored log> looks newer than the current run <log>; fix its modification time before the next restart". The running engine is unaffected, but the engine finds the latest run by modification time, so its next start would take the restored log for the latest run. Once per account and pair of logs | Before any restart, restore the log again from its backup with `sudo rsync -a --chown=ti-trader:ti-trader` (or `sudo cp -p` then `sudo chown ti-trader:ti-trader`), or set its time back with `sudo touch -d '<a time before the current log's>' <restored log>`, and check with `ls -l --time-style=full-iso` that it is older than the current log ("The history across restarts", above). If the engine already refused a start saying the latest earlier run is the restored log, do not approve that log: fix its time and start again with the approval naming the current log |
 | `<account>: the reporter cannot read the journal` | The log does not verify, mixes runs, is missing, or holds a decision record that fails its checks. No other alert from that log is sent and no summary; the heartbeat is still checked unless the body says "The heartbeat is NOT checked" and why. Once per account and problem; the run exits with the error | Check the file with `sudo -u ti-trader journal-query` ([journal-query](journal-query.md)); never edit it. Runbook `docs/runbooks/durable-log.md`, "A log that cannot be read". Until it reads, nothing in it reaches you: watch the account in IBKR's app |
 | `<account>: the reporter cannot check the heartbeat` | The NYSE calendar does not cover the span (it covers 2022 to 2030), so a silent engine would go unreported. Once per problem; the run exits with the error | Install a build whose calendar covers the year. Until then check the engine yourself each trading day |
-| `<host>: the server's clock failed its check` | The reporter runs the clock check (`/usr/local/libexec/trend-investing/clock-check.sh`) at every firing, after it has sent the firing's other alerts, so a slow check never holds them back. A clock behind IBKR's makes every engine on the server count the account reading as stale and withhold every sell (ADR 0019). **When it pages:** after two checks in a row fail, one timer period apart, so within 10 minutes of the clock going wrong; a single failing check (a reference briefly unreachable, say) pages nothing, and one passing check starts the count again. A check recorded more than 150 seconds ahead of the time now means the clock was set back, and that counts as a failed check in its own right (the alert then says the clock stepped back by about so long), so a clock that keeps stepping back pages on the second firing that finds it. **Once per server:** the clock is the server's, so every account's reporter shares one record of it, `/var/lib/trend-investing/reports/host-clock.json` (`-clock-state`), under a lock: one check per 5-minute period, one page per fault, whichever account's reporter made the check. The alert gives the time of the check, the skew it measured (this clock minus the reference), or says none was measured (the clock not synchronised, no reference reachable, the check missing, not executable or timed out), or that its output could not be read, and what the check said. It is not repeated; when a later check passes the PagerDuty incident is resolved and the failure forgotten, channel by channel, so drifting again pages again. A channel that works forgets it at once. If PagerDuty is set aside at that moment (a bad routing key), its record is kept and the incident is closed by the first firing in which PagerDuty works again; ntfy, which has nothing to close, is not held back by it. The same holds if PagerDuty's resolve fails (its service down, or its routing key invalid since the trigger): only PagerDuty's record is kept, to retry the resolve, and a new fault still pages ntfy. A routing key changed to another valid key is accepted by PagerDuty, so the resolve succeeds, closes nothing and the record is forgotten at once: the incident opened under the old key stays open, and it must be resolved by hand in PagerDuty. A channel taken out of `-channel` has its record dropped by the next passing check, but the program cannot reach its incident: if PagerDuty was removed, resolve the open `clock-drift:<host>` incident by hand in PagerDuty. Reporters on one host naming different `-channel` lists share this record, so keep the lists the same | Run the check by hand and fix the time syncing, or on the Mac mini turn on the Mac's automatic date and time ([server](server.md), "The clock"). If the alert says the check **is missing**, run `sudo deploy/provision.sh clock`, which installs it. If it says the check **is not executable by this user**, the reporter's user (`ti-trader`) cannot run it: `sudo chmod 0755 /usr/local/libexec/trend-investing/clock-check.sh` (or run `provision.sh clock` again). If it says the check **timed out after 40s**, the check hung (a reference or `timedatectl` did not answer): run it by hand to see which, and check the network and `systemctl status systemd-timesyncd`. If it says the output **could not be read**, read what the check said in the alert; the check's wording and the reporter disagree, so install a matching build. Until the clock is right, expect sales to be withheld as `stale-broker-snapshot` |
+| `<host>: the server's clock failed its check` | The reporter runs the clock check (`/usr/local/libexec/trend-investing/clock-check.sh`) at every firing, after it has sent the firing's other alerts, so a slow check never holds them back. A clock behind IBKR's makes every engine on the server count the account reading as stale and withhold every sell (ADR 0019). **When it pages:** after two checks in a row fail, one timer period apart, so within 10 minutes of the clock going wrong; a single failing check (a reference briefly unreachable, say) pages nothing, and one passing check starts the count again. A check recorded more than 150 seconds ahead of the time now means the clock was set back, and that counts as a failed check in its own right (the alert then says the clock stepped back by about so long), so a clock that keeps stepping back pages on the second firing that finds it. **Once per server:** the clock is the server's, so every account's reporter shares one record of it, `/var/lib/trend-investing/reports/host-clock.json` (`-clock-state`), under a lock: one check per 5-minute period, one page per fault, whichever account's reporter made the check. The alert gives the time of the check, the skew it measured (this clock minus the reference), or says none was measured (the clock not synchronised, no reference reachable, the check missing, not executable or timed out), or that its output could not be read, and what the check said. It is not repeated; when a later check passes the failure is forgotten, channel by channel (Pushover has nothing to close; a PagerDuty incident, if that channel is named, is resolved first), so drifting again pages again. A channel that works forgets it at once. If PagerDuty is set aside at that moment (a bad routing key), its record is kept and the incident is closed by the first firing in which PagerDuty works again; ntfy, which has nothing to close, is not held back by it. The same holds if PagerDuty's resolve fails (its service down, or its routing key invalid since the trigger): only PagerDuty's record is kept, to retry the resolve, and a new fault still pages ntfy. A routing key changed to another valid key is accepted by PagerDuty, so the resolve succeeds, closes nothing and the record is forgotten at once: the incident opened under the old key stays open, and it must be resolved by hand in PagerDuty. A channel taken out of `-channel` has its record dropped by the next passing check, but the program cannot reach its incident: if PagerDuty was removed, resolve the open `clock-drift:<host>` incident by hand in PagerDuty. Reporters on one host naming different `-channel` lists share this record, so keep the lists the same | Run the check by hand and fix the time syncing, or on the Mac mini turn on the Mac's automatic date and time ([server](server.md), "The clock"). If the alert says the check **is missing**, run `sudo deploy/provision.sh clock`, which installs it. If it says the check **is not executable by this user**, the reporter's user (`ti-trader`) cannot run it: `sudo chmod 0755 /usr/local/libexec/trend-investing/clock-check.sh` (or run `provision.sh clock` again). If it says the check **timed out after 40s**, the check hung (a reference or `timedatectl` did not answer): run it by hand to see which, and check the network and `systemctl status systemd-timesyncd`. If it says the output **could not be read**, read what the check said in the alert; the check's wording and the reporter disagree, so install a matching build. Until the clock is right, expect sales to be withheld as `stale-broker-snapshot` |
 
 The daily summary's last line, "Clock check: ok at <time> (...)" or "Clock check:
 FAILED at <time> (...)", is the check the reporter ran in the same firing that
@@ -1636,27 +1661,27 @@ passes `-clock-check`.
 | Nothing at all for a long time | Possible causes: the timer is not running, the binary is not installed, or every run stops before it sends (the rows below). If the whole server is down, the page comes from Healthchecks instead ([server](server.md), "The outside heartbeat"): your check `trend-investing-reporter` is down, and it names no account | `systemctl list-timers ti-reporter@boost.timer` shows the next firing; `systemctl status ti-reporter@boost` and `journalctl -u ti-reporter@boost` show the last run and its error |
 | The unit failed: "ti-reporter: /var/lib/trend-investing/engines/boost/run.env is missing or empty: start the boost engine once first ..." | The reporter does not run, so it sends nothing from the log. Its unit's failure is paged once by the hook (`<host>: ti-reporter@boost.service failed`, below), not at every firing, with a reminder at most once an hour while every firing fails | Start the engine by `docs/runbooks/durable-log.md`, "Restarting an engine"; the next firing follows its log |
 | `<account>: state at reporter start: <state>`, urgent, then each open alert with its title beginning "state at reporter start:" | This channel began with the reporter after the log's earlier events: the state file is new or was lost (moved aside, say), or you just named the channel in `-channel`. It is sent no routine history, only what is in force: the page names the engine state and scope, an engaged kill switch, a pending cash read, the margin-cushion alarm and every open alert, and any failed trading unit (named with its manual row), and those alerts repeat until acknowledged. Once per channel | Read the page and act on each open alert as you would on its first page; acknowledge each with `operator acknowledge` and the key it gives ([operator](operator.md), "Acknowledging an alert"). Check the account on the dashboard or with `journal-query` |
-| `<host>: <unit> failed`, urgent, once per failure: the unit is `ti-engine@boost.service`, `ti-adapter-boost.service` or `ti-reporter@boost.service`. The text names the unit, the failed run's own last journal line as the reason (or, for a run that wrote nothing, systemd's line about that run) and the manual row to read | A trading unit failed and systemd does not restart it. The `ti-unit-failed@<unit>.service` unit started by the unit's `OnFailure=` sent this page to PagerDuty and your own ntfy server within a minute; it carries no balance, account number or secret. The page is keyed by the run that began the failure (systemd's invocation ID). Every run that fails before the unit is seen well again (a unit restarted that fails again, a reporter failing at each firing) is the same failure: no second page and no resolve-and-trigger of its incident, only `<host>: <unit> still failing`, at most once an hour for as long as the unit stays failed, saying since when and, once two or more runs are known to have failed, how many. The reporter's every firing asks systemd for the engine's and the adapter's state and run at its start too: it pages a failure the hook missed, and resolves the PagerDuty incident of a unit no longer failed; a failure after that pages again. A reporter's own failure is resolved by its next clean firing. While the engine or the adapter is failed the reporter sends no outside heartbeat ping ([server](server.md), "A failed unit") | Read the manual row the page names (the engine's or the adapter's chapter), `journalctl -u <unit>` for the whole reason, then start the engine or the adapter as that row says. Nothing restarts them for you |
-| `<host>: <unit> still failing`, urgent, at most once an hour: "still failing since <time>", plus ", N failed runs" only when two or more runs are known | The unit paged as `<host>: <unit> failed` is still failed and was never seen well between: a unit that failed once and stays failed (nothing restarts it) gets this reminder every hour with no count, and one that has failed again, run after run, gets it with the count of its failed runs. This is a reminder under the same PagerDuty incident, not a new page. It carries no journal line. It stops when the unit is seen well (a firing finds the engine or the adapter not failed, or the reporter finishes a clean firing), which resolves the incident | Act on the first page's manual row; for the reporter, the row of its error (`journalctl -u ti-reporter@boost`), such as starting the engine once or fixing a channel |
+| `<host>: <unit> failed`, urgent, once per failure: the unit is `ti-engine@boost.service`, `ti-adapter-boost.service` or `ti-reporter@boost.service`. The text names the unit, the failed run's own last journal line as the reason (or, for a run that wrote nothing, systemd's line about that run) and the manual row to read | A trading unit failed and systemd does not restart it. The `ti-unit-failed@<unit>.service` unit started by the unit's `OnFailure=` sent this page to Pushover and your own ntfy server within a minute; it carries no balance, account number or secret. The page is keyed by the run that began the failure (systemd's invocation ID). Every run that fails before the unit is seen well again (a unit restarted that fails again, a reporter failing at each firing) is the same failure: no second page and no resolve-and-trigger of its incident, only `<host>: <unit> still failing`, at most once an hour for as long as the unit stays failed, saying since when and, once two or more runs are known to have failed, how many. The reporter's every firing asks systemd for the engine's and the adapter's state and run at its start too: it pages a failure the hook missed, and forgets the page of a unit no longer failed (resolving its PagerDuty incident first, if that channel is named); a failure after that pages again. A reporter's own failure is resolved by its next clean firing. While the engine or the adapter is failed the reporter sends no outside heartbeat ping ([server](server.md), "A failed unit") | Read the manual row the page names (the engine's or the adapter's chapter), `journalctl -u <unit>` for the whole reason, then start the engine or the adapter as that row says. Nothing restarts them for you |
+| `<host>: <unit> still failing`, urgent, at most once an hour: "still failing since <time>", plus ", N failed runs" only when two or more runs are known | The unit paged as `<host>: <unit> failed` is still failed and was never seen well between: a unit that failed once and stays failed (nothing restarts it) gets this reminder every hour with no count, and one that has failed again, run after run, gets it with the count of its failed runs. This is a reminder of the same failure, not a new page. It carries no journal line. It stops when the unit is seen well (a firing finds the engine or the adapter not failed, or the reporter finishes a clean firing), which resolves the incident | Act on the first page's manual row; for the reporter, the row of its error (`journalctl -u ti-reporter@boost`), such as starting the engine once or fixing a channel |
 | A trading unit failed and no page about it came | The hook could not reach a channel (`systemctl status ti-unit-failed@<unit>` shows it failed), or the unit failed before the hook was installed. The next reporter firing pages it (within 5 minutes), and the state-at-start page names every failed trading unit | Wait for the next firing; if nothing comes, `systemctl --failed` on the server shows the unit, and the reporter's own error (`journalctl -u ti-reporter@boost`) says why it could not page |
 | `<account>: the reporter cannot deliver to <channel>`, urgent, on the channels that still work | One channel's secret is empty or malformed, or its name in `-channel` is unknown, so that channel is set aside; every alert still goes to the others, the daily summary ends with "Channels not delivering:" naming it, and the run ends with an error naming it (the rows below). Once per channel and problem; nothing reaches the channel set aside until it is fixed | Fix that channel's line in `secrets.env` (the rows below say which), or the unit's `-channel`; the next firing delivers to it everything it missed |
-| "reporter: the ntfy channel needs TI_NTFY_TOPIC ..." or "reporter: the pagerduty channel needs TI_PAGERDUTY_ROUTING_KEY ..." | That channel is set aside and the other still delivers (the row above). With no channel left that reaches you, the whole run is refused before anything is sent | Fill the line in with `sudo ti-secrets edit secrets.env`; the next firing uses it |
-| "reporter: TI_NTFY_SERVER must be an absolute URL such as https://ntfy.example.org" or "reporter: TI_PAGERDUTY_URL must be an absolute URL such as https://events.pagerduty.com/v2/enqueue" | That channel is set aside and the other still delivers; with none left, the run is refused before anything is sent | Correct the line, or leave `TI_PAGERDUTY_URL` empty for PagerDuty's own endpoint; an empty `TI_NTFY_SERVER` is the public ntfy.sh relay, which takes incident alerts but not the daily summary |
+| "reporter: the ntfy channel needs TI_NTFY_TOPIC ..." "reporter: the pushover channel needs TI_PUSHOVER_APP_TOKEN ..." or "... needs TI_PUSHOVER_USER_KEY ...", or "reporter: the pagerduty channel needs TI_PAGERDUTY_ROUTING_KEY ..." | That channel is set aside and the other still delivers (the row above). With no channel left that reaches you, the whole run is refused before anything is sent | Fill the line in with `sudo ti-secrets edit secrets.env`; the next firing uses it |
+| "reporter: TI_NTFY_SERVER must be an absolute URL such as https://ntfy.example.org" "reporter: TI_PUSHOVER_URL must be an absolute URL such as https://api.pushover.net/1/messages.json" or "reporter: TI_PAGERDUTY_URL must be an absolute URL such as https://events.pagerduty.com/v2/enqueue" | That channel is set aside and the other still delivers; with none left, the run is refused before anything is sent | Correct the line, or leave `TI_PUSHOVER_URL` (or `TI_PAGERDUTY_URL`) empty for the service's own endpoint; an empty `TI_NTFY_SERVER` is the public ntfy.sh relay, which takes incident alerts but not the daily summary |
 | "reporter: the secrets file cannot be read; check -secrets-file names the credential file", or "reporter: the secrets file's line N is not KEY=VALUE" | Reported in the run's error, which never shows a secret's text. Every line that reads is still used, so only a channel whose secret that leaves unset is set aside; with no channel left, nothing is sent | Correct that line of `secrets.env` (`KEY=VALUE`, no spaces round `=`) with `sudo ti-secrets edit secrets.env` |
 | "reporter: the github-issues channel needs TI_GITHUB_ISSUES_TOKEN ..." or "... needs TI_GITHUB_ISSUES_REPO as owner/name ...", or "reporter: TI_GITHUB_API_URL must be https://api.github.com, or an https address whose host TI_GITHUB_API_ALLOW_HOST names ..." | That channel is set aside and the others still deliver (the rows above); no issue is opened | Fill in the name it gives in `/etc/trend-investing/secrets.env` ("Alerts as GitHub Issues", the token steps) |
-| "github-issues: GitHub answered 401 Unauthorized" (or 403 Forbidden, 404 Not Found, 5xx, or "rate limited"), or "github-issues: request failed" | That channel failed, so the alert is not delivered to it, and PagerDuty and ntfy are not held back. It is sent again at the next firing and its issue is made then; a rate limit is the same, and a firing that comes before GitHub lifts the limit fails the same way | 401: the token expired or was revoked, make a new one. 403 or 404: the token lacks Issues read and write on that one repository, or `TI_GITHUB_ISSUES_REPO` is misspelt. Otherwise wait for the next firing |
+| "github-issues: GitHub answered 401 Unauthorized" (or 403 Forbidden, 404 Not Found, 5xx, or "rate limited"), or "github-issues: request failed" | That channel failed, so the alert is not delivered to it, and Pushover and ntfy are not held back. It is sent again at the next firing and its issue is made then; a rate limit is the same, and a firing that comes before GitHub lifts the limit fails the same way | 401: the token expired or was revoked, make a new one. 403 or 404: the token lacks Issues read and write on that one repository, or `TI_GITHUB_ISSUES_REPO` is misspelt. Otherwise wait for the next firing |
 | "github-issues: GitHub's answer is larger than N bytes" | That one delivery failed and is sent again at the next firing; the firing's other alerts are still tried. The answer was larger than any page GitHub can send, so comments on the issue cannot be the cause on GitHub itself. Either something other than GitHub is answering (a wrong address, or a proxy in between), or GitHub has changed its limits. If the listing of alert issues is the answer that is too large, GitHub's deliveries are not tried for the rest of that firing | Check that `TI_GITHUB_API_URL` is unset or points at GitHub's API (the token is sent to that address), and that no proxy sits in front of it. Do not delete comments: that is not the cause |
-| "github-issues: not tried: GitHub failed earlier in this firing (...)" or "github-issues: not tried: this firing's time for GitHub (the send timeout) has run out" | GitHub could not list the alert issues, ran out of `-send-timeout`, limited the rate, answered 5xx or could not be reached, earlier in the same firing, so the firing's later alerts were not sent to it. PagerDuty and ntfy had them first. All are sent again at the next firing | The reason in the brackets is the first failure; act on it as in the row above |
-| "github-issues: more than 1000 issues carry the alert label, so the list of alert issues is incomplete and none is written ..." | The channel fails every firing and writes nothing, since an issue it could not see would be opened twice. PagerDuty and ntfy still get every alert, but each such firing fails the reporter's unit (its failure page) and sends no outside heartbeat ping. The reporter takes the `alert` label off every issue it resolves (and adds `alert-resolved`), so what fills the list is issues you closed by hand, and single-event alerts you have read | Remove the `alert` label only from closed alert issues whose incident is over, such as a single-event alert you have read (filter `label:alert is:closed`, select, Label), until fewer than 1,000 carry it. Leave the label on an issue you closed by hand while its alert still repeats (not yet acknowledged): without it the reporter cannot see that issue |
-| "github-issues: issue has more than 1000 comments, so whether this delivery was made cannot be told and nothing is written" | That issue takes no more comments, so its repeats and reminders fail on GitHub every firing; PagerDuty and ntfy still get them, but each such firing fails the reporter's unit (its failure page) and sends no outside heartbeat ping | Acknowledge the alert (`operator acknowledge`) so it stops repeating; its issue then closes, with no closing comment and with its `alert` label taken off, and the alert's next incident opens a new issue that does not name it (find the closed one by the label `alert-resolved`) |
+| "github-issues: not tried: GitHub failed earlier in this firing (...)" or "github-issues: not tried: this firing's time for GitHub (the send timeout) has run out" | GitHub could not list the alert issues, ran out of `-send-timeout`, limited the rate, answered 5xx or could not be reached, earlier in the same firing, so the firing's later alerts were not sent to it. Pushover and ntfy had them first. All are sent again at the next firing | The reason in the brackets is the first failure; act on it as in the row above |
+| "github-issues: more than 1000 issues carry the alert label, so the list of alert issues is incomplete and none is written ..." | The channel fails every firing and writes nothing, since an issue it could not see would be opened twice. Pushover and ntfy still get every alert, but each such firing fails the reporter's unit (its failure page) and sends no outside heartbeat ping. The reporter takes the `alert` label off every issue it resolves (and adds `alert-resolved`), so what fills the list is issues you closed by hand, and single-event alerts you have read | Remove the `alert` label only from closed alert issues whose incident is over, such as a single-event alert you have read (filter `label:alert is:closed`, select, Label), until fewer than 1,000 carry it. Leave the label on an issue you closed by hand while its alert still repeats (not yet acknowledged): without it the reporter cannot see that issue |
+| "github-issues: issue has more than 1000 comments, so whether this delivery was made cannot be told and nothing is written" | That issue takes no more comments, so its repeats and reminders fail on GitHub every firing; Pushover and ntfy still get them, but each such firing fails the reporter's unit (its failure page) and sends no outside heartbeat ping | Acknowledge the alert (`operator acknowledge`) so it stops repeating; its issue then closes, with no closing comment and with its `alert` label taken off, and the alert's next incident opens a new issue that does not name it (find the closed one by the label `alert-resolved`) |
 | "github-issues: resolve: ... (given up after 3 firings: the next incident opens a fresh issue)" | GitHub refused, three firings running, to close the issue of a broken history made whole or a restored log cleared. The reporter stops trying, so the fault's next incident is not held back: it opens a new issue that names the old one | Close the issue it names by hand |
 | "github-issues: GitHub's listing named an issue without its number or its state" | GitHub's answer was not one the reporter can trust, so nothing is written to GitHub that firing | Usually clears at the next firing; if it persists, check `TI_GITHUB_API_URL` points at GitHub's API |
 | "github-issues: GitHub did not name the token's user", or "github-issues: GitHub named a comment without its author, so whether this delivery was made cannot be told and nothing is written" | The reporter cannot tell its own comments from others', so a delivery that must check them (a repeat, a reminder, a close, or a first delivery whose earlier issue is closed) writes nothing; the token's user is asked once a firing, so every such delivery that firing fails at once. A first delivery with no earlier issue still opens its issue | Usually clears at the next firing; if it persists, check `TI_GITHUB_API_URL` points at GitHub's API |
-| "ntfy: server answered 403 Forbidden" (or another status), "pagerduty: server answered 400 Bad Request", "pagerduty: the answer did not acknowledge the event", or "post failed" | That channel failed, so the alert is not delivered, even if the other channel took it. Only the failed channel is retried, at every firing, until it takes the alert | A wrong topic, server or routing key: correct `TI_NTFY_TOPIC`, `TI_NTFY_SERVER` or `TI_PAGERDUTY_ROUTING_KEY` in `secrets.env`. A network fault clears by itself |
-| PagerDuty shows incidents, but your phone shows nothing | Both channels accepted the alert, so the reporter counts it delivered. What your phone does with it is up to the PagerDuty and ntfy apps | Check the PagerDuty app's notification rules, and that the ntfy app is subscribed to exactly the topic (and server) in `secrets.env` |
+| "ntfy: server answered 403 Forbidden" (or another status), "pushover: server answered 400 Bad Request", "pushover: the answer did not acknowledge the message", "pagerduty: server answered 400 Bad Request", "pagerduty: the answer did not acknowledge the event", or "post failed" | That channel failed, so the alert is not delivered, even if the other channel took it. Only the failed channel is retried, at every firing, until it takes the alert | A wrong topic, server, token or user key: correct `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY` or `TI_PAGERDUTY_ROUTING_KEY` in `secrets.env`. A network fault clears by itself |
+| Pushover took the message, but your phone shows nothing | Both channels accepted the alert, so the reporter counts it delivered. What your phone does with it is up to the Pushover and ntfy apps | Check the Pushover app's notification settings (and iOS's, including Critical Alerts, [server](server.md), "The pager"), and that the ntfy app is subscribed to exactly the topic (and server) in `secrets.env` |
 | "reporter: the state file is unreadable and is not reset, since a new file forgets which alerts are open: ..." | The run stops before anything is sent, every firing | Move the file aside: `sudo -u ti-trader mv /var/lib/trend-investing/reports/boost.reporter.json /var/lib/trend-investing/reports/boost.reporter.json.bad`. The next firing starts a new state file, which sends none of the log's routine history but pages, once per channel, the state at reporter start and every open alert (see "The delivery rules"); the open alerts then repeat until acknowledged |
 | "reporter: write state: ..." | Alerts may have gone, but were not recorded, so the next firing sends them again | Free disk space, or fix the folder's owner (`ti-trader`) |
-| "<account>: the daily summary has no channel: name your own ntfy server" on your channels, and "reporter: Incident alerts are unaffected, but the daily summary is not sent ..." in the unit's output | Every alert still goes. The summary does not: no ntfy server of your own takes it (ntfy is not in `-channel`, or `TI_NTFY_SERVER` is empty or the public ntfy.sh relay, or the ntfy channel was set aside). Said once. The run does not fail for this, but a channel set aside fails the run naming it, as in the rows above. PagerDuty never takes the summary | Set up your own ntfy server ([server](server.md), "Your own ntfy server"), put its URL in `TI_NTFY_SERVER` and keep `ntfy` in the unit's `-channel`. Until then read the summary on the dashboard |
+| "<account>: the daily summary has no channel: name your own ntfy server" on your channels, and "reporter: Incident alerts are unaffected, but the daily summary is not sent ..." in the unit's output | Every alert still goes. The summary does not: no ntfy server of your own takes it (ntfy is not in `-channel`, or `TI_NTFY_SERVER` is empty or the public ntfy.sh relay, or the ntfy channel was set aside). Said once. The run does not fail for this, but a channel set aside fails the run naming it, as in the rows above. Pushover never takes the summary | Set up your own ntfy server ([server](server.md), "Your own ntfy server"), put its URL in `TI_NTFY_SERVER` and keep `ntfy` in the unit's `-channel`. Until then read the summary on the dashboard |
 | The daily summary stops arriving on your phone while incident pages still do | The ntfy channel failed for the summary (your server stopped, the phone left the tailnet, or Tailscale is down on the server) and the run ended with an error naming `ntfy:`. The summary is tried again at every firing | `systemctl status ti-ntfy` on the server; the phone must be signed in to Tailscale. Incident pages are not affected: they go to PagerDuty as well |
 | "reporter: the daily summary was not sent: ..." | Every alert still goes and is remembered; the summary is tried again at the next firing | Read the record it names with `journal-query`; if the record fails its checks, the log is damaged (row above on reading the journal) |
 | The repeats keep coming after you ran `operator acknowledge` | The engine records an acknowledgement only from its operator inbox, at its next input from the adapter, so with the engine stopped the repeats continue until it runs. One the engine refused leaves a `.refused` note in its notes folder (`operator-notes`, beside the inbox); one for another account, or for a key with a typing slip, is recorded and does nothing | Check the engine is running and read any `.refused` note; record the acknowledgement again with the right account, the current time and the key copied from the alert ([operator](operator.md), "Acknowledging an alert") |
@@ -1694,7 +1719,7 @@ nor that nothing was analysed ("Its log", above).
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| No triage comment appears on a new alert issue | Possible causes: the job is off (the `OFF` file, or launchd's job is not loaded), the Mac mini is asleep or off the tailnet, the token expired, or the issue is not the reporter's (another author, or no hidden key line), or it was opened before the job was first switched on. The alert itself is unaffected: PagerDuty and ntfy have it | Read the log. `sudo launchctl print system/com.trendinvesting.triage` shows whether launchd runs it. Check `-alert-author` names the reporter's GitHub user if the two tokens belong to different users |
+| No triage comment appears on a new alert issue | Possible causes: the job is off (the `OFF` file, or launchd's job is not loaded), the Mac mini is asleep or off the tailnet, the token expired, or the issue is not the reporter's (another author, or no hidden key line), or it was opened before the job was first switched on. The alert itself is unaffected: Pushover and ntfy have it | Read the log. `sudo launchctl print system/com.trendinvesting.triage` shows whether launchd runs it. Check `-alert-author` names the reporter's GitHub user if the two tokens belong to different users |
 | "triage: off (/Users/ti-triage/triage/OFF exists); nothing read, nothing written" in the log | Every poll does nothing while the file is there | Delete the file to switch the job back on |
 | "triage skipped: daily limit" on an issue | The day's `-daily-cap` sessions were made, so this issue was not analysed, and never will be | Read the alert and its journal yourself. Raise `-daily-cap` in the plist only if the cost is worth it |
 | "triage failed: ..." on an issue (the analysis failed, ran past its time, named no known kind, or did not finish) | That issue's one session is spent; it is not tried again | Read the alert and its journal yourself, and the log for the reason |
@@ -1746,6 +1771,8 @@ nor that nothing was analysed ("Its log", above).
   `TestTheDailySummaryNeverGoesThroughThePublicRelayOrToPagerDuty`,
   `TestTheSecretsFileSuppliesTheChannelSecrets`,
   `TestOneChannelsBadSecretNeverSilencesTheOther`,
+  `TestPushoverPostsTheDocumentedFormFieldsAndPagesAtEmergencyPriority`,
+  `TestPushoverAnswerThatIsNotAcceptedIsNotADeliveryAndLeaksNothing`,
   `TestAMalformedSecretsLineSetsAsideOnlyWhatItLeavesUnset`,
   `TestTheServiceFileRunsTheReporterOnTheEnginesLog`,
   `TestTheDailySummaryGivesTheVerdictWithTheFlexLedgersTransfersMirrored`,

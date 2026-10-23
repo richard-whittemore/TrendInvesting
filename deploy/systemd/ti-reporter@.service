@@ -22,7 +22,7 @@ Type=oneshot
 # reporter saves each delivery to its state file as a channel takes it, so a
 # run stopped here makes the next one send again at most the one alert on the
 # one channel that had taken it but was not yet saved (at-least-once:
-# PagerDuty folds the repeat by its key, ntfy posts it twice).
+# ntfy and Pushover each post it twice).
 TimeoutStartSec=4min
 User=ti-trader
 Group=ti-trader
@@ -35,8 +35,8 @@ Environment=TI_REPORTS_DIR=/var/lib/trend-investing/reports
 # below, which names it.
 EnvironmentFile=-/var/lib/trend-investing/engines/%i/run.env
 ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/%i/run.env || { echo "ti-reporter: /var/lib/trend-investing/engines/%i/run.env is missing or empty: start the %i engine once first (it names the run whose durable log is reported)" >&2; exit 1; }'
-# TI_NTFY_TOPIC, TI_NTFY_SERVER, TI_PAGERDUTY_ROUTING_KEY and
-# TI_HEARTBEAT_URL, read from %d/secrets and never printed. A firing that
+# TI_NTFY_TOPIC, TI_NTFY_SERVER, TI_PUSHOVER_APP_TOKEN,
+# TI_PUSHOVER_USER_KEY and TI_HEARTBEAT_URL, read from %d/secrets and never printed. A firing that
 # finishes without a fault pings TI_HEARTBEAT_URL, the outside service that
 # pages the owner when the pings stop (docs/manual/server.md, "The outside
 # heartbeat").
@@ -60,7 +60,7 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # journal group. -self-unit: a clean firing resolves the page of an earlier
 # failed one.
 SupplementaryGroups=systemd-journal
-ExecStart=/opt/trend-investing/bin/ti-reporter -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -self-unit ti-reporter@%i.service
+ExecStart=/opt/trend-investing/bin/ti-reporter -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -self-unit ti-reporter@%i.service
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

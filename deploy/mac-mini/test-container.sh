@@ -41,7 +41,7 @@
 #
 # It also runs the clock step and the clock check's unit in the container
 # (passes, and refuses a reference an hour off) and the rehearsal's checks of
-# the owner's tools. The reporter's ntfy and PagerDuty stand-in runs on the
+# the owner's tools. The reporter's ntfy and Pushover stand-in runs on the
 # Mac, reached as host.docker.internal, so it is there before the reporter's
 # timer can fire after each boot.
 # It needs the network (the image's packages, the clock references) and takes
@@ -93,7 +93,7 @@ for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journa
 done
 echo "checkout $work/checkout, container $name, dashboard port $port"
 
-step "the stand-in for ntfy and PagerDuty, on the Mac's loopback port $sink_port"
+step "the stand-in for ntfy and Pushover, on the Mac's loopback port $sink_port"
 cat >"$work/sink.py" <<'SINK'
 import http.server, sys
 
@@ -107,10 +107,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         posts.append(self.path)
-        self.send_response(202)
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"status":"success"}')
+        self.wfile.write(b'{"status":1}')
 
     def do_GET(self):
         if self.path == "/reset":

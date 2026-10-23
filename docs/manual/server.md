@@ -109,7 +109,7 @@ the same disk as the files, and a snapshot would carry both.
 | File | What it holds | Who reads it |
 | --- | --- | --- |
 | `ibkr-login.env` | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
-| `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PAGERDUTY_ROUTING_KEY`, `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL` | handed as a private credential file (`LoadCredential`) to the data job, the engines and the reporter; the dashboard is given none |
+| `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY`, `TI_PAGERDUTY_ROUTING_KEY` (unused: the server pages through Pushover), `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL` | handed as a private credential file (`LoadCredential`) to the data job, the engines and the reporter; the dashboard is given none |
 | `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
 | `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@trad-ira.service`) |
 | `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@roth-ira.service`) |
@@ -125,9 +125,10 @@ What each program actually reads today:
   in its configuration file.
 - The reporter reads `TI_NTFY_TOPIC`, `TI_NTFY_SERVER` (your own server's
   URL, which `provision.sh ntfy` prints; empty means the public ntfy.sh relay,
-  which never gets the daily summary) and `TI_PAGERDUTY_ROUTING_KEY` from that file
+  which never gets the daily summary), `TI_PUSHOVER_APP_TOKEN` and
+  `TI_PUSHOVER_USER_KEY` from that file
   (`-secrets-file`), through its unit's credential. It refuses to run, and
-  its unit fails, while the topic or the routing key is empty: fill them in
+  its unit fails, while the topic, the token or the user key is empty: fill them in
   with `sudo ti-secrets edit secrets.env`; the next firing uses
   them. It also reads `TI_HEARTBEAT_URL`, the address of your check at the
   outside heartbeat service; that one is optional for the run, but without
@@ -197,7 +198,7 @@ which `systemctl cat <unit>` shows). The Gateway stays down; the engines and the
 started; the data job and the Flex reader skip their firings. The reporter
 cannot run either, so it cannot page you itself, but its pings to the outside
 heartbeat stop, and about 20 minutes after the boot Healthchecks pages you
-through PagerDuty ("The outside heartbeat", below). Unlock, and the next
+through Pushover ("The outside heartbeat", below). Unlock, and the next
 firing of each timer runs normally; the data job's next firing catches up
 every session it missed.
 
@@ -253,8 +254,8 @@ again: it lives only in memory. So, **on a server provisioned before the
 secrets were encrypted** (one whose secret files were once on its disk in
 plain text), delete every Lightsail snapshot taken before the migration,
 since they hold the plain text, and rotate the secrets that were on the disk
-in plain text (the IBKR password, the Massive key, the PagerDuty routing
-key, the GitHub token, the Flex token), since anyone who later gets the
+in plain text (the IBKR password, the Massive key, the Pushover token and user key,
+the PagerDuty routing key, the GitHub token, the Flex token), since anyone who later gets the
 volume or a snapshot of it may read the old values. A server provisioned
 after this change never had them in plain text and needs neither step.
 
@@ -281,7 +282,7 @@ file (`sudo rm /swap.img`), which can hold pages from before. If
 
 The daily summary carries your balances, so it goes to a push server that
 only you can reach: ntfy, running on the Lightsail box, listening only on the
-server's Tailscale address. PagerDuty never gets the summary (a page means an
+server's Tailscale address. Pushover never gets the summary (a page means an
 incident), and the public ntfy.sh relay never does either, because anyone who
 learns a topic name can read it there. Incident alerts also go to this server
 when `ntfy` is in the reporter's channels.
@@ -337,7 +338,7 @@ phone keeping Tailscale on (step 3).
 Checking it: `systemctl status ti-ntfy`, and `journalctl -u ti-ntfy`. The
 server keeps messages for 12 hours, so a phone that was off the tailnet for a
 few hours fetches what it missed when it returns; one off for longer misses
-the messages older than 12 hours. Incident alerts go to PagerDuty as well, so
+the messages older than 12 hours. Incident alerts go to Pushover as well, so
 they do not depend on this server. It keeps nothing else and holds no
 account.
 
@@ -347,12 +348,57 @@ alerts are unaffected. Read the summary on the dashboard
 meanwhile ([alerts and dashboard](alerts-and-dashboard.md), "Where alerts
 go").
 
+## The pager
+
+Urgent alerts reach your phone through Pushover. It is a one-time purchase of
+the Pushover app (no subscription), and an **emergency** message, which is
+what every page is sent as, rings again every 60 seconds until you
+acknowledge it in the app or 30 minutes pass. It replaced PagerDuty, whose
+sign-up refuses personal email addresses. The reporter's `pagerduty` channel is
+still in the program but the server's units no longer name it. What is sent,
+and the rules for repeats, are in [alerts and dashboard](alerts-and-dashboard.md),
+"Where alerts go".
+
+**Set it up (once) [OWNER]:**
+
+1. Sign up at pushover.net and install the Pushover app on your iPhone (the
+   purchase is made in the app, after its free trial). Log in to it.
+2. On the iPhone, when the app or iOS asks whether Pushover may send
+   **Critical Alerts**, allow it. A critical alert sounds even when the phone is
+   silenced or on Do Not Disturb, which is what an emergency page needs; in
+   Settings, Notifications, Pushover, confirm that Critical Alerts is on.
+3. On pushover.net, open **Create an Application/API Token**, name the
+   application **Trend server**, and create it. Its **API Token** is
+   `TI_PUSHOVER_APP_TOKEN`.
+4. On the pushover.net dashboard, copy **Your User Key**. It is
+   `TI_PUSHOVER_USER_KEY`.
+5. Put both on the server: `sudo ti-secrets edit secrets.env`, as the lines
+   `TI_PUSHOVER_APP_TOKEN=<the token>` and `TI_PUSHOVER_USER_KEY=<the key>`.
+   They are secrets: they are never printed or logged. The next firing uses them;
+   until both are filled the reporter refuses to run and its unit fails.
+6. Test a page. This sends one emergency message that rings for a minute,
+   reading the two values from the unlocked file without printing them:
+
+   ```
+   sudo sh -c 'f=/run/trend-investing/secrets/secrets.env; t=$(sed -n "s/^TI_PUSHOVER_APP_TOKEN=//p" $f); u=$(sed -n "s/^TI_PUSHOVER_USER_KEY=//p" $f); printf "token=%s&user=%s&priority=2&retry=30&expire=60&title=Trend+server+test&message=A+test+page" "$t" "$u" | curl -sS --data @- https://api.pushover.net/1/messages.json'
+   ```
+
+   Pushover answers `{"status":1,...}`. Your phone should ring; acknowledge it
+   in the app. If it answers `"status":0`, read its `errors`: the token or the
+   user key is wrong.
+
+A page that is not acknowledged on the phone is not the same as one the
+journal records as acknowledged: acknowledging in the Pushover app silences that
+message only, and the reporter sends the next one at its repeat interval until
+the acknowledgement is recorded ([operator](operator.md), "Acknowledging an
+alert").
+
 ## The outside heartbeat
 
 A reporter on the server cannot page you that the server died, so the
 reporter also pings an outside service, Healthchecks, at the end of every
 firing that finishes without a fault (every 5 minutes, around the clock). The
-service pages you through PagerDuty when the pings stop. You decided this is
+service pages you through Pushover when the pings stop. You decided this is
 required before paper trading.
 
 What is sent: an empty request to your check's address, with nothing in it:
@@ -376,11 +422,13 @@ failed for 20 minutes also takes the check down.
 3. Copy the check's ping address (`https://hc-ping.com/<uuid>`) and put it on the
    server: `sudo ti-secrets edit secrets.env`, as the line
    `TI_HEARTBEAT_URL=<the address>`. The next firing uses it.
-4. In Healthchecks, under Integrations, add **PagerDuty** (it asks you to
-   sign in to PagerDuty and pick the same service your reporter pages) and
-   tick it on the check.
+4. In Healthchecks, under Integrations, add **Pushover** (it sends you to
+   Pushover to authorise Healthchecks for your account). Set the priority for
+   **"down" to Emergency**, so the page rings until you acknowledge it, and
+   leave the "up" priority at a normal one. Tick the integration on the check,
+   and use its test button once to hear the page.
 5. Test it: `sudo systemctl stop ti-reporter@boost.timer`. After about
-   20 minutes (the 5-minute period plus the 15 minutes' grace) PagerDuty
+   20 minutes (the 5-minute period plus the 15 minutes' grace) Pushover
    pages you that the check is down. Then `sudo systemctl start
    ti-reporter@boost.timer`: the next firing pings and the check recovers.
 
@@ -582,7 +630,7 @@ The engine, the adapter and the reporter each name `ti-unit-failed@%n.service`
 in `OnFailure=`. When one fails, systemd starts that unit under the failed
 unit's name (for the engine, `ti-unit-failed@ti-engine@boost.service.service`;
 the rehearsal starts it under a real systemd), which runs `ti-reporter
-notify-unit-failed <unit>`: one urgent page on PagerDuty and your own ntfy
+notify-unit-failed <unit>`: one urgent page on Pushover and your own ntfy
 server naming the unit, the reason (cleaned of addresses, account numbers and
 secrets) and the manual row to read. You are paged within a minute of the
 stop, not after two sessions of silence.
@@ -595,11 +643,11 @@ stop, not after two sessions of silence.
   reporter itself, a firing finishes without a fault. Every run that fails
   before that (a unit you restart that fails again, a reporter that fails on
   each 5-minute firing) is the same failure: it is not paged again and its
-  PagerDuty incident is neither resolved nor triggered anew. While it goes
+  page is not sent again. While it goes
   on, at most once an hour, a reminder `<host>: <unit> still failing` is sent
   (by a later failed run, or by a reporter firing that finds the unit still
   failed), saying since when and, once two or more runs have failed, how
-  many, under the same incident. A failure after the unit was seen well pages
+  many, as a reminder of the same failure. A failure after the unit was seen well pages
   again. The record is `unit-failures.json` in
   `/var/lib/trend-investing/reports/`.
 - The reason is the failed run's own last journal line. A run that wrote
@@ -616,7 +664,7 @@ stop, not after two sessions of silence.
   restarted after the failure still tells you. The page of a unit that was not
   failed at the firing's start is resolved; a page sent, or a failed run of
   the same failure recorded, after the firing started is left for the next
-  firing, so a unit that fails again while a firing runs keeps its incident
+  firing, so a unit that fails again while a firing runs keeps its failure record
   open.
 - A failure of the reporter itself is paged by the hook too, once, however
   many firings fail after it (with the hourly reminder), and resolved by the
@@ -643,13 +691,13 @@ stop, not after two sessions of silence.
 | `ti-engine@<instance>` or `ti-adapter-boost` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the IRA engines have no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
 | The data job fails | The unit shows failed; `journalctl -u ti-data` says why; no file is written for the session | Fix the cause and `sudo systemctl start ti-data` ([market data](market-data.md)) |
 | The end-to-end test (step 5 of "Your own ntfy server") shows nothing on the phone | The phone is not on the tailnet (Tailscale off, or not set to stay on), the app is subscribed on another server, or the server cannot reach ntfy.sh to wake an iPhone (`journalctl -u ti-ntfy` names the upstream) | Turn Tailscale on and set it to stay on (step 3); check the subscription's server URL is exactly `TI_NTFY_SERVER`; check the server reaches the internet (`curl -sI https://ntfy.sh`) |
-| `ti-ntfy` fails, or the summary stops reaching your phone while PagerDuty pages still do; `journalctl -u ti-ntfy` names it | Your own ntfy server is down or has no Tailscale address yet. The unit tries again every 10 seconds; the reporter retries the summary at every firing and the run ends with an error naming `ntfy:`. Incident pages go to PagerDuty as well and are not held back | `sudo systemctl status ti-ntfy`; if Tailscale was signed out, `sudo tailscale up --ssh` and `sudo systemctl restart ti-ntfy`; if the configuration is missing, `sudo deploy/provision.sh ntfy` |
+| `ti-ntfy` fails, or the summary stops reaching your phone while Pushover pages still do; `journalctl -u ti-ntfy` names it | Your own ntfy server is down or has no Tailscale address yet. The unit tries again every 10 seconds; the reporter retries the summary at every firing and the run ends with an error naming `ntfy:`. Incident pages go to Pushover as well and are not held back | `sudo systemctl status ti-ntfy`; if Tailscale was signed out, `sudo tailscale up --ssh` and `sudo systemctl restart ti-ntfy`; if the configuration is missing, `sudo deploy/provision.sh ntfy` |
 | `provision.sh ntfy` printed "SKIPPED the ntfy server's configuration: Tailscale is not signed in yet" | The program is installed; the server is not configured or started | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh ntfy` again |
 | `provision.sh ntfy` stopped with "is not a Tailscale address" | The address it was given is outside `100.64.0.0/10`; it configures nothing, so the server cannot be exposed | Do not set `TI_NTFY_ADDRESS` by hand on the server; sign in to Tailscale and run it again |
 | The reporter fails every firing | Nothing reaches your phone; the error is in `journalctl -u ti-reporter@boost` | [alerts and dashboard](alerts-and-dashboard.md), "What can go wrong" |
-| A page from Healthchecks (through PagerDuty) that your check `trend-investing-reporter` is down | The reporter has not finished a clean firing for 20 minutes (period 5 minutes plus 15 minutes' grace). Nothing on the server sent this page; it works even when the server is dead | Check the server is up and reachable over Tailscale (the dashboard, or `ssh`). If it is: `systemctl list-timers ti-reporter@boost.timer`, then `journalctl -u ti-reporter@boost -n 50` for the run's error. If the server is dead, start it from the Lightsail console, then read "After a reboot" |
+| A page from Healthchecks (through Pushover) that your check `trend-investing-reporter` is down | The reporter has not finished a clean firing for 20 minutes (period 5 minutes plus 15 minutes' grace). Nothing on the server sent this page; it works even when the server is dead | Check the server is up and reachable over Tailscale (the dashboard, or `ssh`). If it is: `systemctl list-timers ti-reporter@boost.timer`, then `journalctl -u ti-reporter@boost -n 50` for the run's error. If the server is dead, start it from the Lightsail console, then read "After a reboot" |
 | The reporter's journal says "the heartbeat ping was not sent: ..." | The reporter's run is unaffected; it will ping again at the next firing. The reason is the kind of failure only (an address that is not an absolute URL, the service not reached or not answering in time, or the status it answered), never the address | If the pages from Healthchecks come anyway, check `TI_HEARTBEAT_URL` in `secrets.env` is the check's full ping address and that the server can reach the internet. A single line during a Healthchecks outage needs nothing |
-| No page from Healthchecks when you stop the timer (the test above) | The check is not wired: the address is missing or wrong, the period or grace is wrong, or the PagerDuty integration is not ticked on the check | Healthchecks' page for the check shows the last ping; fix the address, the 5-minute period, the 15-minute grace, or the integration |
+| No page from Healthchecks when you stop the timer (the test above) | The check is not wired: the address is missing or wrong, the period or grace is wrong, or the Pushover integration is not ticked on the check | Healthchecks' page for the check shows the last ping; fix the address, the 5-minute period, the 15-minute grace, or the integration |
 | A page from the server, titled with the unit's name and ending "failed", that a trading unit failed | The engine, the adapter or the reporter stopped and systemd does not restart them. See "A failed unit" below | Read the manual row the page names, then `journalctl -u <unit>` |
 | `provision.sh firewall` printed "SKIPPED firewall: Tailscale is not signed in yet" | The firewall is not changed, so the public door is still open | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh firewall` again |
 | The disk fills | An engine that cannot write its log stops deciding and releases nothing more (ADR 0027); the data job writes nothing; the reporter cannot save its state | Free space, then resume or start as `docs/runbooks/durable-log.md` says |

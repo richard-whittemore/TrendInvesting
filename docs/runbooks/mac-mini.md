@@ -355,7 +355,7 @@ deploy/mac-mini/test-container.sh
 ```
 
 It uses a throwaway container and volumes named `ti-test-<number>`, and a
-stand-in for ntfy and PagerDuty on the Mac's loopback, and removes them at
+stand-in for ntfy and Pushover on the Mac's loopback, and removes them at
 the end. It never touches `ti`. It takes about 20 minutes and needs the
 network. It must end with `REAL CONTAINER TEST COMPLETE`. If Intel (amd64)
 containers already fail on this Mac before the test (quitting and reopening
