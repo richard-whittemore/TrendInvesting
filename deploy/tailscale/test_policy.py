@@ -197,6 +197,11 @@ class PolicyTest(unittest.TestCase):
     def test_owner_keeps_the_mac_mini_once_it_is_tagged(self):
         check_mini_access(self, load())
 
+    def test_policy_comment_says_the_mac_mini_is_never_an_ssh_source(self):
+        text = (ROOT / "deploy/tailscale/policy.hujson").read_text()
+        self.assertIn("the Mac mini is never an SSH source", text)
+        self.assertNotIn("the Mac mini itself never gets an SSH rule", text)
+
 
 def check_mini_access(test, policy):
     """A tagged Mac mini leaves autogroup:member, so the owner needs rules of their own to it."""
@@ -254,9 +259,20 @@ class RescueTest(unittest.TestCase):
     def test_rescue_grants_the_owner_the_tagged_mac_mini(self):
         check_mini_access(self, load_rescue())
 
+    def test_rescue_header_says_the_only_difference_is_root(self):
+        text = " ".join(line.removeprefix("//").strip() for line in RESCUE.read_text().splitlines())
+        self.assertIn("The only difference from policy.hujson's server SSH rule is that this rescue also allows root", text)
+        self.assertNotIn("no re-check on the server", text)
+
     def test_rescue_gives_the_mac_mini_no_ssh(self):
         for rule in load_rescue()["ssh"]:
             self.assertNotIn(MINI, rule["src"])
+
+
+def mac_mini_step_one():
+    text = " ".join((ROOT / "docs/runbooks/mac-mini.md").read_text().split())
+    start = text.index("**[OWNER] A macOS user of its own")
+    return text[start:text.index("2. **[OWNER] The gate's user")]
 
 
 class RunbookOrderTest(unittest.TestCase):
@@ -305,6 +321,22 @@ class RunbookOrderTest(unittest.TestCase):
         for needle in ("tag:trend-mac-mini", "Edit ACL tags", "Disable key expiry",
                        "no longer reachable", "autogroup:member"):
             self.assertIn(needle, sec)
+
+    def test_mac_mini_runbook_confirms_the_policy_before_tagging(self):
+        sec = mac_mini_step_one()
+        self.assertLess(sec.index("Before tagging"), sec.index("Edit ACL tags"))
+        self.assertLess(sec.index("Edit ACL tags"), sec.index("Disable key expiry"))
+
+    def test_mac_mini_runbook_limits_the_ssh_rule_to_tailscale_ssh(self):
+        sec = mac_mini_step_one()
+        self.assertIn("Tailscale SSH", sec)
+        self.assertIn("--ssh", sec)
+        self.assertIn("Remote Login", sec)
+
+    def test_mac_mini_runbook_says_the_dashboard_admits_devices_and_the_mini(self):
+        sec = mac_mini_step_one()
+        self.assertNotIn("admits only the tag", sec)
+        self.assertIn("admits your devices and the tag", sec)
 
     def test_no_runbook_tells_the_owner_to_advertise_tags(self):
         for rel in ("docs/runbooks/lightsail-deployment.md", "docs/runbooks/mac-mini.md",

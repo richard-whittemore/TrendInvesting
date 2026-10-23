@@ -3,9 +3,9 @@
 // the server was tagged (docs/manual/server.md, "Closing the Gateway's ports
 // to your other devices"). It restores SSH and nothing else: its grants are
 // policy.hujson's exactly, so the Gateway's API ports (4001, 4002) stay closed,
-// and the Mac mini keeps its dashboard access. Only the SSH rules are looser
-// (root too, no re-check on the server). Paste policy.hujson again once the
-// cause is fixed.
+// and the Mac mini keeps its dashboard access. The only difference from
+// policy.hujson's server SSH rule is that this rescue also allows root. Paste
+// policy.hujson again once the cause is fixed.
 {
 	"tagOwners": {
 		"tag:trend-server":   ["autogroup:admin"],

@@ -82,7 +82,8 @@
 		},
 
 		// The owner's SSH to the tagged Mac mini, with a periodic re-check
-		// (the Mac mini itself never gets an SSH rule).
+		// (the Mac mini is never an SSH source: no rule grants it SSH to
+		// tag:trend-server).
 		{
 			"action": "check",
 			"src":    ["autogroup:member"],
