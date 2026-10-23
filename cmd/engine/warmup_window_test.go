@@ -10,10 +10,11 @@ import (
 )
 
 // TestShippedDryRunWarmUpLiesInsideMassivesFreeWindow holds the shipped
-// dry-run configuration's warm-up start to the two years of history the
-// owner's Massive plan reaches back (owner decision 2026-10-23), measured from
-// a fixed reference date so the test never reads the wall clock. When the
-// reference date moves past 2 January 2027 the shipped value must move too.
+// dry-run configuration's warm-up start to the two-year history window of the
+// market-data plan: the shipped warm_up_start must lie inside that window.
+// The window is measured from a fixed reference date so the test never reads
+// the wall clock; when the reference date moves forward, the shipped value
+// must move with it. The manual's market-data chapter explains the rule.
 func TestShippedDryRunWarmUpLiesInsideMassivesFreeWindow(t *testing.T) {
 	reference := time.Date(2026, time.October, 23, 0, 0, 0, 0, time.UTC)
 	raw, err := os.ReadFile(boostDeployCfg)
