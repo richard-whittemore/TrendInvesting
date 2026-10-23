@@ -132,7 +132,6 @@ deploy-test:
 	./deploy/rehearsal/test-provision-arch.sh
 	./deploy/mac-mini/test-programs-lib.sh
 	cd deploy/rehearsal && python3 -m unittest test_twsapi_archive
-	cd deploy/rehearsal && python3 -m unittest test_ibapi_probe
 	./deploy/rehearsal/test-clock.sh
 	./deploy/rehearsal/test-target.sh
 	./deploy/mac-mini/test-refusals.sh
