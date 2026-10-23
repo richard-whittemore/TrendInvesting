@@ -394,8 +394,8 @@ when it takes its next input from the adapter (it decides nothing from it).
 With the engine stopped, or with no input arriving, nothing is journalled and
 the alert keeps repeating until the engine runs again. From the reporter's
 first run after it is journalled, that alert is sent no more, on any channel: no more
-ntfy messages and no more PagerDuty incidents. Incidents already open in
-PagerDuty stay open until you resolve them there. The alert is not marked
+ntfy messages and no more Pushover pages. Pages already sent expire on
+your phone by themselves. The alert is not marked
 anywhere else, and a new alert (the account going Halted again later, say)
 has a new key and repeats until you acknowledge that one.
 

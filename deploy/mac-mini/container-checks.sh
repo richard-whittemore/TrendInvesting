@@ -30,12 +30,17 @@ wait_system() {
   echo "${s:-none}"
 }
 
-# The stand-in for ntfy and PagerDuty runs on the Mac (test-container.sh
+# The stand-in for ntfy and Pushover runs on the Mac (test-container.sh
 # starts it), reached as host.docker.internal on SINK_PORT, so it is there
 # from the container's first boot, across restarts and re-creations, before
 # the reporter's timer can fire. It records each request's path; GET /posts
 # lists them and GET /reset clears them.
 sink=http://host.docker.internal:${SINK_PORT:-0}
+# The reporter posts the Pushover token only to https, or http on a loopback
+# address, so the Pushover stand-in is reached through a forwarder in the
+# container (ti-sink-forward.service) that listens on loopback and relays to
+# the stand-in on the Mac. ntfy has no such rule and is reached directly.
+forward=http://127.0.0.1:18099
 sink_posts() { curl -fsS --connect-timeout 2 --max-time 10 "$sink/posts"; }
 
 case ${1:-} in
@@ -111,10 +116,11 @@ ENGINE
     printf 'TI_RUN=run-rehearsal\nTI_AS_OF=2026-10-20T20:00:00Z\nTI_RESTART_ARGS=\n' >"$boost/run.env"
     chown ti-trader:ti-trader "$boost/run.env"
     chmod 0640 "$boost/run.env"
-    test "${SINK_PORT:-0}" != 0 || fail "SINK_PORT is not set: run this from test-container.sh"
+    "$0" forwarder
     sed -i -e 's|^TI_NTFY_TOPIC=.*|TI_NTFY_TOPIC=rehearsal|' \
       -e "s|^TI_NTFY_SERVER=.*|TI_NTFY_SERVER=$sink|" \
-      -e "s|^TI_PAGERDUTY_ROUTING_KEY=.*|TI_PAGERDUTY_ROUTING_KEY=fake\\nTI_PAGERDUTY_URL=$sink/v2/enqueue|" \
+      -e "s|^TI_PUSHOVER_APP_TOKEN=.*|TI_PUSHOVER_APP_TOKEN=fake|" \
+      -e "s|^TI_PUSHOVER_USER_KEY=.*|TI_PUSHOVER_USER_KEY=fake\\nTI_PUSHOVER_URL=$forward/1/messages.json|" \
       /etc/trend-investing/secrets.env
     echo '# filled in by the owner (test sentinel)' >>/etc/trend-investing/secrets.env
     sed -i 's/"mark_timeout": 15/"mark_timeout": 16/' /etc/trend-investing/adapters/boost.json
@@ -131,6 +137,61 @@ ENGINE
     logger -t ti-test "journal sentinel $token"
     journalctl --flush
     pass "fixtures written"
+    ;;
+
+  # The Pushover stand-in's forwarder. Its executable and unit are on the
+  # container's own disk, which a re-creation replaces (only the four volumes
+  # persist) while the secrets in the etc volume still point at it, so
+  # test-container.sh runs this after every up.sh, create or re-create. It is
+  # idempotent.
+  forwarder)
+    test "${SINK_PORT:-0}" != 0 || fail "SINK_PORT is not set: run this from test-container.sh"
+    # A unit of its own, so it starts again after every boot of the container,
+    # before the reporter's timer can fire.
+    cat >/usr/local/bin/ti-sink-forward <<'FORWARD'
+#!/usr/bin/python3
+import asyncio, sys
+
+async def pipe(reader, writer):
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    finally:
+        writer.close()
+
+async def relay(client_reader, client_writer):
+    try:
+        reader, writer = await asyncio.open_connection(sys.argv[2], int(sys.argv[3]))
+    except OSError:
+        client_writer.close()
+        return
+    await asyncio.gather(pipe(client_reader, writer), pipe(reader, client_writer), return_exceptions=True)
+
+async def main():
+    server = await asyncio.start_server(relay, "127.0.0.1", int(sys.argv[1]))
+    async with server:
+        await server.serve_forever()
+
+asyncio.run(main())
+FORWARD
+    chmod 0755 /usr/local/bin/ti-sink-forward
+    cat >/etc/systemd/system/ti-sink-forward.service <<UNIT
+[Unit]
+Description=Rehearsal: relay loopback to the stand-in on the Mac
+After=network.target
+Before=ti-reporter@boost.service
+
+[Service]
+ExecStart=/usr/local/bin/ti-sink-forward 18099 host.docker.internal ${SINK_PORT}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable --now ti-sink-forward.service || fail "the stand-in forwarder did not start: $(journalctl -u ti-sink-forward -n 5 --no-pager -o cat)"
+    pass "the stand-in forwarder is installed and running"
     ;;
 
   # T1: every unit verifies, and the enabled ones and the engine start under
@@ -190,12 +251,12 @@ ENGINE
     # The fixture log is old: both channels begin recorded long before it, as
     # on a server whose reporter has run since before the log's events (a
     # channel with no record is sent none of the log's earlier alerts).
-    printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pagerduty":"2000-01-01T00:00:00Z"}}' >"$state/reports/boost.reporter.json"
+    printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pushover":"2000-01-01T00:00:00Z"}}' >"$state/reports/boost.reporter.json"
     chown ti-trader:ti-trader "$state/reports/boost.reporter.json"
     systemctl start ti-reporter@boost.service || fail "ti-reporter@boost failed: $(journalctl -u ti-reporter@boost -n 10 --no-pager -o cat)"
     posts=$(sink_posts) || fail "the stand-in on the Mac does not list its requests"
     grep -q '^/rehearsal$' <<<"$posts" || fail "the reporter reached no ntfy stand-in: $posts"
-    grep -q '^/v2/enqueue$' <<<"$posts" || fail "the reporter reached no PagerDuty stand-in: $posts"
+    grep -q '^/1/messages.json$' <<<"$posts" || fail "the reporter reached no Pushover stand-in: $posts"
     test "$(stat -c %U "$state/reports/boost.reporter.json")" = ti-trader || fail "the reporter's state is not ti-trader's"
     pass "ti-reporter@boost runs under its unit, reads its secrets through LoadCredential and delivers to both stand-ins"
 
@@ -295,6 +356,10 @@ ENGINE
     for u in ti-data.timer ti-reporter@boost.timer ti-clock-check.timer; do
       systemctl is-active --quiet "$u" || fail "$u is not active after the restart"
     done
+    # The Pushover forwarder survives a restart and a re-creation, and still
+    # relays loopback to the stand-in on the Mac.
+    systemctl is-active --quiet ti-sink-forward.service || fail "the Pushover stand-in forwarder is not running after the restart"
+    curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null "$forward/posts" || fail "the Pushover stand-in is not reached through the forwarder at $forward"
     for _ in $(seq 30); do systemctl is-active --quiet ti-dashboard.service && break; sleep 1; done
     systemctl is-active --quiet ti-dashboard.service || fail "ti-dashboard is not back: $(journalctl -u ti-dashboard -b -n 5 --no-pager -o cat)"
     for u in $units_stopped; do
@@ -345,5 +410,5 @@ STUB
     pass "the clock step and ti-clock-check.service pass against a reference, and the step refuses one an hour off"
     ;;
 
-  *) fail "usage: container-checks.sh boot|fixtures|units|tools|state-manifest|provision-manifest|after-restart|clock" ;;
+  *) fail "usage: container-checks.sh boot|forwarder|fixtures|units|tools|state-manifest|provision-manifest|after-restart|clock" ;;
 esac

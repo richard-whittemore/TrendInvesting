@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -59,6 +64,8 @@ func publicNtfy(server string) (bool, error) {
 }
 
 const defaultPagerDutyURL = "https://events.pagerduty.com/v2/enqueue"
+
+const defaultPushoverURL = "https://api.pushover.net/1/messages.json"
 
 // withSecretsFile returns a lookup that answers from getenv, and, for a name
 // the environment leaves empty, from the KEY=VALUE lines of the secrets file
@@ -128,10 +135,15 @@ func buildSenders(channels string, getenv func(string) string, client *http.Clie
 			s, err = ntfyFrom(getenv, client)
 		case "pagerduty":
 			s, err = pagerDutyFrom(getenv, client)
+		case "pushover":
+			s, err = pushoverFrom(getenv, client)
+			if p, ok := s.(*pushoverSender); ok {
+				p.warn = out
+			}
 		case issuesChannel:
 			s, err = githubIssuesFrom(getenv, client)
 		default:
-			err = fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty, github-issues)", c)
+			err = fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty, pushover, github-issues)", c)
 		}
 		if err != nil {
 			faults = append(faults, channelFault{channel: name, err: err})
@@ -145,7 +157,7 @@ func buildSenders(channels string, getenv func(string) string, client *http.Clie
 		for _, f := range faults {
 			errs = append(errs, f.err)
 		}
-		errs = append(errs, errors.New("reporter: no delivery channel named; stdout only shows alerts on the terminal and reaches no one, so add ntfy or pagerduty"))
+		errs = append(errs, errors.New("reporter: no delivery channel named; stdout only shows alerts on the terminal and reaches no one, so add ntfy, pagerduty or pushover"))
 		return nil, faults, errors.Join(errs...)
 	}
 	return senders, faults, nil
@@ -186,6 +198,47 @@ func pagerDutyFrom(getenv func(string) string, client *http.Client) (sender, err
 		return nil, errors.New("reporter: TI_PAGERDUTY_URL must be an absolute URL such as https://events.pagerduty.com/v2/enqueue")
 	}
 	return pagerDutySender{url: endpoint, routingKey: key, client: client}, nil
+}
+
+// pushoverFrom builds the Pushover channel from its secrets: the application's
+// API token and the owner's user key, and the messages endpoint, Pushover's own
+// when unset. An endpoint that is not an absolute URL is refused here, where it
+// names the channel, rather than failing every send.
+func pushoverFrom(getenv func(string) string, client *http.Client) (sender, error) {
+	token := getenv("TI_PUSHOVER_APP_TOKEN")
+	if token == "" {
+		return nil, errors.New("reporter: the pushover channel needs TI_PUSHOVER_APP_TOKEN (the application's API token; it is a secret)")
+	}
+	user := getenv("TI_PUSHOVER_USER_KEY")
+	if user == "" {
+		return nil, errors.New("reporter: the pushover channel needs TI_PUSHOVER_USER_KEY (the owner's user key; it is a secret)")
+	}
+	endpoint := getenv("TI_PUSHOVER_URL")
+	if endpoint == "" {
+		endpoint = defaultPushoverURL
+	}
+	if !secureEndpoint(endpoint) {
+		return nil, errors.New("reporter: TI_PUSHOVER_URL must be an https URL such as https://api.pushover.net/1/messages.json (http is allowed only for a loopback host)")
+	}
+	return &pushoverSender{url: endpoint, token: token, user: user, client: client}, nil
+}
+
+// secureEndpoint reports whether the address a secret is posted to is https,
+// or http on a loopback host (a stand-in on the same machine), with no user
+// information. The address's text is never in an error.
+func secureEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		ip := net.ParseIP(u.Hostname())
+		return u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback())
+	}
+	return false
 }
 
 // channelKey is the state-file key recording that one channel took one alert.
@@ -242,6 +295,7 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 			failures = append(failures, fmt.Errorf("%s: %w", s.name(), err))
 			continue
 		}
+		keepReceipt(s, a.Key, seen, now)
 		seen[key] = true
 		if a.Repeat {
 			sent[key] = now
@@ -504,4 +558,270 @@ func (p pagerDutySender) post(body []byte) error {
 		return errors.New("the answer did not acknowledge the event")
 	}
 	return nil
+}
+
+// Pushover's documented limits (https://pushover.net/api): a message of at
+// most 1024 characters, a title of at most 250, and for an emergency a retry
+// of at least 30 seconds and an expire of at most 10800.
+const (
+	pushoverMessageLimit = 1024
+	pushoverTitleLimit   = 250
+	pushoverRetry        = 60 * time.Second
+	pushoverExpire       = 30 * time.Minute
+	// pushoverAnswerLimit is the most of an answer that is read: a longer one
+	// is not Pushover's.
+	pushoverAnswerLimit = 1 << 16
+	// pushoverKeyLimit and pushoverAccountLimit are the most characters of
+	// the alert key and of the account the message carries, so that the body
+	// always keeps room; one longer is cut with an ellipsis.
+	pushoverKeyLimit     = 512
+	pushoverAccountLimit = 128
+)
+
+// pushoverSender sends an alert through the Pushover messages API
+// (https://pushover.net/api). A page (an urgent alert) is an emergency,
+// priority 2: the phone repeats it every pushoverRetry until it is
+// acknowledged on the phone or pushoverExpire passes. Every other alert is
+// priority 1. It carries what the PagerDuty payload carries (title, detail,
+// alert key and account) and nothing more: no account number and no secret.
+// An alert is one message, cut to Pushover's limits, never several, so a long
+// page never opens a second emergency; the detail is shortened first, and the
+// alert key and account that end the message are kept whole up to their own
+// limits (pushoverKeyLimit, pushoverAccountLimit), beyond which each is cut. A retried delivery follows
+// the reporter's rules (ADR 0019, ADR 0026): a message Pushover did not
+// accept is sent again on the next firing, and a repeat of an unacknowledged
+// alert is a new emergency only when the repeat interval says so, until the
+// journal records the acknowledgement. The answer is read back, within a size
+// limit and in full: only a 2xx whose whole body is one JSON object with
+// "status":1 is a delivery. An emergency's receipt is handed to the reporter
+// (receipter) so the page can be cancelled when its incident resolves. The
+// token and user key are credentials and never appear in an error or in
+// output: an error is a fixed message with the HTTP status code or the kind
+// of transport fault.
+type pushoverSender struct {
+	url, token, user string
+	client           *http.Client
+	// warn receives the reporter's fixed warnings; nil discards them.
+	warn io.Writer
+
+	mu      sync.Mutex
+	receipt string
+}
+
+func (*pushoverSender) name() string { return "pushover" }
+
+// cutRunes shortens text to at most limit characters, ending in an ellipsis
+// when it was cut, and never inside a UTF-8 character. The limit must be
+// positive: a limit below 1 gives the empty string.
+func cutRunes(text string, limit int) string {
+	if limit < 1 {
+		return ""
+	}
+	if utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	return string([]rune(text)[:limit-1]) + "\u2026"
+}
+
+// pushoverMessage is the detail of an alert within Pushover's limit: the
+// body, shortened as needed, then the alert key (cut at pushoverKeyLimit
+// characters) and account (cut at pushoverAccountLimit), which are kept whole
+// up to those limits, so the body always keeps room.
+func pushoverMessage(a report.Alert) string {
+	suffix := "\n\nAlert: " + cutRunes(a.Key, pushoverKeyLimit)
+	if a.AccountID != "" {
+		suffix += " (" + cutRunes(a.AccountID, pushoverAccountLimit) + ")"
+	}
+	return cutRunes(a.Body, pushoverMessageLimit-utf8.RuneCountInString(suffix)) + suffix
+}
+
+func (p *pushoverSender) send(a report.Alert, repeat int) error {
+	form := url.Values{
+		"token":    {p.token},
+		"user":     {p.user},
+		"title":    {cutRunes(a.Title, pushoverTitleLimit)},
+		"message":  {pushoverMessage(a)},
+		"priority": {"1"},
+	}
+	if a.Severity == report.Urgent {
+		form.Set("priority", "2")
+		form.Set("retry", fmt.Sprint(int(pushoverRetry.Seconds())))
+		form.Set("expire", fmt.Sprint(int(pushoverExpire.Seconds())))
+	}
+	receipt, err := p.call(p.url, form)
+	if err != nil {
+		return err
+	}
+	switch {
+	case a.Severity != report.Urgent:
+		receipt = ""
+	case receipt == "":
+		// The phone rings, so this is a delivery, but there is no receipt to
+		// cancel it with: the state records that, and the owner is told.
+		receipt = noReceipt
+		if p.warn != nil {
+			_, _ = fmt.Fprintln(p.warn, "reporter: pushover accepted an emergency without a usable receipt; it cannot be cancelled and runs until it is acknowledged or expires")
+		}
+	}
+	p.mu.Lock()
+	p.receipt = receipt
+	p.mu.Unlock()
+	return nil
+}
+
+// expiry is how long an emergency lasts: after it Pushover has stopped it.
+func (*pushoverSender) expiry() time.Duration { return pushoverExpire }
+
+// takeReceipt returns the receipt of the emergency the last send opened, and
+// forgets it; empty when that send was not an emergency.
+func (p *pushoverSender) takeReceipt() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.receipt
+	p.receipt = ""
+	return r
+}
+
+// cancel cancels the emergency with the receipt, so the phone stops
+// repeating it (https://pushover.net/api#receipt). A receipt Pushover no
+// longer knows (HTTP 400 whose answer says the receipt was not found: expired
+// or already over) has nothing left to cancel and is not a failure. Any other
+// 400, such as an invalid application token, is a failure: the receipt is
+// kept and the cancel retried until the emergency expires.
+func (p *pushoverSender) cancel(receipt string) error {
+	endpoint, err := url.Parse(p.url)
+	if err != nil {
+		return errors.New("build request")
+	}
+	endpoint.Path = "/1/receipts/" + receipt + "/cancel.json"
+	endpoint.RawQuery = ""
+	code, body, err := p.post(endpoint.String(), url.Values{"token": {p.token}})
+	if err != nil {
+		return err
+	}
+	if code == http.StatusBadRequest && receiptUnknown(body) {
+		return nil
+	}
+	if code/100 != 2 {
+		return httpStatus(code)
+	}
+	return checkAck(body)
+}
+
+// receiptUnknown reports whether a 400 answer says Pushover does not know the
+// receipt (its "errors" name "receipt not found"), and does not say the
+// application token is invalid. The answer's text is never repeated.
+func receiptUnknown(body []byte) bool {
+	var answer struct {
+		Token  string   `json:"token"`
+		Errors []string `json:"errors"`
+	}
+	if json.Unmarshal(body, &answer) != nil || answer.Token == "invalid" {
+		return false
+	}
+	for _, e := range answer.Errors {
+		if strings.Contains(strings.ToLower(e), "receipt not found") {
+			return true
+		}
+	}
+	return false
+}
+
+// httpStatus is a server's answer other than 2xx, by code alone: the status
+// text is the server's and is never repeated.
+type httpStatus int
+
+func (s httpStatus) Error() string { return fmt.Sprintf("server answered HTTP %d", int(s)) }
+
+// call posts form to endpoint and reads the answer back, returning the
+// receipt it carries (empty unless the message was an emergency).
+func (p *pushoverSender) call(endpoint string, form url.Values) (string, error) {
+	code, body, err := p.post(endpoint, form)
+	if err != nil {
+		return "", err
+	}
+	if code/100 != 2 {
+		return "", httpStatus(code)
+	}
+	if err := checkAck(body); err != nil {
+		return "", err
+	}
+	var ack struct {
+		Receipt string `json:"receipt"`
+	}
+	_ = json.Unmarshal(body, &ack)
+	if !receiptShape.MatchString(ack.Receipt) {
+		return "", nil
+	}
+	return ack.Receipt, nil
+}
+
+// jsonSpace is the four bytes JSON allows between its tokens.
+const jsonSpace = " \t\n\r"
+
+// checkAck requires the answer to be one JSON object, and nothing after it
+// but white space, with "status":1.
+func checkAck(answer []byte) error {
+	var ack struct {
+		Status int `json:"status"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(answer))
+	if err := dec.Decode(&ack); err != nil || len(bytes.Trim(answer[dec.InputOffset():], jsonSpace)) != 0 || ack.Status != 1 {
+		return errors.New("the answer did not acknowledge the message")
+	}
+	return nil
+}
+
+// post posts form to endpoint and returns the status code and the whole
+// answer, within the size limit. A redirect is never followed.
+func (p *pushoverSender) post(endpoint string, form url.Values) (code int, answer []byte, err error) {
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return 0, nil, errors.New("build request")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// A redirect is never followed: it could carry the form, and the token in
+	// it, to another address. The 3xx answer is then a failure.
+	client := *p.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, transportFault(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusBadRequest {
+		return resp.StatusCode, nil, nil
+	}
+	answer, err = io.ReadAll(io.LimitReader(resp.Body, pushoverAnswerLimit+1))
+	if err != nil {
+		return 0, nil, errors.New("the answer could not be read in full")
+	}
+	if len(answer) > pushoverAnswerLimit {
+		return 0, nil, errors.New("the answer was longer than any Pushover answer")
+	}
+	return resp.StatusCode, answer, nil
+}
+
+// receiptShape is what a Pushover receipt looks like: letters and digits.
+var receiptShape = regexp.MustCompile(`^[A-Za-z0-9]{1,64}$`)
+
+// transportFault is a fixed message for a request that got no answer: the
+// kind of fault, never the error's own text, which names the request's URL
+// and may carry what it was posted.
+func transportFault(err error) error {
+	kind := "other"
+	var netErr net.Error
+	var dnsErr *net.DNSError
+	var certErr *tls.CertificateVerificationError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
+		kind = "timeout"
+	case errors.As(err, &dnsErr):
+		kind = "dns"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		kind = "connection refused"
+	case errors.As(err, &certErr):
+		kind = "tls"
+	}
+	return fmt.Errorf("transport error (%s)", kind)
 }

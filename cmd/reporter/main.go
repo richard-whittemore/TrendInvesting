@@ -88,7 +88,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	flags.SetOutput(out)
 	journalPath := flags.String("journal", "", "path to the account's journal (read only)")
 	statePath := flags.String("state", "", "path to the reporter's own state file of delivered alerts")
-	channels := flags.String("channel", "stdout", "comma-separated channels: stdout (terminal echo, never a delivery), ntfy, pagerduty, github-issues (one issue per alert, closed when it resolves)")
+	channels := flags.String("channel", "stdout", "comma-separated channels: stdout (terminal echo, never a delivery), ntfy, pagerduty, pushover, github-issues (one issue per alert, closed when it resolves)")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	date := flags.String("date", "", "summary date, YYYY-MM-DD, sent once the log records that day's session closed (default: the latest closed session)")
 	summary := flags.Bool("summary", false, "also deliver the daily summary")
@@ -175,6 +175,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		return errors.Join(append(failures, err)...)
 	}
 	start := now()
+	if pruneReceipts(seen, sent, repeats, start) {
+		if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
+			failures = append(failures, err)
+		}
+	}
 	// A new baseline is on disk before any delivery starts, so a run stopped
 	// midway (systemd stops one at its TimeoutStartSec) cannot leave the next
 	// run to take a later one and drop what the log recorded between the two.
@@ -362,7 +367,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// A firing that finished without a fault resolves this reporter's own
 	// failure page (the OnFailure hook sent it when an earlier firing failed).
 	if *selfUnit != "" && len(failures) == 0 {
-		if err := clearUnit(unitStatePath, *selfUnit, getenv("INVOCATION_ID"), senders, setAside); err != nil {
+		if err := clearUnit(unitStatePath, *selfUnit, getenv("INVOCATION_ID"), senders, setAside, at); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -519,14 +524,14 @@ const summaryNoChannelPrefix = "summary-no-channel:"
 func saySummaryRoute(senders []sender, setAside []channelFault, account string, out io.Writer, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time, every time.Duration, record func() error) error {
 	for _, s := range senders {
 		if t, ok := s.(summaryTaker); ok && t.takesSummary() {
-			return clearSummaryNotice(senders, setAside, seen, sent, repeats)
+			return clearSummaryNotice(senders, setAside, seen, sent, repeats, at)
 		}
 	}
 	a := report.Alert{
 		Key: summaryNoChannelPrefix + account, Kind: kindSummaryNoChannel, Severity: report.Routine, AccountID: account,
 		Title: account + ": the daily summary has no channel: name your own ntfy server",
 		Body: "Incident alerts are unaffected, but the daily summary is not sent. It carries your balances, which go only to your own ntfy server (TI_NTFY_SERVER), " +
-			"never to PagerDuty or the public ntfy.sh relay, and no such server is named, or the one named is set aside (the channel alert says why). " +
+			"never to PagerDuty, Pushover or the public ntfy.sh relay, and no such server is named, or the one named is set aside (the channel alert says why). " +
 			"Set one up: docs/manual/server.md, \"Your own ntfy server\"; until then read the summary on the dashboard. This is said once.",
 	}
 	echoed := slices.ContainsFunc(senders, func(s sender) bool { _, echo := s.(echoOnly); return echo })
@@ -538,7 +543,7 @@ func saySummaryRoute(senders []sender, setAside []channelFault, account string, 
 
 // clearSummaryNotice resolves and forgets every notice that the daily
 // summary had no channel, channel by channel (see saySummaryRoute).
-func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) error {
+func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time) error {
 	keys := map[string]bool{}
 	for k := range seen {
 		if _, key, ok := strings.Cut(k, "|"); ok && strings.HasPrefix(key, summaryNoChannelPrefix) {
@@ -547,7 +552,7 @@ func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[stri
 	}
 	var failures []error
 	for key := range keys {
-		failed, err := resolveAll(senders, key, seen)
+		failed, err := resolveAll(senders, key, seen, at)
 		if err != nil {
 			failures = append(failures, err)
 		}

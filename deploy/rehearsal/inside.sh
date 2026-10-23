@@ -278,7 +278,7 @@ cp /root/dist/boost-fixture.log "$rep/engines/boost/run-rehearsal.log"
 # the log's earlier alerts, and this fixture log is old: so the state file
 # begins with both channels recorded long before it, as on a server whose
 # reporter has run since before the log's events.
-printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pagerduty":"2000-01-01T00:00:00Z"}}' >"$rep/reports/boost.reporter.json"
+printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pushover":"2000-01-01T00:00:00Z"}}' >"$rep/reports/boost.reporter.json"
 chown -R ti-trader:ti-trader "$rep"
 chmod 0750 "$rep/engines" "$rep/engines/boost" "$rep/reports"
 python3 - "$rep/posts" <<'PY' &
@@ -295,10 +295,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             f.write(self.path + "\n")
         with open(posts + ".bodies", "ab") as f:
             f.write(body.replace(b"\n", b" ") + b"\n")
-        self.send_response(202)
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"status":"success"}')
+        self.wfile.write(b'{"status":1,"request":"rehearsal","receipt":"rehearsalreceipt"}')
 
     def log_message(self, *args):
         pass
@@ -316,7 +316,7 @@ done
 # the reporter is handed the unlocked copy its unit names in LoadCredential=,
 # as systemd would hand it: a private copy, the unit's user's, read-only.
 install -d -m 0700 /dev/shm/ti-edit
-printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\nTI_HEARTBEAT_URL=http://127.0.0.1:8099/hb\nMASSIVE_API_KEY=\n' >/dev/shm/ti-edit/content
+printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PUSHOVER_APP_TOKEN=fake\nTI_PUSHOVER_USER_KEY=fake\nTI_PUSHOVER_URL=http://127.0.0.1:8099/1/messages.json\nTI_HEARTBEAT_URL=http://127.0.0.1:8099/hb\nMASSIVE_API_KEY=\n' >/dev/shm/ti-edit/content
 EDITOR=/root/ti-editor.sh with_pass ti-secrets edit secrets.env >/dev/null || fail "ti-secrets edit could not set the reporter's channels"
 rm -rf /dev/shm/ti-edit
 source=$(sed -n 's/^LoadCredential=secrets://p' /etc/systemd/system/ti-reporter@.service)
@@ -351,7 +351,7 @@ sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $line >/dev/null || fail "th
 test -s "$rep/reports/boost.reporter.json" || fail "the reporter wrote no state file"
 test "$(stat -c %U "$rep/reports/boost.reporter.json")" = ti-trader || fail "the reporter's state file is not ti-trader's"
 grep -q '^/rehearsal$' "$rep/posts" || fail "the reporter reached no ntfy topic"
-grep -q '^/v2/enqueue$' "$rep/posts" || fail "the reporter reached no PagerDuty endpoint"
+grep -q '^/1/messages.json$' "$rep/posts" || fail "the reporter reached no Pushover endpoint"
 # The heartbeat pings (POST /hb) are not alerts: counted apart.
 alerts_sent() { { grep -v '^/hb$' "$rep/posts" || true; } | wc -l; }
 sent=$(alerts_sent)
@@ -377,7 +377,7 @@ failed_run=(MONITOR_UNIT=ti-engine@boost.service MONITOR_INVOCATION_ID=012345678
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook, run as its unit runs it (as ti-trader), failed"
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook did not page both channels once"
-grep -q 'ti-engine@boost.service failed' "$rep/posts.bodies" || fail "the hook's page does not name the failed unit"
+grep -q 'ti-engine%40boost.service+failed' "$rep/posts.bodies" || fail "the hook's page does not name the failed unit"
 test -s "$rep/reports/unit-failures.json" || fail "the hook wrote no record of the page"
 grep -q 'unit-failed:ti-engine@boost.service/0123456789abcdef0123456789abcdef' "$rep/reports/unit-failures.json" || fail "the hook's record is not keyed by the failed run"
 # shellcheck disable=SC2086
@@ -399,8 +399,7 @@ out = json.load(open(sys.argv[1]))["last"]["Output"]
 sys.exit(0 if out.startswith("clock: ") else 1)
 PY
 # Then -clock-check with a stand-in: a failing check pages on the second
-# failure in a row, once for the host, and a passing one resolves the
-# PagerDuty incident. Each run's check is aged past the timer period so the
+# failure in a row, once for the host. Each run's check is aged past the timer period so the
 # next run checks again.
 stand=$(mktemp -d)
 chmod 0755 "$stand"
@@ -415,7 +414,7 @@ s["last"]["At"] = "2000-01-01T00:00:00Z"
 json.dump(s, open(sys.argv[1], "w"))
 PY
 }
-clock_pages() { grep -c 'clock-drift:.*"event_action":"trigger"\|"event_action":"trigger".*clock-drift:' "$rep/posts.bodies" || true; }
+clock_pages() { grep -c 'priority=2.*clock-drift%3A\|clock-drift%3A.*priority=2' "$rep/posts.bodies" || true; }
 # The real check's own count (it may fail here with no network) is cleared.
 rm -f "$clock_state"
 touch "$stand/fail"
@@ -425,29 +424,17 @@ for n in 1 2; do
   sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $stand_line >/dev/null || fail "the reporter with a failing stand-in clock check failed to run"
   if test "$n" = 1 && test "$(clock_pages)" != 0; then fail "one failing clock check paged"; fi
 done
-test "$(clock_pages)" = 1 || fail "two failing clock checks in a row did not page once on PagerDuty"
+test "$(clock_pages)" = 1 || fail "two failing clock checks in a row did not page once on Pushover"
 grep -q -- '-42s' "$rep/posts.bodies" || fail "the clock page lacks the measured skew"
 rm "$stand/fail"
 age_check
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $stand_line >/dev/null || fail "the reporter with a passing stand-in clock check failed"
-trigger_key=$(python3 - "$rep/posts.bodies" <<'PY'
-import json, sys
-for line in open(sys.argv[1]):
-    try:
-        b = json.loads(line)
-    except ValueError:
-        continue
-    if isinstance(b, dict) and b.get("event_action") == "trigger" and str(b.get("dedup_key", "")).startswith("clock-drift:"):
-        print(b["dedup_key"])
-        break
-PY
-)
-test -n "$trigger_key" || fail "the clock page's dedup key could not be read from the posts"
-grep -qF "\"event_action\":\"resolve\",\"dedup_key\":\"$trigger_key\"" "$rep/posts.bodies" || fail "a passing clock check did not resolve the PagerDuty incident"
+test "$(clock_pages)" = 1 || fail "a passing clock check paged again ($(clock_pages) pages)"
+grep -qx '/1/receipts/rehearsalreceipt/cancel.json' "$rep/posts" || fail "a passing clock check did not cancel the Pushover emergency"
 rm -rf "$stand"
 kill "$fake"
-pass "the reporter runs the installed clock check as ti-trader, pages a failing stand-in on the second failure, and resolves it on a pass"
+pass "the reporter runs the installed clock check as ti-trader, pages a failing stand-in once, on the second failure, and cancels the page on a pass"
 
 # Unit files. The engine's binary is installed by hand on the server; the
 # rehearsal installs the stamped engine deploy/rehearse.sh built (the

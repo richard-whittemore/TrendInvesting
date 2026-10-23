@@ -784,7 +784,7 @@ step_firewall() {
 }
 
 # The owner's own ntfy server, which takes the daily summary (it carries
-# balances, so it never goes to the public ntfy.sh relay or to PagerDuty). It
+# balances, so it never goes to the public ntfy.sh relay or to Pushover). It
 # names ntfy.sh as its upstream, the relay the iOS app is woken through,
 # which is told only a message's ID and a hash of its topic. It
 # listens on this machine's Tailscale address and nowhere else: the address

@@ -27,7 +27,7 @@ stops ordering, not an order resting at the broker.
 
 1. **Read the alert.** It names what differs (an instrument, the cash, or
    "could not be compared") and the account's whole state. On the public
-   ntfy relay it carries no figures: read them on PagerDuty, the dashboard,
+   ntfy relay it carries no figures: read them on Pushover, the dashboard,
    or with `journal-query`. Two lines of the alert's text are left over
    from the old stop-order strategy: "restoring a missing Protective Stop"
    and "check the protection of the named positions at the broker". These

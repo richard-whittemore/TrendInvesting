@@ -57,7 +57,7 @@ on_disk() { find / -xdev -type f -print0 2>/dev/null | xargs -0 grep -lF -- "$1"
 unlocked=/run/trend-investing/secrets
 # The secrets in plain text, as on a server provisioned before they were
 # encrypted, with a marker; migrated as provision.sh services migrates them.
-printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\nTI_GITHUB_ISSUES_TOKEN=%s\n' "$marker" >/etc/trend-investing/secrets.env
+printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PUSHOVER_APP_TOKEN=fake\nTI_PUSHOVER_USER_KEY=fake\nTI_PUSHOVER_URL=http://127.0.0.1:8099/1/messages.json\nTI_GITHUB_ISSUES_TOKEN=%s\n' "$marker" >/etc/trend-investing/secrets.env
 chmod 0600 /etc/trend-investing/secrets.env
 for f in ibkr-login.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
   install -m 0600 "/deploy/etc/$f.example" "/etc/trend-investing/$f"
@@ -161,10 +161,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             f.write(self.path + "\n")
         with open(posts + ".bodies", "ab") as f:
             f.write(body.replace(b"\n", b" ") + b"\n")
-        self.send_response(202)
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"status":"success"}')
+        self.wfile.write(b'{"status":1,"request":"rehearsal"}')
 
     def log_message(self, *args):
         pass
@@ -203,7 +203,11 @@ systemctl daemon-reload
 
 instances() { if test -e "$reports/hook-instances"; then wc -l <"$reports/hook-instances"; else echo 0; fi; }
 ntfy_pages() { grep -c '^/rehearsal$' "$probe/posts" || true; }
-pd_events() { grep -o '"event_action": *"[a-z]*"' "$probe/posts.bodies" | grep -c "$1" || true; }
+# Pushover's messages are form posts: the pages are the posts to its endpoint,
+# and the text of a page is its form decoded.
+pushover_pages() { grep -c '^/1/messages.json$' "$probe/posts" || true; }
+decoded_bodies() { python3 -c 'import sys, urllib.parse; sys.stdout.write(urllib.parse.unquote_plus(sys.stdin.read()))' <"$probe/posts.bodies"; }
+last_page() { grep 'priority=2' "$probe/posts.bodies" | tail -1 | python3 -c 'import sys, urllib.parse; sys.stdout.write(urllib.parse.unquote_plus(sys.stdin.read()).replace("\n", " "))'; }
 # wait_hook n: the hook has started n times and is no longer running.
 wait_hook() {
   for _ in $(seq 150); do
@@ -226,9 +230,9 @@ systemctl list-units --all --no-legend "ti-unit-failed@*" | grep -q "$hook" || f
 test "$(systemctl show -p Result --value "$hook")" = success || fail "$hook did not succeed"
 test "$(sed -n 1p "$reports/hook-instances")" = "$engine $run1" ||
   fail "the hook was given '$(sed -n 1p "$reports/hook-instances")', want '$engine $run1' (%i and MONITOR_INVOCATION_ID)"
-{ test "$(ntfy_pages)" = 1 && test "$(pd_events trigger)" = 1; } || fail "the first failed run did not page each channel once"
-grep -q "$engine failed" "$probe/posts.bodies" || fail "the page does not name $engine"
-grep -q 'marker-A' "$probe/posts.bodies" || fail "the page's reason is not the failed run's own line"
+{ test "$(ntfy_pages)" = 1 && test "$(pushover_pages)" = 1; } || fail "the first failed run did not page each channel once"
+decoded_bodies | grep -q "$engine failed" || fail "the page does not name $engine"
+decoded_bodies | grep -q 'marker-A' || fail "the page's reason is not the failed run's own line"
 grep -q "unit-failed:$engine/$run1" "$reports/unit-failures.json" || fail "the record is not keyed by the failed run"
 # The reporter's firing asks systemd the same, as ti-trader, over D-Bus.
 answer=$(runuser -u ti-trader -- systemctl show -p ActiveState -p InvocationID "$engine")
@@ -246,9 +250,9 @@ run2=$(run_of)
 test "$run2" != "$run1" || fail "the restarted engine kept its invocation"
 test "$(sed -n 2p "$reports/hook-instances")" = "$engine $run2" || fail "the second hook run was given '$(sed -n 2p "$reports/hook-instances")'"
 test "$(systemctl show -p Result --value "$hook")" = success || fail "$hook did not succeed on the second failed run"
-{ test "$(ntfy_pages)" = 1 && test "$(pd_events trigger)" = 1 && test "$(pd_events resolve)" = 0; } ||
-  fail "a second failed run of one episode paged or resolved (ntfy $(ntfy_pages), triggers $(pd_events trigger), resolves $(pd_events resolve))"
-pass "a unit that fails again before any firing saw it well is one episode: no second page, its incident left open"
+{ test "$(ntfy_pages)" = 1 && test "$(pushover_pages)" = 1; } ||
+  fail "a second failed run of one episode paged again (ntfy $(ntfy_pages), Pushover $(pushover_pages))"
+pass "a unit that fails again before any firing saw it well is one episode: no second page"
 
 # A reporter firing that samples the engine not failed ends the episode
 # (cmd/reporter's TestAFailureAfterTheUnitWasSeenWellPagesAgain); no engine log
@@ -263,8 +267,8 @@ new_episode() {
 new_episode
 fail_engine
 wait_hook 3
-{ test "$(ntfy_pages)" = 2 && test "$(pd_events trigger)" = 2; } || fail "a failure after the episode ended did not page again"
-second=$(grep '"event_action": *"trigger"' "$probe/posts.bodies" | tail -1)
+{ test "$(ntfy_pages)" = 2 && test "$(pushover_pages)" = 2; } || fail "a failure after the episode ended did not page again"
+second=$(last_page)
 case $second in
   *marker-A*) fail "the second page's reason is the first run's line" ;;
   *"No entries"*) fail "the second page's reason is journalctl's own notice: $second" ;;
@@ -279,7 +283,7 @@ new_episode
 rm -f "$probe/silent" "$probe/engine.env"
 fail_engine
 wait_hook 4
-third=$(grep '"event_action": *"trigger"' "$probe/posts.bodies" | tail -1)
+third=$(last_page)
 case $third in
   *"Failed to load environment files"*) ;;
   *) fail "a refused start's page does not give systemd's reason: $third" ;;

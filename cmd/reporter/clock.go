@@ -167,6 +167,14 @@ func clockStep(path, command, host string, senders []sender, setAside []channelF
 		}
 		return writeAtomic(path, raw)
 	}
+	// A receipt past its emergency goes whatever the channels now configured,
+	// and with it the bookkeeping of a cleared alert it was the last record
+	// of; the drop is saved even when no check is made this period.
+	if pruneReceipts(seen, sent, repeats, now) {
+		if err := record(); err != nil {
+			return h.Last, err
+		}
+	}
 	age := time.Duration(0)
 	if h.Last != nil {
 		age = now.Sub(h.Last.At)
@@ -192,7 +200,7 @@ func clockStep(path, command, host string, senders []sender, setAside []channelF
 	key := report.ClockDriftKey(host)
 	switch {
 	case h.Last.Passed && deliveredAnywhere(seen, key):
-		failed, resolveErr := resolveAll(senders, key, seen)
+		failed, resolveErr := resolveAll(senders, key, seen, now)
 		// Each channel's record is cleared on its own (ADR 0019, "Alerting"):
 		// a working channel, or one no longer configured, forgets the
 		// incident at once so a new fault pages it again. Two kinds of record
@@ -245,7 +253,7 @@ type resolver interface {
 // can close it. It returns the names of the channels whose resolve failed and
 // the joined error; the caller keeps only those channels' records so the next
 // firing tries again.
-func resolveAll(senders []sender, key string, seen map[string]bool) ([]string, error) {
+func resolveAll(senders []sender, key string, seen map[string]bool, now time.Time) ([]string, error) {
 	var failures []error
 	var names []string
 	for _, s := range senders {
@@ -258,7 +266,8 @@ func resolveAll(senders []sender, key string, seen map[string]bool) ([]string, e
 			failures = append(failures, fmt.Errorf("%s: resolve %s: %w", s.name(), key, err))
 		}
 	}
-	return names, errors.Join(failures...)
+	cancelled, err := cancelReceipts(senders, key, seen, now)
+	return append(names, cancelled...), errors.Join(append(failures, err)...)
 }
 
 // hostName names this server in the clock alert; the clock is the host's.
@@ -277,7 +286,10 @@ func forgetAlert(key string, keep, seen map[string]bool, sent map[string]time.Ti
 	suffix := channelKey("", key)
 	drop := func(k string) bool {
 		ch, _, _ := strings.Cut(k, "|")
-		return strings.HasSuffix(k, suffix) && !keep[ch]
+		// A receipt is dropped only by its cancel, or when its emergency is
+		// over (pruneReceipts): a channel set aside while the incident
+		// recovers still has the emergency to cancel when it returns.
+		return strings.HasSuffix(k, suffix) && !keep[ch] && !strings.HasPrefix(ch, "receipt:")
 	}
 	for k := range seen {
 		if drop(k) {
