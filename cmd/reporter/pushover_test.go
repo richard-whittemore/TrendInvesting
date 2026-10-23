@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -298,6 +301,12 @@ func TestATruncatedOrOversizedAnswerIsNotADelivery(t *testing.T) {
 		"trailing data": func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"status":1} {"status":0}`))
 		},
+		"extra closing brace": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"status":1}}`))
+		},
+		"extra closing bracket": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"status":1,"receipt":"r"}]`))
+		},
 		"not an object": func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`1`))
 		},
@@ -414,8 +423,13 @@ func TestAReceiptPushoverNoLongerKnowsIsNothingLeftToCancel(t *testing.T) {
 	if failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen, t0.Add(time.Minute)); err != nil || len(failed) != 0 {
 		t.Fatalf("resolve = %v, %v", failed, err)
 	}
-	if deliveredAnywhere(map[string]bool{}, "") || len(seen) != 1 {
+	if !seen[channelKey("pushover", "clock-drift:host")] || len(seen) != 1 {
 		t.Errorf("state = %v, want only the delivery", seen)
+	}
+	for k := range seen {
+		if strings.HasPrefix(k, "receipt:") {
+			t.Errorf("the receipt Pushover no longer knows is still recorded: %q", k)
+		}
 	}
 }
 
@@ -497,5 +511,152 @@ func TestACancelIsDroppedOnceTheEmergencyHasExpiredAnyway(t *testing.T) {
 	}
 	if len(seen) != 1 {
 		t.Errorf("state = %v, want only the delivery", seen)
+	}
+}
+
+// receiptKey is the state-file key of a recorded receipt of the Pushover
+// emergency sent at the time, for the alert key.
+func receiptKey(receipt string, at time.Time, key string) string {
+	return channelKey(receiptChannel("pushover", receipt, at), key)
+}
+
+func TestEveryRunDropsReceiptsPastTheirExpiryWhateverTheAlert(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "s.json")
+	now := t0.Add(3 * time.Hour)
+	old := receiptKey("old", t0, "halted:x")
+	fresh := receiptKey("fresh", now.Add(-time.Minute), "halted:x")
+	future := receiptKey("future", now.Add(time.Hour), "halted:x")
+	raw := `{"keys":["` + old + `","` + fresh + `","` + future + `"],"baselines":{"ntfy":"2000-01-01T00:00:00Z"}}`
+	if err := os.WriteFile(state, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeEnv, fakeClient := acceptingNtfy(t)
+	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "stdout,ntfy"}
+	if err := run(args, fakeEnv, func() time.Time { return now }, &bytes.Buffer{}, fakeClient); err != nil {
+		t.Fatal(err)
+	}
+	seen, _, _, _, err := loadState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen[old] {
+		t.Errorf("a receipt past its expiry and margin survived a run")
+	}
+	if !seen[fresh] {
+		t.Errorf("a receipt of a live emergency was dropped")
+	}
+	if !seen[future] {
+		t.Errorf("a receipt stamped after the clock now reads was dropped: a clock that went back must not lose a live emergency")
+	}
+}
+
+func TestPruningKeepsAReceiptStampedAfterNow(t *testing.T) {
+	seen := map[string]bool{
+		receiptKey("a", t0.Add(time.Hour), "k"):                                 true,
+		receiptKey("b", t0.Add(-pushoverExpire-receiptMargin-time.Second), "k"): true,
+		receiptKey("c", t0.Add(-pushoverExpire), "k"):                           true,
+		"receipt:pushover:malformed|k":                                          true,
+		channelKey("pushover", "k"):                                             true,
+	}
+	pruneReceipts(seen, t0)
+	if len(seen) != 4 || seen[receiptKey("b", t0.Add(-pushoverExpire-receiptMargin-time.Second), "k")] {
+		t.Errorf("state = %v: want only the receipt past expiry and margin dropped", seen)
+	}
+}
+
+func TestTheCancelOfAnUnrecognisedBadRequestKeepsTheReceipt(t *testing.T) {
+	for name, body := range map[string]string{
+		"invalid token": `{"token":"invalid","errors":["application token is invalid, see https://pushover.net/api"],"status":0,"request":"x"}`,
+		"not json":      `<html>bad request</html>`,
+		"empty":         ``,
+	} {
+		ps, seen, po, closeServer := emergency(t)
+		po.answer(http.StatusBadRequest, body)
+		failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen, t0.Add(time.Minute))
+		closeServer()
+		if err == nil || len(failed) != 1 {
+			t.Errorf("%s: resolve = %v, %v: want a failure", name, failed, err)
+		}
+		if strings.Contains(fmt.Sprint(err), "invalid, see") || strings.Contains(fmt.Sprint(err), "rcpt1") {
+			t.Errorf("%s: the error carries the answer or the receipt: %v", name, err)
+		}
+		if !seen[receiptKey("rcpt1", t0, "clock-drift:host")] {
+			t.Errorf("%s: the receipt was dropped on a 400 that does not say it is unknown", name)
+		}
+	}
+}
+
+func TestAnEmergencyAnsweredWithoutAUsableReceiptIsStillDeliveredButWarnsAndCannotBeCancelled(t *testing.T) {
+	for name, body := range map[string]string{
+		"absent":    `{"status":1,"request":"r"}`,
+		"malformed": `{"status":1,"request":"r","receipt":"bad/receipt-secret"}`,
+	} {
+		po := &pushover{status: http.StatusOK, body: body}
+		server := httptest.NewServer(http.HandlerFunc(po.handler))
+		var warn bytes.Buffer
+		ps := &pushoverSender{url: server.URL + "/1/messages.json", token: "app-token-secret-3", user: "user-key-secret-8", client: server.Client(), warn: &warn}
+		seen := map[string]bool{}
+		a := report.Alert{Key: "clock-drift:host", Severity: report.Urgent, Title: "t", Body: "b"}
+		if err := deliver([]sender{ps}, a, seen, map[string]time.Time{}, map[string]int{}, t0, time.Hour, func() error { return nil }); err != nil {
+			t.Fatalf("%s: an emergency the phone rings for is a delivery: %v", name, err)
+		}
+		if !seen[channelKey("pushover", "clock-drift:host")] {
+			t.Errorf("%s: not recorded as delivered: %v", name, seen)
+		}
+		if !seen[receiptKey(noReceipt, t0, "clock-drift:host")] {
+			t.Errorf("%s: no record that it cannot be cancelled: %v", name, seen)
+		}
+		if !strings.Contains(warn.String(), "cannot be cancelled") || strings.Contains(warn.String(), "secret") {
+			t.Errorf("%s: warning = %q: want a fixed message naming no secret", name, warn.String())
+		}
+		po.answer(http.StatusOK, pushoverOK)
+		if failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen, t0.Add(time.Minute)); err != nil || len(failed) != 0 || len(po.received()) != 0 || len(seen) != 1 {
+			t.Errorf("%s: resolve = %v, %v, %d requests, state %v: want no request and the marker gone", name, failed, err, len(po.received()), seen)
+		}
+		server.Close()
+	}
+}
+
+func TestAReceiptOutlivesAChannelSetAsideWhileTheIncidentRecovers(t *testing.T) {
+	dir := t.TempDir()
+	key := report.UnitFailedKey("ti-engine@boost.service", "inv1")
+	u := &unitState{path: filepath.Join(dir, "u.json"), seen: map[string]bool{
+		channelKey("pushover", key):  true,
+		receiptKey("rcpt1", t0, key): true,
+	}, sent: map[string]time.Time{}, repeats: map[string]int{}, baselines: map[string]time.Time{}}
+	aside := []channelFault{{channel: "pushover", err: errors.New("TI_PUSHOVER_APP_TOKEN missing")}}
+	if err := resolveKey(u, key, nil, aside, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if !u.seen[receiptKey("rcpt1", t0, key)] {
+		t.Fatalf("the receipt was forgotten while its channel was set aside: %v", u.seen)
+	}
+	// The channel is back at the next firing: the receipt is cancelled then.
+	ps, _, po, closeServer := emergency(t)
+	defer closeServer()
+	po.answer(http.StatusOK, `{"status":1}`)
+	if _, err := resolveAll([]sender{ps}, key, u.seen, t0.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(po.received()) != 1 || u.seen[receiptKey("rcpt1", t0, key)] {
+		t.Errorf("requests = %d, state %v: want one cancel and the receipt gone", len(po.received()), u.seen)
+	}
+}
+
+func TestTheMacRehearsalsPushoverStandInPassesTheEndpointRule(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/mac-mini/container-checks.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^forward=(\S+)$`).FindStringSubmatch(string(raw))
+	if m == nil {
+		t.Fatal("the rehearsal names no loopback address for the Pushover stand-in")
+	}
+	if !secureEndpoint(m[1] + "/1/messages.json") {
+		t.Errorf("%s does not pass the endpoint rule", m[1])
+	}
+	if !strings.Contains(string(raw), "TI_PUSHOVER_URL=$forward/1/messages.json") {
+		t.Errorf("the rehearsal does not give the reporter the loopback address")
 	}
 }

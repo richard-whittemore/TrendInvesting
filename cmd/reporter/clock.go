@@ -278,7 +278,10 @@ func forgetAlert(key string, keep, seen map[string]bool, sent map[string]time.Ti
 	suffix := channelKey("", key)
 	drop := func(k string) bool {
 		ch, _, _ := strings.Cut(k, "|")
-		return strings.HasSuffix(k, suffix) && !keep[ch]
+		// A receipt is dropped only by its cancel, or when its emergency is
+		// over (pruneReceipts): a channel set aside while the incident
+		// recovers still has the emergency to cancel when it returns.
+		return strings.HasSuffix(k, suffix) && !keep[ch] && !strings.HasPrefix(ch, "receipt:")
 	}
 	for k := range seen {
 		if drop(k) {

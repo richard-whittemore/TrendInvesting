@@ -36,6 +36,11 @@ wait_system() {
 # the reporter's timer can fire. It records each request's path; GET /posts
 # lists them and GET /reset clears them.
 sink=http://host.docker.internal:${SINK_PORT:-0}
+# The reporter posts the Pushover token only to https, or http on a loopback
+# address, so the Pushover stand-in is reached through a forwarder in the
+# container (ti-sink-forward.service) that listens on loopback and relays to
+# the stand-in on the Mac. ntfy has no such rule and is reached directly.
+forward=http://127.0.0.1:18099
 sink_posts() { curl -fsS --connect-timeout 2 --max-time 10 "$sink/posts"; }
 
 case ${1:-} in
@@ -112,10 +117,55 @@ ENGINE
     chown ti-trader:ti-trader "$boost/run.env"
     chmod 0640 "$boost/run.env"
     test "${SINK_PORT:-0}" != 0 || fail "SINK_PORT is not set: run this from test-container.sh"
+    # The forwarder is a unit of its own, so it starts again after every
+    # boot of the container, before the reporter's timer can fire.
+    cat >/usr/local/bin/ti-sink-forward <<'FORWARD'
+#!/usr/bin/python3
+import asyncio, sys
+
+async def pipe(reader, writer):
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    finally:
+        writer.close()
+
+async def relay(client_reader, client_writer):
+    try:
+        reader, writer = await asyncio.open_connection(sys.argv[2], int(sys.argv[3]))
+    except OSError:
+        client_writer.close()
+        return
+    await asyncio.gather(pipe(client_reader, writer), pipe(reader, client_writer), return_exceptions=True)
+
+async def main():
+    server = await asyncio.start_server(relay, "127.0.0.1", int(sys.argv[1]))
+    async with server:
+        await server.serve_forever()
+
+asyncio.run(main())
+FORWARD
+    chmod 0755 /usr/local/bin/ti-sink-forward
+    cat >/etc/systemd/system/ti-sink-forward.service <<UNIT
+[Unit]
+Description=Rehearsal: relay loopback to the stand-in on the Mac
+After=network.target
+Before=ti-reporter@boost.service
+
+[Service]
+ExecStart=/usr/local/bin/ti-sink-forward 18099 host.docker.internal ${SINK_PORT}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable --now ti-sink-forward.service || fail "the stand-in forwarder did not start: $(journalctl -u ti-sink-forward -n 5 --no-pager -o cat)"
     sed -i -e 's|^TI_NTFY_TOPIC=.*|TI_NTFY_TOPIC=rehearsal|' \
       -e "s|^TI_NTFY_SERVER=.*|TI_NTFY_SERVER=$sink|" \
       -e "s|^TI_PUSHOVER_APP_TOKEN=.*|TI_PUSHOVER_APP_TOKEN=fake|" \
-      -e "s|^TI_PUSHOVER_USER_KEY=.*|TI_PUSHOVER_USER_KEY=fake\\nTI_PUSHOVER_URL=$sink/1/messages.json|" \
+      -e "s|^TI_PUSHOVER_USER_KEY=.*|TI_PUSHOVER_USER_KEY=fake\\nTI_PUSHOVER_URL=$forward/1/messages.json|" \
       /etc/trend-investing/secrets.env
     echo '# filled in by the owner (test sentinel)' >>/etc/trend-investing/secrets.env
     sed -i 's/"mark_timeout": 15/"mark_timeout": 16/' /etc/trend-investing/adapters/boost.json

@@ -13,6 +13,14 @@ import (
 // expire time, so a cancel after that has nothing to stop.
 const receiptMargin = 5 * time.Minute
 
+// noReceipt is the receipt recorded for an emergency the channel accepted
+// without a usable receipt: the phone rings, but there is nothing to cancel it
+// with, and the record says so until the incident resolves or it expires.
+const noReceipt = "-"
+
+// receiptLife is how long each channel's emergency lasts, by channel name.
+var receiptLife = map[string]time.Duration{"pushover": pushoverExpire}
+
 // receipter is a channel whose page is an emergency that repeats on the
 // phone until it is cancelled: Pushover. Sending a page returns a receipt,
 // kept in the reporter's state until the incident resolves, when the
@@ -54,7 +62,9 @@ func keepReceipt(s sender, key string, seen map[string]bool, at time.Time) {
 // returns the pseudo-channel names of the receipts whose cancel failed, which
 // the caller keeps (as it keeps a failed resolve) so the next firing tries
 // again, and the joined error. A receipt older than its emergency's life
-// and the margin is dropped without a cancel: the channel has stopped it. The error names the channel, never a receipt.
+// and the margin is dropped without a cancel (receiptOver): the channel has
+// stopped it. A receipt recorded as noReceipt has nothing to cancel and is
+// dropped. The error names the channel, never a receipt.
 func cancelReceipts(senders []sender, key string, seen map[string]bool, now time.Time) ([]string, error) {
 	var kept []string
 	var failures []error
@@ -71,7 +81,7 @@ func cancelReceipts(senders []sender, key string, seen map[string]bool, now time
 				continue
 			}
 			receipt, stamp, _ := strings.Cut(rest, ":")
-			if unix, err := strconv.ParseInt(stamp, 10, 64); err == nil && now.After(time.Unix(unix, 0).Add(r.expiry()+receiptMargin)) {
+			if receipt == noReceipt || receiptOver(stamp, r.expiry(), now) {
 				delete(seen, k)
 				continue
 			}
@@ -84,4 +94,38 @@ func cancelReceipts(senders []sender, key string, seen map[string]bool, now time
 		}
 	}
 	return kept, errors.Join(failures...)
+}
+
+// receiptOver reports whether a receipt sent at stamp (Unix seconds) is past
+// its emergency's life and the margin at now. The reporter has no clock but the
+// host's wall clock across runs, so this is wall-clock time. Pushover stops
+// the emergency at its own expire time, so dropping a receipt after
+// expire+margin only gives up a cancel that would do nothing. A receipt stamped
+// after now (the clock went back since it was sent) is never over, and is
+// kept. The residue: if the clock was behind when it was sent and has since
+// been put right, the receipt can read older than it is and be dropped up to
+// that many minutes early; the emergency then runs to its expire or to the
+// owner's acknowledgement, and the clock check pages the drift itself.
+func receiptOver(stamp string, life time.Duration, now time.Time) bool {
+	unix, err := strconv.ParseInt(stamp, 10, 64)
+	return err == nil && now.After(time.Unix(unix, 0).Add(life+receiptMargin))
+}
+
+// pruneReceipts drops from seen every receipt past its emergency's life and
+// the margin (receiptOver), whatever the alert it was sent for. It runs at the
+// start of every run, so the receipts of alerts that are never resolved (a
+// repeating journal alert) do not accumulate in the state file.
+func pruneReceipts(seen map[string]bool, now time.Time) {
+	for k := range seen {
+		ch, _, found := strings.Cut(k, "|")
+		rest, isReceipt := strings.CutPrefix(ch, "receipt:")
+		if !found || !isReceipt {
+			continue
+		}
+		channel, rest, _ := strings.Cut(rest, ":")
+		_, stamp, _ := strings.Cut(rest, ":")
+		if life, ok := receiptLife[channel]; ok && receiptOver(stamp, life, now) {
+			delete(seen, k)
+		}
+	}
 }

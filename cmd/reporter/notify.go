@@ -137,6 +137,9 @@ func buildSenders(channels string, getenv func(string) string, client *http.Clie
 			s, err = pagerDutyFrom(getenv, client)
 		case "pushover":
 			s, err = pushoverFrom(getenv, client)
+			if p, ok := s.(*pushoverSender); ok {
+				p.warn = out
+			}
 		case issuesChannel:
 			s, err = githubIssuesFrom(getenv, client)
 		default:
@@ -568,8 +571,9 @@ const (
 	// pushoverAnswerLimit is the most of an answer that is read: a longer one
 	// is not Pushover's.
 	pushoverAnswerLimit = 1 << 16
-	// pushoverKeyLimit and pushoverAccountLimit bound the alert key and the
-	// account in the message, so that the body always keeps room.
+	// pushoverKeyLimit and pushoverAccountLimit are the most characters of
+	// the alert key and of the account the message carries, so that the body
+	// always keeps room; one longer is cut with an ellipsis.
 	pushoverKeyLimit     = 512
 	pushoverAccountLimit = 128
 )
@@ -581,8 +585,9 @@ const (
 // priority 1. It carries what the PagerDuty payload carries (title, detail,
 // alert key and account) and nothing more: no account number and no secret.
 // An alert is one message, cut to Pushover's limits, never several, so a long
-// page never opens a second emergency; only the detail is shortened, never
-// the alert key and account that end the message. A retried delivery follows
+// page never opens a second emergency; the detail is shortened first, and the
+// alert key and account that end the message are kept whole up to their own
+// limits (pushoverKeyLimit, pushoverAccountLimit), beyond which each is cut. A retried delivery follows
 // the reporter's rules (ADR 0019, ADR 0026): a message Pushover did not
 // accept is sent again on the next firing, and a repeat of an unacknowledged
 // alert is a new emergency only when the repeat interval says so, until the
@@ -596,6 +601,8 @@ const (
 type pushoverSender struct {
 	url, token, user string
 	client           *http.Client
+	// warn receives the reporter's fixed warnings; nil discards them.
+	warn io.Writer
 
 	mu      sync.Mutex
 	receipt string
@@ -617,9 +624,9 @@ func cutRunes(text string, limit int) string {
 }
 
 // pushoverMessage is the detail of an alert within Pushover's limit: the
-// body, shortened as needed, then the alert key and account, which are
-// always kept (the key and the account are themselves bounded, so the body
-// keeps room).
+// body, shortened as needed, then the alert key (cut at pushoverKeyLimit
+// characters) and account (cut at pushoverAccountLimit), which are kept whole
+// up to those limits, so the body always keeps room.
 func pushoverMessage(a report.Alert) string {
 	suffix := "\n\nAlert: " + cutRunes(a.Key, pushoverKeyLimit)
 	if a.AccountID != "" {
@@ -645,8 +652,16 @@ func (p *pushoverSender) send(a report.Alert, repeat int) error {
 	if err != nil {
 		return err
 	}
-	if a.Severity != report.Urgent {
+	switch {
+	case a.Severity != report.Urgent:
 		receipt = ""
+	case receipt == "":
+		// The phone rings, so this is a delivery, but there is no receipt to
+		// cancel it with: the state records that, and the owner is told.
+		receipt = noReceipt
+		if p.warn != nil {
+			_, _ = fmt.Fprintln(p.warn, "reporter: pushover accepted an emergency without a usable receipt; it cannot be cancelled and runs until it is acknowledged or expires")
+		}
 	}
 	p.mu.Lock()
 	p.receipt = receipt
@@ -669,8 +684,10 @@ func (p *pushoverSender) takeReceipt() string {
 
 // cancel cancels the emergency with the receipt, so the phone stops
 // repeating it (https://pushover.net/api#receipt). A receipt Pushover no
-// longer knows (HTTP 400: expired or already over) has nothing left to cancel
-// and is not a failure.
+// longer knows (HTTP 400 whose answer says the receipt was not found: expired
+// or already over) has nothing left to cancel and is not a failure. Any other
+// 400, such as an invalid application token, is a failure: the receipt is
+// kept and the cancel retried until the emergency expires.
 func (p *pushoverSender) cancel(receipt string) error {
 	endpoint, err := url.Parse(p.url)
 	if err != nil {
@@ -678,12 +695,36 @@ func (p *pushoverSender) cancel(receipt string) error {
 	}
 	endpoint.Path = "/1/receipts/" + receipt + "/cancel.json"
 	endpoint.RawQuery = ""
-	_, err = p.call(endpoint.String(), url.Values{"token": {p.token}})
-	var status httpStatus
-	if errors.As(err, &status) && int(status) == http.StatusBadRequest {
+	code, body, err := p.post(endpoint.String(), url.Values{"token": {p.token}})
+	if err != nil {
+		return err
+	}
+	if code == http.StatusBadRequest && receiptUnknown(body) {
 		return nil
 	}
-	return err
+	if code/100 != 2 {
+		return httpStatus(code)
+	}
+	return checkAck(body)
+}
+
+// receiptUnknown reports whether a 400 answer says Pushover does not know the
+// receipt (its "errors" name "receipt not found"), and does not say the
+// application token is invalid. The answer's text is never repeated.
+func receiptUnknown(body []byte) bool {
+	var answer struct {
+		Token  string   `json:"token"`
+		Errors []string `json:"errors"`
+	}
+	if json.Unmarshal(body, &answer) != nil || answer.Token == "invalid" {
+		return false
+	}
+	for _, e := range answer.Errors {
+		if strings.Contains(strings.ToLower(e), "receipt not found") {
+			return true
+		}
+	}
+	return false
 }
 
 // httpStatus is a server's answer other than 2xx, by code alone: the status
@@ -695,9 +736,45 @@ func (s httpStatus) Error() string { return fmt.Sprintf("server answered HTTP %d
 // call posts form to endpoint and reads the answer back, returning the
 // receipt it carries (empty unless the message was an emergency).
 func (p *pushoverSender) call(endpoint string, form url.Values) (string, error) {
+	code, body, err := p.post(endpoint, form)
+	if err != nil {
+		return "", err
+	}
+	if code/100 != 2 {
+		return "", httpStatus(code)
+	}
+	if err := checkAck(body); err != nil {
+		return "", err
+	}
+	var ack struct {
+		Receipt string `json:"receipt"`
+	}
+	_ = json.Unmarshal(body, &ack)
+	if !receiptShape.MatchString(ack.Receipt) {
+		return "", nil
+	}
+	return ack.Receipt, nil
+}
+
+// checkAck requires the answer to be one JSON object, and nothing after it
+// but white space, with "status":1.
+func checkAck(answer []byte) error {
+	var ack struct {
+		Status int `json:"status"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(answer))
+	if err := dec.Decode(&ack); err != nil || len(bytes.TrimSpace(answer[dec.InputOffset():])) != 0 || ack.Status != 1 {
+		return errors.New("the answer did not acknowledge the message")
+	}
+	return nil
+}
+
+// post posts form to endpoint and returns the status code and the whole
+// answer, within the size limit. A redirect is never followed.
+func (p *pushoverSender) post(endpoint string, form url.Values) (code int, answer []byte, err error) {
 	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", errors.New("build request")
+		return 0, nil, errors.New("build request")
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// A redirect is never followed: it could carry the form, and the token in
@@ -706,31 +783,20 @@ func (p *pushoverSender) call(endpoint string, form url.Values) (string, error) 
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", transportFault(err)
+		return 0, nil, transportFault(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode/100 != 2 {
-		return "", httpStatus(resp.StatusCode)
+	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusBadRequest {
+		return resp.StatusCode, nil, nil
 	}
-	answer, err := io.ReadAll(io.LimitReader(resp.Body, pushoverAnswerLimit+1))
+	answer, err = io.ReadAll(io.LimitReader(resp.Body, pushoverAnswerLimit+1))
 	if err != nil {
-		return "", errors.New("the answer could not be read in full")
+		return 0, nil, errors.New("the answer could not be read in full")
 	}
 	if len(answer) > pushoverAnswerLimit {
-		return "", errors.New("the answer was longer than any Pushover answer")
+		return 0, nil, errors.New("the answer was longer than any Pushover answer")
 	}
-	var ack struct {
-		Status  int    `json:"status"`
-		Receipt string `json:"receipt"`
-	}
-	dec := json.NewDecoder(bytes.NewReader(answer))
-	if err := dec.Decode(&ack); err != nil || dec.More() || ack.Status != 1 {
-		return "", errors.New("the answer did not acknowledge the message")
-	}
-	if !receiptShape.MatchString(ack.Receipt) {
-		return "", nil
-	}
-	return ack.Receipt, nil
+	return resp.StatusCode, answer, nil
 }
 
 // receiptShape is what a Pushover receipt looks like: letters and digits.

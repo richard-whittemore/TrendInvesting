@@ -391,8 +391,10 @@ for a stand-in; the reporter never follows a redirect, which could carry the
 token elsewhere, and treats a 3xx answer as a failure) with the token, the user key, the
 alert's title (at most 250 characters), a message and a priority. The message
 is the alert's text followed by its key and account, within Pushover's 1024
-characters: when it is too long only the text is cut, with an ellipsis, and the
-key and account that end the message are always kept. One alert is always one
+characters: when it is too long the text is cut first, with an ellipsis, and
+the key and account that end the message are kept whole up to their own
+limits (the key at 512 characters, the account at 128; a longer one is cut
+with an ellipsis). One alert is always one
 message, so a long alert never opens a second emergency. A page carries priority 2 with `retry` 60
 (seconds between the phone's repeats; Pushover's minimum is 30) and `expire`
 1800 (when it stops; Pushover's maximum is 10800); anything else is priority 1.
@@ -414,9 +416,22 @@ clock check passing again, a failed unit seen well, a cleared notice), the
 reporter cancels that alert's emergencies through Pushover's receipt API, so
 the phone stops repeating a page whose fault has cleared. A cancel that fails
 is kept and tried again at the next firing until the emergency has run its
-30 minutes (plus 5), when Pushover has stopped it and the record is dropped;
-a receipt Pushover no longer knows
-(HTTP 400) has nothing left to cancel. The journal's acknowledgement does not
+30 minutes (plus 5), when Pushover has stopped it and the record is dropped.
+Every firing drops the receipts that are past that, whatever alert they were
+for, so a page that repeats for days does not fill the state file; the age is
+read from the server's clock, and a receipt that looks newer than the clock
+(the clock went back) is kept. If the clock was wrong when the page was sent
+and has since been corrected, a receipt can be dropped early: the page then
+runs until you acknowledge it or it expires, and the clock check pages the
+fault. A receipt is kept, not dropped, when the incident clears while the
+Pushover channel is set aside for a missing secret, and is cancelled when the
+secret is back. A receipt Pushover no longer knows (HTTP 400 whose answer says
+the receipt was not found) has nothing left to cancel; any other 400, such as an
+invalid application token, is a failure that is retried. An emergency whose
+answer carries no usable receipt is still a delivery (the phone rings), but
+the reporter prints a warning that it cannot be cancelled and it runs until you
+acknowledge it or it expires. An answer with anything after its one JSON object
+(a stray bracket, a second object) is not a delivery. The journal's acknowledgement does not
 cancel a page, as it does not resolve a PagerDuty incident: it stops the
 reporter's repeats, and the page already sent expires on its own or when you
 acknowledge it in the app.

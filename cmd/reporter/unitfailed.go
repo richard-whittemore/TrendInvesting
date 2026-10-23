@@ -83,7 +83,7 @@ func (u *unitState) record() error {
 }
 
 // withUnitState runs fn on the unit-failure record under an exclusive lock.
-func withUnitState(path string, fn func(*unitState) error) error {
+func withUnitState(path string, at time.Time, fn func(*unitState) error) error {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the unit-failure record's lock: %w", err)
@@ -96,6 +96,7 @@ func withUnitState(path string, fn func(*unitState) error) error {
 	if err != nil {
 		return err
 	}
+	pruneReceipts(seen, at)
 	return fn(&unitState{path: path, seen: seen, sent: sent, repeats: repeats, baselines: baselines})
 }
 
@@ -148,7 +149,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	withRedaction(senders, secrets)
 	at := now()
 	run := failedInvocation(getenv, *systemctl, unit, at)
-	err = withUnitState(*statePath, func(u *unitState) error {
+	err = withUnitState(*statePath, at, func(u *unitState) error {
 		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, at, time.Time{}, *repeat)
 	})
 	return errors.Join(append(failures, err)...)
@@ -466,7 +467,7 @@ func splitUnits(list string) []string {
 // page or latest failed run was recorded since then has a run newer than the
 // sample, so it is never ended on the sample's word. Both reporters and the hook share the record under a lock.
 func unitStep(path string, units []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) error {
-	return withUnitState(path, func(u *unitState) error {
+	return withUnitState(path, at, func(u *unitState) error {
 		var failures []error
 		for _, unit := range units {
 			sample := samples[unit]
@@ -527,7 +528,7 @@ func allTook(senders []sender, key string, seen map[string]bool) bool {
 // current (the reporter's own run, which is not failed while it runs), under
 // the record's lock.
 func clearUnit(path, unit, current string, senders []sender, setAside []channelFault, at time.Time) error {
-	return withUnitState(path, func(u *unitState) error {
+	return withUnitState(path, at, func(u *unitState) error {
 		var failures []error
 		for invocation := range unitRecords(u, unit) {
 			if invocation == current {
