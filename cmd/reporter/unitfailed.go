@@ -96,8 +96,15 @@ func withUnitState(path string, at time.Time, fn func(*unitState) error) error {
 	if err != nil {
 		return err
 	}
-	pruneReceipts(seen, at)
-	return fn(&unitState{path: path, seen: seen, sent: sent, repeats: repeats, baselines: baselines})
+	u := &unitState{path: path, seen: seen, sent: sent, repeats: repeats, baselines: baselines}
+	// A receipt past its emergency is dropped, with the bookkeeping of an
+	// episode it was the last record of, and the drop is saved here: the
+	// callback may have nothing else to write.
+	var pruneErr error
+	if pruneReceipts(seen, sent, repeats, at) {
+		pruneErr = u.record()
+	}
+	return errors.Join(pruneErr, fn(u))
 }
 
 // notifyUnitFailed is `reporter notify-unit-failed <unit>`, run by the

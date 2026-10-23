@@ -167,6 +167,14 @@ func clockStep(path, command, host string, senders []sender, setAside []channelF
 		}
 		return writeAtomic(path, raw)
 	}
+	// A receipt past its emergency goes whatever the channels now configured,
+	// and with it the bookkeeping of a cleared alert it was the last record
+	// of; the drop is saved even when no check is made this period.
+	if pruneReceipts(seen, sent, repeats, now) {
+		if err := record(); err != nil {
+			return h.Last, err
+		}
+	}
 	age := time.Duration(0)
 	if h.Last != nil {
 		age = now.Sub(h.Last.At)

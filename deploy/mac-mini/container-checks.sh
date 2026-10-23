@@ -116,9 +116,38 @@ ENGINE
     printf 'TI_RUN=run-rehearsal\nTI_AS_OF=2026-10-20T20:00:00Z\nTI_RESTART_ARGS=\n' >"$boost/run.env"
     chown ti-trader:ti-trader "$boost/run.env"
     chmod 0640 "$boost/run.env"
+    "$0" forwarder
+    sed -i -e 's|^TI_NTFY_TOPIC=.*|TI_NTFY_TOPIC=rehearsal|' \
+      -e "s|^TI_NTFY_SERVER=.*|TI_NTFY_SERVER=$sink|" \
+      -e "s|^TI_PUSHOVER_APP_TOKEN=.*|TI_PUSHOVER_APP_TOKEN=fake|" \
+      -e "s|^TI_PUSHOVER_USER_KEY=.*|TI_PUSHOVER_USER_KEY=fake\\nTI_PUSHOVER_URL=$forward/1/messages.json|" \
+      /etc/trend-investing/secrets.env
+    echo '# filled in by the owner (test sentinel)' >>/etc/trend-investing/secrets.env
+    sed -i 's/"mark_timeout": 15/"mark_timeout": 16/' /etc/trend-investing/adapters/boost.json
+    for v in $volumes; do
+      head -c 256 /dev/urandom | base64 >"$v/sentinel-root"
+      chown root:root "$v/sentinel-root"
+      chmod 0600 "$v/sentinel-root"
+      head -c 256 /dev/urandom | base64 >"$v/sentinel-trader"
+      chown ti-trader:ti-trader "$v/sentinel-trader"
+      chmod 0750 "$v/sentinel-trader"
+    done
+    token=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    echo "$token" >/etc/trend-investing/journal-token
+    logger -t ti-test "journal sentinel $token"
+    journalctl --flush
+    pass "fixtures written"
+    ;;
+
+  # The Pushover stand-in's forwarder. Its executable and unit are on the
+  # container's own disk, which a re-creation replaces (only the four volumes
+  # persist) while the secrets in the etc volume still point at it, so
+  # test-container.sh runs this after every up.sh, create or re-create. It is
+  # idempotent.
+  forwarder)
     test "${SINK_PORT:-0}" != 0 || fail "SINK_PORT is not set: run this from test-container.sh"
-    # The forwarder is a unit of its own, so it starts again after every
-    # boot of the container, before the reporter's timer can fire.
+    # A unit of its own, so it starts again after every boot of the container,
+    # before the reporter's timer can fire.
     cat >/usr/local/bin/ti-sink-forward <<'FORWARD'
 #!/usr/bin/python3
 import asyncio, sys
@@ -162,26 +191,7 @@ WantedBy=multi-user.target
 UNIT
     systemctl daemon-reload
     systemctl enable --now ti-sink-forward.service || fail "the stand-in forwarder did not start: $(journalctl -u ti-sink-forward -n 5 --no-pager -o cat)"
-    sed -i -e 's|^TI_NTFY_TOPIC=.*|TI_NTFY_TOPIC=rehearsal|' \
-      -e "s|^TI_NTFY_SERVER=.*|TI_NTFY_SERVER=$sink|" \
-      -e "s|^TI_PUSHOVER_APP_TOKEN=.*|TI_PUSHOVER_APP_TOKEN=fake|" \
-      -e "s|^TI_PUSHOVER_USER_KEY=.*|TI_PUSHOVER_USER_KEY=fake\\nTI_PUSHOVER_URL=$forward/1/messages.json|" \
-      /etc/trend-investing/secrets.env
-    echo '# filled in by the owner (test sentinel)' >>/etc/trend-investing/secrets.env
-    sed -i 's/"mark_timeout": 15/"mark_timeout": 16/' /etc/trend-investing/adapters/boost.json
-    for v in $volumes; do
-      head -c 256 /dev/urandom | base64 >"$v/sentinel-root"
-      chown root:root "$v/sentinel-root"
-      chmod 0600 "$v/sentinel-root"
-      head -c 256 /dev/urandom | base64 >"$v/sentinel-trader"
-      chown ti-trader:ti-trader "$v/sentinel-trader"
-      chmod 0750 "$v/sentinel-trader"
-    done
-    token=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    echo "$token" >/etc/trend-investing/journal-token
-    logger -t ti-test "journal sentinel $token"
-    journalctl --flush
-    pass "fixtures written"
+    pass "the stand-in forwarder is installed and running"
     ;;
 
   # T1: every unit verifies, and the enabled ones and the engine start under
@@ -346,6 +356,10 @@ UNIT
     for u in ti-data.timer ti-reporter@boost.timer ti-clock-check.timer; do
       systemctl is-active --quiet "$u" || fail "$u is not active after the restart"
     done
+    # The Pushover forwarder survives a restart and a re-creation, and still
+    # relays loopback to the stand-in on the Mac.
+    systemctl is-active --quiet ti-sink-forward.service || fail "the Pushover stand-in forwarder is not running after the restart"
+    curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null "$forward/posts" || fail "the Pushover stand-in is not reached through the forwarder at $forward"
     for _ in $(seq 30); do systemctl is-active --quiet ti-dashboard.service && break; sleep 1; done
     systemctl is-active --quiet ti-dashboard.service || fail "ti-dashboard is not back: $(journalctl -u ti-dashboard -b -n 5 --no-pager -o cat)"
     for u in $units_stopped; do
@@ -396,5 +410,5 @@ STUB
     pass "the clock step and ti-clock-check.service pass against a reference, and the step refuses one an hour off"
     ;;
 
-  *) fail "usage: container-checks.sh boot|fixtures|units|tools|state-manifest|provision-manifest|after-restart|clock" ;;
+  *) fail "usage: container-checks.sh boot|forwarder|fixtures|units|tools|state-manifest|provision-manifest|after-restart|clock" ;;
 esac

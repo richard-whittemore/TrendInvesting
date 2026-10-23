@@ -38,9 +38,10 @@ type receipter interface {
 
 // receiptChannel is the pseudo-channel under which the state file records
 // one receipt of channel, with the time it was sent (Unix seconds): the key
-// is then the alert's, so forgetting the alert (forgetAlert) forgets its
-// receipts too. A receipt is a credential for its emergency's status and is
-// never logged.
+// is then the alert's, so cancelReceipts finds it by alert. A receipt is
+// dropped only by its cancel, or by pruneReceipts once its emergency is over,
+// never by forgetAlert. A receipt is a credential for its emergency's status
+// and is never logged.
 func receiptChannel(channel, receipt string, at time.Time) string {
 	return "receipt:" + channel + ":" + receipt + ":" + strconv.FormatInt(at.Unix(), 10)
 }
@@ -105,19 +106,29 @@ func cancelReceipts(senders []sender, key string, seen map[string]bool, now time
 // kept. The residue: if the clock was behind when it was sent and has since
 // been put right, the receipt can read older than it is and be dropped up to
 // that many minutes early; the emergency then runs to its expire or to the
-// owner's acknowledgement, and the clock check pages the drift itself.
+// owner's acknowledgement. Nothing then guarantees a clock page: the clock
+// check pages only a drift that persists over its consecutive checks, and a
+// clock put right between two checks passes the next one unremarked.
 func receiptOver(stamp string, life time.Duration, now time.Time) bool {
 	unix, err := strconv.ParseInt(stamp, 10, 64)
 	return err == nil && now.After(time.Unix(unix, 0).Add(life+receiptMargin))
 }
 
 // pruneReceipts drops from seen every receipt past its emergency's life and
-// the margin (receiptOver), whatever the alert it was sent for. It runs at the
-// start of every run, so the receipts of alerts that are never resolved (a
-// repeating journal alert) do not accumulate in the state file.
-func pruneReceipts(seen map[string]bool, now time.Time) {
+// the margin (receiptOver), whatever the alert it was sent for or the state of
+// its channel: a receipt is self-expiring. It runs at the start of every run,
+// so the receipts of alerts that are never resolved (a repeating journal
+// alert) do not accumulate in the state file. When it drops the last record of
+// an alert, so that nothing but its bookkeeping is left (the incident
+// recovered while its channel was set aside, or the channel is no longer
+// configured), it does what a successful cancel would: the alert's remaining
+// bookkeeping (its recovery marker, runs and reminders) goes too, so nothing
+// is left behind. It reports whether it changed anything, for the caller to
+// save.
+func pruneReceipts(seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time) bool {
+	alerts := map[string]bool{}
 	for k := range seen {
-		ch, _, found := strings.Cut(k, "|")
+		ch, alert, found := strings.Cut(k, "|")
 		rest, isReceipt := strings.CutPrefix(ch, "receipt:")
 		if !found || !isReceipt {
 			continue
@@ -126,6 +137,13 @@ func pruneReceipts(seen map[string]bool, now time.Time) {
 		_, stamp, _ := strings.Cut(rest, ":")
 		if life, ok := receiptLife[channel]; ok && receiptOver(stamp, life, now) {
 			delete(seen, k)
+			alerts[alert] = true
 		}
 	}
+	for alert := range alerts {
+		if !deliveredAnywhere(seen, alert) {
+			forgetAlert(alert, nil, seen, sent, repeats)
+		}
+	}
+	return len(alerts) > 0
 }

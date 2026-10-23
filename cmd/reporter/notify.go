@@ -756,6 +756,9 @@ func (p *pushoverSender) call(endpoint string, form url.Values) (string, error) 
 	return ack.Receipt, nil
 }
 
+// jsonSpace is the four bytes JSON allows between its tokens.
+const jsonSpace = " \t\n\r"
+
 // checkAck requires the answer to be one JSON object, and nothing after it
 // but white space, with "status":1.
 func checkAck(answer []byte) error {
@@ -763,7 +766,7 @@ func checkAck(answer []byte) error {
 		Status int `json:"status"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(answer))
-	if err := dec.Decode(&ack); err != nil || len(bytes.TrimSpace(answer[dec.InputOffset():])) != 0 || ack.Status != 1 {
+	if err := dec.Decode(&ack); err != nil || len(bytes.Trim(answer[dec.InputOffset():], jsonSpace)) != 0 || ack.Status != 1 {
 		return errors.New("the answer did not acknowledge the message")
 	}
 	return nil

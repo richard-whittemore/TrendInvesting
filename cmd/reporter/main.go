@@ -175,7 +175,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		return errors.Join(append(failures, err)...)
 	}
 	start := now()
-	pruneReceipts(seen, start)
+	if pruneReceipts(seen, sent, repeats, start) {
+		if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
+			failures = append(failures, err)
+		}
+	}
 	// A new baseline is on disk before any delivery starts, so a run stopped
 	// midway (systemd stops one at its TimeoutStartSec) cannot leave the next
 	// run to take a later one and drop what the log recorded between the two.

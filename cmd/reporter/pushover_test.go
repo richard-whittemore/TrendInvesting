@@ -559,7 +559,7 @@ func TestPruningKeepsAReceiptStampedAfterNow(t *testing.T) {
 		"receipt:pushover:malformed|k":                                          true,
 		channelKey("pushover", "k"):                                             true,
 	}
-	pruneReceipts(seen, t0)
+	pruneReceipts(seen, map[string]time.Time{}, map[string]int{}, t0)
 	if len(seen) != 4 || seen[receiptKey("b", t0.Add(-pushoverExpire-receiptMargin-time.Second), "k")] {
 		t.Errorf("state = %v: want only the receipt past expiry and margin dropped", seen)
 	}
@@ -658,5 +658,108 @@ func TestTheMacRehearsalsPushoverStandInPassesTheEndpointRule(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "TI_PUSHOVER_URL=$forward/1/messages.json") {
 		t.Errorf("the rehearsal does not give the reporter the loopback address")
+	}
+}
+
+// Receipt records are self-contained and self-expiring: past expiry and margin
+// a receipt goes whatever its channel's state, and the last one of a recovered
+// incident takes the incident's recovery bookkeeping with it.
+func TestAUnitThatRecoversWhilePushoverIsSetAsideLeavesNothingAfterExpiry(t *testing.T) {
+	dir := t.TempDir()
+	unit := "ti-engine@boost.service"
+	key := report.UnitFailedKey(unit, "inv1")
+	path := filepath.Join(dir, "u.json")
+	u := &unitState{path: path, seen: map[string]bool{
+		channelKey("pushover", key):  true,
+		receiptKey("rcpt1", t0, key): true,
+	}, sent: map[string]time.Time{channelKey("pushover", key): t0}, repeats: map[string]int{}, baselines: map[string]time.Time{}}
+	aside := []channelFault{{channel: "pushover", err: errors.New("TI_PUSHOVER_APP_TOKEN missing")}}
+	if err := resolveKey(u, key, nil, aside, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if u.repeats[recoveredKey(key)] != 1 {
+		t.Fatalf("no recovery marker while the receipt is kept: %v", u.repeats)
+	}
+	late := t0.Add(pushoverExpire + receiptMargin + time.Minute)
+	if err := clearUnit(path, unit, "", nil, aside, late); err != nil {
+		t.Fatal(err)
+	}
+	seen, sent, repeats, _, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 || len(sent) != 0 || len(repeats) != 0 {
+		t.Errorf("state after expiry = %v %v %v: want nothing left behind", seen, sent, repeats)
+	}
+}
+
+func TestPruningALiveIncidentsExpiredReceiptKeepsTheIncident(t *testing.T) {
+	key := "halted:x"
+	seen := map[string]bool{receiptKey("a", t0, key): true, channelKey("pushover", key): true}
+	sent := map[string]time.Time{channelKey("pushover", key): t0}
+	if !pruneReceipts(seen, sent, map[string]int{}, t0.Add(time.Hour)) {
+		t.Error("a pruned receipt was not reported as a change")
+	}
+	if len(seen) != 1 || len(sent) != 1 {
+		t.Errorf("state = %v %v: want the delivery record kept", seen, sent)
+	}
+}
+
+func TestAClearedClockAlertWithPushoverDisabledLeavesNothingAfterExpiry(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	check := newStandInCheck(t)
+	dir := t.TempDir()
+	clockFile := filepath.Join(dir, "host-clock.json")
+	seed := `{"keys":["` + receiptKey("rcpt1", t0, report.ClockDriftKey(hostName())) + `"]}`
+	if err := os.WriteFile(clockFile, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	getenv := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.private.test"})
+	if err := runWith(t, r, dir, check, "ntfy", getenv, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	late := t0.Add(pushoverExpire + receiptMargin + time.Hour)
+	if err := runWith(t, r, dir, check, "ntfy", getenv, late); err != nil {
+		t.Fatal(err)
+	}
+	h, err := loadHostClock(clockFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Keys) != 0 || len(h.Sent) != 0 || len(h.Repeats) != 0 {
+		t.Errorf("host clock state = %v %v %v: want no receipt left behind", h.Keys, h.Sent, h.Repeats)
+	}
+}
+
+func TestOnlyJSONWhiteSpaceMayFollowTheAcknowledgement(t *testing.T) {
+	for name, tail := range map[string]string{"form feed": "\f", "vertical tab": "\v", "no-break space": " ", "next line": "\u0085"} {
+		if err := checkAck([]byte(`{"status":1}` + tail)); err == nil {
+			t.Errorf("%s after the object was accepted", name)
+		}
+	}
+	if err := checkAck([]byte(`{"status":1}` + " \t\r\n ")); err != nil {
+		t.Errorf("JSON white space after the object was refused: %v", err)
+	}
+}
+
+// The forwarder lives on the container's own disk, which a re-creation
+// replaces; the rehearsal installs it after every up.sh and checks it after
+// every restart and re-creation.
+func TestTheRehearsalReinstallsTheForwarderAfterEveryCreateAndChecksItAfterEveryRestart(t *testing.T) {
+	test, err := os.ReadFile("../../deploy/mac-mini/test-container.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := regexp.MustCompile(`(?s)\nup\(\) \{.*?\n\}\n`).FindString(string(test))
+	if !strings.Contains(up, "up.sh") || !strings.Contains(up, "inside forwarder") {
+		t.Errorf("the rehearsal's up does not install the forwarder after up.sh: %q", up)
+	}
+	checks, err := os.ReadFile("../../deploy/mac-mini/container-checks.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := regexp.MustCompile(`(?s)\n {2}after-restart\)\n.*?\n {4};;\n`).FindString(string(checks))
+	if !strings.Contains(after, "ti-sink-forward.service") || !strings.Contains(after, `"$forward/posts"`) {
+		t.Errorf("after-restart does not check that the forwarder runs and relays")
 	}
 }

@@ -422,16 +422,19 @@ for, so a page that repeats for days does not fill the state file; the age is
 read from the server's clock, and a receipt that looks newer than the clock
 (the clock went back) is kept. If the clock was wrong when the page was sent
 and has since been corrected, a receipt can be dropped early: the page then
-runs until you acknowledge it or it expires, and the clock check pages the
-fault. A receipt is kept, not dropped, when the incident clears while the
+runs until you acknowledge it or it expires. The clock check pages only a
+drift that lasts through two checks in a row, so a clock put right between
+two checks can go unremarked, and no clock page is promised. A receipt is kept, not dropped, when the incident clears while the
 Pushover channel is set aside for a missing secret, and is cancelled when the
-secret is back. A receipt Pushover no longer knows (HTTP 400 whose answer says
+secret is back. If the channel is still away when the receipt passes its
+expiry and margin, the receipt is dropped anyway, together with the record of
+the cleared incident, so nothing is left in the state file. A receipt Pushover no longer knows (HTTP 400 whose answer says
 the receipt was not found) has nothing left to cancel; any other 400, such as an
 invalid application token, is a failure that is retried. An emergency whose
 answer carries no usable receipt is still a delivery (the phone rings), but
 the reporter prints a warning that it cannot be cancelled and it runs until you
 acknowledge it or it expires. An answer with anything after its one JSON object
-(a stray bracket, a second object) is not a delivery. The journal's acknowledgement does not
+(a stray bracket, a second object) is not a delivery, and only a space, tab, newline or carriage return may follow the object. The journal's acknowledgement does not
 cancel a page, as it does not resolve a PagerDuty incident: it stops the
 reporter's repeats, and the page already sent expires on its own or when you
 acknowledge it in the app.

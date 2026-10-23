@@ -78,7 +78,13 @@ fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 # docker exec passes the container's environment, not this one's: what a
 # check reads from here is passed by name.
 inside() { docker exec --env "ALLOWED=${ALLOWED:-}" --env "SINK_PORT=$sink_port" "$name" /root/deploy/mac-mini/container-checks.sh "$@"; }
-up() { env TI_MAC_NAME="$name" TI_DIST="$work/dist-link" TI_MAC_DASHBOARD_PORT="$port" "$work/checkout/deploy/mac-mini/up.sh" "$@"; }
+# After every create or re-creation the forwarder to the Pushover stand-in is
+# installed again: it lives on the container's own disk, which a re-creation
+# replaces, while the secrets that point at it persist in a volume.
+up() {
+  env TI_MAC_NAME="$name" TI_DIST="$work/dist-link" TI_MAC_DASHBOARD_PORT="$port" "$work/checkout/deploy/mac-mini/up.sh" "$@" || return
+  inside forwarder
+}
 
 step "a checkout outside the synced folders, and the programs built for arm64"
 mkdir -p "$work/checkout" "$work/dist"
