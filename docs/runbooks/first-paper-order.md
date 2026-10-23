@@ -154,11 +154,14 @@ Socket Clients, port 4002), and run the check again. If the address is
 is off: turn it on and check again before going on.
 Then, from the Mac, check that the tailnet cannot use the API:
 `python3 deploy/ibapi-probe.py trend-investing-1 4002` (it sends only the API's opening
-handshake and closes). Only `REJECTED` (exit 0) is right: the Gateway refuses the
-client, because the rendered IBC settings reject incoming connections from any
-address but the server's own. `EXPOSED` (exit 1) means the tailnet can use the
-API: stop and report it. `INCONCLUSIVE` (exit 2) proves nothing: fix the
-connection and run it again. The
+handshake and closes). Only `REJECTED` (exit 0) is right: the Gateway accepts the connection and
+then closes it without a reply, because the rendered IBC settings reject incoming connections from any
+address but the server's own. `EXPOSED` (exit 1) means the Gateway sent a reply to a tailnet
+client, so the tailnet may be able to use the API: stop and report it.
+`INCONCLUSIVE` (exit 2) proves nothing: nothing listening (check the Gateway
+is logged in and `ss -ltn` shows 4002), an unreachable host, or a connected
+but silent Gateway (wait about 30 seconds and run it again; if it stays
+silent, report it). The
 firewall's deny of 4001 and 4002 is only a second layer, since Tailscale's own
 rules accept tailnet traffic first; IBC's `BindAddress` is the command
 server's address and is not used.

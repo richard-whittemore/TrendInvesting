@@ -22,16 +22,20 @@ client: the rendered IBC settings reject incoming connections from any address
 but the server's own and trust none. The firewall also denies those two ports,
 but that is a second layer, not the guard: Tailscale's own rules let tailnet
 traffic through before the firewall looks. On a server set up earlier, apply
-all of this with: `git pull`, `sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh` into `/usr/local/libexec/trend-investing`), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
+all of this with: `git pull`, `sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh` into `/usr/local/libexec/trend-investing`, and reinstalls `ti-data`, `ti-reporter`, `ti-dashboard`, `operator` and `journal-query` from the checkout's `dist/` for each one present: run `ls dist` first, and rebuild or move `dist/` aside if it holds older builds than the installed ones), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
 start expect an IBKR Mobile prompt). `services` copies the repository's engine
 files over `/etc/trend-investing/engines/` (see the caution under the file table):
 that costs nothing while the server is in dry-run with those files unedited, but
-not once they are edited for paper. To check it from your Mac, run
-`python3 deploy/ibapi-probe.py trend-investing-1 4002`. It sends only the API's opening
+not once they are edited for paper. To check it from your Mac, first confirm on the server that the Gateway log shows
+`Login has completed` after the restart and `ss -ltn | grep 4002` shows a listener,
+then run `python3 deploy/ibapi-probe.py trend-investing-1 4002`. It sends only the API's opening
 handshake and closes, and prints `REJECTED` (exit 0), `EXPOSED` (exit 1) or
-`INCONCLUSIVE` (exit 2). Only `REJECTED` passes; `EXPOSED` means the Gateway
-answered a tailnet client, so stop and report it; `INCONCLUSIVE` proves nothing,
-so fix the connection and run it again. Each `provision.sh` step is safe to repeat.
+`INCONCLUSIVE` (exit 2). Only `REJECTED` passes (the connection was accepted, then
+closed without a reply); `EXPOSED` means the Gateway sent a reply to a tailnet
+client, so stop and report it; `INCONCLUSIVE` proves nothing: nothing listening
+(check the Gateway is logged in and `ss -ltn` shows 4002, then rerun), an unreachable
+host, or a connected but silent Gateway such as one holding an unanswered dialog
+(wait about 30 seconds and rerun; if it stays silent, report it). Each `provision.sh` step is safe to repeat.
 Everything that sets it up is in `deploy/`, run by `deploy/provision.sh`.
 
 One machine keeps the cost at about $170 a year (plan section 8). The price

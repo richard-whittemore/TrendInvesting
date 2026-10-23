@@ -1,8 +1,8 @@
 """Tests for deploy/ibapi-probe.py, the owner's check that the Gateway's API port refuses a client.
 
 A local fake server on 127.0.0.1 replies like the Gateway, closes, resets or
-stays silent, and a closed port refuses; the probe must report EXPOSED,
-REJECTED or INCONCLUSIVE with exit codes 1, 0 and 2, and send nothing after
+stays silent, and a closed port refuses (nothing is listening, which proves
+nothing); the probe must report EXPOSED, REJECTED or INCONCLUSIVE with exit codes 1, 0 and 2, and send nothing after
 the opening handshake. Synthetic traffic only: no IBKR Gateway is needed.
 """
 import importlib.util
@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -85,18 +86,45 @@ class ProbeTest(unittest.TestCase):
     def test_reset_is_rejected(self):
         self.assertEqual(self.run_against("reset")[0], "REJECTED")
 
-    def test_refused_connection_is_rejected(self):
+    def test_refused_connection_is_inconclusive(self):
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
         s.close()
-        self.assertEqual(probe.probe("127.0.0.1", port, 1.0), "REJECTED")
+        self.assertEqual(probe.probe("127.0.0.1", port, 1.0), "INCONCLUSIVE")
 
     def test_silence_is_inconclusive(self):
         self.assertEqual(self.run_against("silent", timeout=0.3)[0], "INCONCLUSIVE")
 
     def test_unresolvable_host_is_inconclusive(self):
         self.assertEqual(probe.probe("no-such-host.invalid", 4002, 1.0), "INCONCLUSIVE")
+
+    def test_slow_resolver_is_bounded_by_the_timeout(self):
+        release = threading.Event()
+
+        def slow(*args, **kwargs):
+            release.wait(10)
+            return []
+
+        start = time.monotonic()
+        result = probe.probe("slow.example", 4002, 0.5, resolver=slow)
+        elapsed = time.monotonic() - start
+        release.set()
+        self.assertEqual(result, "INCONCLUSIVE")
+        self.assertLess(elapsed, 3.0)
+
+    def test_bad_arguments_are_usage_errors_not_exposed(self):
+        for argv in (["127.0.0.1", "4002", "--timeout", "-1"],
+                     ["127.0.0.1", "4002", "--timeout", "nan"],
+                     ["127.0.0.1", "4002", "--timeout", "inf"],
+                     ["127.0.0.1", "4002", "--timeout", "0"],
+                     ["127.0.0.1", "70000"],
+                     ["127.0.0.1", "0"],
+                     ["127.0.0.1", "-5"]):
+            done = subprocess.run([sys.executable, str(SCRIPT), *argv],
+                                  capture_output=True, text=True, timeout=20)
+            self.assertEqual(done.returncode, 2, argv)
+            self.assertIn("usage", done.stderr, argv)
 
     def test_exit_codes(self):
         for behaviour, code in (("reply", 1), ("close", 0), ("silent", 2)):
