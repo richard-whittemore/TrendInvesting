@@ -15,7 +15,11 @@ IB Gateway for Linux x64 only), US East, the 2 GB plan (plan sections 3 and
 8). Everything that trades runs on it: one IB Gateway shared by all three
 accounts, the market-data step, one engine and one IBKR adapter per account
 (only Boost's exist today), the reporter and the dashboard. It is reachable only over
-Tailscale, your private network: the firewall refuses everything else.
+Tailscale, your private network: the firewall refuses everything else. The
+Gateway's API port (4002 for paper, 4001 for live) is closed even to the
+tailnet: only programs on the server itself, the engines and adapters, can
+reach it. To apply or re-apply this, run `sudo deploy/provision.sh firewall`
+on the server; it resets and rebuilds the rules, and is safe to repeat.
 Everything that sets it up is in `deploy/`, run by `deploy/provision.sh`.
 
 One machine keeps the cost at about $170 a year (plan section 8). The price

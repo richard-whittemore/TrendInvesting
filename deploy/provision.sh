@@ -751,7 +751,8 @@ CONF
 
 # Replaces the whole UFW rule set: `ufw --force reset` removes every existing
 # rule, including any added by hand, before the Tailscale-only policy is
-# applied. Re-add a manual rule after each run, or add it here.
+# applied. Re-add a manual rule after each run, or add it here. The Gateway's
+# API ports stay closed to the tailnet; only the server itself reaches them.
 step_firewall() {
   if test "$rehearsal" = 1; then log "rehearsal: skipping firewall"; return 0; fi
   if mac_mini; then
@@ -768,6 +769,12 @@ step_firewall() {
   ufw --force reset >/dev/null
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
+  # The Gateway's API ports (4002 paper, 4001 live) are for the server's own
+  # engines and adapters on 127.0.0.1, which ufw does not filter. The denies
+  # come first, so the tailscale0 allow below never reaches them; the reset
+  # above keeps a rerun from stacking duplicates.
+  ufw deny in proto tcp to any port 4001 >/dev/null
+  ufw deny in proto tcp to any port 4002 >/dev/null
   ufw allow in on tailscale0 >/dev/null
   ufw --force enable >/dev/null
   log "also close port 22 in the Lightsail firewall tab (owner step)"
