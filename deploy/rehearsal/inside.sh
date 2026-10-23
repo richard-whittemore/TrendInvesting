@@ -129,6 +129,7 @@ else
   test -x /var/lib/ti-gateway/Jts/ibgateway/1050/ibgateway || fail "gateway not installed"
 fi
 test -f /opt/ibc/scripts/ibcstart.sh || fail "IBC not installed"
+runuser -u ti-gateway -- test -r /opt/ibc/config.ini || fail "IBC config.ini is not readable by ti-gateway"
 test -x /usr/local/bin/tailscaled || fail "tailscaled not installed"
 if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" != 1; then
   test "$(stat -c %U /var/lib/ti-gateway/Jts/ibgateway/1050/ibgateway)" = ti-gateway || fail "gateway files not owned by ti-gateway"
