@@ -307,6 +307,26 @@ step_clock() {
   "$here/libexec/clock-check.sh" || die "the clock is not good; fix it and run 'provision.sh clock' again"
 }
 
+# fix_ibc_modes DIR: the IBC tree is root's and readable by every service
+# user: ti-gateway runs IBC's scripts and reads config.ini, whatever modes the
+# zip or root's umask gave the files. The template holds no secrets; the
+# credentials are injected into the unit's runtime copy.
+fix_ibc_modes() {
+  local dir=$1
+  chown -R root:root "$dir"
+  chmod -R u=rwX,go=rX "$dir"
+  chmod 0755 "$dir"/scripts/*.sh "$dir"/*.sh
+}
+
+# install_ibc_tree SRC DEST: replaces DEST with SRC's files, then fixes modes.
+install_ibc_tree() {
+  local src=$1 dest=$2
+  rm -rf "$dest"
+  install -d -m 0755 "$dest"
+  cp -a "$src"/. "$dest"/
+  fix_ibc_modes "$dest"
+}
+
 step_gateway() {
   if mac_mini; then
     log "Mac mini: no Linux Gateway (the Gateway is IBKR's macOS app, logged in by hand)"
@@ -319,12 +339,12 @@ step_gateway() {
     local tmp
     tmp=$(mktemp -d)
     unzip -q "$zip" -d "$tmp"
-    rm -rf /opt/ibc
-    install -d -m 0755 /opt/ibc
-    cp -a "$tmp"/. /opt/ibc/
-    chmod 0755 /opt/ibc/scripts/*.sh /opt/ibc/*.sh
+    install_ibc_tree "$tmp" /opt/ibc
     touch "/opt/ibc/.version-${IBC_VERSION}"
     rm -rf "$tmp"
+  else
+    # Repairs a tree installed with the zip's own modes, without unpacking it.
+    fix_ibc_modes /opt/ibc
   fi
 
   log "IB Gateway ${GATEWAY_BUILD}"
@@ -466,6 +486,8 @@ step_twsapi() {
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps "$protobuf"
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps --no-build-isolation "$client"
   verify_adapter_venv "$adapter_venv" "$PROTOBUF_VERSION"
+  # Root's umask must not close the environment to the adapter's user.
+  chmod -R u=rwX,go=rX "$adapter_venv"
   printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nTWSAPI_ARTEFACT=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
     "$TWSAPI_VERSION" "$pinned_sha" "$artefact" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$twsapi_root/INSTALLED.tmp"
   chmod 0644 "$twsapi_root/INSTALLED.tmp"
@@ -729,7 +751,8 @@ CONF
 
 # Replaces the whole UFW rule set: `ufw --force reset` removes every existing
 # rule, including any added by hand, before the Tailscale-only policy is
-# applied. Re-add a manual rule after each run, or add it here.
+# applied. Re-add a manual rule after each run, or add it here. The Gateway's
+# API ports stay closed to the tailnet; only the server itself reaches them.
 step_firewall() {
   if test "$rehearsal" = 1; then log "rehearsal: skipping firewall"; return 0; fi
   if mac_mini; then
@@ -746,6 +769,15 @@ step_firewall() {
   ufw --force reset >/dev/null
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
+  # The Gateway's API ports (4002 paper, 4001 live) are for the server's own
+  # engines and adapters on 127.0.0.1, which ufw does not filter. The denies
+  # come first, so the tailscale0 allow below never reaches them; the reset
+  # above keeps a rerun from stacking duplicates. This is a second layer, not
+  # the guard: tailscaled's own input chain accepts tailscale0 traffic before
+  # ufw's chains, so the Gateway refuses non-local API clients itself
+  # (render-ibc-config.sh: AcceptIncomingConnectionAction=reject).
+  ufw deny in proto tcp to any port 4001 >/dev/null
+  ufw deny in proto tcp to any port 4002 >/dev/null
   ufw allow in on tailscale0 >/dev/null
   ufw --force enable >/dev/null
   log "also close port 22 in the Lightsail firewall tab (owner step)"

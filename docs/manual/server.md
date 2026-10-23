@@ -15,7 +15,18 @@ IB Gateway for Linux x64 only), US East, the 2 GB plan (plan sections 3 and
 8). Everything that trades runs on it: one IB Gateway shared by all three
 accounts, the market-data step, one engine and one IBKR adapter per account
 (only Boost's exist today), the reporter and the dashboard. It is reachable only over
-Tailscale, your private network: the firewall refuses everything else.
+Tailscale, your private network: the firewall refuses everything else. The
+Gateway's API port (4002 for paper, 4001 for live) is for programs on the
+server itself, the engines and adapters, and the Gateway refuses every other
+client: the rendered IBC settings reject incoming connections from any address
+but the server's own and trust none. The firewall also denies those two ports,
+but that is a second layer, not the guard: Tailscale's own rules let tailnet
+traffic through before the firewall looks. On a server set up earlier, apply
+all of this with: `git pull`, `sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh` into `/usr/local/libexec/trend-investing`. `services` reinstalls the five programs (`ti-data`, `ti-reporter`, `ti-dashboard`, `operator`, `journal-query`) found in the checkout's `dist/`, and never `ti-engine`. `dist/` on this server holds the builds copied from the Mac at the first install and has not been changed since. That holds until the first `ti-release`; after that, run `services` only with `dist/` moved aside (or do upgrades only through `ti-release`). If you are unsure, move `dist/` aside before running `services` (the programs already installed then stay)), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
+start expect an IBKR Mobile prompt). `services` copies the repository's engine
+files over `/etc/trend-investing/engines/` (see the caution under the file table):
+that costs nothing while the server is in dry-run with those files unedited, but
+not once they are edited for paper. Then check, as the owner: the Gateway log shows `Login has completed`, and `sudo grep -E '^(AcceptIncomingConnectionAction|TrustedTwsApiClientIPs)=' /run/ti-gateway/config.ini` prints `AcceptIncomingConnectionAction=reject` and `TrustedTwsApiClientIPs=` (an empty list). The guards are: the IBC files' modes; those two settings (the real guard); the Gateway's read-only API, which holds in dry-run only (once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices before turning read-only off); and the firewall's deny of ports 4001 and 4002, a second layer that Tailscale's own input rules may bypass. Closing the port at the network level for tailnet devices is done with Tailscale access rules, a separate owner step. Each `provision.sh` step is safe to repeat.
 Everything that sets it up is in `deploy/`, run by `deploy/provision.sh`.
 
 One machine keeps the cost at about $170 a year (plan section 8). The price
@@ -547,6 +558,82 @@ measured and the remedy, and resolves the page when a check passes; the daily su
 ends with the last check's time and result ([alerts and
 dashboard](alerts-and-dashboard.md), "Alerts this chapter explains"). Running it
 by hand is how you confirm the fix.
+
+## Closing the Gateway's ports to your other devices
+
+Tailscale lets every device on your tailnet reach every port on the server
+unless a rule says otherwise, and the server's own firewall cannot stop that.
+The Gateway's API ports (4001 live, 4002 paper) should be reachable from the
+server alone. Tailscale's access rules are enforced before traffic reaches the
+server, so they close those ports to your Mac, your phone and any device you
+add later. Do this before the Read-Only API is turned off (first-paper-order
+runbook, B4 step 2): after that, the Gateway's `reject` setting would be the
+only guard inside it.
+
+The policy is `deploy/tailscale/policy.hujson`. It lets your own devices reach
+each other, and reach the server on three ports only: 22 (SSH), 443 (the
+dashboard, which `tailscale serve` publishes) and 2586 (your ntfy server). The
+Mac mini (the alert triage job) is tagged `tag:trend-mac-mini` and may reach
+443 only. It keeps Tailscale's default SSH rule for your own devices, and adds
+one for the tagged server, so `ssh ubuntu@trend-investing-1` keeps working as
+ubuntu (the server joined with `tailscale up --ssh`). A device with a tag stops
+belonging to a user, so the tagged server is not covered by the rules for your
+own devices; it has its own.
+
+The server's public SSH port is closed, so Tailscale is your only way in. Take
+these steps so you cannot lock yourself out:
+
+0. Open the Tailscale admin console in your browser and keep it open, with
+   `deploy/tailscale/rescue.hujson` to hand. That is your protection: pasting a
+   policy there does not depend on SSH. An open SSH session is not: every login
+   to the server is a Tailscale SSH login, and Tailscale ends a session the
+   moment a policy change revokes the access that allowed it, so it dies in
+   exactly the case it would be meant to cover. Open one only for convenience.
+1. In the Tailscale admin console, open **Access controls** and replace the
+   policy with the contents of `deploy/tailscale/policy.hujson`. The default
+   policy allows everything; replacing it is the point. If you added rules of
+   your own, merge them in by hand, and keep nothing that admits
+   `tag:trend-server` on any port but 22, 443 and 2586. Save. What changes: the
+   allow-everything rule is gone, and the policy now defines the two tags. The
+   server is not tagged yet, so it is still one of your own devices: your
+   devices still reach it on every port, including 4001 and 4002, and SSH to it
+   still works (the default SSH rule is kept). The Gateway's ports are not
+   closed until step 2.
+2. Open **Machines**, find `trend-investing-1`, choose **Edit ACL tags** and add
+   `tag:trend-server`. Save. What changes: the server leaves your own devices
+   and the policy's rules for the tag apply to it, so 4001 and 4002 are closed
+   to your devices. Its row in the machine list no longer shows you as its
+   owner; that is expected. The Mac mini is not tagged yet (the alert triage job
+   is not set up), and the policy's lines for `tag:trend-mac-mini` do nothing
+   until it is; it is tagged when that job is set up
+   (`docs/runbooks/mac-mini.md`, "2. The alert triage job").
+3. Open a NEW terminal and check `ssh ubuntu@trend-investing-1` logs you in.
+   If it does not, paste
+   `deploy/tailscale/rescue.hujson` into Access controls (below) and try again.
+4. Still in **Machines**, choose the **...** menu on `trend-investing-1` and
+   **Disable key expiry**. Tagging in the console does not change a key's
+   expiry: if it was on when the server joined, the server leaves the tailnet on
+   that date and SSH, the dashboard and ntfy all go dark with the public door
+   closed. Never re-authenticate the server as a user (`tailscale up` signing in
+   again): that drops the tag, and the rules above stop applying to it.
+5. From the Mac, check each of these:
+   - `ssh ubuntu@trend-investing-1` logs you in (in the new terminal).
+   - The dashboard address still opens in a browser.
+   - The ntfy app on your iPhone still receives a test message (server manual,
+     "Your own ntfy server", step 5).
+   - `nc -vz -G 5 trend-investing-1 4002` now fails. With Tailscale filtering, a
+     blocked port is not refused, it simply times out, so "timed out" is the
+     right result. (Before this change it said the connection succeeded.)
+
+**If SSH stops working**, do not restore the previous policy: the default
+policy has no SSH rule for a tagged server, so it would not bring SSH back.
+Open the admin console's Access controls page, paste the contents of
+`deploy/tailscale/rescue.hujson` and save, then try `ssh ubuntu@trend-investing-1`
+again. The rescue policy restores SSH and nothing else: it grants the same
+ports as `policy.hujson` (22, 443 and 2586 to your devices, 443 to the Mac
+mini), so 4001 and 4002 stay closed, and its SSH rules are the most permissive
+safe ones (your devices as ubuntu or root, with no re-check on the server).
+Paste `policy.hujson` again once you have found the cause.
 
 ## What you start by hand
 
