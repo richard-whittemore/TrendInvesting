@@ -362,7 +362,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// A firing that finished without a fault resolves this reporter's own
 	// failure page (the OnFailure hook sent it when an earlier firing failed).
 	if *selfUnit != "" && len(failures) == 0 {
-		if err := clearUnit(unitStatePath, *selfUnit, getenv("INVOCATION_ID"), senders, setAside); err != nil {
+		if err := clearUnit(unitStatePath, *selfUnit, getenv("INVOCATION_ID"), senders, setAside, at); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -519,7 +519,7 @@ const summaryNoChannelPrefix = "summary-no-channel:"
 func saySummaryRoute(senders []sender, setAside []channelFault, account string, out io.Writer, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time, every time.Duration, record func() error) error {
 	for _, s := range senders {
 		if t, ok := s.(summaryTaker); ok && t.takesSummary() {
-			return clearSummaryNotice(senders, setAside, seen, sent, repeats)
+			return clearSummaryNotice(senders, setAside, seen, sent, repeats, at)
 		}
 	}
 	a := report.Alert{
@@ -538,7 +538,7 @@ func saySummaryRoute(senders []sender, setAside []channelFault, account string, 
 
 // clearSummaryNotice resolves and forgets every notice that the daily
 // summary had no channel, channel by channel (see saySummaryRoute).
-func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) error {
+func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time) error {
 	keys := map[string]bool{}
 	for k := range seen {
 		if _, key, ok := strings.Cut(k, "|"); ok && strings.HasPrefix(key, summaryNoChannelPrefix) {
@@ -547,7 +547,7 @@ func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[stri
 	}
 	var failures []error
 	for key := range keys {
-		failed, err := resolveAll(senders, key, seen)
+		failed, err := resolveAll(senders, key, seen, at)
 		if err != nil {
 			failures = append(failures, err)
 		}

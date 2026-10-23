@@ -191,7 +191,7 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 	for invocation, recorded := range unitRecords(u, unit) {
 		key := report.UnitFailedKey(unit, invocation)
 		if u.repeats[recoveredKey(key)] > 0 {
-			errs = append(errs, resolveKey(u, key, senders, setAside))
+			errs = append(errs, resolveKey(u, key, senders, setAside, at))
 			continue
 		}
 		if episode == "" || recorded.Before(opened) || (recorded.Equal(opened) && invocation < episode) {
@@ -312,7 +312,7 @@ func remindRun(u *unitState, unit, episode, run string, senders []sender, at tim
 				}
 			} else {
 				if err = s.send(a, 0); err == nil {
-					keepReceipt(s, a.Key, u.seen)
+					keepReceipt(s, a.Key, u.seen, at)
 				}
 			}
 			if err != nil {
@@ -484,7 +484,7 @@ func unitStep(path string, units []string, samples map[string]unitSample, sample
 				if !recorded.Before(sampledAt) || !latestRun(u, key).Before(sampledAt) {
 					continue
 				}
-				if err := resolveKey(u, key, senders, setAside); err != nil {
+				if err := resolveKey(u, key, senders, setAside, at); err != nil {
 					failures = append(failures, err)
 				}
 			}
@@ -526,14 +526,14 @@ func allTook(senders []sender, key string, seen map[string]bool) bool {
 // clearUnit resolves and forgets the page of every failed run of unit but
 // current (the reporter's own run, which is not failed while it runs), under
 // the record's lock.
-func clearUnit(path, unit, current string, senders []sender, setAside []channelFault) error {
+func clearUnit(path, unit, current string, senders []sender, setAside []channelFault, at time.Time) error {
 	return withUnitState(path, func(u *unitState) error {
 		var failures []error
 		for invocation := range unitRecords(u, unit) {
 			if invocation == current {
 				continue
 			}
-			if err := resolveKey(u, report.UnitFailedKey(unit, invocation), senders, setAside); err != nil {
+			if err := resolveKey(u, report.UnitFailedKey(unit, invocation), senders, setAside, at); err != nil {
 				failures = append(failures, err)
 			}
 		}
@@ -549,8 +549,8 @@ func clearUnit(path, unit, current string, senders []sender, setAside []channelF
 // run begins a new episode. Forgetting drops the episode's own bookkeeping
 // too (its runs, reminders and over marker), so an ended episode leaves
 // only the one marker, set afresh, while a channel keeps its record.
-func resolveKey(u *unitState, key string, senders []sender, setAside []channelFault) error {
-	failedNames, resolveErr := resolveAll(senders, key, u.seen)
+func resolveKey(u *unitState, key string, senders []sender, setAside []channelFault, at time.Time) error {
+	failedNames, resolveErr := resolveAll(senders, key, u.seen, at)
 	keep := map[string]bool{}
 	for _, f := range setAside {
 		keep[f.channel] = f.channel == "pagerduty"

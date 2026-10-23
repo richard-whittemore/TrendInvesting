@@ -368,7 +368,7 @@ func TestResolvingAnIncidentCancelsItsPushoverEmergency(t *testing.T) {
 	if len(seen) != 2 {
 		t.Fatalf("the state holds %v, want the delivery and the receipt", seen)
 	}
-	failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen)
+	failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen, t0.Add(time.Minute))
 	if err != nil || len(failed) != 0 {
 		t.Fatalf("resolve = %v, %v", failed, err)
 	}
@@ -389,7 +389,7 @@ func TestACancelThatFailsKeepsTheReceiptAndIsTriedAgain(t *testing.T) {
 	ps, seen, po, closeServer := emergency(t)
 	defer closeServer()
 	po.answer(http.StatusInternalServerError, `{"status":0}`)
-	failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen)
+	failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen, t0.Add(time.Minute))
 	if err == nil || strings.Contains(err.Error(), "rcpt1") || len(failed) != 1 {
 		t.Fatalf("resolve = %v, %v: want one failure naming no receipt", failed, err)
 	}
@@ -402,7 +402,7 @@ func TestACancelThatFailsKeepsTheReceiptAndIsTriedAgain(t *testing.T) {
 		t.Fatal("the receipt was forgotten with the failed cancel, so it is never retried")
 	}
 	po.answer(http.StatusOK, `{"status":1}`)
-	if failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen); err != nil || len(failed) != 0 || len(seen) != 0 {
+	if failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen, t0.Add(time.Minute)); err != nil || len(failed) != 0 || len(seen) != 0 {
 		t.Fatalf("retry = %v, %v, state %v", failed, err, seen)
 	}
 }
@@ -411,7 +411,7 @@ func TestAReceiptPushoverNoLongerKnowsIsNothingLeftToCancel(t *testing.T) {
 	ps, seen, po, closeServer := emergency(t)
 	defer closeServer()
 	po.answer(http.StatusBadRequest, `{"status":0,"errors":["receipt not found"]}`)
-	if failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen); err != nil || len(failed) != 0 {
+	if failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen, t0.Add(time.Minute)); err != nil || len(failed) != 0 {
 		t.Fatalf("resolve = %v, %v", failed, err)
 	}
 	if deliveredAnywhere(map[string]bool{}, "") || len(seen) != 1 {
@@ -431,5 +431,71 @@ func TestAnAlertThatIsNotAnEmergencyRecordsNoReceipt(t *testing.T) {
 	}
 	if len(seen) != 1 {
 		t.Errorf("state = %v", seen)
+	}
+}
+
+func TestPushoverEndpointMustBeHTTPSUnlessItIsLoopback(t *testing.T) {
+	for url, ok := range map[string]bool{
+		"https://api.pushover.net/1/messages.json": true,
+		"https://pushover.example.org/m":           true,
+		"http://127.0.0.1:8099/1/messages.json":    true,
+		"http://localhost:8099/1/messages.json":    true,
+		"http://[::1]:8099/1/messages.json":        true,
+		"http://pushover.example.org/m":            false,
+		"http://10.0.0.5/m":                        false,
+		"ftp://127.0.0.1/m":                        false,
+		"https://user:pw@pushover.example.org/m":   false,
+	} {
+		_, err := pushoverFrom(env(map[string]string{"TI_PUSHOVER_APP_TOKEN": "a", "TI_PUSHOVER_USER_KEY": "u", "TI_PUSHOVER_URL": url}), http.DefaultClient)
+		if (err == nil) != ok {
+			t.Errorf("%s: err = %v, want accepted = %v", url, err, ok)
+		}
+		if err != nil && strings.Contains(err.Error(), "pw") {
+			t.Errorf("%s: the error repeats the address: %v", url, err)
+		}
+	}
+}
+
+func TestPushoverDoesNotFollowARedirectAndItIsAFailure(t *testing.T) {
+	var elsewhere []url.Values
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		elsewhere = append(elsewhere, r.PostForm)
+		_, _ = w.Write([]byte(pushoverOK))
+	}))
+	defer other.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL, http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	ps := &pushoverSender{url: server.URL, token: "app-token-secret-3", user: "u", client: server.Client()}
+	err := ps.send(report.Alert{Key: "k", Severity: report.Urgent, Title: "t", Body: "b"}, 0)
+	if err == nil || strings.Contains(err.Error(), "secret-") {
+		t.Errorf("a redirect must fail the send without leaking, got %v", err)
+	}
+	if len(elsewhere) != 0 {
+		t.Errorf("the form, with the token, was posted to the redirect target: %v", elsewhere)
+	}
+}
+
+func TestACancelIsDroppedOnceTheEmergencyHasExpiredAnyway(t *testing.T) {
+	ps, seen, po, closeServer := emergency(t)
+	defer closeServer()
+	po.answer(http.StatusInternalServerError, `{"status":0}`)
+	// Still within the emergency's life: the failure is kept for a retry.
+	if failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen, t0.Add(10*time.Minute)); err == nil || len(failed) != 1 {
+		t.Fatalf("a failed cancel inside the emergency's life must be kept: %v, %v", failed, err)
+	}
+	// Past the expire time plus the margin: Pushover has stopped it; no request, no record.
+	po.answer(http.StatusInternalServerError, `{"status":0}`)
+	failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen, t0.Add(pushoverExpire+time.Hour))
+	if err != nil || len(failed) != 0 {
+		t.Fatalf("an expired receipt is not a failure: %v, %v", failed, err)
+	}
+	if len(po.received()) != 0 {
+		t.Errorf("a cancel was sent for an expired emergency")
+	}
+	if len(seen) != 1 {
+		t.Errorf("state = %v, want only the delivery", seen)
 	}
 }

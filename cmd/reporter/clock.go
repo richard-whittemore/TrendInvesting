@@ -192,7 +192,7 @@ func clockStep(path, command, host string, senders []sender, setAside []channelF
 	key := report.ClockDriftKey(host)
 	switch {
 	case h.Last.Passed && deliveredAnywhere(seen, key):
-		failed, resolveErr := resolveAll(senders, key, seen)
+		failed, resolveErr := resolveAll(senders, key, seen, now)
 		// Each channel's record is cleared on its own (ADR 0019, "Alerting"):
 		// a working channel, or one no longer configured, forgets the
 		// incident at once so a new fault pages it again. Two kinds of record
@@ -245,7 +245,7 @@ type resolver interface {
 // can close it. It returns the names of the channels whose resolve failed and
 // the joined error; the caller keeps only those channels' records so the next
 // firing tries again.
-func resolveAll(senders []sender, key string, seen map[string]bool) ([]string, error) {
+func resolveAll(senders []sender, key string, seen map[string]bool, now time.Time) ([]string, error) {
 	var failures []error
 	var names []string
 	for _, s := range senders {
@@ -258,7 +258,7 @@ func resolveAll(senders []sender, key string, seen map[string]bool) ([]string, e
 			failures = append(failures, fmt.Errorf("%s: resolve %s: %w", s.name(), key, err))
 		}
 	}
-	cancelled, err := cancelReceipts(senders, key, seen)
+	cancelled, err := cancelReceipts(senders, key, seen, now)
 	return append(names, cancelled...), errors.Join(append(failures, err)...)
 }
 

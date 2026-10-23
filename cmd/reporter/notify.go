@@ -214,10 +214,28 @@ func pushoverFrom(getenv func(string) string, client *http.Client) (sender, erro
 	if endpoint == "" {
 		endpoint = defaultPushoverURL
 	}
-	if u, err := url.Parse(endpoint); err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return nil, errors.New("reporter: TI_PUSHOVER_URL must be an absolute URL such as https://api.pushover.net/1/messages.json")
+	if !secureEndpoint(endpoint) {
+		return nil, errors.New("reporter: TI_PUSHOVER_URL must be an https URL such as https://api.pushover.net/1/messages.json (http is allowed only for a loopback host)")
 	}
 	return &pushoverSender{url: endpoint, token: token, user: user, client: client}, nil
+}
+
+// secureEndpoint reports whether the address a secret is posted to is https,
+// or http on a loopback host (a stand-in on the same machine), with no user
+// information. The address's text is never in an error.
+func secureEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		ip := net.ParseIP(u.Hostname())
+		return u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback())
+	}
+	return false
 }
 
 // channelKey is the state-file key recording that one channel took one alert.
@@ -274,7 +292,7 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 			failures = append(failures, fmt.Errorf("%s: %w", s.name(), err))
 			continue
 		}
-		keepReceipt(s, a.Key, seen)
+		keepReceipt(s, a.Key, seen, now)
 		seen[key] = true
 		if a.Repeat {
 			sent[key] = now
@@ -636,6 +654,9 @@ func (p *pushoverSender) send(a report.Alert, repeat int) error {
 	return nil
 }
 
+// expiry is how long an emergency lasts: after it Pushover has stopped it.
+func (*pushoverSender) expiry() time.Duration { return pushoverExpire }
+
 // takeReceipt returns the receipt of the emergency the last send opened, and
 // forgets it; empty when that send was not an emergency.
 func (p *pushoverSender) takeReceipt() string {
@@ -679,7 +700,11 @@ func (p *pushoverSender) call(endpoint string, form url.Values) (string, error) 
 		return "", errors.New("build request")
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := p.client.Do(req)
+	// A redirect is never followed: it could carry the form, and the token in
+	// it, to another address. The 3xx answer is then a failure.
+	client := *p.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", transportFault(err)
 	}
