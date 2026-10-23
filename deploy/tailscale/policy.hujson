@@ -1,0 +1,94 @@
+// Example Tailscale access policy for a single-owner tailnet whose one server
+// (the Lightsail machine, "trend-investing-1") runs the Gateway, the engines,
+// the dashboard and ntfy. Paste it into the admin console's Access controls
+// page (docs/manual/server.md, "Closing the Gateway's ports to your other
+// devices"). Syntax: https://tailscale.com/kb/1337/policy-syntax and
+// https://tailscale.com/kb/1193/tailscale-ssh
+//
+// Tailscale enforces these rules before traffic reaches the server, so the
+// Gateway's API ports (4001, 4002) are closed to every tailnet device: only
+// 22, 443 and 2586 are open to the owner's devices, 443 alone to the Mac mini,
+// and nothing is open to anything else. Replacing the default allow-all
+// policy with this one is intended (docs/runbooks/lightsail-deployment.md,
+// provisioning step 12). The server's public SSH port is closed, so Tailscale
+// is the only way in: rescue.hujson beside this file is the policy to paste
+// if SSH to the tagged server stops working.
+{
+	// Only an admin may put a tag on a device. A tagged device loses user
+	// ownership, so the server is not in autogroup:self and the rules that let
+	// the owner's devices reach each other do not cover it; it has its own
+	// rules below. The Mac mini (alert triage) is tagged too, so it is no
+	// longer in autogroup:member and needs its own grant.
+	"tagOwners": {
+		"tag:trend-server":   ["autogroup:admin"],
+		"tag:trend-mac-mini": ["autogroup:admin"],
+	},
+
+	"grants": [
+		// The owner's own devices (the Mac, the phone) reach each other. Until
+		// the server is tagged this also covers the server, on every port.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["autogroup:self"],
+			"ip":  ["*"],
+		},
+
+		// The owner's devices reach the server on SSH (22), the dashboard
+		// that `tailscale serve` publishes over HTTPS (443) and the owner's
+		// ntfy server (2586). No other port, so not 4001 or 4002.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:trend-server"],
+			"ip":  ["tcp:22", "tcp:443", "tcp:2586"],
+		},
+
+		// The Mac mini's alert triage reads the dashboard over HTTPS: 443 only.
+		{
+			"src": ["tag:trend-mac-mini"],
+			"dst": ["tag:trend-server"],
+			"ip":  ["tcp:443"],
+		},
+
+		// The owner's devices reach the tagged Mac mini on every port (screen
+		// sharing, files). A tagged device leaves autogroup:self, so without
+		// this the owner would lose the Mac mini once it is tagged.
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:trend-mac-mini"],
+			"ip":  ["*"],
+		},
+	],
+
+	"ssh": [
+		// Tailscale's default rule, kept: the owner's own devices (and, until
+		// the server is tagged, the server) accept an SSH login from the
+		// owner's other devices, with a periodic re-check.
+		{
+			"action": "check",
+			"src":    ["autogroup:member"],
+			"dst":    ["autogroup:self"],
+			"users":  ["autogroup:nonroot", "root"],
+		},
+
+		// Once tagged, the server is reached with `ssh ubuntu@trend-investing-1`
+		// (it joined with `tailscale up --ssh`). Only as ubuntu, only from the
+		// owner's devices, never from the Mac mini. It also needs the tcp:22
+		// grant above.
+		{
+			"action": "accept",
+			"src":    ["autogroup:member"],
+			"dst":    ["tag:trend-server"],
+			"users":  ["ubuntu"],
+		},
+
+		// The owner's SSH to the tagged Mac mini, with a periodic re-check
+		// (the Mac mini is never an SSH source: no rule grants it SSH to
+		// tag:trend-server).
+		{
+			"action": "check",
+			"src":    ["autogroup:member"],
+			"dst":    ["tag:trend-mac-mini"],
+			"users":  ["autogroup:nonroot"],
+		},
+	],
+}

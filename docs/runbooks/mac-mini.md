@@ -157,6 +157,32 @@ tokens or enter them.
 
    Keep the Mac mini awake (System Settings, Energy: prevent automatic
    sleeping) and on the tailnet.
+
+   **[OWNER] Before tagging, confirm the policy.** Open **Access controls**
+   in the admin console and check that the policy has the grant from
+   `autogroup:member` to `tag:trend-mac-mini` (all ports) and the SSH rule for
+   `tag:trend-mac-mini` (check, your devices as a non-root user). The policy in
+   `deploy/tailscale/policy.hujson` (`docs/manual/server.md`, "Closing the
+   Gateway's ports to your other devices") has both. If yours lacks either (a
+   hand-merged policy can), paste that file in, or add both lines to your own
+   policy, before you tag the Mac mini. The SSH rule matters only if the Mac
+   mini runs Tailscale SSH (the open-source `tailscaled` with `--ssh`). With the
+   usual macOS Tailscale app, you reach the Mac mini with macOS's own Remote
+   Login (port 22) over the grant, not through Tailscale SSH.
+
+   **[OWNER] Tag it on the tailnet.** The job reads the server's dashboard over
+   the tailnet. The access policy admits your devices and the tag
+   `tag:trend-mac-mini` to it, and the tagged Mac mini on 443 only. In the
+   Tailscale admin console, open **Machines**, find the Mac mini, choose
+   **Edit ACL tags** and add `tag:trend-mac-mini`. A tagged Mac mini stops
+   belonging to you, so it is no longer reachable from your other devices
+   unless the policy grants it, which the policy you confirmed above does.
+
+   **[OWNER] Disable its key expiry.** Still in **Machines**, choose the Mac
+   mini's **...** menu and **Disable key expiry**: tagging in the console does
+   not change a key's expiry, and when an expiring key lapses the Mac mini
+   leaves the tailnet and the job stops reading the dashboard. Never sign the
+   Mac mini in again as a user afterwards: that drops the tag.
 2. **[OWNER] The gate's user, group and sudo rule.** The gate runs the code
    a session wrote (`go test`, `make check`) as `ti-triage-gate`, a user
    that cannot log in, has a primary group of its own (not `staff`), and
