@@ -40,7 +40,7 @@ func startEngine(t *testing.T) (socket, log string, stop func()) {
 	dir := t.TempDir()
 	socket, log = filepath.Join(socketDir, "engine.sock"), filepath.Join(dir, "run.log")
 	engine := exec.Command(bin, "-mode", "dry-run", "-config", demoConfig, "-socket", socket,
-		"-log", log, "-out", filepath.Join(dir, "run.journal"), "-as-of", "2024-01-02T21:00:00Z")
+		"-log", log, "-out", filepath.Join(dir, "run.journal"), "-as-of", "2025-01-02T21:00:00Z")
 	stdout, err := engine.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

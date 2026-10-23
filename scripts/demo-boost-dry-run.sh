@@ -13,7 +13,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo"
 config=deploy/etc/engines/boost.config
-as_of=2024-01-02T21:00:00Z
+as_of=2025-01-02T21:00:00Z
 
 make --no-print-directory engine
 go build -o bin/boost-demo ./cmd/boost-demo
