@@ -5,21 +5,23 @@ Usage: python3 deploy/ibapi-probe.py HOST PORT [--timeout SECONDS]
 
 Sends only the IB API opening handshake ("API\\0" and a length-prefixed
 version range, v100..187), reads at most the first reply, and closes. It
-never sends a client ID, a request or an order. SECONDS (default 5) bounds
-the whole probe, name lookup included.
+never sends a client ID, a request or an order. SECONDS (default 5, at most
+300) bounds the whole probe, name lookup included.
 
-  EXPOSED       exit 1  the server sent any reply bytes to the handshake (they
-                        are not checked to be an API server version)
-  REJECTED      exit 0  the connection was accepted, then closed or reset
-                        without any reply byte
-  INCONCLUSIVE  exit 2  proves nothing: nothing is listening (refused), no
-                        answer in time (a silent but connected Gateway too),
-                        or the host could not be reached
+  EXPOSED             exit 1  the server sent any reply bytes to the handshake
+                              (not checked to be an API server version)
+  NOT-SERVED <why>    exit 0  no API was served to this client. <why> is
+                              refused (nothing accepted the connection),
+                              closed (accepted, then closed or reset with no
+                              reply) or silent (no answer before the timeout)
+  ERROR <why>         exit 2  proves nothing: lookup (the name did not
+                              resolve in time), no usable address (no socket
+                              could be made or tried), or a usage error
 
-Only REJECTED is a pass (rules/ADR 0026: the Gateway serves programs on its
-own server only). A bare TCP connect proves nothing, because the IB API
-waits for the client to speak first, and a refused connection is the same as
-a Gateway that is not up yet, so it is not a pass. A bad argument exits 2.
+Only EXPOSED fails (rules/ADR 0026: the Gateway serves programs on its own
+server only). A pass from another machine means something only next to a
+control: the same probe run on the server itself, against 127.0.0.1, must
+print EXPOSED, which shows the Gateway is up and the probe works.
 """
 import math
 import socket
@@ -29,7 +31,8 @@ import threading
 import time
 
 VERSIONS = b"v100..187"
-EXIT = {"REJECTED": 0, "EXPOSED": 1, "INCONCLUSIVE": 2}
+MAX_TIMEOUT = 300.0  # keeps the value inside what thread and socket timeouts accept
+EXIT = {"EXPOSED": 1, "NOT-SERVED": 0, "ERROR": 2}
 
 
 def resolve(host, port, timeout, resolver):
@@ -39,7 +42,7 @@ def resolve(host, port, timeout, resolver):
     def work():
         try:
             box.append(resolver(host, port, type=socket.SOCK_STREAM))
-        except Exception:  # any lookup failure is "could not be reached"
+        except Exception:  # any lookup failure is an ERROR
             box.append(None)
 
     t = threading.Thread(target=work, daemon=True)
@@ -52,20 +55,27 @@ def probe(host, port, timeout, resolver=socket.getaddrinfo):
     deadline = time.monotonic() + timeout
 
     def left():
-        return max(deadline - time.monotonic(), 0.001)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("the probe's time is used up")
+        return remaining
 
     infos = resolve(host, port, timeout, resolver)
     if not infos:
-        return "INCONCLUSIVE"
+        return "ERROR lookup"
+    why = None  # the first reason an address served nothing
     for family, kind, proto, _, addr in infos:
-        s = socket.socket(family, kind, proto)
+        if deadline <= time.monotonic():
+            break
+        s = None
         try:
+            s = socket.socket(family, kind, proto)
             s.settimeout(left())
             s.connect(addr)
-        except OSError:
-            # Refused, unreachable or timed out: nothing answered, which is
-            # not the same as the Gateway refusing this client.
-            s.close()
+        except OSError as e:  # no such socket here, refused, unreachable, timed out
+            if s is not None:
+                s.close()
+                why = why or ("refused" if isinstance(e, ConnectionRefusedError) else "silent")
             continue
         try:
             s.settimeout(left())
@@ -73,18 +83,18 @@ def probe(host, port, timeout, resolver=socket.getaddrinfo):
             s.settimeout(left())
             data = s.recv(64)
         except (ConnectionResetError, BrokenPipeError):
-            return "REJECTED"
+            return "NOT-SERVED closed"
         except OSError:  # includes a timeout: connected but silent
-            return "INCONCLUSIVE"
+            return "NOT-SERVED silent"
         finally:
             s.close()
-        return "EXPOSED" if data else "REJECTED"
-    return "INCONCLUSIVE"
+        return "EXPOSED" if data else "NOT-SERVED closed"
+    return f"NOT-SERVED {why}" if why else "ERROR no usable address"
 
 
 def usage():
     print("usage: ibapi-probe.py HOST PORT [--timeout SECONDS]  "
-          "(PORT 1-65535, SECONDS finite and above 0)", file=sys.stderr)
+          "(PORT 1-65535, SECONDS above 0 and at most 300)", file=sys.stderr)
     return 2
 
 
@@ -98,7 +108,7 @@ def main(argv):
         except (IndexError, ValueError):
             return usage()
         del args[i:i + 2]
-    if not (math.isfinite(timeout) and timeout > 0):
+    if not (math.isfinite(timeout) and 0 < timeout <= MAX_TIMEOUT):
         return usage()
     try:
         if len(args) != 2:
@@ -110,7 +120,7 @@ def main(argv):
         return usage()
     result = probe(host, port, timeout)
     print(f"{result}: {host}:{port}")
-    return EXIT[result]
+    return EXIT[result.split()[0]]
 
 
 if __name__ == "__main__":

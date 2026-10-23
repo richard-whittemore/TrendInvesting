@@ -152,16 +152,8 @@ check the login (A3), then Gateway's API settings above (Enable ActiveX and
 Socket Clients, port 4002), and run the check again. If the address is
 `0.0.0.0` or `*` (every interface), "Allow connections from localhost only"
 is off: turn it on and check again before going on.
-Then, from the Mac, check that the tailnet cannot use the API:
-`python3 deploy/ibapi-probe.py trend-investing-1 4002` (it sends only the API's opening
-handshake and closes). Only `REJECTED` (exit 0) is right: the Gateway accepts the connection and
-then closes it without a reply, because the rendered IBC settings reject incoming connections from any
-address but the server's own. `EXPOSED` (exit 1) means the Gateway sent a reply to a tailnet
-client, so the tailnet may be able to use the API: stop and report it.
-`INCONCLUSIVE` (exit 2) proves nothing: nothing listening (check the Gateway
-is logged in and `ss -ltn` shows 4002), an unreachable host, or a connected
-but silent Gateway (wait about 30 seconds and run it again; if it stays
-silent, report it). The
+Then check that the tailnet cannot use the API: run a pair of probes a few minutes apart. **Step A, on the server (the control):** `python3 deploy/ibapi-probe.py 127.0.0.1 4002` must print `EXPOSED`; that shows the Gateway is up and the probe works. Anything else: stop, the Gateway is not ready; rerun after the Gateway log shows `Login has completed`. **Step B, from the Mac, within a few minutes of A:** `python3 deploy/ibapi-probe.py trend-investing-1 4002` passes on anything except `EXPOSED`: `NOT-SERVED refused`, `NOT-SERVED closed` or `NOT-SERVED silent` (exit 0) all mean no API was served to the tailnet. `EXPOSED` (exit 1) fails: stop and report it. `ERROR` (exit 2: a name that did not resolve, no usable address, or a usage error) is not a pass: fix it and rerun. The probe sends only the API's opening handshake and closes. With "Allow connections from localhost only" on, expect `NOT-SERVED refused` in step B: the server's own kernel refuses a connection that arrives on the tailnet address, and step A is what shows that refusal is not just a Gateway that is down. (If A is not `EXPOSED`, check the login (A3) and `ss -ltn` first.)
+The
 firewall's deny of 4001 and 4002 is only a second layer, since Tailscale's own
 rules accept tailnet traffic first; IBC's `BindAddress` is the command
 server's address and is not used.
