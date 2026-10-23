@@ -258,7 +258,8 @@ func resolveAll(senders []sender, key string, seen map[string]bool) ([]string, e
 			failures = append(failures, fmt.Errorf("%s: resolve %s: %w", s.name(), key, err))
 		}
 	}
-	return names, errors.Join(failures...)
+	cancelled, err := cancelReceipts(senders, key, seen)
+	return append(names, cancelled...), errors.Join(append(failures, err)...)
 }
 
 // hostName names this server in the clock alert; the clock is the host's.

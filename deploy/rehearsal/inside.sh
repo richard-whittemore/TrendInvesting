@@ -295,7 +295,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"status":1,"request":"rehearsal"}')
+        self.wfile.write(b'{"status":1,"request":"rehearsal","receipt":"rehearsalreceipt"}')
 
     def log_message(self, *args):
         pass
@@ -428,9 +428,10 @@ age_check
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $stand_line >/dev/null || fail "the reporter with a passing stand-in clock check failed"
 test "$(clock_pages)" = 1 || fail "a passing clock check paged again ($(clock_pages) pages)"
+grep -qx '/1/receipts/rehearsalreceipt/cancel.json' "$rep/posts" || fail "a passing clock check did not cancel the Pushover emergency"
 rm -rf "$stand"
 kill "$fake"
-pass "the reporter runs the installed clock check as ti-trader, pages a failing stand-in once, on the second failure, and says nothing more on a pass"
+pass "the reporter runs the installed clock check as ti-trader, pages a failing stand-in once, on the second failure, and cancels the page on a pass"
 
 # Unit files. The engine's binary is installed by hand on the server; the
 # rehearsal installs the stamped engine deploy/rehearse.sh built (the

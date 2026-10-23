@@ -230,3 +230,206 @@ func TestPushoverNeverTakesTheDailySummary(t *testing.T) {
 		}
 	}
 }
+
+func TestALongBodyIsShortenedAndTheAlertKeyAndAccountAreAlwaysKept(t *testing.T) {
+	po := &pushover{status: http.StatusOK, body: pushoverOK}
+	server := httptest.NewServer(http.HandlerFunc(po.handler))
+	defer server.Close()
+	ps := &pushoverSender{url: server.URL, token: "t", user: "u", client: server.Client()}
+	a := report.Alert{Key: "refusal:short-position", AccountID: "joint", Severity: report.Urgent, Title: "t", Body: strings.Repeat("é", 5000)}
+	if err := ps.send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	msg := po.received()[0].Get("message")
+	if n := utf8.RuneCountInString(msg); n > 1024 || !utf8.ValidString(msg) {
+		t.Errorf("message is %d characters", n)
+	}
+	if !strings.HasSuffix(msg, "\n\nAlert: refusal:short-position (joint)") {
+		t.Errorf("the message must end with the alert key and account, got ...%q", msg[len(msg)-60:])
+	}
+	if !strings.Contains(msg, "…") {
+		t.Error("the shortened body should end in an ellipsis")
+	}
+}
+
+func TestAnAbsurdlyLongAlertKeyStillLeavesRoomForTheBody(t *testing.T) {
+	a := report.Alert{Key: strings.Repeat("k", 5000), AccountID: strings.Repeat("a", 5000), Body: "the body"}
+	msg := pushoverMessage(a)
+	if n := utf8.RuneCountInString(msg); n > 1024 || !strings.HasPrefix(msg, "the body") {
+		t.Errorf("message = %d characters, starting %q", n, msg[:10])
+	}
+}
+
+func TestCutRunesGuardsANonPositiveLimit(t *testing.T) {
+	for _, limit := range []int{0, -3} {
+		if got := cutRunes("abc", limit); got != "" {
+			t.Errorf("cutRunes(.., %d) = %q, want empty", limit, got)
+		}
+	}
+	if got := cutRunes("abcdef", 3); got != "ab…" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestATruncatedOrOversizedAnswerIsNotADelivery(t *testing.T) {
+	for name, handler := range map[string]http.HandlerFunc{
+		"cut off mid-body": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "200")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":1,`))
+			w.(http.Flusher).Flush()
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			_ = conn.Close()
+		},
+		"complete object but the body is cut short": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "400")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":1}`))
+			w.(http.Flusher).Flush()
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			_ = conn.Close()
+		},
+		"incomplete object": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"status":1`))
+		},
+		"oversized": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"status":1,"request":"` + strings.Repeat("x", 1<<17) + `"}`))
+		},
+		"trailing data": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"status":1} {"status":0}`))
+		},
+		"not an object": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`1`))
+		},
+	} {
+		server := httptest.NewServer(handler)
+		ps := &pushoverSender{url: server.URL, token: "t", user: "u", client: server.Client()}
+		err := ps.send(report.Alert{Key: "k", Severity: report.Urgent, Title: "t", Body: "b"}, 0)
+		server.Close()
+		if err == nil {
+			t.Errorf("%s: counted as delivered", name)
+		}
+	}
+}
+
+// leaky is a transport whose errors and status text carry the credentials.
+type leaky struct {
+	fail bool
+}
+
+func (l leaky) RoundTrip(r *http.Request) (*http.Response, error) {
+	if l.fail {
+		return nil, &url.Error{Op: "Post", URL: r.URL.String() + "?token=app-token-secret-3", Err: &leakyErr{}}
+	}
+	return &http.Response{StatusCode: http.StatusBadGateway, Status: "502 app-token-secret-3 user-key-secret-8", Body: http.NoBody, Header: http.Header{}, Request: r}, nil
+}
+
+type leakyErr struct{}
+
+func (*leakyErr) Error() string { return "dial tcp: token=app-token-secret-3 user=user-key-secret-8" }
+
+func TestErrorsNeverCarryTheCredentials(t *testing.T) {
+	for name, l := range map[string]leaky{"transport": {fail: true}, "status": {}} {
+		ps := &pushoverSender{url: "https://api.pushover.net/1/messages.json", token: "app-token-secret-3", user: "user-key-secret-8", client: &http.Client{Transport: l}}
+		for op, err := range map[string]error{
+			"send":   ps.send(report.Alert{Key: "k", Severity: report.Urgent, Title: "t", Body: "b"}, 0),
+			"cancel": ps.cancel("rcpt1"),
+		} {
+			if err == nil || strings.Contains(err.Error(), "secret-") || strings.Contains(err.Error(), "pushover.net") {
+				t.Errorf("%s %s: error = %v", name, op, err)
+			}
+		}
+	}
+	err := (&pushoverSender{url: "https://x.test/1/messages.json", client: &http.Client{Transport: leaky{}}}).send(report.Alert{Key: "k", Title: "t", Body: "b"}, 0)
+	if err == nil || !strings.Contains(err.Error(), "502") {
+		t.Errorf("a status error should carry the numeric code, got %v", err)
+	}
+}
+
+// emergency sends a page through a fake whose answer carries a receipt and
+// returns the sender, the state and the fake.
+func emergency(t *testing.T) (ps *pushoverSender, seen map[string]bool, po *pushover, closeServer func()) {
+	t.Helper()
+	po = &pushover{status: http.StatusOK, body: `{"status":1,"request":"r","receipt":"rcpt1"}`}
+	server := httptest.NewServer(http.HandlerFunc(po.handler))
+	ps = &pushoverSender{url: server.URL + "/1/messages.json", token: "app-token-secret-3", user: "user-key-secret-8", client: server.Client()}
+	seen = map[string]bool{}
+	sent, repeats := map[string]time.Time{}, map[string]int{}
+	a := report.Alert{Key: "clock-drift:host", Severity: report.Urgent, Title: "t", Body: "b"}
+	if err := deliver([]sender{ps}, a, seen, sent, repeats, t0, time.Hour, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	return ps, seen, po, server.Close
+}
+
+func TestResolvingAnIncidentCancelsItsPushoverEmergency(t *testing.T) {
+	ps, seen, po, closeServer := emergency(t)
+	defer closeServer()
+	if len(seen) != 2 {
+		t.Fatalf("the state holds %v, want the delivery and the receipt", seen)
+	}
+	failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen)
+	if err != nil || len(failed) != 0 {
+		t.Fatalf("resolve = %v, %v", failed, err)
+	}
+	if got := po.path; len(got) != 2 || !strings.HasPrefix(got[1], "/1/receipts/rcpt1/cancel.json ") {
+		t.Fatalf("requests = %v, want the message then the receipt's cancel", got)
+	}
+	if form := po.received()[1]; form.Get("token") != "app-token-secret-3" || form.Has("user") {
+		t.Errorf("cancel form = %v, want the app token alone", form)
+	}
+	for k := range seen {
+		if strings.Contains(k, "rcpt1") {
+			t.Errorf("a cancelled receipt is still recorded: %q", k)
+		}
+	}
+}
+
+func TestACancelThatFailsKeepsTheReceiptAndIsTriedAgain(t *testing.T) {
+	ps, seen, po, closeServer := emergency(t)
+	defer closeServer()
+	po.answer(http.StatusInternalServerError, `{"status":0}`)
+	failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen)
+	if err == nil || strings.Contains(err.Error(), "rcpt1") || len(failed) != 1 {
+		t.Fatalf("resolve = %v, %v: want one failure naming no receipt", failed, err)
+	}
+	keep := map[string]bool{}
+	for _, n := range failed {
+		keep[n] = true
+	}
+	forgetAlert("clock-drift:host", keep, seen, map[string]time.Time{}, map[string]int{})
+	if !deliveredAnywhere(seen, "clock-drift:host") {
+		t.Fatal("the receipt was forgotten with the failed cancel, so it is never retried")
+	}
+	po.answer(http.StatusOK, `{"status":1}`)
+	if failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen); err != nil || len(failed) != 0 || len(seen) != 0 {
+		t.Fatalf("retry = %v, %v, state %v", failed, err, seen)
+	}
+}
+
+func TestAReceiptPushoverNoLongerKnowsIsNothingLeftToCancel(t *testing.T) {
+	ps, seen, po, closeServer := emergency(t)
+	defer closeServer()
+	po.answer(http.StatusBadRequest, `{"status":0,"errors":["receipt not found"]}`)
+	if failed, err := resolveAll([]sender{ps}, "clock-drift:host", seen); err != nil || len(failed) != 0 {
+		t.Fatalf("resolve = %v, %v", failed, err)
+	}
+	if deliveredAnywhere(map[string]bool{}, "") || len(seen) != 1 {
+		t.Errorf("state = %v, want only the delivery", seen)
+	}
+}
+
+func TestAnAlertThatIsNotAnEmergencyRecordsNoReceipt(t *testing.T) {
+	po := &pushover{status: http.StatusOK, body: pushoverOK}
+	server := httptest.NewServer(http.HandlerFunc(po.handler))
+	defer server.Close()
+	ps := &pushoverSender{url: server.URL, token: "t", user: "u", client: server.Client()}
+	seen := map[string]bool{}
+	a := report.Alert{Key: "k", Severity: report.Routine, Title: "t", Body: "b"}
+	if err := deliver([]sender{ps}, a, seen, map[string]time.Time{}, map[string]int{}, t0, time.Hour, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Errorf("state = %v", seen)
+	}
+}

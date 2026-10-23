@@ -127,10 +127,12 @@ What each program actually reads today:
   URL, which `provision.sh ntfy` prints; empty means the public ntfy.sh relay,
   which never gets the daily summary), `TI_PUSHOVER_APP_TOKEN` and
   `TI_PUSHOVER_USER_KEY` from that file
-  (`-secrets-file`), through its unit's credential. It refuses to run, and
-  its unit fails, while the topic, the token or the user key is empty: fill them in
-  with `sudo ti-secrets edit secrets.env`; the next firing uses
-  them. It also reads `TI_HEARTBEAT_URL`, the address of your check at the
+  (`-secrets-file`), through its unit's credential. While one of them is empty the
+  reporter sets that channel aside (ntfy for the topic, Pushover for the token
+  or the user key) and says so in its output; the other channels still
+  deliver, including the GitHub issues, and its unit exits non-zero, so it
+  shows as failed. Fill them in with `sudo ti-secrets edit secrets.env`; the
+  next firing uses them. It also reads `TI_HEARTBEAT_URL`, the address of your check at the
   outside heartbeat service; that one is optional for the run, but without
   it nothing outside the server notices the server dying
   ("The outside heartbeat", below).
@@ -375,7 +377,8 @@ and the rules for repeats, are in [alerts and dashboard](alerts-and-dashboard.md
 5. Put both on the server: `sudo ti-secrets edit secrets.env`, as the lines
    `TI_PUSHOVER_APP_TOKEN=<the token>` and `TI_PUSHOVER_USER_KEY=<the key>`.
    They are secrets: they are never printed or logged. The next firing uses them;
-   until both are filled the reporter refuses to run and its unit fails.
+   until both are filled the reporter sets the Pushover channel aside and says
+   so, ntfy and the GitHub issues still deliver, and its unit exits non-zero.
 6. Test a page. This sends one emergency message that rings for a minute,
    reading the two values from the unlocked file without printing them:
 

@@ -311,7 +311,9 @@ func remindRun(u *unitState, unit, episode, run string, senders []sender, at tim
 					u.repeats[remindedKey(s.name(), key)] = ordinal
 				}
 			} else {
-				err = s.send(a, 0)
+				if err = s.send(a, 0); err == nil {
+					keepReceipt(s, a.Key, u.seen)
+				}
 			}
 			if err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", s.name(), err))

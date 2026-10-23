@@ -388,22 +388,34 @@ pager", has the steps. The reporter posts a form to
 `https://api.pushover.net/1/messages.json` (`TI_PUSHOVER_URL` names another
 endpoint, which must be an absolute URL) with the token, the user key, the
 alert's title (at most 250 characters), a message and a priority. The message
-is the alert's text followed by its key and account, cut with an ellipsis to
-Pushover's 1024 characters: one alert is always one message, so a long alert
-never opens a second emergency. A page carries priority 2 with `retry` 60
+is the alert's text followed by its key and account, within Pushover's 1024
+characters: when it is too long only the text is cut, with an ellipsis, and the
+key and account that end the message are always kept. One alert is always one
+message, so a long alert never opens a second emergency. A page carries priority 2 with `retry` 60
 (seconds between the phone's repeats; Pushover's minimum is 30) and `expire`
 1800 (when it stops; Pushover's maximum is 10800); anything else is priority 1.
 It carries what the PagerDuty payload carries and nothing more: no account
-number and no secret. The reporter reads Pushover's answer back: only a 2xx
-answer with `"status":1` is a delivery. Any other answer, or none, is a failure
-that is retried at the next firing, and the error says only the HTTP status,
-never the token or the user key. Pushover has no de-duplication key, so the
+number and no secret. The reporter reads Pushover's answer back, in full
+and within a size limit: only a 2xx answer whose whole body is one JSON object
+with `"status":1` is a delivery. Any other answer, a cut-off or oversized one,
+or none, is a failure that is retried at the next firing, and the error is a
+fixed message with the HTTP status code, or the kind of network fault (timeout,
+DNS, refused connection, TLS), never the token, the user key or the address. Pushover has no de-duplication key, so the
 rule against a second emergency is the reporter's own: an alert Pushover
 accepted is never sent again except by the repeat rule above, and a message
 Pushover did not accept opens nothing. The one exception is an answer lost
 after Pushover accepted the message (the connection dropped, or a run stopped
 between the send and the save): the next firing then sends it once more.
-Pushover has nothing to resolve, so a page just expires on your phone.
+An emergency's answer carries a receipt, which the reporter keeps in its state
+file (never printed or logged). Where PagerDuty would resolve an incident (the
+clock check passing again, a failed unit seen well, a cleared notice), the
+reporter cancels that alert's emergencies through Pushover's receipt API, so
+the phone stops repeating a page whose fault has cleared. A cancel that fails
+is kept and tried again at the next firing; a receipt Pushover no longer knows
+(HTTP 400) has nothing left to cancel. The journal's acknowledgement does not
+cancel a page, as it does not resolve a PagerDuty incident: it stops the
+reporter's repeats, and the page already sent expires on its own or when you
+acknowledge it in the app.
 
 PagerDuty details (the optional channel): you sign up for PagerDuty and create a service with an
 Events API v2 integration, which gives the routing key. The reporter triggers
