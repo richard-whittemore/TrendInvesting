@@ -24,7 +24,7 @@ set +x
 
 fail() {
   echo "REHEARSAL FAIL: $*" >&2
-  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' --no-pager -o short-monotonic >&2 || true
+  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u ti-adapter-boost -u ti-data -u ti-warmup -u ti-warmup-drill -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
   exit 1
 }
 pass() { echo "REHEARSAL ok: $*"; }
@@ -356,4 +356,8 @@ grep -q "waiting for the account's first run" <<<"$data_said" || fail "the data 
 ! grep -q 'refused\|missing or empty: start' <<<"$data_said" || fail "the data job refused with no run.env: $data_said"
 test -z "$(on_disk "$marker")" || fail "the secret is on disk at the end: $(on_disk "$marker")"
 pass "after the unlock the hook read its channels from the credential systemd handed it, the reporter's unit and the data job, no longer refused and with no run started, wait for the first run and succeed, and the secret is nowhere on disk"
+
+# --- The owner's first dry-run day, step by step
+# (docs/runbooks/first-dry-run-day.md).
+. /deploy/rehearsal/first-day.sh
 echo "REHEARSAL (systemd) complete"

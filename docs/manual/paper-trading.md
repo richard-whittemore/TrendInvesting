@@ -108,6 +108,13 @@ restarted by systemd on its own, and every start is yours. Stop it with
 `journalctl -u ti-adapter-boost`. Account numbers are never written there
 (a stop message shows `<account>` instead).
 
+**A dry run the adapter feeds needs the first-run approval too.** The
+engine starts a dry-run first run without one, but the adapter's first
+reading of the account has nothing to be compared with, and the engine halts
+on it ("reconciliation unverifiable"); the account named in the engine's
+configuration must also be the one the adapter reads. The ordered steps are in
+[the first dry-run day runbook](../runbooks/first-dry-run-day.md).
+
 **Never start a run again without an approval.** In paper the engine
 itself refuses: a start over an earlier run's log without `-approval` stops
 with "already holds an earlier run's durable log ... decides nothing until

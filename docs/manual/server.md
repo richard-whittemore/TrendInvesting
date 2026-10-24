@@ -711,6 +711,7 @@ Paste `policy.hujson` again once you have found the cause.
   ([paper trading](paper-trading.md), "Starting the adapter").
 - **Once per Boost run:** the data job's warm-up, after the engine has
   started once ([market data](market-data.md), "The one-time warm-up").
+- **The first dry-run day, in order:** [the first dry-run day runbook](../runbooks/first-dry-run-day.md).
 - **After every boot:** `sudo ti-unlock`, then approve the Gateway's phone
   prompt ("Unlocking the secrets after a boot").
 - **Every Sunday:** approve the Gateway's phone prompt.
