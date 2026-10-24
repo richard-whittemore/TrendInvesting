@@ -450,14 +450,16 @@ empty_line=${empty_line//"$rep/reports/boost.reporter.json"/"$rep/reports/empty.
 chown -R ti-trader:ti-trader "$rep/creds-empty" "$rep/reports/empty.reporter.json"
 chmod 0400 "$rep/creds-empty/secrets"
 github_writes=$(wc -l <"$rep/posts.github")
-sent=$(alerts_sent)
+ntfy_posts=$(grep -c '^/rehearsal$' "$rep/posts" || true)
+pushover_posts=$(grep -c '^/1/messages.json$' "$rep/posts" || true)
 pings=$(grep -c '^/hb$' "$rep/posts")
 # shellcheck disable=SC2086
 if empty_out=$(sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $empty_line 2>&1); then
   fail "the reporter with an empty GitHub token exited zero"
 fi
 case $empty_out in *"github-issues channel needs TI_GITHUB_ISSUES_TOKEN"*) ;; *) fail "the reporter with an empty GitHub token did not name the channel and the missing value" ;; esac
-test "$(alerts_sent)" -gt "$sent" || fail "the reporter with an empty GitHub token delivered to no other channel"
+test "$(grep -c '^/rehearsal$' "$rep/posts" || true)" -gt "$ntfy_posts" || fail "the reporter with an empty GitHub token delivered nothing to ntfy"
+test "$(grep -c '^/1/messages.json$' "$rep/posts" || true)" -gt "$pushover_posts" || fail "the reporter with an empty GitHub token delivered nothing to Pushover"
 test "$(wc -l <"$rep/posts.github")" = "$github_writes" || fail "the reporter with an empty GitHub token wrote to the alerts repository"
 test "$(grep -c '^/hb$' "$rep/posts")" = "$pings" || fail "the reporter with an empty GitHub token pinged the heartbeat"
 pass "with the GitHub token empty the reporter sets only that channel aside by name, still delivers to ntfy and Pushover, exits non-zero and pings no heartbeat"

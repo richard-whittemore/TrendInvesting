@@ -607,7 +607,8 @@ outside heartbeat ping, so Healthchecks pages too if it goes on (rows below).
 Expect both until GitHub recovers, or stop using the channel for now with a
 systemd drop-in (the unit files themselves are replaced by every
 `provision.sh services`, so never edit them): run
-`sudo systemctl edit ti-reporter@boost`, put this in the editor and save:
+`sudo systemctl edit --drop-in=no-github-issues ti-reporter@boost`, put this in
+the editor and save:
 
 ```
 [Service]
@@ -615,8 +616,8 @@ ExecStart=
 ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -self-unit ti-reporter@%i.service
 ```
 
-then run `sudo systemctl edit ti-unit-failed@.service` and put this in the
-editor for the failed-unit hook:
+then run `sudo systemctl edit --drop-in=no-github-issues ti-unit-failed@.service`
+and put this in the editor for the failed-unit hook:
 
 ```
 [Service]
@@ -625,9 +626,22 @@ ExecStart=/opt/trend-investing/bin/ti-reporter notify-unit-failed -state /var/li
 ```
 
 (each copies the installed unit's `ExecStart=` line with `github-issues`
-taken out of `-channel`; compare with `systemctl cat ti-reporter@boost` first,
-because a later unit file may differ). To go back, `sudo systemctl revert
-ti-reporter@boost ti-unit-failed@.service`. First read the run's error: a failed firing names `github-issues:` and why. The
+taken out of `-channel`; compare with `systemctl cat ti-reporter@boost` and
+`systemctl cat ti-unit-failed@.service` first, because a later unit file may
+differ). **Warning:** while these drop-ins exist they keep that exact command
+over the unit file that every later `provision.sh services` installs, so a
+newer release's changed command line is silently ignored. Remove them as soon
+as GitHub works again, and before or right after any upgrade. To go back,
+remove exactly these two files and nothing else (your other overrides stay;
+`systemctl revert` would remove all of a unit's drop-ins):
+
+```
+sudo rm /etc/systemd/system/ti-reporter@boost.service.d/no-github-issues.conf
+sudo rm /etc/systemd/system/ti-unit-failed@.service.d/no-github-issues.conf
+sudo systemctl daemon-reload
+```
+
+`systemctl cat` shows the override while it is in place. First read the run's error: a failed firing names `github-issues:` and why. The
 usual causes are in the table "What can go wrong", below: the token expired or
 was revoked ("GitHub answered 401 Unauthorized"), the token cannot write the
 repository's issues ("403 Forbidden" or "404 Not Found"), GitHub was
@@ -1023,22 +1037,10 @@ and writes only in `/var/lib/trend-investing/reports`. Check a run with
 Only the Boost account's timer is enabled: the IRA engines have no
 configuration yet.
 
-On the Mac, from the repository root, against a copy of a log:
-
-```
-TI_NTFY_TOPIC=... TI_PUSHOVER_APP_TOKEN=... TI_PUSHOVER_USER_KEY=... \
-  go run ./cmd/reporter -journal boost.log -state boost.reporter.json \
-  -secrets-file ./alerts.env -channel ntfy,pushover,github-issues -summary
-```
-
-`./alerts.env` is a file you make once outside the repository (or in a folder
-Git ignores), readable by you alone (`chmod 600 alerts.env`), with the two
-GitHub lines of "Alerts as GitHub Issues", below:
-`TI_GITHUB_ISSUES_TOKEN=` (the token) and `TI_GITHUB_ISSUES_REPO=`
-(`owner/name` of the private alerts repository). Type them into the file with
-an editor, never on the command line, where the shell's history would keep
-them. Without both lines `github-issues` is set aside and the run fails; to
-try a copy of a log without GitHub, leave `github-issues` out of `-channel`.
+The `github-issues` channel runs on the server, as part of the unit above;
+its two values, `TI_GITHUB_ISSUES_TOKEN` and `TI_GITHUB_ISSUES_REPO`, live in
+the encrypted `secrets.env` (see "Alerts as GitHub Issues", above). Without
+both, `github-issues` is set aside and the run fails.
 
 Flags: `-journal` and `-state` are required; `-secrets-file` (a
 `KEY=VALUE` file read for any secret the environment leaves empty); `-channel` (default `stdout`,
