@@ -344,8 +344,8 @@ runuser -u ti-trader -- operator approve -log "$engines/run-2026-10-24.log" -acc
 printf 'TI_RUN=run-2026-10-25\nTI_AS_OF=2026-10-26T19:58:00Z\nTI_RESTART_ARGS=-approval %s/approval-run-2026-10-25.json\n' "$engines" >"$engines/run.env"
 chown ti-trader:ti-trader "$engines/run.env"
 systemctl start ti-engine@boost.service
-for _ in $(seq 20); do systemctl is-active --quiet ti-engine@boost && break; sleep 1; done
-systemctl is-active --quiet ti-engine@boost || fail "the drill's engine did not start: $(journalctl -u ti-engine@boost -n 5 --no-pager -o cat)"
+for _ in $(seq 30); do systemctl is-active --quiet ti-engine@boost && test -s "$engines/run-2026-10-25.log" && break; sleep 1; done
+test -s "$engines/run-2026-10-25.log" || fail "the drill's engine did not start: $(journalctl -u ti-engine@boost -n 5 --no-pager -o cat)"
 systemd-run --quiet --wait --collect --unit=ti-warmup-drill -p User=ti-trader -p Group=ti-trader \
   -p LoadCredential=secrets:/run/trend-investing/secrets/secrets.env \
   /opt/trend-investing/bin/ti-data --data /var/lib/trend-investing/data --config /etc/trend-investing/engines/boost.config \
