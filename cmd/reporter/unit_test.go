@@ -185,10 +185,17 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		"-account":      "boost",
 		"-clock-state":  reports + "/host-clock.json",
 		"-cash-ledger":  "/var/lib/trend-investing/flex/boost/cash-movements.jsonl",
+		"-run-env":      "/var/lib/trend-investing/engines/boost/run.env",
 	} {
 		if i := indexOf(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != value {
 			t.Errorf("ExecStart %v does not pass %s %s", args, flag, value)
 		}
+	}
+	// The server's run.env is not on this machine: the same file in this
+	// test's state directory, which a run has started.
+	if i := indexOf(args, "-run-env"); i >= 0 && i+1 < len(args) {
+		args[i+1] = filepath.Join(state, "run.env")
+		writeFileT(t, args[i+1], "TI_RUN="+env["TI_RUN"]+"\n")
 	}
 	if i := indexOf(args, "-clock-check"); i < 0 || i+1 >= len(args) || args[i+1] != "/usr/local/libexec/trend-investing/clock-check.sh" {
 		t.Errorf("ExecStart %v does not run the installed clock check", args)
@@ -461,5 +468,17 @@ func TestTheProvisionerStartsWhatItEnablesAndStopsWhatItRemoves(t *testing.T) {
 	remove := at(`rm -f "$unit_dir/ti-reporter.service"`)
 	if active >= 0 && disable >= 0 && remove >= 0 && (remove < active || remove < disable) {
 		t.Error("the old single reporter's files are removed before it is stopped and disabled")
+	}
+}
+
+// TestTheServiceFileHasNoStartCheckThatFailsBeforeTheFirstRun: with no run
+// started the reporter's own firing waits quietly (-run-env), so the unit
+// carries no ExecStartPre that exits 1 for a missing run.env, which would
+// fail the unit and page the owner on a freshly provisioned server.
+func TestTheServiceFileHasNoStartCheckThatFailsBeforeTheFirstRun(t *testing.T) {
+	for _, d := range unitDirectives(t, reporterUnitPath) {
+		if d.key == "ExecStartPre" {
+			t.Errorf("ExecStartPre=%s: a missing run.env must not fail the unit", d.value)
+		}
 	}
 }

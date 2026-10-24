@@ -532,9 +532,14 @@ the path of the file it wrote, or of the file that already held the session;
 `journalctl -u ti-data` shows it. `ti-data --version` prints the build too. A
 refusal prints `ti-data refused:` and the reason, exits 1, and the unit
 shows as failed, which the alerting (plan.md section 7) is to watch. The unit
-is never skipped: before the job is installed, or before the Boost engine has
-been started once (no `run.env`), each firing fails with a message saying
-which.
+is never skipped: before the job is installed each firing fails with a message
+saying so. Before the Boost engine has been started once (no `run.env`, no
+`.log` run log in its folder and no run folder under `streams/boost`) the firing is not a failure: it prints one line, `ti-data: waiting for the
+account's first run: ... run.env is missing or empty`, writes nothing and
+succeeds, so nothing pages you ([server](server.md), "The reporter before the
+first run"). Once `run.env` exists the job is unchanged. A `run.env` that is
+missing or empty while a run log or a run stream folder exists, or that is not a regular file, is over
+64 KiB or cannot be read (a link to nothing included), is a refusal like any other.
 
 **What can go wrong.** In every case no file is written for the session,
 so the engine never reads half a day. Recordings already made are kept, and
@@ -559,9 +564,8 @@ carries on from them.
   log beside it as the likely first run's. Restore the first run's log
   from the backup, unchanged, and start again; do not run a warm-up under
   the new name.
-- **The engine has not been started yet** (no `run.env`: the unit fails
-  before the job runs, naming the file), or **its durable log cannot be
-  read**, or its first input is not a Boost configuration.
+- **The engine's durable log cannot be read** (a `run.env` exists, so a run
+  was started; before that the job waits quietly and succeeds), or its first input is not a Boost configuration.
 - **The configuration file and the engine's log disagree**: the file was
   edited after the engine started. Put the file back as the engine started
   with it; an edited configuration is a new run.
