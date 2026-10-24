@@ -593,13 +593,23 @@ def awaiting_first_run(path, engine_streams=None):
     any of those exists was lost, and one that is not a regular file, is over
     64 KiB or cannot be read is bad: all of them raise, to be refused like any
     other fault (docs/manual/server.md, "The reporter before the first run":
-    the wait is only for an account that has never run). run.env is opened
+    the wait is only for an account that has never run). run.env is absent only when lstat finds nothing at the path (a dangling
+    link is present and refused). It is opened
     without blocking and its descriptor checked, so a FIFO swapped in after a
     path check cannot hold the job."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
-        empty = True
+        # Absent means lstat finds nothing at the path: a link whose target is
+        # missing is present, and cannot be read.
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            empty = True
+        except OSError as e:
+            raise RunEnvRefused("{} cannot be read: {}".format(path, e))
+        else:
+            raise RunEnvRefused("{} is present but cannot be opened (a link to nothing?)".format(path))
     except OSError as e:
         raise RunEnvRefused("{} cannot be read: {}".format(path, e))
     else:

@@ -539,7 +539,7 @@ account's first run: ... run.env is missing or empty`, writes nothing and
 succeeds, so nothing pages you ([server](server.md), "The reporter before the
 first run"). Once `run.env` exists the job is unchanged. A `run.env` that is
 missing or empty while a run log or a run stream folder exists, or that is not a regular file, is over
-64 KiB or cannot be read, is a refusal like any other.
+64 KiB or cannot be read (a link to nothing included), is a refusal like any other.
 
 **What can go wrong.** In every case no file is written for the session,
 so the engine never reads half a day. Recordings already made are kept, and

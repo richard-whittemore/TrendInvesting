@@ -897,7 +897,16 @@ const maxRunEnv = 64 << 10
 func runEnvIsEmpty(path string) (bool, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, fs.ErrNotExist) {
-		return true, nil
+		// Absent means Lstat finds nothing at the path: a link to nothing is
+		// present, and cannot be read.
+		_, lerr := os.Lstat(path)
+		switch {
+		case errors.Is(lerr, fs.ErrNotExist):
+			return true, nil
+		case lerr != nil:
+			return false, fmt.Errorf("reporter: %s cannot be read: %w", path, lerr)
+		}
+		return false, fmt.Errorf("reporter: %s is present but cannot be opened: %w", path, err)
 	}
 	if err != nil {
 		return false, fmt.Errorf("reporter: %s cannot be read: %w", path, err)

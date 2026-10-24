@@ -434,7 +434,7 @@ engine's log as usual.
 From then on a `run.env` that names a log that is missing or unreadable is a
 fault as before: the firing fails, the failure is paged, and no heartbeat is
 sent. A `run.env` that exists but cannot be read, is not a regular file or is
-over 64 KiB is also a fault.
+over 64 KiB is also a fault, and so is a link to nothing: only a path with nothing at it counts as missing.
 
 The wait is for an account that has never run, and only for that. The reporter
 keeps its own record of a run: the first time it reads a journal named by

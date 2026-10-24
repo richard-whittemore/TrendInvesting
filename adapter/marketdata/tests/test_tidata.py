@@ -217,6 +217,19 @@ class WaitingForTheFirstRunTest(unittest.TestCase):
             self.assertIn("ti-data refused:", err)
             self.assertEqual(job.made, 0)
 
+    def test_a_dangling_run_env_symlink_is_refused_not_a_wait(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            Path(d, "engine").mkdir()   # no run log beside it: only the link is wrong
+            run_env = Path(d, "engine", "run.env")
+            os.symlink(Path(d, "nowhere"), run_env)   # present, target missing
+            status, _, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused:", err)
+            self.assertNotIn("waiting", err)
+            self.assertIn("run.env", err)
+            self.assertEqual(job.made, 0)
+
     def test_an_oversized_run_env_is_refused_unread(self):
         with tempfile.TemporaryDirectory() as d:
             job = Job(d)

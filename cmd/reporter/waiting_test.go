@@ -252,6 +252,21 @@ func TestAnEmptyRunEnvWithARunLogIsTheSameAlert(t *testing.T) {
 	}
 }
 
+func TestADanglingRunEnvSymlinkIsRefusedNotAWait(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.env")
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), path); err != nil {
+		t.Fatal(err)
+	}
+	e, err := waitingRun(t, path, nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "run.env") {
+		t.Fatalf("a dangling run.env symlink was treated as absent: err = %v", err)
+	}
+	if e.count("ping") != 0 {
+		t.Errorf("pinged: %v", e.events)
+	}
+}
+
 func TestAnOversizedRunEnvIsRefusedNotRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.env")
 	writeFileT(t, path, strings.Repeat("A=1\n", 40000))
