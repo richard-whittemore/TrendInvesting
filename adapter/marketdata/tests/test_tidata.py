@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -167,6 +168,7 @@ class WaitingForTheFirstRunTest(unittest.TestCase):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
                 job = Job(d)
                 run_env = Path(d, "run.env")
+                job.log.unlink()   # no run has started, so the engine folder holds no run log
                 if text is not None:
                     run_env.write_text(text)
                 before = job.files()
@@ -189,6 +191,54 @@ class WaitingForTheFirstRunTest(unittest.TestCase):
             self.assertEqual(status, 1)
             self.assertIn("ti-data refused:", err)
             self.assertNotIn("waiting", err)
+
+
+    def test_a_missing_or_empty_run_env_with_a_run_log_is_refused_not_waited_on(self):
+        for text in (None, "", " \n"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                job = Job(d)   # its engine log is in the same folder
+                run_env = Path(d, "run.env")
+                if text is not None:
+                    run_env.write_text(text)
+                status, out, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+                self.assertEqual(status, 1)
+                self.assertIn("ti-data refused:", err)
+                self.assertIn("settings file is missing but a run exists", err)
+                self.assertNotIn("waiting", err)
+                self.assertEqual(job.made, 0)
+
+    def test_a_run_env_that_cannot_be_read_is_a_refusal_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            run_env = Path(d, "run.env")
+            run_env.mkdir()   # present, but not a regular file
+            status, _, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused:", err)
+            self.assertEqual(job.made, 0)
+
+    def test_an_oversized_run_env_is_refused_unread(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            run_env = Path(d, "run.env")
+            run_env.write_text("A=1\n" * 40000)
+            status, _, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused:", err)
+            self.assertEqual(job.made, 0)
+
+    def test_a_fifo_for_run_env_is_refused_without_blocking(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            run_env = Path(d, "run.env")
+            os.mkfifo(run_env)
+            result = []
+            t = threading.Thread(target=lambda: result.append(job.main(after_settle(WARM), "--run-env", str(run_env))), daemon=True)
+            t.start()
+            t.join(10)
+            self.assertFalse(t.is_alive(), "the job blocked on a run.env that is a FIFO")
+            self.assertEqual(result[0][0], 1)
+            self.assertIn("ti-data refused:", result[0][2])
 
 
 class SettleTest(unittest.TestCase):

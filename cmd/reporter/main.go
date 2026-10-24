@@ -150,24 +150,17 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			failures = append(failures, secretsErr)
 		}
 	}
-	// No run has been started for the account: there is no log to read and
-	// nothing to report, which is a quiet success, not a fault. The firing
-	// is still alive, so it pings the outside heartbeat by the same rules as
-	// any clean firing (ADR 0019, "Alerting": the outside heartbeat). A
-	// fault in the secrets file is still a fault.
+	// run.env missing or empty means no settings, and so no log path: the
+	// journal step alone is skipped for it. Whether that is a quiet wait or a
+	// fault is decided once the state is loaded (runEvidence). Every other
+	// step of the firing is unchanged (ADR 0019, "Alerting").
+	runEnvEmpty := false
 	if *runEnv != "" {
-		waiting, err := awaitingFirstRun(*runEnv)
+		empty, err := runEnvIsEmpty(*runEnv)
 		if err != nil {
 			return errors.Join(append(failures, err)...)
 		}
-		if waiting {
-			if len(failures) > 0 {
-				return errors.Join(failures...)
-			}
-			_, _ = fmt.Fprintln(out, "reporter: waiting for the account's first run: "+*runEnv+" is missing or empty (start the engine once)")
-			pingHeartbeat(getenv, &bounded, out)
-			return nil
-		}
+		runEnvEmpty = empty
 	}
 	senders, setAside, err := buildSenders(*channels, getenv, &bounded, out)
 	if err != nil {
@@ -194,6 +187,18 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if err != nil {
 		return errors.Join(append(failures, err)...)
 	}
+	// The firing waits only on proof that the account has never run: nothing
+	// shows a run but the missing settings file. Any sign of one is a fault.
+	var lostRunEnv error
+	waiting := false
+	if runEnvEmpty {
+		if sign := runEvidence(filepath.Dir(*runEnv), seen); sign != "" {
+			lostRunEnv = fmt.Errorf("reporter: the run's settings file is missing but a run exists: %s is missing or empty and %s", *runEnv, sign)
+		} else {
+			waiting = true
+			_, _ = fmt.Fprintln(out, "reporter: waiting for the account's first run: "+*runEnv+" is missing or empty (start the engine once)")
+		}
+	}
 	start := now()
 	if pruneReceipts(seen, sent, repeats, start) {
 		if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
@@ -217,30 +222,45 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if label == "" {
 		label = filepath.Base(*journalPath)
 	}
-	info, statErr := os.Stat(*journalPath)
-	history, envelopes, account, alerts, refused := readJournal(*journalPath, now(), *ackWithin, seen)
-	if account != "" {
-		label = account
+	var (
+		info      os.FileInfo
+		statErr   error
+		history   report.History
+		envelopes []event.Envelope
+		account   string
+		alerts    []report.Alert
+		refused   error
+	)
+	switch {
+	case waiting:
+	case lostRunEnv != nil:
+		refused = lostRunEnv
+	default:
+		info, statErr = os.Stat(*journalPath)
+		history, envelopes, account, alerts, refused = readJournal(*journalPath, now(), *ackWithin, seen)
+		if account != "" {
+			label = account
+		}
 	}
 	examined := false
 	var forgotten []string
 	withIssueEvidence(senders, *journalPath)
 	withIssueRecords(senders, repeats)
-	if refused == nil {
+	if !waiting && refused == nil {
 		var restored, current string
 		restored, current, examined = restoredLogNewer(*journalPath)
 		if restored != "" {
 			alerts = append(alerts, report.RestoredLogNewerAlert(account, restored, current, now()))
 		}
 	}
-	if refused == nil && history.Broken == nil {
+	if !waiting && refused == nil && history.Broken == nil {
 		// A whole chain clears every break delivered for the account, so a
 		// break after a repair is a new incident (ADR 0019, "Alerting":
 		// once per incident).
 		forget(report.HistoryUnavailableKeyPrefix(account), seen, sent, repeats)
 		forgotten = append(forgotten, report.HistoryUnavailableKeyPrefix(account))
 	}
-	if refused == nil && examined && !slices.ContainsFunc(alerts, func(a report.Alert) bool { return a.Kind == report.KindRestoredLogNewer }) {
+	if !waiting && refused == nil && examined && !slices.ContainsFunc(alerts, func(a report.Alert) bool { return a.Kind == report.KindRestoredLogNewer }) {
 		// A folder examined with no log newer than the current run clears
 		// the restored-log alerts delivered for the account, so the same log restored wrongly again
 		// is a new incident (ADR 0019, "Alerting": once per incident).
@@ -251,9 +271,13 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// whether liveness is monitored.
 	var heartbeat []report.Alert
 	unchecked := ""
-	if statErr != nil {
+	switch {
+	case waiting:
+	case lostRunEnv != nil:
+		unchecked = "the settings file that names the journal is missing"
+	case statErr != nil:
 		unchecked = "the journal file has no modification time to check"
-	} else {
+	default:
 		a, lost, err := report.HeartbeatAlert(label, info.ModTime(), now(), *sessions)
 		if err != nil {
 			// A check the calendar cannot answer is as silent as the lost
@@ -299,7 +323,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		if len(group) == 0 {
 			continue
 		}
-		if refused == nil {
+		if !waiting && refused == nil {
 			if err := tellStateAtStart(group, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, sortedUnits(tradingUnits, failedNow), record); err != nil {
 				failures = append(failures, err)
 			}
@@ -359,12 +383,12 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// The notice that the summary has no channel is the account's, keyed by
 	// the account the journal names, so it is said only when the journal
 	// reads, as the summary itself is sent only then.
-	if *summary && refused == nil {
+	if *summary && !waiting && refused == nil {
 		if err := saySummaryRoute(senders, setAside, account, out, seen, sent, repeats, at, *repeat, record); err != nil {
 			failures = append(failures, err)
 		}
 	}
-	if *summary && refused == nil {
+	if *summary && !waiting && refused == nil {
 		// The ledger is taken only from the account's own flex/<instance>
 		// folder, the instance of the engine directory the journal is in
 		// (report.LoadCashLedgerFor).
@@ -846,16 +870,61 @@ func writeAtomic(path string, raw []byte) error {
 	return nil
 }
 
-// awaitingFirstRun reports whether the engine's run.env is missing or holds
-// nothing, that is, whether no run has been started for the account. A file
-// that exists but cannot be read is a fault, not a wait.
-func awaitingFirstRun(path string) (bool, error) {
-	raw, err := os.ReadFile(path)
+// maxRunEnv bounds what is read of run.env, a short file of settings.
+const maxRunEnv = 64 << 10
+
+// runEnvIsEmpty reports whether the engine's run.env is missing or holds
+// nothing. A file that exists but is not a regular file, is larger than
+// maxRunEnv or cannot be read is a fault, not a wait; it is never opened
+// before its type is known, so a FIFO cannot hold the firing.
+func runEnvIsEmpty(path string) (bool, error) {
+	info, err := os.Stat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return true, nil
 	case err != nil:
 		return false, fmt.Errorf("reporter: %s cannot be read: %w", path, err)
+	case !info.Mode().IsRegular():
+		return false, fmt.Errorf("reporter: %s is not a regular file", path)
+	case info.Size() > maxRunEnv:
+		return false, fmt.Errorf("reporter: %s is larger than %d bytes and is not read", path, maxRunEnv)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("reporter: %s cannot be read: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(f, maxRunEnv+1))
+	if err != nil {
+		return false, fmt.Errorf("reporter: %s cannot be read: %w", path, err)
+	}
+	if len(raw) > maxRunEnv {
+		return false, fmt.Errorf("reporter: %s is larger than %d bytes and is not read", path, maxRunEnv)
 	}
 	return len(bytes.TrimSpace(raw)) == 0, nil
+}
+
+// runEvidence names the first sign that a run has happened, or "" when there
+// is none: a run log (*.log) in the engine's folder, or an alert the reporter
+// has delivered from a journal (the host's own pages, for a failed unit, a
+// channel set aside or the clock, say nothing of a run). A folder that cannot
+// be listed is a sign, since it cannot be shown to hold none.
+func runEvidence(engineDir string, seen map[string]bool) string {
+	entries, err := os.ReadDir(engineDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "its folder cannot be listed: " + err.Error()
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
+			return "the engine folder holds the run log " + e.Name()
+		}
+	}
+	for k := range seen {
+		_, alertKey, _ := strings.Cut(k, "|")
+		if strings.HasPrefix(alertKey, "unit-failed:") || strings.HasPrefix(alertKey, "channel-refused:") || strings.HasPrefix(alertKey, "clock-drift:") {
+			continue
+		}
+		return "the reporter has already reported from a journal"
+	}
+	return ""
 }

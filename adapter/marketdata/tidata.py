@@ -76,6 +76,7 @@ import glob
 import json
 import os
 import re
+import stat
 import sys
 from collections import namedtuple
 
@@ -555,8 +556,9 @@ def parse(argv):
     ap.add_argument("--streams", help="the streams folder (default DATA/streams)")
     ap.add_argument("--config", required=True, help="the Boost engine's configuration")
     ap.add_argument("--engine-log", required=True, help="the engine's durable log, <run>.log")
-    ap.add_argument("--run-env", help="the engine's run.env: while it is missing or empty no run has been "
-                                      "started, and the job prints one waiting line and exits 0, writing nothing")
+    ap.add_argument("--run-env", help="the engine's run.env: while it is missing or empty and the engine's folder holds no "
+                                      "run log, no run has been started, and the job prints one waiting line and exits "
+                                      "0, writing nothing; with a run log, a missing or unreadable run.env is refused")
     credentials = os.environ.get("CREDENTIALS_DIRECTORY")
     ap.add_argument("--secrets-file", default=os.path.join(credentials, "secrets") if credentials else None,
                     help="KEY=VALUE secrets holding MASSIVE_API_KEY (default $CREDENTIALS_DIRECTORY/secrets)")
@@ -576,25 +578,64 @@ def parse(argv):
     return args
 
 
+MAX_RUN_ENV = 64 * 1024
+
+
+class RunEnvRefused(Exception):
+    """run.env is lost, unreadable, not a regular file or too large."""
+
+
 def awaiting_first_run(path):
-    """True when the engine's run.env is missing or holds nothing, that is, no
-    run has been started; the firing then waits rather than failing."""
+    """True only when no run has been started: run.env is missing or holds
+    nothing and the engine's folder holds no run log (*.log); the firing then
+    waits rather than failing. A run.env that is missing or empty while a run
+    log exists was lost, and one that is not a regular file, is over 64 KiB or
+    cannot be read is bad: all of them raise, to be refused like any other
+    fault. It is never opened before its type is known, so a FIFO cannot hold
+    the job."""
     try:
-        with open(path) as f:
-            return not f.read().strip()
+        st = os.stat(path)
     except FileNotFoundError:
-        return True
+        empty = True
+    except OSError as e:
+        raise RunEnvRefused("{} cannot be read: {}".format(path, e))
+    else:
+        if not stat.S_ISREG(st.st_mode):
+            raise RunEnvRefused("{} is not a regular file".format(path))
+        if st.st_size > MAX_RUN_ENV:
+            raise RunEnvRefused("{} is larger than {} bytes and is not read".format(path, MAX_RUN_ENV))
+        try:
+            with open(path, "rb") as f:
+                raw = f.read(MAX_RUN_ENV + 1)
+            empty = not raw.decode("utf-8").strip()
+        except (OSError, UnicodeDecodeError) as e:
+            raise RunEnvRefused("{} cannot be read: {}".format(path, e))
+        if len(raw) > MAX_RUN_ENV:
+            raise RunEnvRefused("{} is larger than {} bytes and is not read".format(path, MAX_RUN_ENV))
+    if not empty:
+        return False
+    folder = os.path.dirname(os.path.abspath(path))
+    try:
+        logs = [n for n in os.listdir(folder) if n.endswith(".log")]
+    except FileNotFoundError:
+        logs = []
+    except OSError as e:
+        raise RunEnvRefused("the settings file {} is missing or empty and its folder cannot be listed: {}".format(path, e))
+    if logs:
+        raise RunEnvRefused("the run's settings file is missing but a run exists: {} is missing or empty and the "
+                            "engine folder holds the run log {}".format(path, sorted(logs)[0]))
+    return True
 
 
 def main(argv, now=steps._now, client_factory=massive.Client):
     args = parse(argv)
     print("ti-data " + STAMP, file=sys.stderr)
-    if args.run_env and awaiting_first_run(args.run_env):
-        print("ti-data: waiting for the account's first run: {} is missing or empty (start the Boost engine once)"
-              .format(args.run_env), file=sys.stderr)
-        return 0
     key = None   # held here, so every message printed below can have it replaced
     try:
+        if args.run_env and awaiting_first_run(args.run_env):
+            print("ti-data: waiting for the account's first run: {} is missing or empty (start the Boost engine once)"
+                  .format(args.run_env), file=sys.stderr)
+            return 0
         key = read_key(args.secrets_file)
         path = run(args.data, args.streams, args.config, args.engine_log, key, now,
                    dt.timedelta(minutes=args.settle_minutes), session=args.session,
