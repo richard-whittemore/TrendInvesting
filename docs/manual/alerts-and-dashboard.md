@@ -455,8 +455,9 @@ the reporter has no way to listen for it.
 
 ## Alerts as GitHub Issues
 
-With `github-issues` in `-channel`, every alert also becomes an issue in the
-repository named by `TI_GITHUB_ISSUES_REPO`, with the label `alert`. It is a
+The server's reporter and failed-unit hook name `github-issues` in
+`-channel`, so once the token and repository are filled in, every alert also
+becomes an issue in the repository named by `TI_GITHUB_ISSUES_REPO`, with the label `alert`. It is a
 third place to read the alert, with the context beside it, in the GitHub app
 on your phone. Pushover still pages you, and ntfy still pushes; the issue is
 not a replacement for either, and a fault in it never holds them back: every
@@ -605,7 +606,8 @@ Expect both until GitHub recovers, or take `github-issues` out of
 usual causes are in the table "What can go wrong", below: the token expired or
 was revoked ("GitHub answered 401 Unauthorized"), the token cannot write the
 repository's issues ("403 Forbidden" or "404 Not Found"), GitHub was
-unreachable, or the channel is not in `-channel`. The alert is not lost: it
+unreachable, or `TI_GITHUB_ISSUES_TOKEN` or `TI_GITHUB_ISSUES_REPO` is empty
+("reporter: the github-issues channel needs ..."). The alert is not lost: it
 is sent again at the next firing, and an issue is made then.
 
 **The token.** Create it once, and again when it expires:
@@ -621,8 +623,10 @@ is sent again at the next firing, and an issue is made then.
    settings or trade; if it leaks, the most it can do is write issues.
 4. On the server, `sudo ti-secrets edit secrets.env` and fill in
    `TI_GITHUB_ISSUES_TOKEN=` (the token) and `TI_GITHUB_ISSUES_REPO=`
-   (`owner/name`). The next firing uses them. Add `github-issues` to the
-   reporter's `-channel`.
+   (`owner/name`). The next firing uses them. The reporter's unit and the
+   failed-unit hook already name `github-issues`; there is no `-channel` to
+   edit. Until both are filled in, the channel is set aside and the unit
+   fails (the table "What can go wrong", below).
 5. To rotate it, make a new token the same way, replace the line, and delete
    the old token on GitHub. Put a reminder in your calendar for its expiry:
    an expired token is a channel that fails every firing.
@@ -972,7 +976,7 @@ with:
 /opt/trend-investing/bin/ti-reporter \
   -journal /var/lib/trend-investing/engines/boost/${TI_RUN}.log \
   -state /var/lib/trend-investing/reports/boost.reporter.json \
-  -secrets-file %d/secrets -channel ntfy,pushover -summary -account boost \
+  -secrets-file %d/secrets -channel ntfy,pushover,github-issues -summary -account boost \
   -cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl
 ```
 
@@ -995,7 +999,7 @@ On the Mac, from the repository root, against a copy of a log:
 ```
 TI_NTFY_TOPIC=... TI_PUSHOVER_APP_TOKEN=... TI_PUSHOVER_USER_KEY=... \
   go run ./cmd/reporter -journal boost.log -state boost.reporter.json \
-  -channel ntfy,pushover -summary
+  -channel ntfy,pushover,github-issues -summary
 ```
 
 Flags: `-journal` and `-state` are required; `-secrets-file` (a

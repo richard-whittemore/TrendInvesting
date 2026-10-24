@@ -278,7 +278,7 @@ cp /root/dist/boost-fixture.log "$rep/engines/boost/run-rehearsal.log"
 # the log's earlier alerts, and this fixture log is old: so the state file
 # begins with both channels recorded long before it, as on a server whose
 # reporter has run since before the log's events.
-printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pushover":"2000-01-01T00:00:00Z"}}' >"$rep/reports/boost.reporter.json"
+printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pushover":"2000-01-01T00:00:00Z","github-issues":"2000-01-01T00:00:00Z"}}' >"$rep/reports/boost.reporter.json"
 chown -R ti-trader:ti-trader "$rep"
 chmod 0750 "$rep/engines" "$rep/engines/boost" "$rep/reports"
 python3 - "$rep/posts" <<'PY' &
@@ -288,9 +288,33 @@ import sys
 posts = sys.argv[1]
 
 
+sys.path.insert(0, "/deploy/rehearsal")
+import github_standin
+
+
+def github_log(line, body):
+    # The alerts repository's requests are kept apart from the other channels'.
+    with open(posts + ".github", "a") as f:
+        f.write(line + "\n")
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if not github_standin.handle(self, "GET", b"", github_log):
+            self.send_response(404)
+            self.end_headers()
+
+    def do_PATCH(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        github_standin.handle(self, "PATCH", body, github_log)
+
+    def do_DELETE(self):
+        github_standin.handle(self, "DELETE", b"", github_log)
+
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if github_standin.handle(self, "POST", body, github_log):
+            return
         with open(posts, "a") as f:
             f.write(self.path + "\n")
         with open(posts + ".bodies", "ab") as f:
@@ -316,7 +340,7 @@ done
 # the reporter is handed the unlocked copy its unit names in LoadCredential=,
 # as systemd would hand it: a private copy, the unit's user's, read-only.
 install -d -m 0700 /dev/shm/ti-edit
-printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PUSHOVER_APP_TOKEN=fake\nTI_PUSHOVER_USER_KEY=fake\nTI_PUSHOVER_URL=http://127.0.0.1:8099/1/messages.json\nTI_HEARTBEAT_URL=http://127.0.0.1:8099/hb\nMASSIVE_API_KEY=\n' >/dev/shm/ti-edit/content
+printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PUSHOVER_APP_TOKEN=fake\nTI_PUSHOVER_USER_KEY=fake\nTI_PUSHOVER_URL=http://127.0.0.1:8099/1/messages.json\nTI_GITHUB_ISSUES_TOKEN=fakeghtoken\nTI_GITHUB_ISSUES_REPO=owner/repo\nTI_GITHUB_API_URL=http://127.0.0.1:8099/gh\nTI_GITHUB_API_ALLOW_HOST=127.0.0.1:8099\nTI_HEARTBEAT_URL=http://127.0.0.1:8099/hb\nMASSIVE_API_KEY=\n' >/dev/shm/ti-edit/content
 EDITOR=/root/ti-editor.sh with_pass ti-secrets edit secrets.env >/dev/null || fail "ti-secrets edit could not set the reporter's channels"
 rm -rf /dev/shm/ti-edit
 source=$(sed -n 's/^LoadCredential=secrets://p' /etc/systemd/system/ti-reporter@.service)
@@ -356,14 +380,22 @@ test -s "$rep/reports/boost.reporter.json" || fail "the reporter wrote no state 
 test "$(stat -c %U "$rep/reports/boost.reporter.json")" = ti-trader || fail "the reporter's state file is not ti-trader's"
 grep -q '^/rehearsal$' "$rep/posts" || fail "the reporter reached no ntfy topic"
 grep -q '^/1/messages.json$' "$rep/posts" || fail "the reporter reached no Pushover endpoint"
+# The alerts repository's stand-in took an issue for a rehearsed alert, and
+# only the reporter's own run made it (the unit names github-issues).
+issues_opened() {
+  if test -e "$rep/posts.github"; then grep -c '^POST /gh/repos/owner/repo/issues$' "$rep/posts.github" || true; else echo 0; fi
+}
+test "$(issues_opened)" -ge 1 || fail "the reporter opened no issue in the alerts repository (stand-in saw: $(cat "$rep/posts.github" 2>/dev/null || echo nothing))"
+opened=$(issues_opened)
 # The heartbeat pings (POST /hb) are not alerts: counted apart.
 alerts_sent() { { grep -v '^/hb$' "$rep/posts" || true; } | wc -l; }
 sent=$(alerts_sent)
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $line >/dev/null || fail "the reporter's second run failed"
+test "$(issues_opened)" = "$opened" || fail "the reporter's second run opened another issue"
 test "$(alerts_sent)" = "$sent" || fail "the reporter's second run sent its alerts again"
 test "$(grep -c '^/hb$' "$rep/posts")" = 2 || fail "the reporter did not ping the outside heartbeat once per clean firing (stand-in endpoint saw $(grep -c '^/hb$' "$rep/posts"))"
-pass "the reporter runs as its unit runs it, as ti-trader, delivers to both channels once, keeps its state, and pings the outside heartbeat once per firing"
+pass "the reporter runs as its unit runs it, as ti-trader, delivers to ntfy, Pushover and the alerts repository's issues once, keeps its state, and pings the outside heartbeat once per firing"
 
 # The failed-unit page: the hook unit's own command line, for the engine's
 # failure, as ti-trader against the same stand-in channels, with the failed
@@ -381,6 +413,7 @@ failed_run=(MONITOR_UNIT=ti-engine@boost.service MONITOR_INVOCATION_ID=012345678
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook, run as its unit runs it (as ti-trader), failed"
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook did not page both channels once"
+test "$(issues_opened)" = "$((opened + 1))" || fail "the failed-unit hook did not open one issue in the alerts repository"
 grep -q 'ti-engine%40boost.service+failed' "$rep/posts.bodies" || fail "the hook's page does not name the failed unit"
 test -s "$rep/reports/unit-failures.json" || fail "the hook wrote no record of the page"
 grep -q 'unit-failed:ti-engine@boost.service/0123456789abcdef0123456789abcdef' "$rep/reports/unit-failures.json" || fail "the hook's record is not keyed by the failed run"

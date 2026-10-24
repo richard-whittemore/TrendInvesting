@@ -9,7 +9,7 @@ Description=Page the owner that %i failed
 # a later failed run before the unit is seen well only counts toward an
 # hourly reminder, and the episode's incident is resolved when a firing of
 # the reporter sees the unit well. It sends one urgent page through
-# the reporter's channels (Pushover and the owner's own ntfy) naming the
+# the reporter's channels (Pushover, the owner's own ntfy and the private alerts repository's issues) naming the
 # unit, the failed run's last journal line and the manual row to read; a
 # firing of the reporter pages a failure this unit could not deliver (ADR
 # 0019, "Alerting"; docs/manual/server.md, "A failed unit"). No Condition: a
@@ -40,7 +40,7 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # The record of failed-unit pages is the host's, beside the reporters' state
 # files: the reporter's firings read it to resolve a page and to skip a unit
 # already paged.
-ExecStart=/opt/trend-investing/bin/ti-reporter notify-unit-failed -state /var/lib/trend-investing/reports/unit-failures.json -secrets-file %d/secrets -channel ntfy,pushover %i
+ExecStart=/opt/trend-investing/bin/ti-reporter notify-unit-failed -state /var/lib/trend-investing/reports/unit-failures.json -secrets-file %d/secrets -channel ntfy,pushover,github-issues %i
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
