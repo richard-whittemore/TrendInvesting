@@ -152,9 +152,18 @@ What each program actually reads today:
 - The reporter's `github-issues` channel reads `TI_GITHUB_ISSUES_TOKEN`, a
   fine-grained token with **Issues read and write on the one repository and
   no other permission**, and `TI_GITHUB_ISSUES_REPO`, that repository as
-  `owner/name`. Both are optional until `github-issues` is in the reporter's
-  `-channel`; the channel is set aside while either is empty and the others
-  still deliver. How to create and rotate the token:
+  `owner/name`. The reporter's unit and the failed-unit hook both name
+  `github-issues` in `-channel`, beside `ntfy` and `pushover`, so nothing is
+  edited on the server to turn it on. While either value is empty the channel
+  is set aside: the run says "the github-issues channel needs
+  TI_GITHUB_ISSUES_TOKEN" (or "... TI_GITHUB_ISSUES_REPO as owner/name"), ntfy
+  and Pushover still deliver, and the unit exits non-zero, so a server
+  without the alerts repository shows as failed until you fill both in. Fill
+  them in before installing the unit files on a running server: until then
+  every firing fails, sends no heartbeat ping (Healthchecks pages) and the
+  failed-unit page repeats hourly. The
+  daily summary never goes to this channel. How to create and rotate the
+  token:
   [alerts and dashboard](alerts-and-dashboard.md), "Alerts as GitHub Issues".
 
 Never paste a secret into an issue, a pull request, a chat with an agent or
@@ -775,8 +784,7 @@ The engine, the adapter and the reporter each name `ti-unit-failed@%n.service`
 in `OnFailure=`. When one fails, systemd starts that unit under the failed
 unit's name (for the engine, `ti-unit-failed@ti-engine@boost.service.service`;
 the rehearsal starts it under a real systemd), which runs `ti-reporter
-notify-unit-failed <unit>`: one urgent page on Pushover and your own ntfy
-server naming the unit, the reason (cleaned of addresses, account numbers and
+notify-unit-failed <unit>`: one urgent page on Pushover, your own ntfy and, once its token and repository are filled in, the private alerts repository, naming the unit, the reason (cleaned of addresses, account numbers and
 secrets) and the manual row to read. You are paged within a minute of the
 stop, not after two sessions of silence.
 

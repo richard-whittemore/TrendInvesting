@@ -59,7 +59,7 @@ on_disk() { find / -xdev -type f -print0 2>/dev/null | xargs -0 grep -lF -- "$1"
 unlocked=/run/trend-investing/secrets
 # The secrets in plain text, as on a server provisioned before they were
 # encrypted, with a marker; migrated as provision.sh services migrates them.
-printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PUSHOVER_APP_TOKEN=fake\nTI_PUSHOVER_USER_KEY=fake\nTI_PUSHOVER_URL=http://127.0.0.1:8099/1/messages.json\nTI_GITHUB_ISSUES_TOKEN=%s\n' "$marker" >/etc/trend-investing/secrets.env
+printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PUSHOVER_APP_TOKEN=fake\nTI_PUSHOVER_USER_KEY=fake\nTI_PUSHOVER_URL=http://127.0.0.1:8099/1/messages.json\nTI_GITHUB_ISSUES_REPO=owner/repo\nTI_GITHUB_API_URL=http://127.0.0.1:8099/gh\nTI_GITHUB_API_ALLOW_HOST=127.0.0.1:8099\nTI_GITHUB_ISSUES_TOKEN=%s\n' "$marker" >/etc/trend-investing/secrets.env
 chmod 0600 /etc/trend-investing/secrets.env
 for f in ibkr-login.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
   install -m 0600 "/deploy/etc/$f.example" "/etc/trend-investing/$f"
@@ -156,9 +156,32 @@ import sys
 posts = sys.argv[1]
 
 
+sys.path.insert(0, "/deploy/rehearsal")
+import github_standin
+
+
+def github_log(line, body):
+    with open(posts + ".github", "a") as f:
+        f.write(line + "\n")
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if not github_standin.handle(self, "GET", b"", github_log):
+            self.send_response(404)
+            self.end_headers()
+
+    def do_PATCH(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        github_standin.handle(self, "PATCH", body, github_log)
+
+    def do_DELETE(self):
+        github_standin.handle(self, "DELETE", b"", github_log)
+
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if github_standin.handle(self, "POST", body, github_log):
+            return
         with open(posts, "a") as f:
             f.write(self.path + "\n")
         with open(posts + ".bodies", "ab") as f:
@@ -233,6 +256,7 @@ test "$(systemctl show -p Result --value "$hook")" = success || fail "$hook did 
 test "$(sed -n 1p "$reports/hook-instances")" = "$engine $run1" ||
   fail "the hook was given '$(sed -n 1p "$reports/hook-instances")', want '$engine $run1' (%i and MONITOR_INVOCATION_ID)"
 { test "$(ntfy_pages)" = 1 && test "$(pushover_pages)" = 1; } || fail "the first failed run did not page each channel once"
+test "$(grep -c '^POST /gh/repos/owner/repo/issues$' "$probe/posts.github" || true)" = 1 || fail "the first failed run did not open one issue in the alerts repository"
 decoded_bodies | grep -q "$engine failed" || fail "the page does not name $engine"
 decoded_bodies | grep -q 'marker-A' || fail "the page's reason is not the failed run's own line"
 grep -q "unit-failed:$engine/$run1" "$reports/unit-failures.json" || fail "the record is not keyed by the failed run"
