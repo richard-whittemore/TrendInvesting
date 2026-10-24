@@ -355,11 +355,15 @@ for _ in $(seq 120); do grep -q '"state":"halted"' "$engines/run-2026-10-25.log"
 grep -q '"state":"halted"' "$engines/run-2026-10-25.log" || fail "the engine did not halt on a first reading that is not the approved book: $(journalctl -u ti-adapter-boost -n 8 --no-pager -o cat)"
 note "the drill's engine halted on its first reading, as a mistyped book makes it"
 
+# The recovery blocks name the halted run (run-2026-10-24) and the new one
+# (run-2026-10-24b); the later steps are repeated "with run-2026-10-24b in
+# place of run-2026-10-24", as the owner does it.
 remap_expr='s/run-2026-10-24/run-2026-10-25/g'
 step recover-stop
 step recover-approve
 step recover-run-env
 step engine 0 engine-again
+remap_expr='s/run-2026-10-24/run-2026-10-25b/g'
 before_recovery=$(grouped)
 step warmup
 step warmup-wait
