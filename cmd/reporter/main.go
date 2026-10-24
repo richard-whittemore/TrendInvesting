@@ -106,7 +106,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	selfUnit := flags.String("self-unit", "", "this reporter's own unit (ti-reporter@<instance>.service): its failure page is resolved by the next firing that finishes without a fault")
 	unitState := flags.String("unit-state", "", "the host's record of failed-unit pages, shared with the OnFailure hook (default: unit-failures.json beside -state)")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
-	runEnv := flags.String("run-env", "", "the engine's run.env (/var/lib/trend-investing/engines/<instance>/run.env): while it is missing or empty and nothing shows a run (no *.log in its folder, no <account>.ran marker beside -state) the firing logs that it is waiting for the account's first run and skips only the journal step; every other check still runs, and the firing pings the outside heartbeat only when nothing else is wrong. With any sign of a run it is an urgent alert and a failed firing")
+	runEnv := flags.String("run-env", "", "the engine's run.env (/var/lib/trend-investing/engines/<instance>/run.env): while it is missing or empty and nothing shows a run (no *.log in its folder, no <account>.ran marker beside -state; -account is required with it) the firing logs that it is waiting for the account's first run and skips only the journal step; every other check still runs, and the firing pings the outside heartbeat only when nothing else is wrong. With any sign of a run it is an urgent alert and a failed firing")
 	journalctl := flags.String("journalctl", "journalctl", "the journal reader that gives a failed unit's last line")
 	err := flags.Parse(args)
 	if err != nil {
@@ -114,6 +114,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	if *journalPath == "" || *statePath == "" {
 		return errors.New("reporter: -journal and -state are required")
+	}
+	if *runEnv != "" && *accountName == "" {
+		return errors.New("reporter: -run-env needs -account: the first-run marker is the account's own, named by it, and a name taken from the state file could be shared by two accounts")
 	}
 	if *sessions < 2 {
 		return errors.New("reporter: -heartbeat-sessions must be at least 2: a session's close is counted before the engine writes that session's records, so 1 would page on every trading day")
@@ -921,12 +924,12 @@ func runEnvIsEmpty(path string) (bool, error) {
 
 // ranMarkerPath is the account's durable record that a journal named by
 // run.env has been read: <account>.ran beside the state file, with the same
-// owner and mode. The account is -account, else the state file's name up to
-// its first dot.
+// owner and mode. The account is -account, which -run-env requires, so two
+// accounts never share a marker. The record is the account's own, it persists
+// until an owner removes it, and it is read only to refuse a wait that would
+// hide a run (ADR 0019, "Alerting"; docs/manual/server.md, "The reporter
+// before the first run").
 func ranMarkerPath(statePath, account string) string {
-	if account == "" {
-		account, _, _ = strings.Cut(filepath.Base(statePath), ".")
-	}
 	return filepath.Join(filepath.Dir(statePath), account+".ran")
 }
 

@@ -255,6 +255,23 @@ class WaitingForTheFirstRunTest(unittest.TestCase):
                 self.assertIn("settings file is missing but a run exists", err)
                 self.assertNotIn("waiting", err)
 
+    def test_run_stream_entries_that_cannot_be_inspected_are_a_refusal_not_absence(self):
+        if os.geteuid() == 0:
+            self.skipTest("root inspects anything")
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            job.log.unlink()
+            job.stream_dir().mkdir(parents=True)
+            engine_streams = job.streams / "boost"
+            engine_streams.chmod(0o444)   # listable, but its entries cannot be stat-ed
+            try:
+                status, out, err = job.main(after_settle(WARM), "--run-env", str(Path(d, "run.env")))
+            finally:
+                engine_streams.chmod(0o755)
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused:", err)
+            self.assertNotIn("waiting", err)
+
     def test_a_fifo_swapped_in_after_a_path_check_cannot_hold_the_open(self):
         # The file is opened without blocking and its descriptor is checked, so
         # a path check that saw a regular file cannot let a FIFO block the job.

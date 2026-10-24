@@ -444,9 +444,13 @@ removes it. If `run.env` is missing or empty and any sign of a run exists (that
 marker, or a `.log` file in the engine's folder), or the engine's folder exists
 but cannot be listed, the firing sends an urgent alert, "the run's settings
 file is missing", fails, and sends no heartbeat ping. A stray `.log` file that
-is later deleted leaves nothing behind: the next firing waits again. Only an
-engine folder that does not exist at all, with no marker, is a fresh server and
-waits. The data job refuses when a `.log` file is in the engine's folder or the
+is later deleted leaves nothing behind: the next firing waits again. The
+firing waits only when there is no marker and the engine's folder either does
+not exist or exists, can be listed and holds no `.log` file; anything else is
+the alert. The reporter needs `-account` whenever `-run-env` is given and
+refuses to start without it (the shipped unit passes it). An account that ran
+before the marker existed gets its marker at its next firing that reads its
+journal, and its `.log` file covers it until then. The data job refuses when a `.log` file is in the engine's folder or the
 job's own output already holds a run's stream folder
 (`/var/lib/trend-investing/data/streams/boost/<run>`); it does not read the
 reporter's marker. Restore `run.env` as the runbook describes

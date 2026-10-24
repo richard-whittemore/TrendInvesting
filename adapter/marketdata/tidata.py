@@ -630,11 +630,16 @@ def awaiting_first_run(path, engine_streams=None):
     streams = []
     if engine_streams:
         try:
-            streams = [n for n in os.listdir(engine_streams) if os.path.isdir(os.path.join(engine_streams, n))]
+            for n in os.listdir(engine_streams):
+                try:
+                    if stat.S_ISDIR(os.stat(os.path.join(engine_streams, n)).st_mode):
+                        streams.append(n)
+                except FileNotFoundError:
+                    continue   # the entry vanished between the listing and the stat: no longer there
         except FileNotFoundError:
             streams = []
         except OSError as e:
-            raise RunEnvRefused("the settings file {} is missing or empty and {} cannot be listed: {}"
+            raise RunEnvRefused("the settings file {} is missing or empty and {} cannot be listed or inspected: {}"
                                 .format(path, engine_streams, e))
     if logs or streams:
         raise RunEnvRefused("the run's settings file is missing but a run exists: {} is missing or empty and {}"

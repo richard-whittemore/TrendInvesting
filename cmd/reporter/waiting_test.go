@@ -23,7 +23,7 @@ func waitingRun(t *testing.T, runEnv string, extra []string, out *bytes.Buffer) 
 	t.Helper()
 	e, server := newStandInEndpoint(t)
 	dir := t.TempDir()
-	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-run-env", runEnv}
+	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-account", "boost", "-run-env", runEnv}
 	args = append(args, extra...)
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_HEARTBEAT_URL": server.URL + heartbeatPath})
 	err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, out, server.Client())
@@ -69,7 +69,7 @@ func TestAnEmptyRunEnvIsTheSameQuietWait(t *testing.T) {
 func TestWaitingWithNoHeartbeatURLPingsNothingAndFailsNothing(t *testing.T) {
 	e, server := newStandInEndpoint(t)
 	dir := t.TempDir()
-	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-run-env", filepath.Join(dir, "run.env")}
+	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-account", "boost", "-run-env", filepath.Join(dir, "run.env")}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL})
 	if err := run(args, environment, func() time.Time { return t0 }, &bytes.Buffer{}, server.Client()); err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestWaitingReadsTheHeartbeatAddressFromTheSecretsFile(t *testing.T) {
 	dir := t.TempDir()
 	secrets := filepath.Join(dir, "secrets")
 	writeFileT(t, secrets, "TI_HEARTBEAT_URL="+server.URL+heartbeatPath+"\nTI_NTFY_TOPIC=t\nTI_NTFY_SERVER="+server.URL+"\n")
-	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets, "-run-env", filepath.Join(dir, "run.env")}
+	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets, "-account", "boost", "-run-env", filepath.Join(dir, "run.env")}
 	if err := run(args, env(nil), func() time.Time { return t0 }, &bytes.Buffer{}, server.Client()); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestWaitingReadsTheHeartbeatAddressFromTheSecretsFile(t *testing.T) {
 func TestWaitingStillFailsWhenTheSecretsFileCannotBeRead(t *testing.T) {
 	e, server := newStandInEndpoint(t)
 	dir := t.TempDir()
-	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", filepath.Join(dir, "missing"), "-run-env", filepath.Join(dir, "run.env")}
+	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", filepath.Join(dir, "missing"), "-account", "boost", "-run-env", filepath.Join(dir, "run.env")}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_HEARTBEAT_URL": server.URL + heartbeatPath})
 	if err := run(args, environment, func() time.Time { return t0 }, &bytes.Buffer{}, server.Client()); err == nil {
 		t.Fatal("an unreadable secrets file should still fail the firing")
@@ -143,7 +143,7 @@ func TestWithARunEnvPresentAndTheLogReadableTheFiringAlertsAndPingsAsBefore(t *t
 	dir := t.TempDir()
 	runEnv := filepath.Join(dir, "run.env")
 	writeFileT(t, runEnv, "TI_RUN=r1\n")
-	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-run-env", runEnv}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-account", "boost", "-run-env", runEnv}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_HEARTBEAT_URL": server.URL + heartbeatPath})
 	if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, server.Client()); err != nil {
 		t.Fatal(err)
@@ -160,7 +160,7 @@ func TestWithARunEnvPresentAndTheLogReadableTheFiringAlertsAndPingsAsBefore(t *t
 func TestWaitingWithAnEmptyChannelSecretSetsTheChannelAsideAndFails(t *testing.T) {
 	e, server := newStandInEndpoint(t)
 	dir := t.TempDir()
-	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pushover", "-run-env", filepath.Join(dir, "run.env")}
+	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pushover", "-account", "boost", "-run-env", filepath.Join(dir, "run.env")}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_PUSHOVER_TOKEN": "", "TI_PUSHOVER_USER": "", "TI_HEARTBEAT_URL": server.URL + heartbeatPath})
 	err := run(args, environment, func() time.Time { return t0 }, &bytes.Buffer{}, server.Client())
 	if err == nil || !strings.Contains(err.Error(), "pushover") {
@@ -176,7 +176,7 @@ func TestWaitingWithAFailedTradingUnitSendsNoPing(t *testing.T) {
 	systemd := newStandInSystemd(t)
 	systemd.fail("ti-engine@boost.service")
 	dir := t.TempDir()
-	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-run-env", filepath.Join(dir, "run.env"),
+	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-account", "boost", "-run-env", filepath.Join(dir, "run.env"),
 		"-units", "ti-engine@boost.service,ti-adapter-boost.service", "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_HEARTBEAT_URL": server.URL + heartbeatPath})
 	if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, server.Client()); err != nil {
@@ -210,7 +210,7 @@ func TestWaitingResolvesTheReportersEarlierFailurePage(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty",
-		"-run-env", filepath.Join(t.TempDir(), "run.env"), "-self-unit", self}
+		"-account", "boost", "-run-env", filepath.Join(t.TempDir(), "run.env"), "-self-unit", self}
 	if err := run(args, twoChannels(), func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r}); err != nil {
 		t.Fatal(err)
 	}
@@ -412,5 +412,62 @@ func TestAnEngineFolderThatCannotBeListedIsAFaultNotAWait(t *testing.T) {
 	err := f.fire(t, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "cannot be listed") || f.e.count("ping") != 0 {
 		t.Fatalf("err = %v events %v", err, f.e.events)
+	}
+}
+
+func TestARunEnvWithoutAnAccountRefusesToStart(t *testing.T) {
+	e, server := newStandInEndpoint(t)
+	dir := t.TempDir()
+	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "boost.reporter.json"), "-channel", "ntfy", "-run-env", filepath.Join(dir, "run.env")}
+	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_HEARTBEAT_URL": server.URL + heartbeatPath})
+	err := run(args, environment, func() time.Time { return t0 }, &bytes.Buffer{}, server.Client())
+	if err == nil || !strings.Contains(err.Error(), "-account") || !strings.Contains(err.Error(), "-run-env") {
+		t.Fatalf("err = %v, want a refusal naming -account and -run-env", err)
+	}
+	if len(e.events) != 0 {
+		t.Errorf("a refused start sent or pinged: %v", e.events)
+	}
+}
+
+func TestARefusedJournalReadWritesNoMarker(t *testing.T) {
+	f := newFiring(t)
+	if err := os.MkdirAll(f.engine, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFileT(t, filepath.Join(f.engine, "run.env"), "TI_RUN=r1\n")
+	writeFileT(t, f.journal, "this is not a journal\n")
+	if err := f.fire(t, &bytes.Buffer{}); err == nil {
+		t.Fatal("an unreadable journal should fail the firing")
+	}
+	if _, err := os.Stat(filepath.Join(f.reports, "boost.ran")); err == nil {
+		t.Error("a marker was written although the journal read was refused")
+	}
+}
+
+func TestAMarkerThatCannotBeWrittenFailsTheFiringAndIsRetriedNextFiring(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes anywhere")
+	}
+	f := newFiring(t)
+	if err := os.MkdirAll(f.engine, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFileT(t, filepath.Join(f.engine, "run.env"), "TI_RUN=r1\n")
+	if err := os.Chmod(f.reports, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.reports, 0o755) })
+	err := f.fire(t, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "first-run marker") {
+		t.Fatalf("err = %v, want the failed marker named", err)
+	}
+	if err := os.Chmod(f.reports, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.fire(t, &bytes.Buffer{}); err != nil {
+		t.Fatalf("the next firing did not recover: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.reports, "boost.ran")); err != nil {
+		t.Errorf("the marker was not retried: %v", err)
 	}
 }
