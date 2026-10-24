@@ -1947,7 +1947,7 @@ class RealEngineResumeTests(unittest.TestCase):
             out = root / (name + ".out")
             with open(out, "w") as sink:
                 engine = subprocess.Popen([engine_bin, "-mode", "dry-run", "-config", config,
-                                           "-as-of", "2024-01-02T21:00:00Z", "-socket", socket,
+                                           "-as-of", "2025-01-02T21:00:00Z", "-socket", socket,
                                            "-log", str(logs / (name + ".log")), "-out", str(root / (name + ".journal")),
                                            *extra], stdout=sink, stderr=subprocess.STDOUT)
             self.addCleanup(lambda: engine.poll() is None and (engine.kill(), engine.wait()))

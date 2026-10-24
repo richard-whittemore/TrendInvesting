@@ -77,7 +77,7 @@ for b in operator journal-query; do
 done
 work=$(mktemp -d)
 background_start "$work/engine.out" /dist/ti-engine -mode dry-run -config /src/deploy/etc/engines/boost.config \
-  -as-of 2024-01-02T21:00:00Z -socket "$work/engine.sock" -log "$work/run.log" -out "$work/run.journal"
+  -as-of 2025-01-02T21:00:00Z -socket "$work/engine.sock" -log "$work/run.log" -out "$work/run.journal"
 wait_ready "listening on" "$work/engine.out" 10 || fail "the engine did not start within 10 s: $(cat "$work/engine.out")"
 status=0
 background_stop 10 || status=$?

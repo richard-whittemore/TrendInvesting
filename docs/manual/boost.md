@@ -340,11 +340,11 @@ feed the readings and decide nothing, as QuantConnect's warm-up does. The
 daily data job's one-time warm-up delivers that history
 ([market data](market-data.md), "The one-time warm-up").
 
-The shipped dry-run file says 2024-01-02, which is outside the two years of
-history Massive's plan reaches back, so the data job cannot fetch a warm-up
-for that file. A run fed by the data job needs a date inside the window;
-that is a different configuration (a new hash), so it starts as a new run.
-A paper run uses a date inside the window
+The shipped dry-run file says 2025-01-02, inside the two years of history
+Massive's plan reaches back, so the data job can fetch its warm-up. That date
+stays inside the window until 2 January 2027; a later warm-up needs a later
+date, which is a different configuration (a new hash) and so a new run. A paper
+run uses a date inside the window
 (`docs/runbooks/first-paper-order.md`, step A5, recommends 2025-01-02).
 
 ## The hard limits for this account

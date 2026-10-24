@@ -60,10 +60,10 @@ func syntheticCloses(n int) []float64 {
 	return closes
 }
 
-// sessions returns n weekday session closes from 2024-01-02, 21:00 UTC.
+// sessions returns n weekday session closes from 2025-01-02, 21:00 UTC.
 func sessions(n int) []time.Time {
 	out := make([]time.Time, 0, n)
-	for day := time.Date(2024, time.January, 2, 21, 0, 0, 0, time.UTC); len(out) < n; day = day.AddDate(0, 0, 1) {
+	for day := time.Date(2025, time.January, 2, 21, 0, 0, 0, time.UTC); len(out) < n; day = day.AddDate(0, 0, 1) {
 		if day.Weekday() != time.Saturday && day.Weekday() != time.Sunday {
 			out = append(out, day)
 		}
@@ -223,7 +223,7 @@ func (f *feeder) session(i int, at time.Time, price float64) error {
 		{event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%d", i),
 			event.CompletedBarAdjustedPayload{
 				CompletedBarPayload: event.CompletedBarPayload{InstrumentID: f.instrument, PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)},
-				Adjusted:            view(event.ViewAdjusted), AdjustedBase: "2024-01-02",
+				Adjusted:            view(event.ViewAdjusted), AdjustedBase: "2025-01-02",
 			}},
 		{event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", i), snapshot},
 		{event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", i),

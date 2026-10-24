@@ -397,17 +397,16 @@ sessions as the longest indicator window (200 for the trend average), and
 writes the run's first file, holding the whole history. Any other date is
 refused, because the indicators are seeded from the configured one.
 
-Massive's free plan reaches back two years only, so the paper Boost
+Massive's free plan reaches back two years only, so the Boost
 configuration's `warm_up_start` must lie within the last two years. The
-shipped dry-run file says 2024-01-02, which is already outside that window.
-In your paper copy (`docs/runbooks/first-paper-order.md`, A5) set
-`"warm_up_start": "2025-01-02"`, the recommended value: it is a session, it
-is within the window, and it leaves well over the 200 sessions the trend
-average needs before the first paper day. The choice is yours; any session
-inside the window with at least 200 sessions before the first paper day
-works. 2025-01-02 stays inside the window until 2 January 2027; a warm-up
-run after that needs a later date. It changes the paper configuration's hash only (the paper run is a
-new run anyway); the shipped dry-run file and its runs are unchanged.
+shipped dry-run file says 2025-01-02, a session inside that window with well
+over the 200 sessions the trend average needs before the first dry-run day.
+It stays inside the window until 2 January 2027; a warm-up run after that
+needs a later date, which is a new configuration and so a new run. Your paper
+copy (`docs/runbooks/first-paper-order.md`, A5) keeps the same value unless you
+choose another session inside the window with at least 200 sessions before the
+first paper day; a paper copy that keeps 2025-01-02 differs from the shipped
+file in its mode and account only.
 
 A new engine run (a fresh `TI_RUN`) starts with no files and needs the
 warm-up again; the recordings are already on disk, so it fetches only the
