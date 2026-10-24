@@ -240,6 +240,43 @@ class WaitingForTheFirstRunTest(unittest.TestCase):
             self.assertEqual(result[0][0], 1)
             self.assertIn("ti-data refused:", result[0][2])
 
+    def test_a_missing_run_env_with_a_run_stream_folder_and_no_logs_is_refused(self):
+        for text in (None, ""):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                job = Job(d)
+                run_env = Path(d, "run.env")
+                if text is not None:
+                    run_env.write_text(text)
+                job.log.unlink()
+                job.stream_dir().mkdir(parents=True)
+                status, _, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+                self.assertEqual(status, 1)
+                self.assertIn("ti-data refused:", err)
+                self.assertIn("settings file is missing but a run exists", err)
+                self.assertNotIn("waiting", err)
+
+    def test_a_fifo_swapped_in_after_a_path_check_cannot_hold_the_open(self):
+        # The file is opened without blocking and its descriptor is checked, so
+        # a path check that saw a regular file cannot let a FIFO block the job.
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            run_env = Path(d, "run.env")
+            os.mkfifo(run_env)
+            real_stat = os.stat
+
+            def stat_says_regular(path, *a, **k):
+                if str(path) == str(run_env):
+                    return os.stat_result((0o100600, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+                return real_stat(path, *a, **k)
+
+            result = []
+            with mock.patch("os.stat", stat_says_regular):
+                t = threading.Thread(target=lambda: result.append(job.main(after_settle(WARM), "--run-env", str(run_env))), daemon=True)
+                t.start()
+                t.join(10)
+            self.assertFalse(t.is_alive(), "the job blocked opening a FIFO")
+            self.assertEqual(result[0][0], 1)
+
 
 class SettleTest(unittest.TestCase):
     """The latest settled session: its close plus the settle minutes have passed."""

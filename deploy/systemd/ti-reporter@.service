@@ -59,9 +59,10 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # journal group. -self-unit: a clean firing resolves the page of an earlier
 # failed one.
 # -run-env: while the engine's run.env is missing or empty and nothing shows a
-# run, the firing logs that it is waiting for the account's first run and skips
+# run (no <account>.ran marker in the reports directory, no *.log in the engine
+# folder), the firing logs that it is waiting for the account's first run and skips
 # only the reading of the journal; every other step runs as usual. With any
-# sign of a run it is a fault (docs/manual/server.md, "The reporter before the
+# sign of a run it is an alert and a fault (docs/manual/server.md, "The reporter before the
 # first run").
 SupplementaryGroups=systemd-journal
 ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -self-unit ti-reporter@%i.service

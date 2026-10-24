@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,18 +252,6 @@ func TestAnEmptyRunEnvWithARunLogIsTheSameAlert(t *testing.T) {
 	}
 }
 
-func TestALostRunEnvWithAReportedRunInTheStateIsTheSameAlert(t *testing.T) {
-	e, server := newStandInEndpoint(t)
-	dir := t.TempDir()
-	writeFileT(t, filepath.Join(dir, "s.json"), `{"keys":["ntfy|refusal:x@a"]}`)
-	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-run-env", filepath.Join(t.TempDir(), "run.env")}
-	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_HEARTBEAT_URL": server.URL + heartbeatPath})
-	err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, server.Client())
-	if err == nil || !strings.Contains(err.Error(), "settings file is missing but a run exists") || e.count("ping") != 0 {
-		t.Fatalf("err = %v, events %v", err, e.events)
-	}
-}
-
 func TestAnOversizedRunEnvIsRefusedNotRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.env")
 	writeFileT(t, path, strings.Repeat("A=1\n", 40000))
@@ -289,5 +278,139 @@ func TestARunEnvThatIsNotARegularFileIsRefusedWithoutBlocking(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the firing blocked on a run.env that is a FIFO")
+	}
+}
+
+// The run evidence is an explicit durable marker, <account>.ran beside the
+// reporter's state file, written the first time a journal named by run.env is
+// read, plus the logs in the engine folder (docs/manual/server.md, "The
+// reporter before the first run"). A stray file or a state key proves nothing.
+
+type runFiring struct {
+	e       *standInEndpoint
+	server  *httptest.Server
+	reports string
+	engine  string
+	journal string
+}
+
+func newFiring(t *testing.T) *runFiring {
+	t.Helper()
+	e, server := newStandInEndpoint(t)
+	return &runFiring{e: e, server: server, reports: t.TempDir(), engine: filepath.Join(t.TempDir(), "engine"), journal: writeJournal(t, t.TempDir())}
+}
+
+func (f *runFiring) fire(t *testing.T, out *bytes.Buffer) error {
+	t.Helper()
+	args := []string{"-journal", f.journal, "-state", filepath.Join(f.reports, "boost.reporter.json"), "-channel", "ntfy", "-account", "boost", "-run-env", filepath.Join(f.engine, "run.env")}
+	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": f.server.URL, "TI_HEARTBEAT_URL": f.server.URL + heartbeatPath})
+	return run(args, environment, func() time.Time { return t0.Add(time.Hour) }, out, f.server.Client())
+}
+
+func (f *runFiring) state(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(f.reports, "boost.reporter.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestACleanFirstReadWritesTheMarkerAndALaterLostRunEnvIsAnAlertNotAWait(t *testing.T) {
+	f := newFiring(t)
+	if err := os.MkdirAll(f.engine, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFileT(t, filepath.Join(f.engine, "run.env"), "TI_RUN=r1\n")
+	if err := f.fire(t, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(f.reports, "boost.ran")
+	info, err := os.Stat(marker)
+	if err != nil {
+		t.Fatalf("no marker after the first journal read: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("marker mode %v, want the state file's 0600", info.Mode().Perm())
+	}
+	// The settings file is lost, and no log is left in the folder.
+	if err := os.Remove(filepath.Join(f.engine, "run.env")); err != nil {
+		t.Fatal(err)
+	}
+	f.e.events = nil
+	var out bytes.Buffer
+	err = f.fire(t, &out)
+	if err == nil || !strings.Contains(err.Error(), "settings file is missing but a run exists") {
+		t.Fatalf("err = %v, want the lost-settings fault", err)
+	}
+	if f.e.count("ping") != 0 || strings.Contains(out.String(), "waiting") {
+		t.Errorf("pinged or waited: %v %q", f.e.events, out.String())
+	}
+	if !strings.Contains(f.state(t), "run-env-missing:boost:") {
+		t.Errorf("the lost-settings alert was not delivered: %s", f.state(t))
+	}
+}
+
+func TestAStrayLogLaterDeletedDoesNotLatchTheWait(t *testing.T) {
+	f := newFiring(t)
+	if err := os.MkdirAll(f.engine, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stray := filepath.Join(f.engine, "stray.log")
+	writeFileT(t, stray, "")
+	if err := f.fire(t, &bytes.Buffer{}); err == nil {
+		t.Fatal("a log with no run.env should alert")
+	}
+	if err := os.Remove(stray); err != nil {
+		t.Fatal(err)
+	}
+	f.e.events = nil
+	var out bytes.Buffer
+	if err := f.fire(t, &out); err != nil {
+		t.Fatalf("the wait latched into a fault after the stray log was removed: %v", err)
+	}
+	if !strings.Contains(out.String(), "waiting for the account's first run") || f.e.count("ping") != 1 {
+		t.Errorf("out %q events %v", out.String(), f.e.events)
+	}
+	if _, err := os.Stat(filepath.Join(f.reports, "boost.ran")); err == nil {
+		t.Error("a marker was written without a journal read")
+	}
+}
+
+func TestAnAbsentEngineFolderWithNoMarkerIsAWait(t *testing.T) {
+	f := newFiring(t)
+	var out bytes.Buffer
+	if err := f.fire(t, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "waiting") || f.e.count("ping") != 1 {
+		t.Errorf("out %q events %v", out.String(), f.e.events)
+	}
+}
+
+func TestAnAbsentEngineFolderWithTheMarkerIsAnAlert(t *testing.T) {
+	f := newFiring(t)
+	writeFileT(t, filepath.Join(f.reports, "boost.ran"), "")
+	err := f.fire(t, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "settings file is missing but a run exists") || f.e.count("ping") != 0 {
+		t.Fatalf("err = %v events %v", err, f.e.events)
+	}
+}
+
+func TestAnEngineFolderThatCannotBeListedIsAFaultNotAWait(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lists anything")
+	}
+	f := newFiring(t)
+	if err := os.MkdirAll(f.engine, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(f.engine, 0o311); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.engine, 0o755) })
+	err := f.fire(t, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be listed") || f.e.count("ping") != 0 {
+		t.Fatalf("err = %v events %v", err, f.e.events)
 	}
 }

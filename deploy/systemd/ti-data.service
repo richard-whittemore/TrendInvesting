@@ -6,7 +6,8 @@ Wants=network-online.target
 # No Condition: a missing /opt/trend-investing/bin/ti-data, or a run.env
 # naming a log that cannot be read, fails the unit with a message, so the
 # owner sees a failed unit, never a silent skip. A Boost engine not yet
-# started (no run.env) is a quiet success: --run-env below.
+# started (no run.env, no run log, no run stream folder) is a quiet success:
+# --run-env below.
 # The secrets rest on disk only encrypted; ti-unlock decrypts them after
 # each boot into a root-only tmpfs, and this unit loads its credential
 # from there. Until then systemd refuses to start it ("Assertion failed")

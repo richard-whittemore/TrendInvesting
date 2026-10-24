@@ -35,6 +35,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -105,7 +106,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	selfUnit := flags.String("self-unit", "", "this reporter's own unit (ti-reporter@<instance>.service): its failure page is resolved by the next firing that finishes without a fault")
 	unitState := flags.String("unit-state", "", "the host's record of failed-unit pages, shared with the OnFailure hook (default: unit-failures.json beside -state)")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
-	runEnv := flags.String("run-env", "", "the engine's run.env (/var/lib/trend-investing/engines/<instance>/run.env): while it is missing or empty no run has been started, and the firing logs one line that it is waiting for the account's first run, sends no alert, pings the outside heartbeat and succeeds; once it exists the firing reads the journal as usual")
+	runEnv := flags.String("run-env", "", "the engine's run.env (/var/lib/trend-investing/engines/<instance>/run.env): while it is missing or empty and nothing shows a run (no *.log in its folder, no <account>.ran marker beside -state) the firing logs that it is waiting for the account's first run and skips only the journal step; every other check still runs, and the firing pings the outside heartbeat only when nothing else is wrong. With any sign of a run it is an urgent alert and a failed firing")
 	journalctl := flags.String("journalctl", "journalctl", "the journal reader that gives a failed unit's last line")
 	err := flags.Parse(args)
 	if err != nil {
@@ -190,9 +191,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// The firing waits only on proof that the account has never run: nothing
 	// shows a run but the missing settings file. Any sign of one is a fault.
 	var lostRunEnv error
+	marker := ranMarkerPath(*statePath, *accountName)
 	waiting := false
 	if runEnvEmpty {
-		if sign := runEvidence(filepath.Dir(*runEnv), seen); sign != "" {
+		if sign := runEvidence(filepath.Dir(*runEnv), marker); sign != "" {
 			lostRunEnv = fmt.Errorf("reporter: the run's settings file is missing but a run exists: %s is missing or empty and %s", *runEnv, sign)
 		} else {
 			waiting = true
@@ -240,6 +242,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		history, envelopes, account, alerts, refused = readJournal(*journalPath, now(), *ackWithin, seen)
 		if account != "" {
 			label = account
+		}
+		if refused == nil && *runEnv != "" {
+			if err := writeRanMarker(marker); err != nil {
+				failures = append(failures, err)
+			}
 		}
 	}
 	examined := false
@@ -295,7 +302,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		// alert, the heartbeat is checked where it can be, and the error is
 		// returned.
 		failures = append(failures, refused)
-		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, unchecked, now())}
+		if lostRunEnv != nil && errors.Is(refused, lostRunEnv) {
+			alerts = []report.Alert{report.RunEnvMissingAlert(label, refused, unchecked, now())}
+		} else {
+			alerts = []report.Alert{report.JournalRefusedAlert(label, refused, unchecked, now())}
+		}
 	}
 	alerts = append(alerts, heartbeat...)
 	for _, f := range setAside {
@@ -874,14 +885,23 @@ func writeAtomic(path string, raw []byte) error {
 const maxRunEnv = 64 << 10
 
 // runEnvIsEmpty reports whether the engine's run.env is missing or holds
-// nothing. A file that exists but is not a regular file, is larger than
-// maxRunEnv or cannot be read is a fault, not a wait; it is never opened
-// before its type is known, so a FIFO cannot hold the firing.
+// nothing, by the rule that the wait is only for an account that has never
+// run (docs/manual/server.md, "The reporter before the first run"). A file
+// that exists but is not a regular file, is larger than maxRunEnv or cannot be
+// read is a fault, not a wait. It is opened without blocking and its
+// descriptor checked, so a FIFO swapped in after a path check cannot hold the
+// firing.
 func runEnvIsEmpty(path string) (bool, error) {
-	info, err := os.Stat(path)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, fs.ErrNotExist) {
 		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reporter: %s cannot be read: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	switch {
 	case err != nil:
 		return false, fmt.Errorf("reporter: %s cannot be read: %w", path, err)
 	case !info.Mode().IsRegular():
@@ -889,11 +909,6 @@ func runEnvIsEmpty(path string) (bool, error) {
 	case info.Size() > maxRunEnv:
 		return false, fmt.Errorf("reporter: %s is larger than %d bytes and is not read", path, maxRunEnv)
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false, fmt.Errorf("reporter: %s cannot be read: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(f, maxRunEnv+1))
 	if err != nil {
 		return false, fmt.Errorf("reporter: %s cannot be read: %w", path, err)
@@ -904,12 +919,44 @@ func runEnvIsEmpty(path string) (bool, error) {
 	return len(bytes.TrimSpace(raw)) == 0, nil
 }
 
+// ranMarkerPath is the account's durable record that a journal named by
+// run.env has been read: <account>.ran beside the state file, with the same
+// owner and mode. The account is -account, else the state file's name up to
+// its first dot.
+func ranMarkerPath(statePath, account string) string {
+	if account == "" {
+		account, _, _ = strings.Cut(filepath.Base(statePath), ".")
+	}
+	return filepath.Join(filepath.Dir(statePath), account+".ran")
+}
+
+// writeRanMarker records the first successful read of a journal named by
+// run.env. It is never removed by the program, and a stray file cannot stand
+// in for it: it is written only after a real read (docs/manual/server.md,
+// "The reporter before the first run").
+func writeRanMarker(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if err := writeAtomic(path, []byte("a journal named by run.env has been read\n")); err != nil {
+		return fmt.Errorf("reporter: write the first-run marker: %w", err)
+	}
+	return nil
+}
+
 // runEvidence names the first sign that a run has happened, or "" when there
-// is none: a run log (*.log) in the engine's folder, or an alert the reporter
-// has delivered from a journal (the host's own pages, for a failed unit, a
-// channel set aside or the clock, say nothing of a run). A folder that cannot
-// be listed is a sign, since it cannot be shown to hold none.
-func runEvidence(engineDir string, seen map[string]bool) string {
+// is none: the marker written by an earlier read of a journal, or a run log
+// (*.log) in the engine's folder. A marker or a folder that cannot be examined
+// is a sign, since it cannot be shown to hold none; an engine folder that does
+// not exist at all is a fresh server, and shows none. The rule is that the
+// wait is only for an account that has never run (docs/manual/server.md, "The
+// reporter before the first run").
+func runEvidence(engineDir, marker string) string {
+	if _, err := os.Stat(marker); err == nil {
+		return "the reporter has already read a journal for this account (" + filepath.Base(marker) + ")"
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "its first-run marker cannot be examined: " + err.Error()
+	}
 	entries, err := os.ReadDir(engineDir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "its folder cannot be listed: " + err.Error()
@@ -918,13 +965,6 @@ func runEvidence(engineDir string, seen map[string]bool) string {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
 			return "the engine folder holds the run log " + e.Name()
 		}
-	}
-	for k := range seen {
-		_, alertKey, _ := strings.Cut(k, "|")
-		if strings.HasPrefix(alertKey, "unit-failed:") || strings.HasPrefix(alertKey, "channel-refused:") || strings.HasPrefix(alertKey, "clock-drift:") {
-			continue
-		}
-		return "the reporter has already reported from a journal"
 	}
 	return ""
 }

@@ -533,12 +533,12 @@ the path of the file it wrote, or of the file that already held the session;
 refusal prints `ti-data refused:` and the reason, exits 1, and the unit
 shows as failed, which the alerting (plan.md section 7) is to watch. The unit
 is never skipped: before the job is installed each firing fails with a message
-saying so. Before the Boost engine has been started once (no `run.env` and no
-`.log` run log in its folder) the firing is not a failure: it prints one line, `ti-data: waiting for the
+saying so. Before the Boost engine has been started once (no `run.env`, no
+`.log` run log in its folder and no run folder under `streams/boost`) the firing is not a failure: it prints one line, `ti-data: waiting for the
 account's first run: ... run.env is missing or empty`, writes nothing and
 succeeds, so nothing pages you ([server](server.md), "The reporter before the
 first run"). Once `run.env` exists the job is unchanged. A `run.env` that is
-missing or empty while a run log exists, or that is not a regular file, is over
+missing or empty while a run log or a run stream folder exists, or that is not a regular file, is over
 64 KiB or cannot be read, is a refusal like any other.
 
 **What can go wrong.** In every case no file is written for the session,

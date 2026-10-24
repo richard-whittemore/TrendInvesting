@@ -585,33 +585,39 @@ class RunEnvRefused(Exception):
     """run.env is lost, unreadable, not a regular file or too large."""
 
 
-def awaiting_first_run(path):
+def awaiting_first_run(path, engine_streams=None):
     """True only when no run has been started: run.env is missing or holds
-    nothing and the engine's folder holds no run log (*.log); the firing then
-    waits rather than failing. A run.env that is missing or empty while a run
-    log exists was lost, and one that is not a regular file, is over 64 KiB or
-    cannot be read is bad: all of them raise, to be refused like any other
-    fault. It is never opened before its type is known, so a FIFO cannot hold
-    the job."""
+    nothing, the engine's folder holds no run log (*.log) and engine_streams,
+    this job's own output for the engine, holds no run stream folder; the firing
+    then waits rather than failing. A run.env that is missing or empty while
+    any of those exists was lost, and one that is not a regular file, is over
+    64 KiB or cannot be read is bad: all of them raise, to be refused like any
+    other fault (docs/manual/server.md, "The reporter before the first run":
+    the wait is only for an account that has never run). run.env is opened
+    without blocking and its descriptor checked, so a FIFO swapped in after a
+    path check cannot hold the job."""
     try:
-        st = os.stat(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
         empty = True
     except OSError as e:
         raise RunEnvRefused("{} cannot be read: {}".format(path, e))
     else:
-        if not stat.S_ISREG(st.st_mode):
-            raise RunEnvRefused("{} is not a regular file".format(path))
-        if st.st_size > MAX_RUN_ENV:
-            raise RunEnvRefused("{} is larger than {} bytes and is not read".format(path, MAX_RUN_ENV))
         try:
-            with open(path, "rb") as f:
-                raw = f.read(MAX_RUN_ENV + 1)
-            empty = not raw.decode("utf-8").strip()
-        except (OSError, UnicodeDecodeError) as e:
-            raise RunEnvRefused("{} cannot be read: {}".format(path, e))
-        if len(raw) > MAX_RUN_ENV:
-            raise RunEnvRefused("{} is larger than {} bytes and is not read".format(path, MAX_RUN_ENV))
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise RunEnvRefused("{} is not a regular file".format(path))
+            if st.st_size > MAX_RUN_ENV:
+                raise RunEnvRefused("{} is larger than {} bytes and is not read".format(path, MAX_RUN_ENV))
+            try:
+                raw = os.read(fd, MAX_RUN_ENV + 1)
+                empty = not raw.decode("utf-8").strip()
+            except (OSError, UnicodeDecodeError) as e:
+                raise RunEnvRefused("{} cannot be read: {}".format(path, e))
+            if len(raw) > MAX_RUN_ENV:
+                raise RunEnvRefused("{} is larger than {} bytes and is not read".format(path, MAX_RUN_ENV))
+        finally:
+            os.close(fd)
     if not empty:
         return False
     folder = os.path.dirname(os.path.abspath(path))
@@ -621,9 +627,19 @@ def awaiting_first_run(path):
         logs = []
     except OSError as e:
         raise RunEnvRefused("the settings file {} is missing or empty and its folder cannot be listed: {}".format(path, e))
-    if logs:
-        raise RunEnvRefused("the run's settings file is missing but a run exists: {} is missing or empty and the "
-                            "engine folder holds the run log {}".format(path, sorted(logs)[0]))
+    streams = []
+    if engine_streams:
+        try:
+            streams = [n for n in os.listdir(engine_streams) if os.path.isdir(os.path.join(engine_streams, n))]
+        except FileNotFoundError:
+            streams = []
+        except OSError as e:
+            raise RunEnvRefused("the settings file {} is missing or empty and {} cannot be listed: {}"
+                                .format(path, engine_streams, e))
+    if logs or streams:
+        raise RunEnvRefused("the run's settings file is missing but a run exists: {} is missing or empty and {}"
+                            .format(path, "the engine folder holds the run log " + sorted(logs)[0] if logs
+                                    else "{} holds the run stream folder {}".format(engine_streams, sorted(streams)[0])))
     return True
 
 
@@ -632,7 +648,7 @@ def main(argv, now=steps._now, client_factory=massive.Client):
     print("ti-data " + STAMP, file=sys.stderr)
     key = None   # held here, so every message printed below can have it replaced
     try:
-        if args.run_env and awaiting_first_run(args.run_env):
+        if args.run_env and awaiting_first_run(args.run_env, os.path.join(args.streams, ENGINE)):
             print("ti-data: waiting for the account's first run: {} is missing or empty (start the Boost engine once)"
                   .format(args.run_env), file=sys.stderr)
             return 0
