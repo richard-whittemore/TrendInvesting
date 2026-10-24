@@ -556,9 +556,9 @@ so the engine never reads half a day. Recordings already made are kept, and
 the next run (or `sudo systemctl start ti-data` once the cause is fixed)
 carries on from them.
 
-- **No Massive key**: the line `MASSIVE_API_KEY=` in
-  `/etc/trend-investing/secrets.env` (stored encrypted; edit it with `sudo
-  ti-secrets edit secrets.env`) is empty or missing. The key is never
+- **No Massive key**: the line `MASSIVE_API_KEY=` in `secrets.env`
+  (stored encrypted; edit it with `sudo ti-secrets edit secrets.env`) is
+  empty or missing. The key is never
   printed, even when an error from Massive would contain it: it is replaced
   by `[MASSIVE_API_KEY]`.
 - **The session has not settled**: only when a session is named with
