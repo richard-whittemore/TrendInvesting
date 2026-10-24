@@ -99,19 +99,33 @@ for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journa
 done
 echo "checkout $work/checkout, container $name, dashboard port $port"
 
-step "the stand-in for ntfy and Pushover, on the Mac's loopback port $sink_port"
+step "the stand-in for ntfy, Pushover and the alerts repository's issues, on the Mac's loopback port $sink_port"
+cp "$repo/deploy/rehearsal/github_standin.py" "$work/github_standin.py"
 cat >"$work/sink.py" <<'SINK'
 import http.server, sys
 
+sys.path.insert(0, sys.argv[2])
+import github_standin
+
 posts = []
+github_posts = []
 
 class Handler(http.server.BaseHTTPRequestHandler):
     # A connection that sends nothing, or a body shorter than it declares, is
     # dropped after 5 s rather than holding this one-at-a-time server.
     timeout = 5
 
+    def do_PATCH(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        github_standin.handle(self, "PATCH", body, lambda line, _: github_posts.append(line))
+
+    def do_DELETE(self):
+        github_standin.handle(self, "DELETE", b"", lambda line, _: github_posts.append(line))
+
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if github_standin.handle(self, "POST", body, lambda line, _: github_posts.append(line)):
+            return
         posts.append(self.path)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -119,9 +133,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b'{"status":1}')
 
     def do_GET(self):
+        if github_standin.handle(self, "GET", b"", lambda line, _: None):
+            return
         if self.path == "/reset":
             posts.clear()
-        body = "".join(p + "\n" for p in posts).encode()
+            github_posts.clear()
+            github_standin.issues.clear()
+        listing = github_posts if self.path == "/github-posts" else posts
+        body = "".join(p + "\n" for p in listing).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -132,7 +151,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
 SINK
-python3 -I "$work/sink.py" "$sink_port" &
+python3 -I "$work/sink.py" "$sink_port" "$work" &
 sink_pid=$!
 # Every request to it is bounded, so a port held by something that never
 # answers fails the test instead of hanging it.

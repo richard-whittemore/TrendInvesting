@@ -42,6 +42,7 @@ sink=http://host.docker.internal:${SINK_PORT:-0}
 # the stand-in on the Mac. ntfy has no such rule and is reached directly.
 forward=http://127.0.0.1:18099
 sink_posts() { curl -fsS --connect-timeout 2 --max-time 10 "$sink/posts"; }
+sink_issue_posts() { curl -fsS --connect-timeout 2 --max-time 10 "$sink/github-posts"; }
 
 case ${1:-} in
   # T1: systemd is PID 1 and the system is up. ALLOWED names the units that
@@ -121,6 +122,8 @@ ENGINE
       -e "s|^TI_NTFY_SERVER=.*|TI_NTFY_SERVER=$sink|" \
       -e "s|^TI_PUSHOVER_APP_TOKEN=.*|TI_PUSHOVER_APP_TOKEN=fake|" \
       -e "s|^TI_PUSHOVER_USER_KEY=.*|TI_PUSHOVER_USER_KEY=fake\\nTI_PUSHOVER_URL=$forward/1/messages.json|" \
+      -e "s|^TI_GITHUB_ISSUES_TOKEN=.*|TI_GITHUB_ISSUES_TOKEN=fakeghtoken|" \
+      -e "s|^TI_GITHUB_ISSUES_REPO=.*|TI_GITHUB_ISSUES_REPO=owner/repo\\nTI_GITHUB_API_URL=$forward/gh\\nTI_GITHUB_API_ALLOW_HOST=127.0.0.1:18099|" \
       /etc/trend-investing/secrets.env
     echo '# filled in by the owner (test sentinel)' >>/etc/trend-investing/secrets.env
     sed -i 's/"mark_timeout": 15/"mark_timeout": 16/' /etc/trend-investing/adapters/boost.json
@@ -251,14 +254,16 @@ UNIT
     # The fixture log is old: both channels begin recorded long before it, as
     # on a server whose reporter has run since before the log's events (a
     # channel with no record is sent none of the log's earlier alerts).
-    printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pushover":"2000-01-01T00:00:00Z"}}' >"$state/reports/boost.reporter.json"
+    printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pushover":"2000-01-01T00:00:00Z","github-issues":"2000-01-01T00:00:00Z"}}' >"$state/reports/boost.reporter.json"
     chown ti-trader:ti-trader "$state/reports/boost.reporter.json"
     systemctl start ti-reporter@boost.service || fail "ti-reporter@boost failed: $(journalctl -u ti-reporter@boost -n 10 --no-pager -o cat)"
     posts=$(sink_posts) || fail "the stand-in on the Mac does not list its requests"
     grep -q '^/rehearsal$' <<<"$posts" || fail "the reporter reached no ntfy stand-in: $posts"
     grep -q '^/1/messages.json$' <<<"$posts" || fail "the reporter reached no Pushover stand-in: $posts"
     test "$(stat -c %U "$state/reports/boost.reporter.json")" = ti-trader || fail "the reporter's state is not ti-trader's"
-    pass "ti-reporter@boost runs under its unit, reads its secrets through LoadCredential and delivers to both stand-ins"
+    issue_posts=$(sink_issue_posts) || fail "the stand-in on the Mac does not list the alerts repository's requests"
+    grep -q '^POST /gh/repos/owner/repo/issues$' <<<"$issue_posts" || fail "the reporter opened no issue in the alerts repository stand-in: $issue_posts"
+    pass "ti-reporter@boost runs under its unit, reads its secrets through LoadCredential and delivers to all three stand-ins"
 
     # The data job: it runs, reads its credential and refuses the empty key.
     if systemctl start ti-data.service 2>/dev/null; then fail "ti-data succeeded with no Massive key"; fi
