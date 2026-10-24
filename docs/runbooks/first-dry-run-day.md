@@ -58,7 +58,7 @@ systemctl is-active ti-gateway
 ss -ltn 'sport = :4002' | grep -c LISTEN
 test -f /opt/trend-investing/adapter/adapter/ibkr/cli.py || { echo "STOP: adapter code missing: run sudo deploy/provision.sh adapter"; exit 1; }
 echo adapter-code-installed
-{ test -x /opt/trend-investing/bin/ti-data && test -x /opt/trend-investing/bin/ti-engine; } || { echo "STOP: programs missing: run sudo deploy/provision.sh from the checkout, then start this step again"; exit 1; }
+{ test -x /opt/trend-investing/bin/ti-data && test -x /opt/trend-investing/bin/ti-engine; } || { echo "STOP: programs missing: from the checkout, with the programs copied from the Mac into dist/, install ti-data with sudo deploy/provision.sh services (only before step 1; see the warning at the top) and ti-engine with sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine, then start this step again"; exit 1; }
 echo programs-installed
 sudo test ! -e /var/lib/trend-investing/engines/boost/run.env || { echo "STOP: run.env already exists: this is not a first start; do not go on (see 'If the engine halts on its first reading')"; exit 1; }
 echo no-run-env
