@@ -235,7 +235,7 @@ sudo systemd-run --unit=ti-warmup --collect -p User=ti-trader -p Group=ti-trader
 
 <!-- expect: warmup -->
 ```text
-Running as unit: ti-warmup.service
+~ Running as unit: ti-warmup\.service
 ```
 
 Then wait for it, for at most 3 hours (twice what it should take):
