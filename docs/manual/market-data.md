@@ -383,13 +383,23 @@ engine has been started once (so its durable log exists), run the warm-up
 once, with the configuration's `warm_up_start` date:
 
 ```sh
-sudo systemd-run --wait --pipe --collect -p User=ti-trader -p Group=ti-trader \
-  -p LoadCredential=secrets:/etc/trend-investing/secrets.env \
+sudo systemd-run --unit=ti-warmup --collect -p User=ti-trader -p Group=ti-trader \
+  -p LoadCredential=secrets:/run/trend-investing/secrets/secrets.env \
   /opt/trend-investing/bin/ti-data --data /var/lib/trend-investing/data \
   --config /etc/trend-investing/engines/boost.config \
   --engine-log /var/lib/trend-investing/engines/boost/<TI_RUN>.log \
   --backfill-from <warm_up_start>
 ```
+
+The secrets rest on disk only encrypted (ADR 0028), so the credential is the
+unlocked copy `sudo ti-unlock` decrypts into `/run/trend-investing/secrets/`:
+until you have unlocked, systemd refuses the command. The job runs as its own
+transient unit and keeps running if your terminal closes: follow it with
+`sudo journalctl -fu ti-warmup`, and wait for `ti-warmup.service: Deactivated
+successfully.`; the file it wrote is the last path in that journal. At the
+free plan's pace it takes about an hour and a half for a warm-up from
+2025-01-02. The ordered, rehearsed steps around it are in
+[the first dry-run day runbook](../runbooks/first-dry-run-day.md).
 
 It records every session from that date (resumable: a second try fetches
 only what is missing), checks there is no missing day and at least as many
@@ -542,7 +552,8 @@ the next run (or `sudo systemctl start ti-data` once the cause is fixed)
 carries on from them.
 
 - **No Massive key**: the line `MASSIVE_API_KEY=` in
-  `/etc/trend-investing/secrets.env` is empty or missing. The key is never
+  `/etc/trend-investing/secrets.env` (stored encrypted; edit it with `sudo
+  ti-secrets edit secrets.env`) is empty or missing. The key is never
   printed, even when an error from Massive would contain it: it is replaced
   by `[MASSIVE_API_KEY]`.
 - **The session has not settled**: only when a session is named with
@@ -967,7 +978,7 @@ for the recording and encoding steps.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| `ti-data refused:` "no secrets file", "cannot read MASSIVE_API_KEY from the secrets file" or "MASSIVE_API_KEY is not set in the secrets file" | No file is written; the unit shows as failed. The key is never printed | Put the key on the `MASSIVE_API_KEY=` line of `/etc/trend-investing/secrets.env`, then `sudo systemctl start ti-data` ("What can go wrong" under "The daily data job") |
+| `ti-data refused:` "no secrets file", "cannot read MASSIVE_API_KEY from the secrets file" or "MASSIVE_API_KEY is not set in the secrets file" | No file is written; the unit shows as failed. The key is never printed | Put the key on the `MASSIVE_API_KEY=` line of `secrets.env` (`sudo ti-secrets edit secrets.env`; the file is stored encrypted), then `sudo systemctl start ti-data` ("What can go wrong" under "The daily data job") |
 | `ti-data refused:` "run ... has no stream yet: run the warm-up once first" | No file is written | Run the one-time warm-up with the date it names ("The one-time warm-up") |
 | `ti-data refused:` the engine's durable log "cannot be read", "is not an engine durable log", "holds no committed configuration input: start the engine first", "holds no committed input, so it names no run", or the run's first input "is not its configuration" | No file is written | Start the engine once (so `run.env` and its log exist), check `TI_RUN`, and restore a log that cannot be read from the backup as the engine wrote it; never edit it |
 | `ti-data refused:` "it is not a Boost configuration", "warm_up_start ... is not an NYSE session", "--backfill-from ... is not the configuration's warm_up_start", "session ... precedes the warm-up start", or "the Boost configuration ... is not the one the engine's durable log ... holds" | No file is written | Correct the date or put the configuration back as the engine started with it; an edited configuration is a new run |

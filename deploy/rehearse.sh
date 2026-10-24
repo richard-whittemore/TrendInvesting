@@ -19,6 +19,12 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The secrets rest on disk only encrypted (ADR 0028): no command in the docs
+# may load a credential from the plain-text path.
+if grep -rn 'LoadCredential=[a-z]*:/etc/trend-investing' "$repo/docs" "$repo/deploy/systemd" "$repo/deploy/mac-mini/systemd" >&2; then
+  echo "REHEARSAL FAIL: a command or unit loads a credential from /etc/trend-investing (the unlocked copy is under /run/trend-investing/secrets)" >&2
+  exit 1
+fi
 # shellcheck source=/dev/null
 . "$repo/deploy/rehearsal/platform.sh"
 platform=$(rehearsal_platform)
@@ -70,15 +76,22 @@ docker start -a "$id"
 # systemd starts, and Docker's default seccomp filter kept. / is mounted
 # shared, as up.sh's mount-shared.service does, so that systemd can hand a
 # unit its credentials (LoadCredential=) and the rehearsal reads them as the
-# server does; gnupg is ti-secrets' tool, as provision.sh base installs it.
+# server does; gnupg is ti-secrets' tool, as provision.sh base installs it;
+# openssl, iproute2 (ss) and tzdata serve the first-day rehearsal's stand-in
+# Massive, the runbook's port check and the New York clock.
 caps=(--cap-drop ALL)
 for cap in SYS_ADMIN SYS_CHROOT CHOWN FOWNER DAC_OVERRIDE SETUID SETGID SETPCAP AUDIT_WRITE KILL FSETID; do
   caps+=(--cap-add "$cap")
 done
 sd=$(docker create "${caps[@]}" --cgroupns=private --tmpfs /run --tmpfs /run/lock -e container=docker --platform "$platform" ubuntu:24.04 \
-  bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends systemd dbus python3 gnupg >/dev/null && mount -o remount,rw /sys/fs/cgroup && mount --make-rshared / && exec /lib/systemd/systemd')
+  bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends systemd dbus python3 gnupg openssl iproute2 curl tzdata tzdata-legacy >/dev/null && mount -o remount,rw /sys/fs/cgroup && mount --make-rshared / && exec /lib/systemd/systemd')
 docker cp "$repo/deploy" "$sd:/deploy"
 docker cp "$dist" "$sd:/dist"
+# The adapter's code (provision.sh adapter installs it from beside deploy/)
+# and its scripted fake gateway, and the first-day runbook whose commands
+# deploy/rehearsal/first-day.sh runs as written.
+docker cp "$repo/adapter" "$sd:/adapter"
+docker cp "$repo/docs/runbooks/first-dry-run-day.md" "$sd:/first-dry-run-day.md"
 docker start "$sd" >/dev/null
 booted=""
 for _ in $(seq 120); do
