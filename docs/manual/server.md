@@ -52,9 +52,9 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 | Unit | What it does | When it runs | Today |
 | --- | --- | --- | --- |
 | `ti-gateway.service` | IB Gateway under IBC, logged in to IBKR | Starts at boot (enabled). Restarts itself 30 seconds after IBC exits (for example when the weekly phone approval times out), except when the login file is empty or malformed (a wrong password is not caught: see the table below). IBC restarts the Gateway nightly at 11:45 PM and logs in again from cold every Sunday at 09:00 (`/etc/trend-investing/gateway.env`) | Installed; not yet run against a real IBKR login |
-| `ti-data.timer` and `ti-data.service` | The daily data job: records the day's market data from Massive and writes the Boost engine's input ([market data](market-data.md), "The daily data job") | Monday to Friday at 17:05, retried at 18:05 and 20:05. A firing missed while the server was off runs when it starts again. A run is stopped after an hour | Built and installed by `provision.sh services` when `dist/ti-data` is beside `deploy/`. It fails, with a message, until the Boost engine has been started once |
+| `ti-data.timer` and `ti-data.service` | The daily data job: records the day's market data from Massive and writes the Boost engine's input ([market data](market-data.md), "The daily data job") | Monday to Friday at 17:05, retried at 18:05 and 20:05. A firing missed while the server was off runs when it starts again. A run is stopped after an hour | Built and installed by `provision.sh services` when `dist/ti-data` is beside `deploy/`. Until the Boost engine has been started once (no `run.env` and no run log in its folder) a firing waits quietly and succeeds; it refuses, and the unit fails, for a real fault, including a `run.env` lost after a run (a run log or a run stream folder is the sign) ("The reporter before the first run", below) |
 | `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. The IRA instances are skipped: they have no configuration file |
-| `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; only Boost's timer is enabled, since the IRA engines have no configuration yet | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, and fails, with a message, until the engine has been started once and the `secrets.env` entries below are filled in |
+| `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; only Boost's timer is enabled, since the IRA engines have no configuration yet | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, until the engine has been started once it logs that it is waiting for the account's first run, skips only the reading of the log, and otherwise runs as usual ("The reporter before the first run", below); it fails, with a message, until the `secrets.env` entries below are filled in |
 | `ti-unit-failed@.service` | The page that a unit failed: the engine, the adapter and the reporter each name it in `OnFailure=`, so systemd starts one instance, named after the failed unit (for the engine, `ti-unit-failed@ti-engine@boost.service.service`), the moment that unit fails. It sends one urgent page through the reporter's channels naming the unit, the failed run's last journal line and the manual row to read ("A failed unit", below) | Only when one of those three units fails; never by itself otherwise | Installed by `provision.sh services` with the other units |
 | `ti-dashboard.service` | The read-only dashboard, on loopback port 8088 | Starts at boot (enabled) | Built and installed by `provision.sh services`; it finds the Boost engine's current run, the newest link of its chain of runs, on every request and follows the chain of runs back to the first, so a restart or an upgrade of the engine needs no dashboard restart. It shows a message, not a figure, until the engine has run once |
 | `ti-ntfy.service` | Your own ntfy server: the only place the daily summary goes ("Your own ntfy server", below). Listens on the server's Tailscale address, port 2586, and nowhere else | Starts at boot once `provision.sh ntfy` has enabled it; tried again every 10 seconds if the Tailscale address is not up yet | Installed by `provision.sh ntfy`, which you run after joining Tailscale. Not part of `provision.sh all` |
@@ -124,6 +124,8 @@ the same disk as the files, and a snapshot would carry both.
 | `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
 | `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@trad-ira.service`) |
 | `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@roth-ira.service`) |
+
+An existing server's `secrets.env` keeps the layout it was provisioned with, because provisioning never overwrites it, so the owner may tidy it by hand to match `deploy/etc/secrets.env.example`.
 
 What each program actually reads today:
 
@@ -407,11 +409,63 @@ message only, and the reporter sends the next one at its repeat interval until
 the acknowledgement is recorded ([operator](operator.md), "Acknowledging an
 alert").
 
+## The reporter before the first run
+
+(The data job, `ti-data`, waits the same way: with no `run.env`, no run log
+in the engine's folder and no run stream folder in its own output, its firing logs `ti-data: waiting for the account's
+first run` and succeeds, writing nothing and sending no heartbeat of its own.
+With either present, a missing or empty `run.env` is a refusal and the unit
+fails.)
+
+On a freshly provisioned server no engine has been started, so there is no
+`run.env` and no log to report on. The reporter's firing does not fail then:
+it logs one line, `reporter: waiting for the account's first run: ... run.env
+is missing or empty (start the engine once)`, and skips only the reading of the
+log: there is none. Everything else runs as on any firing. The channels'
+secrets are checked, so an empty one is set aside, named and fails the unit;
+the trading units are checked, and a failed one is paged and holds back the
+heartbeat; the host's clock is checked; and an earlier failure page of the
+reporter's own is resolved. When nothing is wrong it pings the outside
+heartbeat ("The outside heartbeat", below), because the reporter is alive and
+the server is up; there is simply nothing to report yet, and a check that went
+down here would page you for a server that is well.
+The timer keeps firing every 5 minutes; the first firing after you write
+`run.env` (`docs/runbooks/durable-log.md`, "Restarting an engine") reads the
+engine's log as usual.
+
+From then on a `run.env` that names a log that is missing or unreadable is a
+fault as before: the firing fails, the failure is paged, and no heartbeat is
+sent. A `run.env` that exists but cannot be read, is not a regular file or is
+over 64 KiB is also a fault, and so is a link to nothing: only a path with nothing at it counts as missing.
+
+The wait is for an account that has never run, and only for that. The reporter
+keeps its own record of a run: the first time it reads a journal named by
+`run.env` it writes a small marker file, `<account>.ran` (`boost.ran`), in
+`/var/lib/trend-investing/reports`, beside its state file, and the program never
+removes it. If `run.env` is missing or empty and any sign of a run exists (that
+marker, or a `.log` file in the engine's folder), or the engine's folder exists
+but cannot be listed, the firing sends an urgent alert, "the run's settings
+file is missing", fails, and sends no heartbeat ping. A stray `.log` file that
+is later deleted leaves nothing behind: the next firing waits again. The
+firing waits only when there is no marker and the engine's folder either does
+not exist or exists, can be listed and holds no `.log` file; anything else is
+the alert. The reporter needs `-account` whenever `-run-env` is given and
+refuses to start without it (the shipped unit passes it). An account that ran
+before the marker existed gets its marker at its next firing that reads its
+journal, and its `.log` file covers it until then. The data job refuses when a `.log` file is in the engine's folder or the
+job's own output already holds a run's stream folder
+(`/var/lib/trend-investing/data/streams/boost/<run>`); it does not read the
+reporter's marker. Restore `run.env` as the runbook describes
+(`docs/runbooks/durable-log.md`, "Restarting an engine"). The secrets
+must still be unlocked and filled in: a firing without its secrets file fails
+and sends no ping.
+
 ## The outside heartbeat
 
 A reporter on the server cannot page you that the server died, so the
 reporter also pings an outside service, Healthchecks, at the end of every
-firing that finishes without a fault (every 5 minutes, around the clock). The
+firing that finishes without a fault (every 5 minutes, around the clock),
+including the firings that wait for the account's first run. The
 service pages you through Pushover when the pings stop. You decided this is
 required before paper trading.
 
@@ -777,7 +831,7 @@ stop, not after two sessions of silence.
 | The Sunday phone prompt is missed | IBC exits, the unit starts it again after 30 seconds, and a new prompt arrives each time; nothing reaches IBKR meanwhile | Approve the next prompt (`docs/runbooks/gateway-login.md`) |
 | `ti-gateway` failed and stays down; `journalctl -u ti-gateway` names the login file | The login file is empty, or holds an unknown key or value (for example a trading mode other than `paper` or `live`). The unit does not restart on these, because none fixes itself | Fill it in or correct it with `sudo ti-secrets edit ibkr-login.env`, then `sudo systemctl start ti-gateway` (`docs/runbooks/gateway-login.md`) |
 | The IBKR password is wrong | That check does not catch it: if IBC exits, the unit starts it again every 30 seconds, and repeated failed logins can make IBKR lock the login | Stop the Gateway at once (`sudo systemctl stop ti-gateway`), correct the file, start it again (`docs/runbooks/gateway-login.md`) |
-| `ti-data` or `ti-reporter@boost` failed: ".../engines/boost/run.env is missing or empty: start the Boost engine once first ..." | That unit does not run. The data job writes nothing; the reporter sends nothing | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine") |
+| The journal of `ti-data` or `ti-reporter@boost` says "waiting for the account's first run" (the unit is not failed) | No engine run has been started, so there is nothing to record or report. The data job writes nothing; the reporter sends no alert and, if nothing else is wrong, pings the heartbeat. Nothing is paged ("The reporter before the first run", below) | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine") |
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |
 | `ti-engine@<instance>` or `ti-adapter-boost` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the IRA engines have no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
 | The data job fails | The unit shows failed; `journalctl -u ti-data` says why; no file is written for the session | Fix the cause and `sudo systemctl start ti-data` ([market data](market-data.md)) |

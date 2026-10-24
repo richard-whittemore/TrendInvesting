@@ -35,6 +35,9 @@ const (
 	// KindJournalRefused is the reporter's own failure to read the journal:
 	// every alert the journal holds is withheld until it reads.
 	KindJournalRefused Kind = "journal-refused"
+	// KindRunEnvMissing is a run.env that is missing or empty although the
+	// account has run: the settings file that names the journal was lost.
+	KindRunEnvMissing Kind = "run-env-missing"
 	// KindHeartbeatUnchecked is the reporter's own failure to check the
 	// heartbeat, such as a span the calendar does not cover.
 	KindHeartbeatUnchecked Kind = "heartbeat-unchecked"
@@ -771,6 +774,24 @@ func JournalRefusedAlert(account string, err error, heartbeatUnchecked string, a
 		Key: "journal-refused:" + account + ":" + err.Error(), Kind: KindJournalRefused, Severity: Urgent, AccountID: account, At: at,
 		Title: fmt.Sprintf("%s: the reporter cannot read the journal", account),
 		Body:  fmt.Sprintf("The reporter refused the journal: %s. No alert recorded in it (refusals, Degraded or Halted, withheld decisions) can be sent until it reads, and the daily summary is not sent.%s Stops and orders at the broker are unaffected. Check the file with journal-query; recovery is a person's.", err, heartbeat),
+	}
+}
+
+// RunEnvMissingAlert reports that the engine's run.env is missing or empty
+// although the account has run, so the reporter cannot tell which journal to
+// read: the quiet wait is only for an account that has never run (ADR 0019,
+// "Alerting"; docs/manual/server.md, "The reporter before the first run").
+// heartbeatUnchecked is as in JournalRefusedAlert. The key is the account and
+// the sign of a run, so one loss is one incident.
+func RunEnvMissingAlert(account string, err error, heartbeatUnchecked string, at time.Time) Alert {
+	heartbeat := " The heartbeat is still checked."
+	if heartbeatUnchecked != "" {
+		heartbeat = " The heartbeat is NOT checked: " + heartbeatUnchecked + "."
+	}
+	return Alert{
+		Key: "run-env-missing:" + account + ":" + err.Error(), Kind: KindRunEnvMissing, Severity: Urgent, AccountID: account, At: at,
+		Title: fmt.Sprintf("%s: the run's settings file is missing", account),
+		Body:  fmt.Sprintf("%s. Without it the reporter does not know which log to read, so no alert recorded in the log can be sent and the daily summary is not sent.%s Stops and orders at the broker are unaffected. Restore run.env as the runbook says (docs/runbooks/durable-log.md, \"Restarting an engine\"); never edit the log.", err, heartbeat),
 	}
 }
 

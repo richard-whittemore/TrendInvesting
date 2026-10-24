@@ -329,6 +329,10 @@ line=${line//%d/$rep/creds}
 line=${line//"\${TI_STATE_DIR}"/$rep/engines/boost}
 line=${line//"\${TI_REPORTS_DIR}"/$rep/reports}
 line=${line//"\${TI_RUN}"/run-rehearsal}
+# The engine has run: its run.env, where the unit reads it, is the rehearsal's.
+line=${line//"/var/lib/trend-investing/engines/boost/run.env"/$rep/engines/boost/run.env}
+printf 'TI_RUN=run-rehearsal\n' >"$rep/engines/boost/run.env"
+chown ti-trader:ti-trader "$rep/engines/boost/run.env"
 case $line in *'$'* | *%*) fail "the reporter's ExecStart has a variable the rehearsal does not expand: $line" ;; esac
 # No systemd runs here, so the reporter's systemctl (asked for each -units
 # unit's state and invocation) is a stand-in that answers every unit active

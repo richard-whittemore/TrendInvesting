@@ -39,6 +39,8 @@ install -d "$probe"
 useradd --system --no-create-home --shell /usr/sbin/nologin ti-trader
 install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing "$reports"
 install -D -m 0755 /dist/ti-reporter /opt/trend-investing/bin/ti-reporter
+install -D -m 0755 /dist/ti-data /opt/trend-investing/bin/ti-data
+install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/data /var/lib/trend-investing/engines/boost
 install -d -m 0755 /etc/trend-investing
 install -d -m 0700 /etc/trend-investing/accounts
 
@@ -310,13 +312,26 @@ if test "$(instances)" = "$before" && test "$(run_of)" != "$run3"; then
 else
   note "systemd started the hook for a start refused while $engine was already failed"
 fi
-# After the unlock the reporter's own unit is no longer refused: it runs, and
-# stops at its own check that the Boost engine has run once.
-systemctl start ti-reporter@boost.service 2>/dev/null || true
-test "$(systemctl show -p AssertResult --value ti-reporter@boost.service)" = yes || fail "the reporter is still refused after the unlock"
-grep -q 'run.env is missing or empty' <<<"$(journalctl -u ti-reporter@boost.service --no-pager -o cat)" || fail "the unlocked reporter did not run its own checks: $(journalctl -u ti-reporter@boost.service --no-pager -o cat | tail -n 5)"
+# After the unlock the reporter's own unit is no longer refused (a start that
+# exits 0 is not an assertion failure; a finished oneshot is unloaded, so its
+# journal is what is read). The server is
+# provisioned and no engine has run, so there is no run.env: the firing waits
+# quietly for the account's first run, which is a success, not a failed unit
+# (docs/manual/server.md, "The reporter before the first run").
+test ! -e /var/lib/trend-investing/engines/boost/run.env || fail "a run.env exists before the reporter's first-run wait is checked"
+systemctl start ti-reporter@boost.service 2>/dev/null || fail "the reporter's firing with no run.env failed: $(journalctl -u ti-reporter@boost.service --no-pager -o cat | tail -n 5)"
+! systemctl is-failed --quiet ti-reporter@boost.service || fail "the reporter's unit is failed with no run.env"
+waiting=$(journalctl -u ti-reporter@boost.service --no-pager -o cat)
+grep -q "waiting for the account's first run" <<<"$waiting" || fail "the reporter did not say it is waiting for the first run: $waiting"
+! grep -q 'missing or empty: start' <<<"$waiting" || fail "the reporter still fails its start step with no run.env: $waiting"
+# The data job is the same: with no run.env its firing waits and succeeds.
+systemctl start ti-data.service 2>/dev/null || fail "the data job's firing with no run.env failed: $(journalctl -u ti-data.service --no-pager -o cat | tail -n 5)"
+! systemctl is-failed --quiet ti-data.service || fail "the data job's unit is failed with no run.env"
+data_said=$(journalctl -u ti-data.service --no-pager -o cat)
+grep -q "waiting for the account's first run" <<<"$data_said" || fail "the data job did not say it is waiting for the first run: $data_said"
+! grep -q 'refused\|missing or empty: start' <<<"$data_said" || fail "the data job refused with no run.env: $data_said"
 test -z "$(on_disk "$marker")" || fail "the secret is on disk at the end: $(on_disk "$marker")"
-pass "after the unlock the hook read its channels from the credential systemd handed it, the reporter's unit is no longer refused, and the secret is nowhere on disk"
+pass "after the unlock the hook read its channels from the credential systemd handed it, the reporter's unit and the data job, no longer refused and with no run started, wait for the first run and succeed, and the secret is nowhere on disk"
 
 # --- The owner's first dry-run day, step by step
 # (docs/runbooks/first-dry-run-day.md).

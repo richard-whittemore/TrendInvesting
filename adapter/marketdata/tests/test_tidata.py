@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -156,6 +157,157 @@ def go_check(path):
                               cwd=REPO, stdin=f, text=True, capture_output=True)
 
 
+class WaitingForTheFirstRunTest(unittest.TestCase):
+    """Before the account's first engine run there is no run.env: the firing
+    waits quietly and succeeds, so the unit is not failed and nothing pages
+    (docs/manual/server.md, "The reporter before the first run"). Once
+    run.env exists the job is unchanged."""
+
+    def test_a_missing_or_empty_run_env_exits_zero_with_one_waiting_line_and_writes_nothing(self):
+        for text in (None, "", " \n"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                job = Job(d)
+                run_env = Path(d, "run.env")
+                job.log.unlink()   # no run has started, so the engine folder holds no run log
+                if text is not None:
+                    run_env.write_text(text)
+                before = job.files()
+                status, out, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+                self.assertEqual(status, 0)
+                self.assertEqual(out, "")
+                self.assertIn("waiting for the account's first run", err)
+                self.assertNotIn("refused", err)
+                self.assertEqual(job.made, 0)
+                self.assertEqual(job.files(), before)
+                self.assertEqual(len([l for l in err.splitlines() if "waiting" in l]), 1)
+
+    def test_with_a_run_env_present_a_missing_log_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            run_env = Path(d, "run.env")
+            run_env.write_text("TI_RUN=" + RUN + "\n")
+            job.log.unlink()
+            status, _, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused:", err)
+            self.assertNotIn("waiting", err)
+
+
+    def test_a_missing_or_empty_run_env_with_a_run_log_is_refused_not_waited_on(self):
+        for text in (None, "", " \n"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                job = Job(d)   # its engine log is in the same folder
+                run_env = Path(d, "run.env")
+                if text is not None:
+                    run_env.write_text(text)
+                status, out, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+                self.assertEqual(status, 1)
+                self.assertIn("ti-data refused:", err)
+                self.assertIn("settings file is missing but a run exists", err)
+                self.assertNotIn("waiting", err)
+                self.assertEqual(job.made, 0)
+
+    def test_a_run_env_that_cannot_be_read_is_a_refusal_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            run_env = Path(d, "run.env")
+            run_env.mkdir()   # present, but not a regular file
+            status, _, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused:", err)
+            self.assertEqual(job.made, 0)
+
+    def test_a_dangling_run_env_symlink_is_refused_not_a_wait(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            Path(d, "engine").mkdir()   # no run log beside it: only the link is wrong
+            run_env = Path(d, "engine", "run.env")
+            os.symlink(Path(d, "nowhere"), run_env)   # present, target missing
+            status, _, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused:", err)
+            self.assertNotIn("waiting", err)
+            self.assertIn("run.env", err)
+            self.assertEqual(job.made, 0)
+
+    def test_an_oversized_run_env_is_refused_unread(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            run_env = Path(d, "run.env")
+            run_env.write_text("A=1\n" * 40000)
+            status, _, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused:", err)
+            self.assertEqual(job.made, 0)
+
+    def test_a_fifo_for_run_env_is_refused_without_blocking(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            run_env = Path(d, "run.env")
+            os.mkfifo(run_env)
+            result = []
+            t = threading.Thread(target=lambda: result.append(job.main(after_settle(WARM), "--run-env", str(run_env))), daemon=True)
+            t.start()
+            t.join(10)
+            self.assertFalse(t.is_alive(), "the job blocked on a run.env that is a FIFO")
+            self.assertEqual(result[0][0], 1)
+            self.assertIn("ti-data refused:", result[0][2])
+
+    def test_a_missing_run_env_with_a_run_stream_folder_and_no_logs_is_refused(self):
+        for text in (None, ""):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                job = Job(d)
+                run_env = Path(d, "run.env")
+                if text is not None:
+                    run_env.write_text(text)
+                job.log.unlink()
+                job.stream_dir().mkdir(parents=True)
+                status, _, err = job.main(after_settle(WARM), "--run-env", str(run_env))
+                self.assertEqual(status, 1)
+                self.assertIn("ti-data refused:", err)
+                self.assertIn("settings file is missing but a run exists", err)
+                self.assertNotIn("waiting", err)
+
+    def test_run_stream_entries_that_cannot_be_inspected_are_a_refusal_not_absence(self):
+        if os.geteuid() == 0:
+            self.skipTest("root inspects anything")
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            job.log.unlink()
+            job.stream_dir().mkdir(parents=True)
+            engine_streams = job.streams / "boost"
+            engine_streams.chmod(0o444)   # listable, but its entries cannot be stat-ed
+            try:
+                status, out, err = job.main(after_settle(WARM), "--run-env", str(Path(d, "run.env")))
+            finally:
+                engine_streams.chmod(0o755)
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused:", err)
+            self.assertNotIn("waiting", err)
+
+    def test_a_fifo_swapped_in_after_a_path_check_cannot_hold_the_open(self):
+        # The file is opened without blocking and its descriptor is checked, so
+        # a path check that saw a regular file cannot let a FIFO block the job.
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            run_env = Path(d, "run.env")
+            os.mkfifo(run_env)
+            real_stat = os.stat
+
+            def stat_says_regular(path, *a, **k):
+                if str(path) == str(run_env):
+                    return os.stat_result((0o100600, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+                return real_stat(path, *a, **k)
+
+            result = []
+            with mock.patch("os.stat", stat_says_regular):
+                t = threading.Thread(target=lambda: result.append(job.main(after_settle(WARM), "--run-env", str(run_env))), daemon=True)
+                t.start()
+                t.join(10)
+            self.assertFalse(t.is_alive(), "the job blocked opening a FIFO")
+            self.assertEqual(result[0][0], 1)
+
+
 class SettleTest(unittest.TestCase):
     """The latest settled session: its close plus the settle minutes have passed."""
 
@@ -231,22 +383,12 @@ class UnitTest(unittest.TestCase):
         self.assertRegex(self.service, r"(?m)^AssertPathExists=/run/trend-investing/secrets/secrets\.env$")
         self.assertRegex(self.service, r"(?m)^LoadCredential=secrets:/run/trend-investing/secrets/secrets\.env$")
 
-    def test_a_missing_run_env_fails_the_unit_with_a_message(self):
+    def test_a_missing_run_env_is_a_quiet_wait_not_a_start_check_that_fails(self):
+        # The program waits (--run-env), so the unit has no ExecStartPre that
+        # exits 1 and would page the owner on a freshly provisioned server.
         self.assertRegex(self.service, r"(?m)^EnvironmentFile=-/var/lib/trend-investing/engines/boost/run\.env$")
-        pre = re.search(r"(?m)^ExecStartPre=(.*)$", self.service)
-        self.assertIsNotNone(pre, "the unit checks run.env itself")
-        with tempfile.TemporaryDirectory() as d:
-            command = pre.group(1).replace("/var/lib/trend-investing/engines/boost/run.env", str(Path(d, "run.env")))
-            argv = command.split(" ", 2)
-            self.assertEqual(argv[:2], ["/bin/sh", "-c"])
-            script = argv[2]
-            self.assertTrue(script.startswith("'") and script.endswith("'"), script)
-            result = subprocess.run(["/bin/sh", "-c", script[1:-1]], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("run.env", result.stderr)
-            self.assertIn("start the Boost engine", result.stderr)
-            Path(d, "run.env").write_text("TI_RUN=run-1\n")
-            self.assertEqual(subprocess.run(["/bin/sh", "-c", script[1:-1]]).returncode, 0)
+        self.assertNotRegex(self.service, r"(?m)^ExecStartPre=")
+        self.assertRegex(self.service, r"(?m)^ExecStart=\S*ti-data --run-env /var/lib/trend-investing/engines/boost/run\.env ")
 
     def test_the_unit_holds_no_ib_gateway_client_id(self):
         self.assertNotIn("TI_ADAPTER_CLIENT_ID", self.service)

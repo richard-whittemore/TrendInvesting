@@ -68,3 +68,20 @@ func TestAJournalTheReporterCannotReadIsItselfAnUrgentAlert(t *testing.T) {
 		t.Fatal("one failure must be one incident, and a different failure another")
 	}
 }
+
+func TestRunEnvMissingAlertHasItsOwnTitleAndPointsToTheRunbook(t *testing.T) {
+	at := time.Date(2026, 3, 2, 15, 0, 0, 0, time.UTC)
+	a := report.RunEnvMissingAlert("boost", errors.New("x"), "", at)
+	if a.Title != "boost: the run's settings file is missing" || a.Kind != report.KindRunEnvMissing || a.Severity != report.Urgent {
+		t.Errorf("title %q kind %q severity %v", a.Title, a.Kind, a.Severity)
+	}
+	if !contains(a.Body, "Restarting an engine") {
+		t.Errorf("body does not point to the runbook: %q", a.Body)
+	}
+	if a.Key == report.JournalRefusedAlert("boost", errors.New("x"), "", at).Key {
+		t.Error("the key is the generic journal alert's")
+	}
+	if unchecked := report.RunEnvMissingAlert("boost", errors.New("x"), "no calendar", at); !contains(unchecked.Body, "The heartbeat is NOT checked: no calendar.") {
+		t.Errorf("an unchecked heartbeat is not said: %q", unchecked.Body)
+	}
+}
