@@ -125,6 +125,8 @@ the same disk as the files, and a snapshot would carry both.
 | `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@trad-ira.service`) |
 | `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@roth-ira.service`) |
 
+An existing server's `secrets.env` keeps the layout it was provisioned with, because provisioning never overwrites it, so the owner may tidy it by hand to match `deploy/etc/secrets.env.example`.
+
 What each program actually reads today:
 
 - `ti-data` reads **only** `MASSIVE_API_KEY` from that file.
