@@ -312,22 +312,21 @@ if test "$(instances)" = "$before" && test "$(run_of)" != "$run3"; then
 else
   note "systemd started the hook for a start refused while $engine was already failed"
 fi
-# After the unlock the reporter's own unit is no longer refused. The server is
+# After the unlock the reporter's own unit is no longer refused (a start that
+# exits 0 is not an assertion failure; a finished oneshot is unloaded, so its
+# journal is what is read). The server is
 # provisioned and no engine has run, so there is no run.env: the firing waits
 # quietly for the account's first run, which is a success, not a failed unit
 # (docs/manual/server.md, "The reporter before the first run").
 test ! -e /var/lib/trend-investing/engines/boost/run.env || fail "a run.env exists before the reporter's first-run wait is checked"
 systemctl start ti-reporter@boost.service 2>/dev/null || fail "the reporter's firing with no run.env failed: $(journalctl -u ti-reporter@boost.service --no-pager -o cat | tail -n 5)"
-test "$(systemctl show -p AssertResult --value ti-reporter@boost.service)" = yes || fail "the reporter is still refused after the unlock"
-test "$(systemctl show -p Result --value ti-reporter@boost.service)" = success || fail "the reporter's firing with no run.env did not end in success: $(systemctl show -p Result --value ti-reporter@boost.service)"
-test "$(systemctl show -p ActiveState --value ti-reporter@boost.service)" != failed || fail "the reporter's unit is failed with no run.env"
+! systemctl is-failed --quiet ti-reporter@boost.service || fail "the reporter's unit is failed with no run.env"
 waiting=$(journalctl -u ti-reporter@boost.service --no-pager -o cat)
 grep -q "waiting for the account's first run" <<<"$waiting" || fail "the reporter did not say it is waiting for the first run: $waiting"
 ! grep -q 'missing or empty: start' <<<"$waiting" || fail "the reporter still fails its start step with no run.env: $waiting"
 # The data job is the same: with no run.env its firing waits and succeeds.
 systemctl start ti-data.service 2>/dev/null || fail "the data job's firing with no run.env failed: $(journalctl -u ti-data.service --no-pager -o cat | tail -n 5)"
-test "$(systemctl show -p Result --value ti-data.service)" = success || fail "the data job's firing with no run.env did not end in success"
-test "$(systemctl show -p ActiveState --value ti-data.service)" != failed || fail "the data job's unit is failed with no run.env"
+! systemctl is-failed --quiet ti-data.service || fail "the data job's unit is failed with no run.env"
 data_said=$(journalctl -u ti-data.service --no-pager -o cat)
 grep -q "waiting for the account's first run" <<<"$data_said" || fail "the data job did not say it is waiting for the first run: $data_said"
 ! grep -q 'refused\|missing or empty: start' <<<"$data_said" || fail "the data job refused with no run.env: $data_said"
