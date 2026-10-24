@@ -24,7 +24,7 @@ set +x
 
 fail() {
   echo "REHEARSAL FAIL: $*" >&2
-  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' --no-pager -o short-monotonic >&2 || true
+  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u ti-adapter-boost -u ti-data -u ti-warmup -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
   exit 1
 }
 pass() { echo "REHEARSAL ok: $*"; }
@@ -317,4 +317,8 @@ test "$(systemctl show -p AssertResult --value ti-reporter@boost.service)" = yes
 grep -q 'run.env is missing or empty' <<<"$(journalctl -u ti-reporter@boost.service --no-pager -o cat)" || fail "the unlocked reporter did not run its own checks: $(journalctl -u ti-reporter@boost.service --no-pager -o cat | tail -n 5)"
 test -z "$(on_disk "$marker")" || fail "the secret is on disk at the end: $(on_disk "$marker")"
 pass "after the unlock the hook read its channels from the credential systemd handed it, the reporter's unit is no longer refused, and the secret is nowhere on disk"
+
+# --- The owner's first dry-run day, step by step
+# (docs/runbooks/first-dry-run-day.md).
+. /deploy/rehearsal/first-day.sh
 echo "REHEARSAL (systemd) complete"
