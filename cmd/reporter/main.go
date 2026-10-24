@@ -105,6 +105,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	selfUnit := flags.String("self-unit", "", "this reporter's own unit (ti-reporter@<instance>.service): its failure page is resolved by the next firing that finishes without a fault")
 	unitState := flags.String("unit-state", "", "the host's record of failed-unit pages, shared with the OnFailure hook (default: unit-failures.json beside -state)")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
+	runEnv := flags.String("run-env", "", "the engine's run.env (/var/lib/trend-investing/engines/<instance>/run.env): while it is missing or empty no run has been started, and the firing logs one line that it is waiting for the account's first run, sends no alert, pings the outside heartbeat and succeeds; once it exists the firing reads the journal as usual")
 	journalctl := flags.String("journalctl", "journalctl", "the journal reader that gives a failed unit's last line")
 	err := flags.Parse(args)
 	if err != nil {
@@ -147,6 +148,25 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		var secretsErr error
 		if getenv, secretsErr = withSecretsFile(getenv, *secretsFile); secretsErr != nil {
 			failures = append(failures, secretsErr)
+		}
+	}
+	// No run has been started for the account: there is no log to read and
+	// nothing to report, which is a quiet success, not a fault. The firing
+	// is still alive, so it pings the outside heartbeat by the same rules as
+	// any clean firing (ADR 0019, "Alerting": the outside heartbeat). A
+	// fault in the secrets file is still a fault.
+	if *runEnv != "" {
+		waiting, err := awaitingFirstRun(*runEnv)
+		if err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		if waiting {
+			if len(failures) > 0 {
+				return errors.Join(failures...)
+			}
+			_, _ = fmt.Fprintln(out, "reporter: waiting for the account's first run: "+*runEnv+" is missing or empty (start the engine once)")
+			pingHeartbeat(getenv, &bounded, out)
+			return nil
 		}
 	}
 	senders, setAside, err := buildSenders(*channels, getenv, &bounded, out)
@@ -824,4 +844,18 @@ func writeAtomic(path string, raw []byte) error {
 		return fmt.Errorf("reporter: write state: %w", err)
 	}
 	return nil
+}
+
+// awaitingFirstRun reports whether the engine's run.env is missing or holds
+// nothing, that is, whether no run has been started for the account. A file
+// that exists but cannot be read is a fault, not a wait.
+func awaitingFirstRun(path string) (bool, error) {
+	raw, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("reporter: %s cannot be read: %w", path, err)
+	}
+	return len(bytes.TrimSpace(raw)) == 0, nil
 }

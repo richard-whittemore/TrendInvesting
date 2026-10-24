@@ -555,6 +555,8 @@ def parse(argv):
     ap.add_argument("--streams", help="the streams folder (default DATA/streams)")
     ap.add_argument("--config", required=True, help="the Boost engine's configuration")
     ap.add_argument("--engine-log", required=True, help="the engine's durable log, <run>.log")
+    ap.add_argument("--run-env", help="the engine's run.env: while it is missing or empty no run has been "
+                                      "started, and the job prints one waiting line and exits 0, writing nothing")
     credentials = os.environ.get("CREDENTIALS_DIRECTORY")
     ap.add_argument("--secrets-file", default=os.path.join(credentials, "secrets") if credentials else None,
                     help="KEY=VALUE secrets holding MASSIVE_API_KEY (default $CREDENTIALS_DIRECTORY/secrets)")
@@ -574,9 +576,23 @@ def parse(argv):
     return args
 
 
+def awaiting_first_run(path):
+    """True when the engine's run.env is missing or holds nothing, that is, no
+    run has been started; the firing then waits rather than failing."""
+    try:
+        with open(path) as f:
+            return not f.read().strip()
+    except FileNotFoundError:
+        return True
+
+
 def main(argv, now=steps._now, client_factory=massive.Client):
     args = parse(argv)
     print("ti-data " + STAMP, file=sys.stderr)
+    if args.run_env and awaiting_first_run(args.run_env):
+        print("ti-data: waiting for the account's first run: {} is missing or empty (start the Boost engine once)"
+              .format(args.run_env), file=sys.stderr)
+        return 0
     key = None   # held here, so every message printed below can have it replaced
     try:
         key = read_key(args.secrets_file)

@@ -3,9 +3,10 @@ Description=Market-data step: record each day's settled session once and write t
 # Massive only: the step needs the network, not IB Gateway.
 After=network-online.target
 Wants=network-online.target
-# No Condition: a missing /opt/trend-investing/bin/ti-data, or a Boost
-# engine not yet started (no run.env), fails the unit with a message, so the
-# owner sees a failed unit, never a silent skip.
+# No Condition: a missing /opt/trend-investing/bin/ti-data, or a run.env
+# naming a log that cannot be read, fails the unit with a message, so the
+# owner sees a failed unit, never a silent skip. A Boost engine not yet
+# started (no run.env) is a quiet success: --run-env below.
 # The secrets rest on disk only encrypted; ti-unlock decrypts them after
 # each boot into a root-only tmpfs, and this unit loads its credential
 # from there. Until then systemd refuses to start it ("Assertion failed")
@@ -28,9 +29,9 @@ Group=ti-trader
 Environment=TZ=America/New_York
 Environment=TI_DATA_DIR=/var/lib/trend-investing/data
 # TI_RUN: the Boost engine's current run, whose durable log is read. Optional
-# here ("-") so that its absence reaches the check below, which names it.
+# here ("-"): before the account's first run there is none, and --run-env
+# below makes that a quiet success, not a failure.
 EnvironmentFile=-/var/lib/trend-investing/engines/boost/run.env
-ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/boost/run.env || { echo "ti-data: /var/lib/trend-investing/engines/boost/run.env is missing or empty: start the Boost engine once first (it names the run whose durable log the stream is stamped from)" >&2; exit 1; }'
 # MASSIVE_API_KEY, read from %d/secrets and never printed.
 LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # Records into TI_DATA_DIR and writes the day's stream to
@@ -39,7 +40,7 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # "A crash resume"). Settle
 # minutes: the close plus this long before a session is recorded; the timer
 # fires after it (ti-data.timer).
-ExecStart=/opt/trend-investing/bin/ti-data --data ${TI_DATA_DIR} --streams ${TI_DATA_DIR}/streams --config /etc/trend-investing/engines/boost.config --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --secrets-file %d/secrets --settle-minutes 60
+ExecStart=/opt/trend-investing/bin/ti-data --run-env /var/lib/trend-investing/engines/boost/run.env --data ${TI_DATA_DIR} --streams ${TI_DATA_DIR}/streams --config /etc/trend-investing/engines/boost.config --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --secrets-file %d/secrets --settle-minutes 60
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
