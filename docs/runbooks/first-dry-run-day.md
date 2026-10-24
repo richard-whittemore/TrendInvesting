@@ -43,8 +43,10 @@ The plan, for a start on Saturday evening, 2026-10-24 (New York time):
 ## 0. Check where the server stands
 
 Nothing here changes anything except the `systemctl stop` line, which stops the data
-job's and the reporter's timers if provisioning started them: their units fail
-until `run.env` exists (step 3), and step 7 starts them again.
+job's and the reporter's timers if provisioning started them. Their units wait
+quietly until `run.env` exists (step 3), so they do no harm; they are stopped
+so that nothing fires while the warm-up and the first start are under way, and
+step 7 starts them again.
 
 <!-- rehearsed: preflight -->
 ```sh
@@ -54,9 +56,12 @@ sudo grep -c '^MASSIVE_API_KEY=.' /run/trend-investing/secrets/secrets.env
 sudo grep -c '^IBKR_ACCOUNT_BOOST=DU' /run/trend-investing/secrets/accounts/boost.env
 systemctl is-active ti-gateway
 ss -ltn 'sport = :4002' | grep -c LISTEN
-test -f /opt/trend-investing/adapter/adapter/ibkr/cli.py && echo adapter-code-installed
-test -x /opt/trend-investing/bin/ti-data && test -x /opt/trend-investing/bin/ti-engine && echo programs-installed
-sudo test ! -e /var/lib/trend-investing/engines/boost/run.env && echo no-run-env
+test -f /opt/trend-investing/adapter/adapter/ibkr/cli.py || { echo "STOP: adapter code missing: run sudo deploy/provision.sh adapter"; exit 1; }
+echo adapter-code-installed
+{ test -x /opt/trend-investing/bin/ti-data && test -x /opt/trend-investing/bin/ti-engine; } || { echo "STOP: programs missing: run sudo deploy/provision.sh from the checkout, then start this step again"; exit 1; }
+echo programs-installed
+sudo test ! -e /var/lib/trend-investing/engines/boost/run.env || { echo "STOP: run.env already exists: this is not a first start; do not go on (see 'If the engine halts on its first reading')"; exit 1; }
+echo no-run-env
 sudo systemctl stop ti-data.timer ti-reporter@boost.timer
 systemctl is-active ti-data.timer ti-reporter@boost.timer || true
 )
@@ -78,7 +83,8 @@ inactive
 ```
 
 The block stops at the first line that fails, so the last line it printed
-is the one to look at. If `adapter-code-installed` is missing, install it from the checkout you
+is the one to look at; the three checks near the end print a line starting
+`STOP:` that says what to do. If it says the adapter code is missing, install it from the checkout you
 provisioned from: `sudo deploy/provision.sh adapter`. If a `1` is a `0`, the
 secret is missing: `sudo ti-secrets edit secrets.env` (the Massive key) or
 `sudo ti-secrets edit accounts/boost.env` (`IBKR_ACCOUNT_BOOST=DU...`, no
@@ -381,8 +387,9 @@ and the command that settles it").
 
 ## 7. Turn the two stopped timers back on
 
-You stopped `ti-data.timer` and `ti-reporter@boost.timer` by hand because their
-units fail until `run.env` exists. It exists now, and the engine and the adapter
+You stopped `ti-data.timer` and `ti-reporter@boost.timer` by hand so that
+nothing fired during the warm-up and the first start (before `run.env` exists their
+units only wait quietly). It exists now, and the engine and the adapter
 are up. Start them, then run each unit once by hand to see what a weekend
 firing does: the data job finds Friday's file already written and fetches
 nothing new to record; the reporter reads the log and sends nothing.
@@ -490,13 +497,18 @@ next=run-2026-10-24b
 asof=2026-10-26T19:59:00Z
 ```
 
-For a second recovery (the run `next` halted too), set `halted` to the run
-that just halted (`run-2026-10-24b`), `next` to a new name
-(`run-2026-10-24c`) and `asof` one minute earlier again
-(`2026-10-26T19:58:00Z`), then follow this section from the top. Nothing else
+For a second recovery (the run `next` halted too), paste this block instead
+of the one above, then continue with the stop block below (the one that stops the adapter and the engine). Nothing else
 changes: no command below has a run name written in it. Then repeat steps 4,
 5 and 6 with the blocks of this section (step 4's block has no run name), and
 read `next` for the run name in step 7 and in "Monday after the close".
+
+<!-- rehearsed: recover-vars-2 -->
+```sh
+halted=run-2026-10-24b
+next=run-2026-10-24c
+asof=2026-10-26T19:58:00Z
+```
 
 <!-- rehearsed: recover-stop -->
 ```sh
@@ -528,7 +540,9 @@ next=$2
 cash=100000.00
 account=$(sed -n 's/^IBKR_ACCOUNT_BOOST=//p' /run/trend-investing/secrets/accounts/boost.env)
 dir=/var/lib/trend-investing/engines/boost
-incident=$(runuser -u ti-trader -- operator approve -log "$dir/$halted.log" -account "$account" -by owner -positions "" -cash "$cash" -currency USD -out "$dir/incident-look-$next.json" | sed -n 's/.*carries incident \([^ ]*\) in force.*/\1/p')
+set -o pipefail
+look=$(runuser -u ti-trader -- operator approve -log "$dir/$halted.log" -account "$account" -by owner -positions "" -cash "$cash" -currency USD -out "$dir/incident-look-$next.json" 2>&1) || { printf '%s\n' "$look"; echo "STOP: operator could not read $halted.log: check the name in halted"; exit 1; }
+incident=$(printf '%s\n' "$look" | sed -n 's/.*carries incident \([^ ]*\) in force.*/\1/p')
 test -n "$incident" || { echo "STOP: no incident in force in $halted.log; it did not halt. Do not start a fresh run."; exit 1; }
 runuser -u ti-trader -- operator approve -log "$dir/$halted.log" -account "$account" -by owner -clear-incident "$incident" -positions "" -cash "$cash" -currency USD -out "$dir/approval-$next.json"
 EOF2
@@ -667,8 +681,8 @@ active
 ```
 
 `halted` must be `0` again. Finish with step 7's first command, which starts
-the two timers again. The halted run's files (`run-2026-10-24.log`, its
-stream folder and the `incident-look` file) stay where they are as evidence;
+the two timers again. The halted run's files (`$halted.log`, here
+`run-2026-10-24.log`, its stream folder and the `incident-look` file) stay where they are as evidence;
 never delete or edit them.
 
 ## Sunday, and the Gateway's cold restart
@@ -706,6 +720,7 @@ and the adapter running through it:
   its close, not before. Also check `systemctl is-active ti-engine@boost
   ti-adapter-boost ti-gateway` prints `active` three times, and that your phone
   has had no page.
+
 After a recovery, read the new run's name for `run-2026-10-24` in the two paths below.
 
 - 16:00 the market closes. The data job fires at 17:05 (and again at 18:05 and

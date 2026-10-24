@@ -121,7 +121,7 @@ install -D -m 0755 /dev/null /usr/local/libexec/trend-investing/clock-check.sh
 printf '#!/bin/sh\nexit 0\n' >/usr/local/libexec/trend-investing/clock-check.sh
 for b in ti-data ti-reporter ti-dashboard operator journal-query; do
   case $b in
-    operator | journal-query) install -m 0755 "/dist/$b" "/usr/local/bin/$b" ;;
+    operator | journal-query) install -D -m 0755 "/dist/$b" "/opt/trend-investing/bin/$b" && ln -sfn "/opt/trend-investing/bin/$b" "/usr/local/bin/$b" ;;
     *) install -D -m 0755 "/dist/$b" "/opt/trend-investing/bin/$b" ;;
   esac
 done
@@ -235,6 +235,8 @@ rm -rf /dev/shm/ti-edit
 systemctl stop ti-data.timer ti-reporter@boost.timer 2>/dev/null || true
 out=$(run_block "$(block rehearsed preflight)" 2>&1) || true
 if grep -qxF 'adapter-code-installed' <<<"$out"; then fail "the adapter's code was reported installed before provision.sh adapter ran"; fi
+grep -qF 'STOP: adapter code missing: run sudo deploy/provision.sh adapter' <<<"$out" || fail "the preflight did not stop with its message when the adapter's code is missing: $out"
+if grep -qxF 'inactive' <<<"$out"; then fail "the preflight went on to stop the timers after a failed check"; fi
 TI_REHEARSAL_ANY_ARCH=1 /deploy/provision.sh adapter >/dev/null || fail "provision.sh adapter failed"
 test -f /opt/trend-investing/adapter/adapter/ibkr/cli.py || fail "provision.sh adapter did not install the adapter's code"
 step preflight
@@ -388,6 +390,15 @@ note "the drill's first run halted on its first reading, as a mistyped book make
 remap_expr='s/run-2026-10-24/run-2026-10-25/g'
 withvars=1
 step recover-stop
+# A mistyped halted name: operator's own error is shown and the block stops
+# with the runbook's message, not "it did not halt".
+badout=$(run_block "$(block rehearsed recover-vars | remap)"$'\n'"halted=run-2026-10-25B"$'\n'"$(block rehearsed recover-approve | remap)" 2>&1) || true
+grep -qF 'STOP: operator could not read run-2026-10-25B.log: check the name in halted' <<<"$badout" || fail "a mistyped halted name did not stop with the runbook's message: $badout"
+if grep -qF 'it did not halt' <<<"$badout"; then fail "a mistyped halted name was reported as a run that did not halt"; fi
+# The second recovery has its own names block, to paste instead of the first.
+second=$(block rehearsed recover-vars-2 | remap)
+test -n "$second" || fail "the runbook has no 'rehearsed: recover-vars-2' block"
+grep -qx 'halted=run-2026-10-25b' <<<"$second" || fail "the second recovery's names do not start from the first recovery's new run: $second"
 step recover-approve
 step recover-run-env
 step engine 0 engine-again
