@@ -607,7 +607,7 @@ outside heartbeat ping, so Healthchecks pages too if it goes on (rows below).
 Expect both until GitHub recovers, or stop using the channel for now with a
 systemd drop-in (the unit files themselves are replaced by every
 `provision.sh services`, so never edit them): run
-`sudo systemctl edit --drop-in=no-github-issues ti-reporter@boost`, put this in
+`sudo systemctl edit --drop-in=no-github-issues.conf ti-reporter@boost`, put this in
 the editor and save:
 
 ```
@@ -616,7 +616,7 @@ ExecStart=
 ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -self-unit ti-reporter@%i.service
 ```
 
-then run `sudo systemctl edit --drop-in=no-github-issues ti-unit-failed@.service`
+then run `sudo systemctl edit --drop-in=no-github-issues.conf ti-unit-failed@.service`
 and put this in the editor for the failed-unit hook:
 
 ```
