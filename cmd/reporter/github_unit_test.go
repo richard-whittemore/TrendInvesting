@@ -16,7 +16,10 @@ import (
 // GitHub Issues").
 
 // githubSecrets is the secrets file's lines for the channel, against the
-// stand-in at url.
+// stand-in at url (ADR 0019, "Alerting": the token goes only to a host the
+// secrets file names). The url must be the stand-in's http base URL, such as
+// http://127.0.0.1:8099: the allowed host is derived by removing that literal
+// prefix.
 func githubSecrets(url string) string {
 	return "TI_GITHUB_ISSUES_TOKEN=" + issuesToken + "\nTI_GITHUB_ISSUES_REPO=owner/repo\nTI_GITHUB_API_URL=" + url +
 		"\nTI_GITHUB_API_ALLOW_HOST=" + strings.TrimPrefix(url, "http://") + "\n"

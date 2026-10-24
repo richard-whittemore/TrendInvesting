@@ -10,6 +10,7 @@ data only (ADR 0019, "Alerting"; docs/manual/alerts-and-dashboard.md,
 
 import json
 import re
+from urllib.parse import parse_qs, unquote, urlsplit
 
 PREFIX = "/gh"
 REPO = PREFIX + "/repos/owner/repo"
@@ -19,7 +20,13 @@ issues = []
 
 
 def _issue_json(i):
-    return {"number": i["number"], "state": i["state"], "body": i["body"], "comments": len(i["comments"])}
+    return {
+        "number": i["number"],
+        "state": i["state"],
+        "body": i["body"],
+        "comments": len(i["comments"]),
+        "labels": [{"name": n} for n in i["labels"]],
+    }
 
 
 def _find(number):
@@ -35,23 +42,31 @@ def handle(handler, method, body, log):
     log is called with "METHOD path" for each write, so a rehearsal can count
     what the channel did without mixing it into the other channels' posts.
     """
-    path = handler.path.split("?", 1)[0]
+    split = urlsplit(handler.path)
+    path, query = split.path, parse_qs(split.query)
     if not path.startswith(PREFIX + "/"):
         return False
     if method != "GET":
         log(method + " " + path, body)
     status, out = 404, {"message": "Not Found"}
-    m = re.fullmatch(re.escape(REPO) + r"/issues(?:/(\d+))?(?:/(comments|labels)(?:/[^/]+)?)?", path)
+    m = re.fullmatch(re.escape(REPO) + r"/issues(?:/(\d+))?(?:/(comments|labels)(?:/([^/]+))?)?", path)
     if method == "GET" and path == PREFIX + "/user":
         status, out = 200, {"id": SELF_ID, "login": "rehearsal"}
     elif m:
-        number, sub = (int(m.group(1)) if m.group(1) else None), m.group(2)
+        number, sub, label = (int(m.group(1)) if m.group(1) else None), m.group(2), m.group(3)
         issue = _find(number) if number else None
         if number is None and method == "GET":
-            status, out = 200, [_issue_json(i) for i in reversed(issues)]
+            # The listing filters the reporter uses: every named label, and the state.
+            want = [n for v in query.get("labels", []) for n in v.split(",") if n]
+            state = query.get("state", ["open"])[0]
+            status, out = 200, [
+                _issue_json(i)
+                for i in reversed(issues)
+                if all(n in i["labels"] for n in want) and state in ("all", i["state"])
+            ]
         elif number is None and method == "POST":
             data = json.loads(body or b"{}")
-            issue = {"number": len(issues) + 1, "state": "open", "body": data.get("body", ""), "comments": []}
+            issue = {"number": len(issues) + 1, "state": "open", "body": data.get("body", ""), "comments": [], "labels": list(data.get("labels", []))}
             issues.append(issue)
             status, out = 201, _issue_json(issue)
         elif issue is not None and sub is None and method == "GET":
@@ -64,8 +79,15 @@ def handle(handler, method, body, log):
         elif issue is not None and sub == "comments" and method == "POST":
             issue["comments"].append(json.loads(body or b"{}").get("body", ""))
             status, out = 201, {"id": len(issue["comments"])}
-        elif issue is not None and sub == "labels":
-            status, out = 200, []
+        elif issue is not None and sub == "labels" and label is None and method == "POST":
+            for n in json.loads(body or b"{}").get("labels", []):
+                if n not in issue["labels"]:
+                    issue["labels"].append(n)
+            status, out = 200, [{"name": n} for n in issue["labels"]]
+        elif issue is not None and sub == "labels" and label is not None and method == "DELETE":
+            if unquote(label) in issue["labels"]:
+                issue["labels"].remove(unquote(label))
+                status, out = 200, [{"name": n} for n in issue["labels"]]
     payload = json.dumps(out).encode()
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")

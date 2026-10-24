@@ -279,6 +279,7 @@ cp /root/dist/boost-fixture.log "$rep/engines/boost/run-rehearsal.log"
 # begins with both channels recorded long before it, as on a server whose
 # reporter has run since before the log's events.
 printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pushover":"2000-01-01T00:00:00Z","github-issues":"2000-01-01T00:00:00Z"}}' >"$rep/reports/boost.reporter.json"
+cp "$rep/reports/boost.reporter.json" "$rep/reports/boost.reporter.json.seed"
 chown -R ti-trader:ti-trader "$rep"
 chmod 0750 "$rep/engines" "$rep/engines/boost" "$rep/reports"
 python3 - "$rep/posts" <<'PY' &
@@ -387,12 +388,19 @@ issues_opened() {
 }
 test "$(issues_opened)" -ge 1 || fail "the reporter opened no issue in the alerts repository (stand-in saw: $(cat "$rep/posts.github" 2>/dev/null || echo nothing))"
 opened=$(issues_opened)
+# Comments the reporter wrote on existing issues: a repeat of an alert must not
+# arrive as a comment either.
+comments_posted() {
+  if test -e "$rep/posts.github"; then grep -c '^POST /gh/repos/owner/repo/issues/[0-9]*/comments$' "$rep/posts.github" || true; else echo 0; fi
+}
+commented=$(comments_posted)
 # The heartbeat pings (POST /hb) are not alerts: counted apart.
 alerts_sent() { { grep -v '^/hb$' "$rep/posts" || true; } | wc -l; }
 sent=$(alerts_sent)
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $line >/dev/null || fail "the reporter's second run failed"
 test "$(issues_opened)" = "$opened" || fail "the reporter's second run opened another issue"
+test "$(comments_posted)" = "$commented" || fail "the reporter's second run commented on an issue again"
 test "$(alerts_sent)" = "$sent" || fail "the reporter's second run sent its alerts again"
 test "$(grep -c '^/hb$' "$rep/posts")" = 2 || fail "the reporter did not ping the outside heartbeat once per clean firing (stand-in endpoint saw $(grep -c '^/hb$' "$rep/posts"))"
 pass "the reporter runs as its unit runs it, as ti-trader, delivers to ntfy, Pushover and the alerts repository's issues once, keeps its state, and pings the outside heartbeat once per firing"
@@ -414,16 +422,45 @@ failed_run=(MONITOR_UNIT=ti-engine@boost.service MONITOR_INVOCATION_ID=012345678
 sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook, run as its unit runs it (as ti-trader), failed"
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook did not page both channels once"
 test "$(issues_opened)" = "$((opened + 1))" || fail "the failed-unit hook did not open one issue in the alerts repository"
+hook_comments=$(comments_posted)
 grep -q 'ti-engine%40boost.service+failed' "$rep/posts.bodies" || fail "the hook's page does not name the failed unit"
 test -s "$rep/reports/unit-failures.json" || fail "the hook wrote no record of the page"
 grep -q 'unit-failed:ti-engine@boost.service/0123456789abcdef0123456789abcdef' "$rep/reports/unit-failures.json" || fail "the hook's record is not keyed by the failed run"
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook's second run failed"
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook paged again for the same failure"
+test "$(issues_opened)" = "$((opened + 1))" || fail "the failed-unit hook opened another issue for the same failure"
+test "$(comments_posted)" = "$hook_comments" || fail "the failed-unit hook commented on an issue again for the same failure"
 for unit in ti-engine@.service ti-adapter-boost.service ti-reporter@.service; do
   grep -qx 'OnFailure=ti-unit-failed@%n.service' "/etc/systemd/system/$unit" || fail "$unit does not hand its failure to the hook"
 done
 pass "the failed-unit hook runs as its unit runs it, as ti-trader, pages both channels once per failure episode and not again, and the three trading units name it in OnFailure="
+
+# The alerts repository not yet set up: the credential file with the token
+# empty, as secrets.env.example ships it, and a state file recorded as above.
+# The reporter sets only that channel aside by name and exits non-zero, so the
+# unit fails and no heartbeat is pinged; ntfy and Pushover still deliver, and
+# nothing reaches the alerts repository.
+mkdir "$rep/creds-empty"
+grep -v '^TI_GITHUB_ISSUES_TOKEN=' "$rep/creds/secrets" >"$rep/creds-empty/secrets"
+echo 'TI_GITHUB_ISSUES_TOKEN=' >>"$rep/creds-empty/secrets"
+cp "$rep/reports/boost.reporter.json.seed" "$rep/reports/empty.reporter.json"
+empty_line=${line//"$rep/creds/"/"$rep/creds-empty/"}
+empty_line=${empty_line//"$rep/reports/boost.reporter.json"/"$rep/reports/empty.reporter.json"}
+chown -R ti-trader:ti-trader "$rep/creds-empty" "$rep/reports/empty.reporter.json"
+chmod 0400 "$rep/creds-empty/secrets"
+github_writes=$(wc -l <"$rep/posts.github")
+sent=$(alerts_sent)
+pings=$(grep -c '^/hb$' "$rep/posts")
+# shellcheck disable=SC2086
+if empty_out=$(sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $empty_line 2>&1); then
+  fail "the reporter with an empty GitHub token exited zero"
+fi
+case $empty_out in *"github-issues channel needs TI_GITHUB_ISSUES_TOKEN"*) ;; *) fail "the reporter with an empty GitHub token did not name the channel and the missing value" ;; esac
+test "$(alerts_sent)" -gt "$sent" || fail "the reporter with an empty GitHub token delivered to no other channel"
+test "$(wc -l <"$rep/posts.github")" = "$github_writes" || fail "the reporter with an empty GitHub token wrote to the alerts repository"
+test "$(grep -c '^/hb$' "$rep/posts")" = "$pings" || fail "the reporter with an empty GitHub token pinged the heartbeat"
+pass "with the GitHub token empty the reporter sets only that channel aside by name, still delivers to ntfy and Pushover, exits non-zero and pings no heartbeat"
 
 # The clock check. The reporter ran the installed check as ti-trader above:
 # the host clock state must hold what the check said, not that it could not

@@ -33,8 +33,9 @@ Group=ti-trader
 # page's reason.
 SupplementaryGroups=systemd-journal
 Environment=TZ=America/New_York
-# TI_NTFY_TOPIC, TI_NTFY_SERVER, TI_PUSHOVER_APP_TOKEN and
-# TI_PUSHOVER_USER_KEY from %d/secrets,
+# TI_NTFY_TOPIC, TI_NTFY_SERVER, TI_PUSHOVER_APP_TOKEN,
+# TI_PUSHOVER_USER_KEY, TI_GITHUB_ISSUES_TOKEN and TI_GITHUB_ISSUES_REPO from
+# %d/secrets,
 # never printed; the same credential file the reporter reads.
 LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # The record of failed-unit pages is the host's, beside the reporters' state

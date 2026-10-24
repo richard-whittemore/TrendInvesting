@@ -158,7 +158,10 @@ What each program actually reads today:
   is set aside: the run says "the github-issues channel needs
   TI_GITHUB_ISSUES_TOKEN" (or "... TI_GITHUB_ISSUES_REPO as owner/name"), ntfy
   and Pushover still deliver, and the unit exits non-zero, so a server
-  without the alerts repository shows as failed until you fill both in. The
+  without the alerts repository shows as failed until you fill both in. Fill
+  them in before installing the unit files on a running server: until then
+  every firing fails, sends no heartbeat ping (Healthchecks pages) and the
+  failed-unit page repeats hourly. The
   daily summary never goes to this channel. How to create and rotate the
   token:
   [alerts and dashboard](alerts-and-dashboard.md), "Alerts as GitHub Issues".
@@ -780,8 +783,7 @@ The engine, the adapter and the reporter each name `ti-unit-failed@%n.service`
 in `OnFailure=`. When one fails, systemd starts that unit under the failed
 unit's name (for the engine, `ti-unit-failed@ti-engine@boost.service.service`;
 the rehearsal starts it under a real systemd), which runs `ti-reporter
-notify-unit-failed <unit>`: one urgent page on Pushover, your own ntfy and, once its token and repository are filled in, the private alerts repository
-server naming the unit, the reason (cleaned of addresses, account numbers and
+notify-unit-failed <unit>`: one urgent page on Pushover, your own ntfy and, once its token and repository are filled in, the private alerts repository, naming the unit, the reason (cleaned of addresses, account numbers and
 secrets) and the manual row to read. You are paged within a minute of the
 stop, not after two sessions of silence.
 
