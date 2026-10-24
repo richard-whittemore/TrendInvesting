@@ -341,7 +341,7 @@ pass "step 8: the dashboard unit starts on loopback and answers read-only"
 systemctl stop ti-adapter-boost.service ti-engine@boost.service ti-data.timer ti-reporter@boost.timer
 runuser -u ti-trader -- operator approve -log "$engines/run-2026-10-24.log" -account DU0000001 -by owner \
   -positions "" -cash 90000.00 -currency USD -out "$engines/approval-run-2026-10-25.json" >/dev/null || fail "the drill's wrong-book approval was refused"
-printf 'TI_RUN=run-2026-10-25\nTI_AS_OF=2026-10-26T20:00:00Z\nTI_RESTART_ARGS=-approval %s/approval-run-2026-10-25.json\n' "$engines" >"$engines/run.env"
+printf 'TI_RUN=run-2026-10-25\nTI_AS_OF=2026-10-26T19:58:00Z\nTI_RESTART_ARGS=-approval %s/approval-run-2026-10-25.json\n' "$engines" >"$engines/run.env"
 chown ti-trader:ti-trader "$engines/run.env"
 systemctl start ti-engine@boost.service
 for _ in $(seq 20); do systemctl is-active --quiet ti-engine@boost && break; sleep 1; done

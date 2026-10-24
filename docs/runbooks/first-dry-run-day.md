@@ -479,7 +479,7 @@ EOF2
 ```sh
 sudo -u ti-trader tee /var/lib/trend-investing/engines/boost/run.env >/dev/null <<'EOF2'
 TI_RUN=run-2026-10-24b
-TI_AS_OF=2026-10-26T20:00:00Z
+TI_AS_OF=2026-10-26T19:59:00Z
 TI_RESTART_ARGS=-approval /var/lib/trend-investing/engines/boost/approval-run-2026-10-24b.json
 EOF2
 sudo cat /var/lib/trend-investing/engines/boost/run.env
@@ -488,9 +488,15 @@ sudo cat /var/lib/trend-investing/engines/boost/run.env
 <!-- expect: recover-run-env -->
 ```text
 TI_RUN=run-2026-10-24b
-TI_AS_OF=2026-10-26T20:00:00Z
+TI_AS_OF=2026-10-26T19:59:00Z
 TI_RESTART_ARGS=-approval /var/lib/trend-investing/engines/boost/approval-run-2026-10-24b.json
 ```
+
+`TI_AS_OF` is one minute earlier than in step 3, on purpose: the engine
+refuses a fresh run whose start is the same as an earlier log's ("declare a
+new start with -as-of"). 19:59 changes nothing that matters: Friday's session
+still only warms the indicators, and Monday's, closing at 20:00 UTC, is still
+the first one decided. A second recovery uses `2026-10-26T19:58:00Z`, and so on.
 
 Then step 4 (start the engine), step 5 (the warm-up and its wait) and step 6
 (the adapter), each with `run-2026-10-24b`. In step 4 the engine's third line
