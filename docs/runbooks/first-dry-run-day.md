@@ -33,7 +33,7 @@ The plan, for a start on Saturday evening, 2026-10-24 (New York time):
 
 ## 0. Check where the server stands
 
-Nothing here changes anything except the last two lines, which stop the data
+Nothing here changes anything except the `systemctl stop` line, which stops the data
 job's and the reporter's timers if provisioning started them: their units fail
 until `run.env` exists (step 3), and step 7 starts them again.
 
