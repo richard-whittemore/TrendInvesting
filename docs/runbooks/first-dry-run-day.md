@@ -33,7 +33,9 @@ The plan, for a start on Saturday evening, 2026-10-24 (New York time):
 
 ## 0. Check where the server stands
 
-Nothing here changes anything.
+Nothing here changes anything except the last two lines, which stop the data
+job's and the reporter's timers if provisioning started them: their units fail
+until `run.env` exists (step 3), and step 7 starts them again.
 
 <!-- rehearsed: preflight -->
 ```sh
@@ -45,6 +47,7 @@ ss -ltn 'sport = :4002' | grep -c LISTEN
 test -f /opt/trend-investing/adapter/adapter/ibkr/cli.py && echo adapter-code-installed
 test -x /opt/trend-investing/bin/ti-data && test -x /opt/trend-investing/bin/ti-engine && echo programs-installed
 sudo test ! -e /var/lib/trend-investing/engines/boost/run.env && echo no-run-env
+sudo systemctl stop ti-data.timer ti-reporter@boost.timer
 systemctl is-active ti-data.timer ti-reporter@boost.timer || true
 ```
 
@@ -137,7 +140,9 @@ and with none the engine halts on that first reading ("reconciliation
 unverifiable"; `docs/manual/boost.md`). In IBKR (Client Portal), read the paper
 account's holdings and its **total cash** (`TotalCashValue`, in USD). Replace
 `100000.00` with that figure, digits and a decimal point only. If the account
-holds SPY, replace `-positions ""` with `-positions SPY=<shares>`. Approve right
+holds anything, replace `-positions ""` with every holding, as
+`-positions SPY=<shares>` or `-positions QQQ=5,SPY=10` (one `SYMBOL=shares` for
+each holding, none left out); keep `""` only when it holds nothing. Approve right
 after you read it, with no order working.
 
 <!-- rehearsed: approve -->
@@ -453,8 +458,8 @@ run-2026-10-24.log
 
 The first `operator approve` below only reads the incident's ID from the
 stopped log; the second clears it and states the book as IBKR shows it now.
-Replace `100000.00` in both with that figure, and add `SPY=<shares>` as in
-step 2 if it holds any.
+Replace `100000.00` in both with that figure, and put every holding in
+`-positions` as in step 2 if it holds any.
 
 <!-- rehearsed: recover-approve -->
 ```sh
