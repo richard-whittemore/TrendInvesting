@@ -29,20 +29,28 @@ useradd --create-home --shell /bin/bash owner
 printf 'owner ALL=(ALL) NOPASSWD:ALL\n' >/etc/sudoers.d/owner
 chmod 0440 /etc/sudoers.d/owner
 
-# run_block COMMANDS: runs them as the owner in a shell of their own that
-# stops at the first failing command (bash -e), outside any errexit-
-# suppressing context, so its exit status is the block's.
+# run_block COMMANDS: runs them as the owner in a shell of their own WITHOUT
+# errexit, as the owner's pasted login shell is: a block stops at a failing
+# command only if it stops itself (its own "( set -euo pipefail" wrapper).
+# The exit status is that of the block's last command.
 run_block() {
-  (cd / && runuser -u owner -- bash -e -c "$1")
+  (cd / && runuser -u owner -- bash -c "$1")
 }
 
-# The runner's own checks, before it is trusted with the runbook: a failing
-# command ends a block, the owner is unprivileged, and a ti-trader-only path
-# is refused without sudo and read with it.
+# The runner's own checks, before it is trusted with the runbook: it has no
+# errexit of its own (a bare failing command stops nothing, as in a pasted
+# login shell), a block wrapped as the runbook's are does stop, the owner is
+# unprivileged, and a ti-trader-only path is refused without sudo and read
+# with it.
+selftest=$(run_block 'false; echo after-the-failure' 2>&1) || true
+grep -q after-the-failure <<<"$selftest" || fail "run_block stops a block at a failing command: the rehearsal would hide a block that does not stop itself"
 status=0
-selftest=$(run_block 'false; echo after-the-failure' 2>&1) || status=$?
-test "$status" != 0 || fail "run_block let a block go on, and exit 0, after a failing command"
-! grep -q after-the-failure <<<"$selftest" || fail "run_block ran a command after a failing one"
+selftest=$(run_block '( set -euo pipefail; false; echo after-the-failure ); echo shell-still-open' 2>&1) || status=$?
+! grep -q after-the-failure <<<"$selftest" || fail "a wrapped block ran a command after a failing one"
+grep -q shell-still-open <<<"$selftest" || fail "a wrapped block ended the owner's shell"
+status=0
+run_block '( set -euo pipefail; false; echo after-the-failure )' >/dev/null 2>&1 || status=$?
+test "$status" != 0 || fail "a wrapped block that failed exited 0"
 test "$(run_block 'id -un')" = owner || fail "the runbook's blocks do not run as the owner"
 install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/engines/selftest
 status=0
@@ -63,10 +71,15 @@ remap() { sed -e "$remap_expr"; }
 # "~ ", as a pattern. Each match consumes the output through the line it
 # matched. The output is kept in $out.
 out=
+withvars=0
 step() {
   local cmds want line status=0 rest found newrest o pat mode
   cmds=$(block rehearsed "$1" | remap)
   test -n "$cmds" || fail "the runbook has no command block 'rehearsed: $1'"
+  # The recovery section's names are set once in the owner's shell and read by
+  # its later blocks; each block here is a shell of its own, so they are set
+  # again in front of it.
+  if test "$withvars" = 1; then cmds=$(block rehearsed recover-vars | remap)$'\n'$cmds; fi
   want=$(block expect "${3:-$1}" | remap)
   test -n "$want" || fail "the runbook has no expected output block 'expect: ${3:-$1}'"
   out=$(run_block "$cmds" 2>&1) || status=$?
@@ -266,7 +279,11 @@ step warmup-wait 1 warmup-late
 remap_expr='s/^$//'
 systemctl stop ti-warmup.service
 step warmup
+# A warm-up that does not end is given up on here too, after fifteen
+# minutes, not the runbook's three hours.
+remap_expr='s/10800/900/;s/sleep 30/sleep 1/'
 step warmup-wait
+remap_expr='s/^$//'
 test -s /var/lib/trend-investing/data/streams/boost/run-2026-10-24/boost-2026-10-23.jsonl || fail "the warm-up wrote no stream file"
 fetched=$(grep -c '^/v2/aggs/grouped/' "$probe/massive-requests")
 test "$fetched" -gt 440 || fail "the warm-up fetched only $fetched sessions"
@@ -333,42 +350,56 @@ clock_at "2026-10-24 19:00"
 step dashboard
 pass "step 8: the dashboard unit starts on loopback and answers read-only"
 
-# --- If the engine halts on its first reading. A drill, on the run name the
-# recovery section does not use: the section's commands, as written, with
-# 2026-10-25 in place of 2026-10-24 (so its new name is run-2026-10-25b). The
-# earlier run is stopped; a fresh run is approved with a wrong book, the
-# adapter reads the account and the engine halts; then the section is followed.
+# --- If the engine halts on its first reading. A drill of the owner's case:
+# the FIRST run (no earlier log, a -first-run approval, TI_AS_OF 20:00) halts
+# on a book that is not the account's, then the section is followed with its
+# own names (halted, next, asof), on the run name the section does not use:
+# 2026-10-25 in place of 2026-10-24, so the new run is run-2026-10-25b and
+# its start, 19:59, is one minute EARLIER than the halted run's. The earlier
+# real run's files are set aside so that the halted run has no predecessor,
+# as on the server.
 systemctl stop ti-adapter-boost.service ti-engine@boost.service ti-data.timer ti-reporter@boost.timer
-runuser -u ti-trader -- operator approve -log "$engines/run-2026-10-24.log" -account DU0000001 -by owner \
-  -positions "" -cash 90000.00 -currency USD -out "$engines/approval-run-2026-10-25.json" >/dev/null || fail "the drill's wrong-book approval was refused"
-printf 'TI_RUN=run-2026-10-25\nTI_AS_OF=2026-10-26T19:58:00Z\nTI_RESTART_ARGS=-approval %s/approval-run-2026-10-25.json\n' "$engines" >"$engines/run.env"
+aside=/root/aside-run-2026-10-24
+install -d "$aside"
+mv "$engines"/run-2026-10-24.* "$aside"/
+test -z "$(ls "$engines"/*.log 2>/dev/null)" || fail "the drill's halted run still has an earlier log"
+runuser -u ti-trader -- operator approve -first-run -account DU0000001 -by owner \
+  -positions "" -cash 90000.00 -currency USD -out "$engines/first-run-approval-run-2026-10-25.json" >/dev/null || fail "the drill's wrong-book approval was refused"
+printf 'TI_RUN=run-2026-10-25\nTI_AS_OF=2026-10-26T20:00:00Z\nTI_RESTART_ARGS=-approval %s/first-run-approval-run-2026-10-25.json\n' "$engines" >"$engines/run.env"
 chown ti-trader:ti-trader "$engines/run.env"
 systemctl start ti-engine@boost.service
 for _ in $(seq 30); do systemctl is-active --quiet ti-engine@boost && test -s "$engines/run-2026-10-25.log" && break; sleep 1; done
 test -s "$engines/run-2026-10-25.log" || fail "the drill's engine did not start: $(journalctl -u ti-engine@boost -n 5 --no-pager -o cat)"
-systemd-run --quiet --wait --collect --unit=ti-warmup-drill -p User=ti-trader -p Group=ti-trader \
+# Bounded: systemd stops the warm-up after fifteen minutes and --wait then
+# returns non-zero, which fails the rehearsal.
+systemd-run --quiet --wait --collect --unit=ti-warmup-drill -p RuntimeMaxSec=900 -p User=ti-trader -p Group=ti-trader \
   -p LoadCredential=secrets:/run/trend-investing/secrets/secrets.env \
   /opt/trend-investing/bin/ti-data --data /var/lib/trend-investing/data --config /etc/trend-investing/engines/boost.config \
-  --engine-log "$engines/run-2026-10-25.log" --backfill-from 2025-01-02 || fail "the drill's warm-up failed"
+  --engine-log "$engines/run-2026-10-25.log" --backfill-from 2025-01-02 || fail "the drill's warm-up failed or ran past its 15-minute limit"
 systemctl start ti-adapter-boost.service
 for _ in $(seq 120); do grep -q '"state":"halted"' "$engines/run-2026-10-25.log" && break; sleep 1; done
 grep -q '"state":"halted"' "$engines/run-2026-10-25.log" || fail "the engine did not halt on a first reading that is not the approved book: $(journalctl -u ti-adapter-boost -n 8 --no-pager -o cat)"
-note "the drill's engine halted on its first reading, as a mistyped book makes it"
+note "the drill's first run halted on its first reading, as a mistyped book makes it"
 
-# The recovery blocks name the halted run (run-2026-10-24) and the new one
-# (run-2026-10-24b); the later steps are repeated "with run-2026-10-24b in
-# place of run-2026-10-24", as the owner does it.
+# The recovery section's names (recover-vars) are prefixed to each of its
+# blocks, as the owner sets them once; the drill's run names replace the
+# section's, so halted is run-2026-10-25 and next run-2026-10-25b. asof
+# (19:59) is the section's own.
 remap_expr='s/run-2026-10-24/run-2026-10-25/g'
+withvars=1
 step recover-stop
 step recover-approve
 step recover-run-env
 step engine 0 engine-again
-remap_expr='s/run-2026-10-24/run-2026-10-25b/g'
 before_recovery=$(grouped)
-step warmup
-step warmup-wait
+step recover-warmup 0 warmup
+# The wait is bounded here as in step 5.
+remap_expr='s/run-2026-10-24/run-2026-10-25/g;s/10800/900/;s/sleep 30/sleep 1/'
+step recover-warmup-wait
+remap_expr='s/run-2026-10-24/run-2026-10-25/g'
 refetched=$(($(grouped) - before_recovery))
 test "$refetched" -lt 5 || fail "the second warm-up fetched $refetched sessions; the runbook says it fetches only the missing days"
-step adapter
-pass "recovery: the halted run is stopped, a new run name, approval with the book and run.env follow, and steps 4 to 6 again start a run that stays out of Halted; the second warm-up fetched $refetched sessions (the days missing from the recordings)"
+step recover-adapter
+withvars=0
+pass "recovery: the first run (as of 20:00) halted on a wrong book; the section's names, the approval clearing its incident, run.env with an as-of one minute earlier, and the engine, warm-up and adapter blocks start a new run that stays out of Halted; the second warm-up fetched $refetched sessions (the days missing from the recordings)"
 remap_expr='s/^$//'
