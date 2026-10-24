@@ -24,7 +24,7 @@ set +x
 
 fail() {
   echo "REHEARSAL FAIL: $*" >&2
-  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u ti-adapter-boost -u ti-data -u ti-warmup -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
+  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u ti-adapter-boost -u ti-data -u ti-warmup -u ti-warmup-drill -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
   exit 1
 }
 pass() { echo "REHEARSAL ok: $*"; }
