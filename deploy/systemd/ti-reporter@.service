@@ -34,8 +34,9 @@ Environment=TI_REPORTS_DIR=/var/lib/trend-investing/reports
 # the new log. Optional here ("-") because before the account's first run there is
 # none, and -run-env below makes that a quiet wait.
 EnvironmentFile=-/var/lib/trend-investing/engines/%i/run.env
-# TI_NTFY_TOPIC, TI_NTFY_SERVER, TI_PUSHOVER_APP_TOKEN,
-# TI_PUSHOVER_USER_KEY and TI_HEARTBEAT_URL, read from %d/secrets and never printed. A firing that
+# TI_NTFY_TOPIC, TI_NTFY_SERVER, TI_PUSHOVER_APP_TOKEN, TI_PUSHOVER_USER_KEY,
+# TI_GITHUB_ISSUES_TOKEN, TI_GITHUB_ISSUES_REPO and TI_HEARTBEAT_URL, read from
+# %d/secrets and never printed. A firing that
 # finishes without a fault pings TI_HEARTBEAT_URL, the outside service that
 # pages the owner when the pings stop (docs/manual/server.md, "The outside
 # heartbeat").
@@ -65,7 +66,7 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # sign of a run it is an alert and a fault (docs/manual/server.md, "The reporter before the
 # first run").
 SupplementaryGroups=systemd-journal
-ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -self-unit ti-reporter@%i.service
+ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover,github-issues -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -self-unit ti-reporter@%i.service
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

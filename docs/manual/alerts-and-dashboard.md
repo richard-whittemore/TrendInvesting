@@ -455,10 +455,12 @@ the reporter has no way to listen for it.
 
 ## Alerts as GitHub Issues
 
-With `github-issues` in `-channel`, every alert also becomes an issue in the
-repository named by `TI_GITHUB_ISSUES_REPO`, with the label `alert`. It is a
+The server's reporter and failed-unit hook name `github-issues` in
+`-channel`, so once the token and repository are filled in, every alert also
+becomes an issue in the repository named by `TI_GITHUB_ISSUES_REPO`, with the label `alert`. It is a
 third place to read the alert, with the context beside it, in the GitHub app
-on your phone. Pushover still pages you, and ntfy still pushes; the issue is
+on your phone. The alerts repository is **private**; only the code and the
+fix PRs are public (see "Two repositories", below). Pushover still pages you, and ntfy still pushes; the issue is
 not a replacement for either, and a fault in it never holds them back: every
 alert of a firing goes to Pushover and ntfy before any goes to GitHub, and
 so does every reminder of a failed unit. A firing's work on GitHub, every
@@ -499,7 +501,9 @@ author of could be the reporter's, so then nothing is written and the
 delivery fails (it is tried again at the next firing). An alert that comes
 back after it resolved is a new incident and opens a new issue.
 
-**What is kept out.** The repository is public, so anyone can read an issue.
+**What is kept out.** The alerts repository is private, so only you (and anyone
+you add to it) can read an issue, but it can be shared or made public later,
+so the redaction holds regardless.
 The reporter therefore writes only the alert's *public* text when it has one,
 the text that names what is in doubt and carries no balance (the same text
 the public ntfy.sh relay gets), and it removes, from every part of the issue,
@@ -600,12 +604,35 @@ a firing whose GitHub work failed ends with an error: the reporter's unit
 fails, so you get its urgent `<host>: ti-reporter@boost.service failed` page
 (and its hourly reminders while every firing fails), and the firing sends no
 outside heartbeat ping, so Healthchecks pages too if it goes on (rows below).
-Expect both until GitHub recovers, or take `github-issues` out of
-`-channel`. First read the run's error: a failed firing names `github-issues:` and why. The
+Expect both until GitHub recovers, or stop using the channel for now with a
+systemd drop-in (the unit files themselves are replaced by every
+`provision.sh services`, so never edit them): run
+`sudo systemctl edit ti-reporter@boost`, put this in the editor and save:
+
+```
+[Service]
+ExecStart=
+ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -self-unit ti-reporter@%i.service
+```
+
+then run `sudo systemctl edit ti-unit-failed@.service` and put this in the
+editor for the failed-unit hook:
+
+```
+[Service]
+ExecStart=
+ExecStart=/opt/trend-investing/bin/ti-reporter notify-unit-failed -state /var/lib/trend-investing/reports/unit-failures.json -secrets-file %d/secrets -channel ntfy,pushover %i
+```
+
+(each copies the installed unit's `ExecStart=` line with `github-issues`
+taken out of `-channel`; compare with `systemctl cat ti-reporter@boost` first,
+because a later unit file may differ). To go back, `sudo systemctl revert
+ti-reporter@boost ti-unit-failed@.service`. First read the run's error: a failed firing names `github-issues:` and why. The
 usual causes are in the table "What can go wrong", below: the token expired or
 was revoked ("GitHub answered 401 Unauthorized"), the token cannot write the
 repository's issues ("403 Forbidden" or "404 Not Found"), GitHub was
-unreachable, or the channel is not in `-channel`. The alert is not lost: it
+unreachable, or `TI_GITHUB_ISSUES_TOKEN` or `TI_GITHUB_ISSUES_REPO` is empty
+("reporter: the github-issues channel needs ..."). The alert is not lost: it
 is sent again at the next firing, and an issue is made then.
 
 **The token.** Create it once, and again when it expires:
@@ -621,8 +648,14 @@ is sent again at the next firing, and an issue is made then.
    settings or trade; if it leaks, the most it can do is write issues.
 4. On the server, `sudo ti-secrets edit secrets.env` and fill in
    `TI_GITHUB_ISSUES_TOKEN=` (the token) and `TI_GITHUB_ISSUES_REPO=`
-   (`owner/name`). The next firing uses them. Add `github-issues` to the
-   reporter's `-channel`.
+   (`owner/name` of the private alerts repository). **Do this before the unit
+   files that name `github-issues` are installed** (`sudo deploy/provision.sh
+   services`): the next firing uses the values. The reporter's unit and the
+   failed-unit hook already name `github-issues`; there is no `-channel` to
+   edit. Until both are filled in, the channel is set aside and every
+   firing fails, sends no heartbeat ping (so Healthchecks pages you at
+   Emergency) and the failed-unit page repeats hourly (the table "What can go
+   wrong", below).
 5. To rotate it, make a new token the same way, replace the line, and delete
    the old token on GitHub. Put a reminder in your calendar for its expiry:
    an expired token is a channel that fails every firing.
@@ -972,7 +1005,7 @@ with:
 /opt/trend-investing/bin/ti-reporter \
   -journal /var/lib/trend-investing/engines/boost/${TI_RUN}.log \
   -state /var/lib/trend-investing/reports/boost.reporter.json \
-  -secrets-file %d/secrets -channel ntfy,pushover -summary -account boost \
+  -secrets-file %d/secrets -channel ntfy,pushover,github-issues -summary -account boost \
   -cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl
 ```
 
@@ -995,8 +1028,17 @@ On the Mac, from the repository root, against a copy of a log:
 ```
 TI_NTFY_TOPIC=... TI_PUSHOVER_APP_TOKEN=... TI_PUSHOVER_USER_KEY=... \
   go run ./cmd/reporter -journal boost.log -state boost.reporter.json \
-  -channel ntfy,pushover -summary
+  -secrets-file ./alerts.env -channel ntfy,pushover,github-issues -summary
 ```
+
+`./alerts.env` is a file you make once outside the repository (or in a folder
+Git ignores), readable by you alone (`chmod 600 alerts.env`), with the two
+GitHub lines of "Alerts as GitHub Issues", below:
+`TI_GITHUB_ISSUES_TOKEN=` (the token) and `TI_GITHUB_ISSUES_REPO=`
+(`owner/name` of the private alerts repository). Type them into the file with
+an editor, never on the command line, where the shell's history would keep
+them. Without both lines `github-issues` is set aside and the run fails; to
+try a copy of a log without GitHub, leave `github-issues` out of `-channel`.
 
 Flags: `-journal` and `-state` are required; `-secrets-file` (a
 `KEY=VALUE` file read for any secret the environment leaves empty); `-channel` (default `stdout`,

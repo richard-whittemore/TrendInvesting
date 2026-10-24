@@ -181,7 +181,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		"-journal":      state + "/" + env["TI_RUN"] + ".log",
 		"-state":        reports + "/boost.reporter.json",
 		"-secrets-file": credentials + "/secrets",
-		"-channel":      "ntfy,pushover",
+		"-channel":      "ntfy,pushover,github-issues",
 		"-account":      "boost",
 		"-clock-state":  reports + "/host-clock.json",
 		"-cash-ledger":  "/var/lib/trend-investing/flex/boost/cash-movements.jsonl",
@@ -227,7 +227,9 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	var ntfy, pager countingServer
 	ntfyServer := ntfy.serve(t, http.StatusOK, "")
 	pagerServer := pager.serve(t, http.StatusOK, `{"status":1}`)
-	secrets := "TI_NTFY_TOPIC=topic\nTI_NTFY_SERVER=" + ntfyServer.URL + "\nTI_PUSHOVER_APP_TOKEN=token\nTI_PUSHOVER_USER_KEY=user\nTI_PUSHOVER_URL=" + pagerServer.URL + "\n"
+	gh := &fakeGitHub{}
+	ghURL := fakeGitHubServer(t, gh)
+	secrets := "TI_NTFY_TOPIC=topic\nTI_NTFY_SERVER=" + ntfyServer.URL + "\nTI_PUSHOVER_APP_TOKEN=token\nTI_PUSHOVER_USER_KEY=user\nTI_PUSHOVER_URL=" + pagerServer.URL + "\n" + githubSecrets(ghURL)
 	if err := os.WriteFile(filepath.Join(credentials, "secrets"), []byte(secrets), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -238,6 +240,9 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	}
 	if ntfy.count() == 0 || pager.count() == 0 {
 		t.Errorf("ntfy took %d and Pushover %d alerts, want both reached", ntfy.count(), pager.count())
+	}
+	if len(gh.snapshot()) == 0 {
+		t.Error("the alerts repository was opened no issue: the unit does not reach the github-issues channel")
 	}
 	if _, err := os.Stat(filepath.Join(reports, "boost.reporter.json")); err != nil {
 		t.Errorf("no state file in the reports directory: %v", err)
