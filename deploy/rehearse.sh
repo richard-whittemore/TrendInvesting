@@ -78,13 +78,14 @@ docker start -a "$id"
 # unit its credentials (LoadCredential=) and the rehearsal reads them as the
 # server does; gnupg is ti-secrets' tool, as provision.sh base installs it;
 # openssl, iproute2 (ss) and tzdata serve the first-day rehearsal's stand-in
-# Massive, the runbook's port check and the New York clock.
+# Massive, the runbook's port check and the New York clock; sudo is the
+# owner's, as the runbook types it.
 caps=(--cap-drop ALL)
 for cap in SYS_ADMIN SYS_CHROOT CHOWN FOWNER DAC_OVERRIDE SETUID SETGID SETPCAP AUDIT_WRITE KILL FSETID; do
   caps+=(--cap-add "$cap")
 done
 sd=$(docker create "${caps[@]}" --cgroupns=private --tmpfs /run --tmpfs /run/lock -e container=docker --platform "$platform" ubuntu:24.04 \
-  bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends systemd dbus python3 gnupg openssl iproute2 curl tzdata tzdata-legacy >/dev/null && mount -o remount,rw /sys/fs/cgroup && mount --make-rshared / && exec /lib/systemd/systemd')
+  bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends systemd dbus python3 gnupg openssl iproute2 curl tzdata tzdata-legacy sudo >/dev/null && mount -o remount,rw /sys/fs/cgroup && mount --make-rshared / && exec /lib/systemd/systemd')
 docker cp "$repo/deploy" "$sd:/deploy"
 docker cp "$dist" "$sd:/dist"
 # The adapter's code (provision.sh adapter installs it from beside deploy/)

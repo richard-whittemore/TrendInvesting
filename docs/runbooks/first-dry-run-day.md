@@ -5,8 +5,18 @@ Tailscale SSH, that takes Boost from "programs installed, secrets unlocked,
 Gateway logged in" to a dry-run engine that decides Monday's session after
 its close. Dry-run sends nothing to IBKR, ever.*
 
+> **WARNING: never run `sudo deploy/provision.sh services` (or `all`) once
+> step 1 is done, until the dry-run day is over.** It copies the shipped
+> `boost.config` back over yours, with the account `joint`: the engine then
+> refuses the adapter's reading of your account at its next start, and the
+> data job refuses to write Monday's file, so Monday is not decided. If it
+> happens: do step 1 again (it is safe to repeat), then restart nothing else;
+> the running engine is not affected.
+
 Every command in a block below is run by `deploy/rehearse.sh` inside its
-systemd container, exactly as written, against stand-ins (a synthetic Massive,
+systemd container, as an ordinary login named `owner` with sudo (not as root,
+so a command that needs `sudo` and lacks it fails there), exactly as written,
+and a command that fails stops its block, against stand-ins (a synthetic Massive,
 a scripted gateway, invented figures), and the lines in each "expect" block
 are checked there (a line beginning `~` is a pattern, for times and counts). The container proves the commands, their order and their
 output lines; it cannot prove the real Massive key, the real Gateway, the
@@ -34,7 +44,7 @@ systemctl is-active ti-gateway
 ss -ltn 'sport = :4002' | grep -c LISTEN
 test -f /opt/trend-investing/adapter/adapter/ibkr/cli.py && echo adapter-code-installed
 test -x /opt/trend-investing/bin/ti-data && test -x /opt/trend-investing/bin/ti-engine && echo programs-installed
-test ! -e /var/lib/trend-investing/engines/boost/run.env && echo no-run-env
+sudo test ! -e /var/lib/trend-investing/engines/boost/run.env && echo no-run-env
 systemctl is-active ti-data.timer ti-reporter@boost.timer || true
 ```
 
@@ -62,29 +72,61 @@ account number into a chat, a ticket or this repository.
 
 ## 1. Name the paper account in Boost's configuration
 
+> **Never run `sudo deploy/provision.sh services` (or `all`) again after this
+> step.** It copies the shipped file back over the one you edit here (account
+> `joint`): the engine then refuses the adapter's reading of your account at
+> its next start, and the data job refuses to write Monday's file. To recover,
+> run this step again and restart nothing else.
+
 The adapter reads the account `IBKR_ACCOUNT_BOOST` names from IB Gateway and
 hands the engine a reconciliation for it; the engine refuses a reconciliation
 for any account but the one its configuration names. The shipped dry-run
 configuration names the placeholder `joint`, so, as for the paper copy
 (`docs/runbooks/first-paper-order.md`, A5), the account number goes into
 `/etc/trend-investing/engines/boost.config` on the server. The number is read
-from the unlocked account file and never printed. It stays in `/etc` only:
-never put it in the repository. Do not run `sudo deploy/provision.sh services`
-again afterwards: it copies the shipped file back over this one.
+from the unlocked account file and never printed. **The paper account number
+then sits in `boost.config` in plain text, in `/etc` only** (never put it in
+the repository): the paper runbook's copy does the same, and a paper account
+number is an identifier, not a credential; it opens nothing without the
+Gateway's login. The block stops with a message if the configuration already
+names a different account than `accounts/boost.env` (an earlier attempt with
+another number): correct whichever is wrong and run it again. It is safe to
+run twice, and it checks the result by comparing the two values exactly.
 
 <!-- rehearsed: account -->
 ```sh
-account=$(sudo sed -n 's/^IBKR_ACCOUNT_BOOST=//p' /run/trend-investing/secrets/accounts/boost.env)
-sudo sed -i "s/\"account_id\": \"joint\"/\"account_id\": \"$account\"/" /etc/trend-investing/engines/boost.config
-unset account
-sudo grep -c '"account_id": "DU' /etc/trend-investing/engines/boost.config
-sudo grep -c '"mode": "dry-run"' /etc/trend-investing/engines/boost.config
+sudo bash -eu <<'EOF2'
+config=/etc/trend-investing/engines/boost.config
+account=$(sed -n 's/^IBKR_ACCOUNT_BOOST=//p' /run/trend-investing/secrets/accounts/boost.env)
+if ! printf '%s\n' "$account" | grep -qE '^DU[0-9]+$'; then
+  echo "STOP: accounts/boost.env has no IBKR_ACCOUNT_BOOST=DU... line (digits only, no quotes or spaces)."
+  exit 1
+fi
+current=$(sed -n 's/^ *"account_id": *"\([^"]*\)".*/\1/p' "$config")
+if [ "$current" = joint ]; then
+  sed -i "s/\"account_id\": \"joint\"/\"account_id\": \"$account\"/" "$config"
+elif [ "$current" != "$account" ]; then
+  echo "STOP: boost.config already names a different account than accounts/boost.env. Change nothing; find out which is wrong."
+  exit 1
+fi
+now=$(sed -n 's/^ *"account_id": *"\([^"]*\)".*/\1/p' "$config")
+[ "$now" = "$account" ] || { echo "STOP: boost.config does not name the account of accounts/boost.env."; exit 1; }
+echo account-named
+grep -c '"mode": "dry-run"' "$config"
+EOF2
 ```
 
 <!-- expect: account -->
 ```text
+account-named
 1
-1
+```
+
+If the account in the file is the wrong one:
+
+<!-- expect: account-refused -->
+```text
+~ STOP: boost.config already names a different account
 ```
 
 ## 2. Approve the first run with its starting book
@@ -150,7 +192,7 @@ sudo systemctl start ti-engine@boost
 sleep 3
 systemctl is-active ti-engine@boost
 sudo journalctl -u ti-engine@boost -n 3 --no-pager -o cat
-ls /var/lib/trend-investing/engines/boost/
+sudo ls /var/lib/trend-investing/engines/boost/
 ```
 
 <!-- expect: engine -->
@@ -189,19 +231,53 @@ sudo systemd-run --unit=ti-warmup --collect -p User=ti-trader -p Group=ti-trader
   --config /etc/trend-investing/engines/boost.config \
   --engine-log /var/lib/trend-investing/engines/boost/run-2026-10-24.log \
   --backfill-from 2025-01-02
-sleep 2
-while systemctl is-active --quiet ti-warmup; do sleep 30; done
-sudo journalctl -u ti-warmup --no-pager -o cat
-ls /var/lib/trend-investing/data/streams/boost/run-2026-10-24/
 ```
 
 <!-- expect: warmup -->
+```text
+Running as unit: ti-warmup.service
+```
+
+Then wait for it, for at most 3 hours (twice what it should take):
+
+<!-- rehearsed: warmup-wait -->
+```sh
+sleep 2
+deadline=$((SECONDS + 10800))
+late=0
+while systemctl is-active --quiet ti-warmup; do
+  if [ "$SECONDS" -ge "$deadline" ]; then late=1; break; fi
+  sleep 30
+done
+if [ "$late" = 1 ]; then
+  echo "STILL RUNNING after 3 hours (it should take about 90 minutes): see the paragraph below this block"
+else
+  sudo journalctl -u ti-warmup --no-pager -o cat
+  sudo ls /var/lib/trend-investing/data/streams/boost/run-2026-10-24/
+fi
+test "$late" = 0
+```
+
+<!-- expect: warmup-wait -->
 ```text
 Started ti-warmup.service - /opt/trend-investing/bin/ti-data --data /var/lib/trend-investing/data --config /etc/trend-investing/engines/boost.config --engine-log /var/lib/trend-investing/engines/boost/run-2026-10-24.log --backfill-from 2025-01-02.
 /var/lib/trend-investing/data/streams/boost/run-2026-10-24/boost-2026-10-23.jsonl
 ti-warmup.service: Deactivated successfully.
 boost-2026-10-23.jsonl
 ```
+
+If it is late you see this instead, and the unit may still be running:
+
+<!-- expect: warmup-late -->
+```text
+~ STILL RUNNING after 3 hours
+```
+
+A late warm-up is wedged or very slow (a Massive outage, a 429 streak). Read
+`sudo journalctl -u ti-warmup -n 30 --no-pager`; if it is still making
+requests, run the wait block again; if it is stuck, `sudo systemctl stop
+ti-warmup` (your own unit) and run the warm-up block again: it fetches only
+what is missing.
 
 While it runs, `sudo journalctl -fu ti-warmup` shows it (Ctrl-C leaves it
 running). It prints the build, then, at the end, the path of the one file it
@@ -223,10 +299,15 @@ fine. Do not edit that file.
 ```sh
 sudo grep -E '"(mode|paper_sending_enabled)"' /etc/trend-investing/adapters/boost.json
 sudo systemctl start ti-adapter-boost
-for _ in $(seq 60); do sudo journalctl -u ti-adapter-boost --no-pager -o cat | grep -q 'session-closed:2026-10-23' && break; sleep 5; done
+invocation=$(systemctl show -p InvocationID --value ti-adapter-boost)
+for _ in $(seq 60); do sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat | grep -q 'session-closed:2026-10-23' && break; sleep 5; done
+if ! sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat | grep -q 'session-closed:2026-10-23'; then
+  echo "NOT READY: this start of the adapter has not delivered the warm-up after 5 minutes; read sudo journalctl -u ti-adapter-boost -n 30"
+  false
+fi
 systemctl is-active ti-adapter-boost
-sudo journalctl -u ti-adapter-boost --no-pager -o cat | grep -E 'adapter starting|link connected|reconciled|stream queued|stopped|refused'
-sudo journalctl -u ti-adapter-boost --no-pager -o cat | grep 'session-closed:2026-10-23'
+sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat | grep -E 'adapter starting|link connected|reconciled|stream queued|stopped|refused'
+sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat | grep 'session-closed:2026-10-23'
 sudo grep -c '"state":"halted"' /var/lib/trend-investing/engines/boost/run-2026-10-24.log || true
 ```
 
@@ -243,13 +324,22 @@ active
 0
 ```
 
+The readiness check looks only at this start of the adapter (its journal
+invocation), so an acknowledgement left by an earlier start, or by an earlier
+run, never makes it ready. A start that does not connect, or does not deliver,
+prints this instead, and the block stops:
+
+<!-- expect: adapter-not-ready -->
+```text
+~ NOT READY: this start of the adapter has not delivered
+```
+
 The adapter connects to the Gateway, reads the account, hands the engine the
 reconciliation against the book you approved, then delivers the warm-up file
 to the engine, one input at a time. That takes a minute or two (about 900
 inputs). `halted` must stay `0`: a `1` means the engine halted on its first
-reading (the book you typed is not what the adapter read; start again with the
-book as IBKR shows it, `docs/manual/boost.md`, the first alert row under
-"What can go wrong"). If the unit is `failed`, `sudo journalctl -u
+reading (the book you typed is not what the adapter read): follow "If the
+engine halts on its first reading", below. If the unit is `failed`, `sudo journalctl -u
 ti-adapter-boost -n 30` says why; the common causes are the Gateway not
 listening on 4002 or the account number in `accounts/boost.env` not being the
 one the Gateway is logged in to (`docs/manual/ibkr-adapter.md`, "Every stop,
@@ -283,8 +373,8 @@ ActiveState=inactive
 Result=success
 ActiveState=inactive
 /var/lib/trend-investing/data/streams/boost/run-2026-10-24/boost-2026-10-23.jsonl
-~ ti-data\.timer +ti-data\.service
 ~ ti-reporter@boost\.timer +ti-reporter@boost\.service
+~ ti-data\.timer +ti-data\.service
 ```
 
 `ti-data.timer` fires Monday to Friday at 17:05, 18:05 and 20:05 New York time
@@ -292,7 +382,9 @@ and never on a weekend. `ti-reporter@boost.timer` fires every 5 minutes, all
 week. On Saturday and Sunday there is no new session, so the data job's
 weekend runs (if any, such as a catch-up after a reboot) find the last
 settled session, Friday's, already written, record nothing and succeed; the
-reporter's weekend firings find nothing to report and succeed. A failure of
+reporter's weekend firings find nothing to report and succeed (the
+rehearsal cannot move the reporter's clock, so its weekend firings are not
+rehearsed; only the data job's are). A failure of
 either pages you through the reporter's channels like any failed unit
 (`docs/manual/server.md`, "A failed unit"), so no page is the expected
 state.
@@ -331,6 +423,92 @@ once and check again. Never `tailscale funnel`: that publishes to the whole
 internet. Then open the address from your phone or laptop (on Tailscale). The
 page should say "Read-only", name the Boost account, and show its engine state
 as normal.
+
+## If the engine halts on its first reading
+
+You see `halted` `1` in step 6, or the page "reconciliation unverifiable".
+The book you approved is not the book the adapter read, and a run's log is
+never reused, so you start a fresh run. Nothing is lost but time: the new
+warm-up fetches only the sessions the data job has not already recorded
+(they are on disk), so it takes seconds rather than 90 minutes (the rehearsal
+checks this: fewer than 5 requests). In the commands below, `run-2026-10-24b`
+is the new name; if you need a third, `run-2026-10-24c`. Read the holdings and
+**total cash** in IBKR again and use them in the second block. Then repeat
+steps 4, 5 and 6 as written, with `run-2026-10-24b` in place of
+`run-2026-10-24` in every command and path, here, in step 7 and in "Monday
+after the close".
+
+<!-- rehearsed: recover-stop -->
+```sh
+sudo systemctl stop ti-adapter-boost
+sudo systemctl stop ti-engine@boost
+sudo systemctl stop ti-data.timer ti-reporter@boost.timer
+sudo ls /var/lib/trend-investing/engines/boost/
+```
+
+<!-- expect: recover-stop -->
+```text
+run-2026-10-24.log
+```
+
+The first `operator approve` below only reads the incident's ID from the
+stopped log; the second clears it and states the book as IBKR shows it now.
+Replace `100000.00` in both with that figure, and add `SPY=<shares>` as in
+step 2 if it holds any.
+
+<!-- rehearsed: recover-approve -->
+```sh
+sudo bash -eu <<'EOF2'
+cash=100000.00
+account=$(sed -n 's/^IBKR_ACCOUNT_BOOST=//p' /run/trend-investing/secrets/accounts/boost.env)
+dir=/var/lib/trend-investing/engines/boost
+incident=$(runuser -u ti-trader -- operator approve -log $dir/run-2026-10-24.log -account "$account" -by owner -positions "" -cash "$cash" -currency USD -out $dir/incident-look-run-2026-10-24b.json | sed -n 's/.*carries incident \([^ ]*\) in force.*/\1/p')
+test -n "$incident" || { echo "STOP: no incident in force in run-2026-10-24.log; it did not halt. Do not start a fresh run."; exit 1; }
+runuser -u ti-trader -- operator approve -log $dir/run-2026-10-24.log -account "$account" -by owner -clear-incident "$incident" -positions "" -cash "$cash" -currency USD -out $dir/approval-run-2026-10-24b.json
+EOF2
+```
+
+<!-- expect: recover-approve -->
+```text
+~ the approval clears incident .* \(halted\)
+~ the fresh run starts from the book you checked in IBKR.*holdings none, total cash 100000 USD
+~ wrote /var/lib/trend-investing/engines/boost/approval-run-2026-10-24b.json: start the fresh run with -approval
+```
+
+<!-- rehearsed: recover-run-env -->
+```sh
+sudo -u ti-trader tee /var/lib/trend-investing/engines/boost/run.env >/dev/null <<'EOF2'
+TI_RUN=run-2026-10-24b
+TI_AS_OF=2026-10-26T20:00:00Z
+TI_RESTART_ARGS=-approval /var/lib/trend-investing/engines/boost/approval-run-2026-10-24b.json
+EOF2
+sudo cat /var/lib/trend-investing/engines/boost/run.env
+```
+
+<!-- expect: recover-run-env -->
+```text
+TI_RUN=run-2026-10-24b
+TI_AS_OF=2026-10-26T20:00:00Z
+TI_RESTART_ARGS=-approval /var/lib/trend-investing/engines/boost/approval-run-2026-10-24b.json
+```
+
+Then step 4 (start the engine), step 5 (the warm-up and its wait) and step 6
+(the adapter), each with `run-2026-10-24b`. In step 4 the engine's third line
+reads "recorded the owner's approval of a fresh run after ..." with the
+earlier log's name; what must hold is `active`:
+
+<!-- expect: engine-again -->
+```text
+active
+~ recorded the owner's approval of a fresh run after
+listening on /run/ti-engine-boost/engine.sock
+run-2026-10-24b.log
+```
+
+Finish with step 7's first command, which starts the two timers again. The
+halted run's files (`run-2026-10-24.log`, its stream folder and the
+`incident-look` file) stay where they are as evidence; never delete or edit
+them.
 
 ## Sunday, and the Gateway's cold restart
 

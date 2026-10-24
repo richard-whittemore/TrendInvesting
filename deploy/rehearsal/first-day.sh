@@ -21,42 +21,81 @@ block() {
     inside { print }' "$doc"
 }
 
-# The runbook's commands say sudo, as the owner types them; the container
-# runs as root, so sudo is the user switch alone.
-sudo() {
-  if test "${1:-}" = -u; then
-    local user=$2
-    shift 2
-    runuser -u "$user" -- "$@"
-  else
-    "$@"
-  fi
+# The owner: an ordinary login on the server, not root and not in
+# ti-trader's group, with sudo as the Lightsail image gives its login. Every
+# block of the runbook runs as this user, so a command that needs sudo and
+# does not say so fails here as it would for the owner.
+useradd --create-home --shell /bin/bash owner
+printf 'owner ALL=(ALL) NOPASSWD:ALL\n' >/etc/sudoers.d/owner
+chmod 0440 /etc/sudoers.d/owner
+
+# run_block COMMANDS: runs them as the owner in a shell of their own that
+# stops at the first failing command (bash -e), outside any errexit-
+# suppressing context, so its exit status is the block's.
+run_block() {
+  (cd / && runuser -u owner -- bash -e -c "$1")
 }
 
-# step NAME: runs the runbook's NAME block as written, and requires every
-# line of its expected block, in order, to appear in the output as a whole
-# line (or, marked "~ ", as a pattern). The output is kept in $out.
+# The runner's own checks, before it is trusted with the runbook: a failing
+# command ends a block, the owner is unprivileged, and a ti-trader-only path
+# is refused without sudo and read with it.
+status=0
+selftest=$(run_block 'false; echo after-the-failure' 2>&1) || status=$?
+test "$status" != 0 || fail "run_block let a block go on, and exit 0, after a failing command"
+! grep -q after-the-failure <<<"$selftest" || fail "run_block ran a command after a failing one"
+test "$(run_block 'id -un')" = owner || fail "the runbook's blocks do not run as the owner"
+install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/engines/selftest
+status=0
+run_block 'ls /var/lib/trend-investing/engines/selftest' >/dev/null 2>&1 || status=$?
+test "$status" != 0 || fail "the owner can list a ti-trader-only directory without sudo"
+run_block 'sudo ls /var/lib/trend-investing/engines/selftest' >/dev/null || fail "the owner cannot list it with sudo"
+rmdir /var/lib/trend-investing/engines/selftest
+
+# remap_expr: a sed program applied to a block and its expected lines, for
+# the drill at the end, which runs the recovery section's commands for a
+# halted run of another name.
+remap_expr='s/^$//'
+remap() { sed -e "$remap_expr"; }
+
+# step NAME [STATUS [EXPECT]]: runs the runbook's NAME block as the owner,
+# as written, and requires every line of the expected block (EXPECT, else
+# NAME), in order, to appear in the output: a line as a whole, or, marked
+# "~ ", as a pattern. Each match consumes the output through the line it
+# matched. The output is kept in $out.
 out=
 step() {
-  local cmds want line status=0 rest
-  cmds=$(block rehearsed "$1")
+  local cmds want line status=0 rest found newrest o pat mode
+  cmds=$(block rehearsed "$1" | remap)
   test -n "$cmds" || fail "the runbook has no command block 'rehearsed: $1'"
-  out=$(eval "$cmds" 2>&1) || status=$?
+  want=$(block expect "${3:-$1}" | remap)
+  test -n "$want" || fail "the runbook has no expected output block 'expect: ${3:-$1}'"
+  out=$(run_block "$cmds" 2>&1) || status=$?
   printf 'REHEARSAL step %s output:\n%s\n' "$1" "$out" | sed 's/^/    /'
   if test "$status" != "${2:-0}"; then fail "step $1 exited $status, want ${2:-0}"; fi
-  want=$(block expect "$1")
   rest=$out
   while IFS= read -r line; do
     test -n "$line" || continue
-    # A line beginning "~ " is an extended regular expression that some line
-    # of the output must match (times and ids vary); any other line is
-    # matched whole, in order.
+    mode=lit
+    pat=$line
     if [[ $line == "~ "* ]]; then
-      grep -qE -- "${line:2}" <<<"$out" || fail "step $1: no line of the output matches '${line:2}'"
-      continue
+      mode=re
+      pat=${line:2}
     fi
-    if ! grep -qxF -- "$line" <<<"$rest"; then fail "step $1: the runbook promises the line '$line', which the output lacks (or has out of order)"; fi
-    rest=$(sed -n "/^$(printf '%s' "$line" | sed 's/[][\.*^$/]/\\&/g')\$/,\$p" <<<"$rest" | tail -n +2)
+    found=
+    newrest=
+    while IFS= read -r o || test -n "$o"; do
+      if test -z "$found"; then
+        if test "$mode" = re; then
+          if [[ $o =~ $pat ]]; then found=1; fi
+        elif test "$o" = "$pat"; then
+          found=1
+        fi
+        continue
+      fi
+      newrest+=$o$'\n'
+    done <<<"$rest"
+    test -n "$found" || fail "step $1: the runbook promises '$pat', which the output lacks (or has out of order)"
+    rest=$newrest
   done <<<"$want"
 }
 
@@ -181,7 +220,7 @@ rm -rf /dev/shm/ti-edit
 # --- Step 0: where the server stands. The adapter's code is the one thing
 # the owner may need to install; do what the runbook says for it.
 systemctl stop ti-data.timer ti-reporter@boost.timer 2>/dev/null || true
-out=$(eval "$(block rehearsed preflight)" 2>&1) || true
+out=$(run_block "$(block rehearsed preflight)" 2>&1) || true
 if grep -qxF 'adapter-code-installed' <<<"$out"; then fail "the adapter's code was reported installed before provision.sh adapter ran"; fi
 TI_REHEARSAL_ANY_ARCH=1 /deploy/provision.sh adapter >/dev/null || fail "provision.sh adapter failed"
 test -f /opt/trend-investing/adapter/adapter/ibkr/cli.py || fail "provision.sh adapter did not install the adapter's code"
@@ -191,6 +230,14 @@ pass "step 0: the preflight reports the server as the owner described it, and th
 # --- Steps 1 to 4: the account in the configuration, the first run's
 # approval, the run file, then the engine, started by its own unit.
 step account
+# Run again it changes nothing and says the same; a configuration that
+# already names another account stops the step before it changes anything.
+step account
+config=/etc/trend-investing/engines/boost.config
+sed -i 's/"account_id": "DU0000001"/"account_id": "DU0000009"/' "$config"
+step account 1 account-refused
+grep -q '"account_id": "DU0000009"' "$config" || fail "the account step changed a configuration that names another account"
+sed -i 's/"account_id": "DU0000009"/"account_id": "DU0000001"/' "$config"
 step approve
 test -s /var/lib/trend-investing/engines/boost/first-run-approval.json || fail "operator approve wrote no approval"
 step run-env
@@ -208,7 +255,18 @@ test ! -e /etc/trend-investing/secrets.env || fail "secrets.env is in plain text
 
 # --- Step 3: the one-time warm-up, with the encrypted secrets, against the
 # synthetic Massive on the Saturday evening's clock.
+# The wait has a deadline. A warm-up that never ends (a stand-in for it: a
+# unit of its name that sleeps) is given up on after the deadline, which the
+# rehearsal shortens to six seconds, with the message the runbook promises.
+engines=/var/lib/trend-investing/engines/boost
+systemd-run --quiet --unit=ti-warmup --collect /bin/sleep 300
+remap_expr='s/10800/6/;s/sleep 30/sleep 1/'
+step warmup-wait 1 warmup-late
+! grep -q 'Deactivated successfully' <<<"$out" || fail "the late warm-up was reported as finished"
+remap_expr='s/^$//'
+systemctl stop ti-warmup.service
 step warmup
+step warmup-wait
 test -s /var/lib/trend-investing/data/streams/boost/run-2026-10-24/boost-2026-10-23.jsonl || fail "the warm-up wrote no stream file"
 fetched=$(grep -c '^/v2/aggs/grouped/' "$probe/massive-requests")
 test "$fetched" -gt 440 || fail "the warm-up fetched only $fetched sessions"
@@ -218,6 +276,24 @@ pass "step 3: the warm-up command, run with the encrypted secrets unlocked, reco
 # account from the fake gateway and delivers the warm-up.
 step adapter
 pass "step 6: the adapter unit starts in dry-run with sending off, reconciles against the approved book, and delivers the warm-up; the engine stays out of Halted"
+
+# Readiness counts only this start's acknowledgements. The adapter is
+# restarted on a run.env whose log does not exist, so the new invocation
+# refuses to start; the journal still holds the first invocation's
+# acknowledgement of the session, which must not make it ready.
+systemctl stop ti-adapter-boost.service
+cp -p "$engines/run.env" /root/run.env.keep
+sed -i 's/^TI_RUN=.*/TI_RUN=run-no-such-log/' "$engines/run.env"
+remap_expr='s/seq 60/seq 2/;s/sleep 5/sleep 1/'
+step adapter 1 adapter-not-ready
+remap_expr='s/^$//'
+! grep -q 'market.session.closed' <<<"$out" || fail "the readiness check showed an earlier start's acknowledgement"
+cp -p /root/run.env.keep "$engines/run.env"
+systemctl reset-failed ti-adapter-boost.service || true
+systemctl start ti-adapter-boost.service
+for _ in $(seq 30); do systemctl is-active --quiet ti-adapter-boost && break; sleep 1; done
+sleep 20 # the failed start's page, if it pages, is sent before the weekend's firings are counted
+pass "step 6: an earlier start's acknowledgement does not make a start that never connected ready"
 
 # --- Step 7: the two timers, and what the weekend's firings do. A page is
 # a POST to Pushover's endpoint, so none may be added by any firing here.
@@ -231,13 +307,15 @@ pass "step 7: both timers start, and the Saturday firings succeed, fetch no sess
 
 # Sunday 09:05 (after the Gateway's cold login): the same, again.
 clock_at "2026-10-25 09:05"
-systemctl start ti-data.service ti-reporter@boost.service
-for u in ti-data.service ti-reporter@boost.service; do
-  test "$(systemctl show -p Result --value "$u")" = success || fail "$u did not succeed on Sunday"
-done
+# Only the data job: it is Python, and the clock above moves what it reads.
+# The reporter is a Go program with no clock to move, so it cannot be made
+# to see a Sunday here; its weekend firings are not rehearsed (step 7 above
+# ran it once, on the container's own clock).
+systemctl start ti-data.service
+test "$(systemctl show -p Result --value ti-data.service)" = success || fail "ti-data.service did not succeed on Sunday"
 test "$(grouped)" = "$before_requests" || fail "Sunday's data job fetched a session"
 test "$(pushover_pages)" = "$before_pages" || fail "a Sunday firing paged"
-pass "Sunday's firings of the data job and the reporter succeed quietly: nothing to record, no page"
+pass "Sunday's firing of the data job succeeds quietly: nothing to record, no page"
 
 # Monday 17:06: the data job's first evening firing writes Monday's file.
 clock_at "2026-10-26 17:06"
@@ -254,3 +332,39 @@ clock_at "2026-10-24 19:00"
 # --- Step 8: the dashboard, on loopback.
 step dashboard
 pass "step 8: the dashboard unit starts on loopback and answers read-only"
+
+# --- If the engine halts on its first reading. A drill, on the run name the
+# recovery section does not use: the section's commands, as written, with
+# 2026-10-25 in place of 2026-10-24 (so its new name is run-2026-10-25b). The
+# earlier run is stopped; a fresh run is approved with a wrong book, the
+# adapter reads the account and the engine halts; then the section is followed.
+systemctl stop ti-adapter-boost.service ti-engine@boost.service ti-data.timer ti-reporter@boost.timer
+runuser -u ti-trader -- operator approve -log "$engines/run-2026-10-24.log" -account DU0000001 -by owner \
+  -positions "" -cash 90000.00 -currency USD -out "$engines/approval-run-2026-10-25.json" >/dev/null || fail "the drill's wrong-book approval was refused"
+printf 'TI_RUN=run-2026-10-25\nTI_AS_OF=2026-10-26T20:00:00Z\nTI_RESTART_ARGS=-approval %s/approval-run-2026-10-25.json\n' "$engines" >"$engines/run.env"
+chown ti-trader:ti-trader "$engines/run.env"
+systemctl start ti-engine@boost.service
+for _ in $(seq 20); do systemctl is-active --quiet ti-engine@boost && break; sleep 1; done
+systemctl is-active --quiet ti-engine@boost || fail "the drill's engine did not start: $(journalctl -u ti-engine@boost -n 5 --no-pager -o cat)"
+systemd-run --quiet --wait --collect --unit=ti-warmup-drill -p User=ti-trader -p Group=ti-trader \
+  -p LoadCredential=secrets:/run/trend-investing/secrets/secrets.env \
+  /opt/trend-investing/bin/ti-data --data /var/lib/trend-investing/data --config /etc/trend-investing/engines/boost.config \
+  --engine-log "$engines/run-2026-10-25.log" --backfill-from 2025-01-02 || fail "the drill's warm-up failed"
+systemctl start ti-adapter-boost.service
+for _ in $(seq 120); do grep -q '"state":"halted"' "$engines/run-2026-10-25.log" && break; sleep 1; done
+grep -q '"state":"halted"' "$engines/run-2026-10-25.log" || fail "the engine did not halt on a first reading that is not the approved book: $(journalctl -u ti-adapter-boost -n 8 --no-pager -o cat)"
+note "the drill's engine halted on its first reading, as a mistyped book makes it"
+
+remap_expr='s/run-2026-10-24/run-2026-10-25/g'
+step recover-stop
+step recover-approve
+step recover-run-env
+step engine 0 engine-again
+before_recovery=$(grouped)
+step warmup
+step warmup-wait
+refetched=$(($(grouped) - before_recovery))
+test "$refetched" -lt 5 || fail "the second warm-up fetched $refetched sessions; the runbook says it fetches only the missing days"
+step adapter
+pass "recovery: the halted run is stopped, a new run name, approval with the book and run.env follow, and steps 4 to 6 again start a run that stays out of Halted; the second warm-up fetched $refetched sessions (the days missing from the recordings)"
+remap_expr='s/^$//'
