@@ -259,7 +259,9 @@ Statement = namedtuple("Statement", "account_id from_date to_date postings")
 """The instance's Flex statement: its account, the period IBKR states (yyyyMMdd, from_date not after to_date), and
 every detail posting in order."""
 
-ACCOUNT_NUMBER = re.compile(r"\b[A-Z]{1,2}[0-9]{5,9}\b")
+# An IBKR account number: one or two capital letters and digits (U1234567, DU1234567), or DU with letters and digits
+# after it (DUX1234567); the letters-then-digits form alone would not match the second.
+ACCOUNT_NUMBER = re.compile(r"\b(?:[A-Z]{1,2}[0-9]{5,9}|DU(?=[A-Z0-9]*[0-9])[A-Z0-9]{5,9})\b")
 RECORD_FIELDS = ("id", "type", "schema_version", "event_time", "source", "payload")
 OPTIONAL_RECORD_FIELDS = ("note",)
 # A record's note, beside the engine's payload (internal/event CashMovementPayload, which has no field for it):

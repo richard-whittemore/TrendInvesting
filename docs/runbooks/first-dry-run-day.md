@@ -119,8 +119,8 @@ run twice, and it checks the result by comparing the two values exactly.
 sudo bash -eu <<'EOF2'
 config=/etc/trend-investing/engines/boost.config
 account=$(sed -n 's/^IBKR_ACCOUNT_BOOST=//p' /run/trend-investing/secrets/accounts/boost.env)
-if ! printf '%s\n' "$account" | grep -qE '^DU[0-9]+$'; then
-  echo "STOP: accounts/boost.env has no IBKR_ACCOUNT_BOOST=DU... line (digits only, no quotes or spaces)."
+if ! printf '%s\n' "$account" | grep -qE '^DU[A-Z0-9]+$'; then
+  echo "STOP: accounts/boost.env has no IBKR_ACCOUNT_BOOST=DU... line (letters and digits only, no quotes or spaces)."
   exit 1
 fi
 current=$(sed -n 's/^ *"account_id": *"\([^"]*\)".*/\1/p' "$config")

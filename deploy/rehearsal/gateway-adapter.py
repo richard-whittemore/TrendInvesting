@@ -16,7 +16,11 @@ sys.path.append("/opt/rehearsal/tests")
 
 import ibapi_pin  # noqa: E402
 from cli import main  # noqa: E402
-from fake_tws import ACCOUNT, FakeTWS  # noqa: E402
+from fake_tws import FakeTWS  # noqa: E402
+
+# The rehearsal's stand-in paper account (synthetic, never a real number): it has a
+# letter after DU, the shape the runbook's account check must accept.
+ACCOUNT = "DUX1234567"
 
 if sys.argv[1:4] != ["-m", "adapter.ibkr", "run"]:
     sys.exit("gateway-adapter: not the adapter's command: " + " ".join(sys.argv[1:]))
