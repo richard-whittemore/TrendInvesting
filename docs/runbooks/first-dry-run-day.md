@@ -119,8 +119,8 @@ run twice, and it checks the result by comparing the two values exactly.
 sudo bash -eu <<'EOF2'
 config=/etc/trend-investing/engines/boost.config
 account=$(sed -n 's/^IBKR_ACCOUNT_BOOST=//p' /run/trend-investing/secrets/accounts/boost.env)
-if ! printf '%s\n' "$account" | grep -qE '^DU[A-Z0-9]+$'; then
-  echo "STOP: accounts/boost.env has no IBKR_ACCOUNT_BOOST=DU... line (letters and digits only, no quotes or spaces)."
+if ! printf '%s\n' "$account" | grep -qE '^DU[A-Z0-9]{5,9}$' || ! printf '%s\n' "$account" | grep -q '[0-9]'; then
+  echo "STOP: accounts/boost.env has no IBKR_ACCOUNT_BOOST=DU... line (DU, then 5 to 9 capital letters and digits with at least one digit, no quotes or spaces)."
   exit 1
 fi
 current=$(sed -n 's/^ *"account_id": *"\([^"]*\)".*/\1/p' "$config")
@@ -144,6 +144,11 @@ account-named
 ```
 
 If the account in the file is the wrong one:
+
+<!-- expect: account-invalid -->
+```text
+~ STOP: accounts/boost.env has no IBKR_ACCOUNT_BOOST=DU
+```
 
 <!-- expect: account-refused -->
 ```text

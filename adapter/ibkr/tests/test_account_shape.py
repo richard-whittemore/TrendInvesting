@@ -19,7 +19,7 @@ class AccountNumberMaskingTests(unittest.TestCase):
                 self.assertNotIn(number, flex.mask(text))
 
     def test_ordinary_words_are_not_masked(self):
-        text = "CANCELLED order SPY500 at 09:30 DAY"
+        text = "CANCELLED order SPY500 at 09:30 DAY DURATION DUPLICATE DUXXXXXXX"
         self.assertEqual(cli.mask_accounts(text, ""), text)
         self.assertEqual(flex.mask(text), text)
 

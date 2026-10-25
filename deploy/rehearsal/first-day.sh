@@ -228,7 +228,6 @@ install -d -m 0700 /dev/shm/ti-edit
 EDITOR=/root/ti-editor.sh with_pass ti-secrets edit secrets.env >/dev/null || fail "ti-secrets edit secrets.env failed"
 printf 'IBKR_ACCOUNT_BOOST=DUX1234567\n' >/dev/shm/ti-edit/content
 EDITOR=/root/ti-editor.sh with_pass ti-secrets edit accounts/boost.env >/dev/null || fail "ti-secrets edit accounts/boost.env failed"
-rm -rf /dev/shm/ti-edit
 
 # --- Step 0: where the server stands. The adapter's code is the one thing
 # the owner may need to install; do what the runbook says for it.
@@ -244,6 +243,14 @@ pass "step 0: the preflight reports the server as the owner described it, and th
 
 # --- Steps 1 to 4: the account in the configuration, the first run's
 # approval, the run file, then the engine, started by its own unit.
+# A placeholder that has the shape but no digit (DUXXXXXXX) is not an account
+# number: the step stops before it touches the configuration.
+printf 'IBKR_ACCOUNT_BOOST=DUXXXXXXX\n' >/dev/shm/ti-edit/content
+EDITOR=/root/ti-editor.sh with_pass ti-secrets edit accounts/boost.env >/dev/null || fail "ti-secrets edit accounts/boost.env failed"
+step account 1 account-invalid
+grep -q '"account_id": "joint"' /etc/trend-investing/engines/boost.config || fail "the account step changed the configuration for a placeholder"
+printf 'IBKR_ACCOUNT_BOOST=DUX1234567\n' >/dev/shm/ti-edit/content
+EDITOR=/root/ti-editor.sh with_pass ti-secrets edit accounts/boost.env >/dev/null || fail "ti-secrets edit accounts/boost.env failed"
 step account
 # Run again it changes nothing and says the same; a configuration that
 # already names another account stops the step before it changes anything.
@@ -258,6 +265,7 @@ test -s /var/lib/trend-investing/engines/boost/first-run-approval.json || fail "
 step run-env
 test "$(stat -c %U:%G /var/lib/trend-investing/engines/boost/run.env)" = ti-trader:ti-trader || fail "run.env is not the engine user's"
 step engine
+rm -rf /dev/shm/ti-edit
 pass "steps 1 to 4: the account is named in the configuration, the first run is approved with its starting book, run.env is written and the real engine unit starts the dry-run engine"
 
 # The warm-up command as market-data.md gave it before (the plain-text path)
