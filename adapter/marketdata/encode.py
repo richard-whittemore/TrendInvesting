@@ -221,9 +221,16 @@ def load_retractions(directory):
     return out
 
 
-def load_sessions(directory, first, last, retracted=()):
+def load_sessions(directory, first, last, retracted=(), tickers=None):
     """[Session] for the trading days first..last, oldest first, leaving out
-    each ``retracted`` day, which must have no bar recording."""
+    each ``retracted`` day, which must have no bar recording.
+
+    With ``tickers`` (a set), each session keeps only those tickers' bars and
+    no universe recording, and a recording is read, checked and dropped
+    before the next is read, so memory holds one recording plus the named
+    instruments' bars, not every instrument of every session. Every check
+    (the two recordings agree, a ticker is not repeated) still runs on the
+    whole recording."""
     out = []
     for day in nyse_calendar.sessions(first, last):
         if day in retracted:
@@ -244,14 +251,17 @@ def load_sessions(directory, first, last, retracted=()):
         _, path, rec = found[0]
         if not rec.get("bars"):
             raise Gap("the recording for {} has no bars".format(day))
-        bars = {}
+        bars, seen = {}, set()
         for row in rec["bars"]:
             ticker = row.get("T")
-            if not isinstance(ticker, str) or not ticker or ticker in bars:
+            if not isinstance(ticker, str) or not ticker or ticker in seen:
                 raise Malformed("{} holds a missing or repeated ticker {!r}".format(path, ticker))
-            bars[ticker] = row
-        universe = next((r for kind, _, r in found if kind == "universe"), None)
+            seen.add(ticker)
+            if tickers is None or ticker in tickers:
+                bars[ticker] = row
+        universe = None if tickers is not None else next((r for kind, _, r in found if kind == "universe"), None)
         out.append(Session(day, bars, _fetched_at(rec, path), universe))
+        del found, rec, seen
     return out
 
 
@@ -520,7 +530,9 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     if first > last or ahead < 1:
         raise ValueError("need first <= last and ahead >= 1")
     retractions = {} if boost else load_retractions(directory)
-    loaded = load_sessions(directory, base, last, retractions)
+    # A boost stream reads its one instrument's bars only, so the other
+    # instruments of each recording are not kept.
+    loaded = load_sessions(directory, base, last, retractions, set(required) if boost else None)
     days = [s.day for s in loaded]
     by_day = {s.day: s for s in loaded}
     span = [s for s in loaded if s.day >= first]
