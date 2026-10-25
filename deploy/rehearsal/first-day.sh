@@ -226,9 +226,8 @@ chmod 0755 /root/ti-editor.sh
 install -d -m 0700 /dev/shm/ti-edit
 { cat "$unlocked/secrets.env"; printf 'MASSIVE_API_KEY=synthetic-key-0123456789\n'; } >/dev/shm/ti-edit/content
 EDITOR=/root/ti-editor.sh with_pass ti-secrets edit secrets.env >/dev/null || fail "ti-secrets edit secrets.env failed"
-printf 'IBKR_ACCOUNT_BOOST=DU0000001\n' >/dev/shm/ti-edit/content
+printf 'IBKR_ACCOUNT_BOOST=DUX1234567\n' >/dev/shm/ti-edit/content
 EDITOR=/root/ti-editor.sh with_pass ti-secrets edit accounts/boost.env >/dev/null || fail "ti-secrets edit accounts/boost.env failed"
-rm -rf /dev/shm/ti-edit
 
 # --- Step 0: where the server stands. The adapter's code is the one thing
 # the owner may need to install; do what the runbook says for it.
@@ -244,20 +243,29 @@ pass "step 0: the preflight reports the server as the owner described it, and th
 
 # --- Steps 1 to 4: the account in the configuration, the first run's
 # approval, the run file, then the engine, started by its own unit.
+# A placeholder that has the shape but no digit (DUXXXXXXX) is not an account
+# number: the step stops before it touches the configuration.
+printf 'IBKR_ACCOUNT_BOOST=DUXXXXXXX\n' >/dev/shm/ti-edit/content
+EDITOR=/root/ti-editor.sh with_pass ti-secrets edit accounts/boost.env >/dev/null || fail "ti-secrets edit accounts/boost.env failed"
+step account 1 account-invalid
+grep -q '"account_id": "joint"' /etc/trend-investing/engines/boost.config || fail "the account step changed the configuration for a placeholder"
+printf 'IBKR_ACCOUNT_BOOST=DUX1234567\n' >/dev/shm/ti-edit/content
+EDITOR=/root/ti-editor.sh with_pass ti-secrets edit accounts/boost.env >/dev/null || fail "ti-secrets edit accounts/boost.env failed"
 step account
 # Run again it changes nothing and says the same; a configuration that
 # already names another account stops the step before it changes anything.
 step account
 config=/etc/trend-investing/engines/boost.config
-sed -i 's/"account_id": "DU0000001"/"account_id": "DU0000009"/' "$config"
+sed -i 's/"account_id": "DUX1234567"/"account_id": "DUX1234569"/' "$config"
 step account 1 account-refused
-grep -q '"account_id": "DU0000009"' "$config" || fail "the account step changed a configuration that names another account"
-sed -i 's/"account_id": "DU0000009"/"account_id": "DU0000001"/' "$config"
+grep -q '"account_id": "DUX1234569"' "$config" || fail "the account step changed a configuration that names another account"
+sed -i 's/"account_id": "DUX1234569"/"account_id": "DUX1234567"/' "$config"
 step approve
 test -s /var/lib/trend-investing/engines/boost/first-run-approval.json || fail "operator approve wrote no approval"
 step run-env
 test "$(stat -c %U:%G /var/lib/trend-investing/engines/boost/run.env)" = ti-trader:ti-trader || fail "run.env is not the engine user's"
 step engine
+rm -rf /dev/shm/ti-edit
 pass "steps 1 to 4: the account is named in the configuration, the first run is approved with its starting book, run.env is written and the real engine unit starts the dry-run engine"
 
 # The warm-up command as market-data.md gave it before (the plain-text path)
@@ -365,7 +373,7 @@ aside=/root/aside-run-2026-10-24
 install -d "$aside"
 mv "$engines"/run-2026-10-24.* "$aside"/
 test -z "$(ls "$engines"/*.log 2>/dev/null)" || fail "the drill's halted run still has an earlier log"
-runuser -u ti-trader -- operator approve -first-run -account DU0000001 -by owner \
+runuser -u ti-trader -- operator approve -first-run -account DUX1234567 -by owner \
   -positions "" -cash 90000.00 -currency USD -out "$engines/first-run-approval-run-2026-10-25.json" >/dev/null || fail "the drill's wrong-book approval was refused"
 printf 'TI_RUN=run-2026-10-25\nTI_AS_OF=2026-10-26T20:00:00Z\nTI_RESTART_ARGS=-approval %s/first-run-approval-run-2026-10-25.json\n' "$engines" >"$engines/run.env"
 chown ti-trader:ti-trader "$engines/run.env"

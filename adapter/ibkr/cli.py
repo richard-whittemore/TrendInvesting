@@ -46,9 +46,9 @@ sent. Gateway's Read-Only API must also be off for IBKR to accept an order.
 """
 
 
-# An IBKR account number: one or two capital letters and digits (U1234567,
-# DU1234567).
-ACCOUNT_NUMBER = re.compile(r"\b[A-Z]{1,2}[0-9]{5,9}\b")
+# An IBKR account number: one or two capital letters and digits (U1234567, DU1234567), or DU with letters and digits
+# after it (DUX1234567); the letters-then-digits form alone would not match the second.
+ACCOUNT_NUMBER = re.compile(r"\b(?:[A-Z]{1,2}[0-9]{5,9}|DU(?=[A-Z0-9]*[0-9])[A-Z0-9]{5,9})\b")
 
 
 def mask_accounts(text, account_id):
