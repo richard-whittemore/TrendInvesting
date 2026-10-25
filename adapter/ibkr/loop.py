@@ -519,6 +519,12 @@ class AdapterLoop:
                                           "read in full is unread)".format(err)) from None
             strays = self.conn.open_order_strays
             reading = read_account(self.conn)
+            if self.conn.link_changes != changes:
+                # A read the outage cut off before IBKR ended its positions
+                # or open orders leaves their late ends on this socket, where
+                # one would complete the next read's: the link is dropped,
+                # never read on again (see the module).
+                self._unended(reading)
             self._link_unchanged(changes)
             if reading.unread:
                 raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread; the account summary "
@@ -1156,7 +1162,7 @@ class AdapterLoop:
         """Whether reading was cut off before answers that carry no request ID ended; if so the link is dropped (see the module)."""
         if not reading.unended:
             return False
-        log.info("ibkr broker snapshot: IBKR had not ended its %s when the read gave up, and a late end would "
+        log.info("ibkr account read: IBKR had not ended its %s when the read gave up, and a late end would "
                  "complete a later read on this link, so the link is made again and reconciled first",
                  ",".join(sorted(reading.unended)))
         self.conn.drop("untagged-read-interrupted")

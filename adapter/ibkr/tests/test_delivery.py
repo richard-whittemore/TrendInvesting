@@ -1404,6 +1404,53 @@ class DeliveryTests(unittest.TestCase):
                          [json.loads((tests_dir / "testdata" / "paper_released.json").read_text())["client_order_id"]],
                          "the working order is in the snapshot: no late answer completed a later read")
 
+    def test_a_reconcile_cut_off_during_its_positions_is_never_read_again_on_the_same_link(self):
+        class LosesIbkrDuringPositions(FakeTWS):
+            connects = 0
+            lose = True
+            lost_on = None
+
+            def connect(self, *args):
+                self.connects += 1
+                super().connect(*args)
+
+            def req_positions(self):
+                if self.lose:
+                    # Gateway loses IBKR's servers during the start's
+                    # reconcile's positions and restores them on the same
+                    # socket; the positions' end comes later.
+                    self.lose, self.lost_on = False, self.connects
+                    self.calls.append(("req_positions",))
+                    self.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+                    self.callbacks.error(-1, 1102, "Connectivity between IB and Trader Workstation has been "
+                                                   "restored - data maintained.")
+                    return
+                if self.lost_on == self.connects:
+                    # The abandoned read's end arrives first, on the same
+                    # link; this read's own positions come after the rest
+                    # of its answers.
+                    self.lost_on = None
+                    self.calls.append(("req_positions",))
+                    self.callbacks.position_end()
+                    for account, con, pos, avg in self.positions:
+                        self._later.append(lambda a=account, c=con, p=pos, v=avg: self.callbacks.position(a, c, p, v))
+                    self._later.append(self.callbacks.position_end)
+                    return
+                super().req_positions()
+        fake = LosesIbkrDuringPositions()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        self.fake = fake
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop(fake=fake)
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            loop.start()
+            self.settle(loop)
+        reconciled = [o for o in logs.output if "ibkr reconciled" in o]
+        self.assertTrue(reconciled, logs.output)
+        self.assertIn("positions=1 ", reconciled[0],
+                      "the reconcile holds the account's position: no late end completed a later read")
+        self.assertGreater(fake.connects, 1, "the link was made again, not taken back as Gateway restored it")
+
     # -- a fresh run strikes an earlier run's batch -------------------------
     def test_a_stop_while_a_fresh_run_strikes_an_earlier_batch_never_parts_its_snapshot_from_its_stream(self):
         self.queue_unsent()
