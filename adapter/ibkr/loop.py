@@ -120,8 +120,9 @@ report IBKR sent before the read is recorded ahead of it; it is not taken
 while an execution awaits its commission (its fill is not yet recorded);
 the account is read, then IBKR's last prices (beside each mark, the price band's comparison),
 then the account again, then IBKR's open orders and executions, and the
-snapshots are the second read. It is read again, up to SNAPSHOT_ATTEMPTS
-times, if an order report is recorded or an execution arrives (of any
+snapshots are the second read. It is read again, up to
+BROKER_SNAPSHOT_ATTEMPTS times (after a reading with a component unread,
+only once SNAPSHOT_RETRY_WAITS has passed), if an order report is recorded or an execution arrives (of any
 client's order in the account, not only this adapter's, each counted once
 by its execution ID) between the start of the first read and the end of
 the last list, if the two reads' holdings,
@@ -207,9 +208,19 @@ EVENT_TIME_FIELD = {LIFECYCLE_TYPE: "occurred_at", FILL_TYPE: "filled_at"}
 # How long, in seconds, the loop waits on the engine's thread between reads
 # of IB Gateway's callbacks while the engine decides.
 ENGINE_WAIT_POLL = 0.05
-# How many times one delivery reads the account and the marks for a broker
-# snapshot that is complete and not overtaken by an order report.
+# How many reads in a row of the reconciliation owed after a start or
+# reconnect may leave its positions or cash unread before the adapter stops.
 SNAPSHOT_ATTEMPTS = 3
+# The seconds one delivery waits before reading the account again for a
+# broker snapshot after a reading left a component unread: IBKR's refusals
+# of an account summary (its limit of two at a time, error 322) and a
+# Gateway briefly without IBKR's servers pass in seconds, and three reads
+# back to back stopped the adapter for good on 2026-10-25. So a broker
+# snapshot is read at most BROKER_SNAPSHOT_ATTEMPTS times, waiting 50 s in
+# all between them (each read's own pacing and 322 waits, snapshot.py, come
+# on top: under three minutes in all with the deployed request_timeout).
+SNAPSHOT_RETRY_WAITS = (5.0, 15.0, 30.0)
+BROKER_SNAPSHOT_ATTEMPTS = len(SNAPSHOT_RETRY_WAITS) + 1
 # How many reconciles in a row the link may be dropped during (the open
 # orders never quiet, a close) before the adapter stops for a person: a
 # Gateway that keeps the socket up while its stream never pauses would
@@ -496,9 +507,10 @@ class AdapterLoop:
             strays = self.conn.open_order_strays
             reading = read_account(self.conn)
             if reading.unread:
-                raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread); nothing is sent until "
-                                          "a read is complete (ADR 0019: an unavailable balance is not zero)".format(
-                                              ", ".join(sorted(reading.unread))))
+                raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread; the account summary "
+                                          "{}); nothing is sent until a read is complete (ADR 0019: an unavailable "
+                                          "balance is not zero)".format(", ".join(sorted(reading.unread)),
+                                                                        reading.summary))
             self.conn.resync_open_orders()
             new_executions = self._account_executions - seen - {r.exec_id for r in broker.executions}
             if (self.conn.open_order_strays == strays and not new_executions
@@ -570,21 +582,22 @@ class AdapterLoop:
                      "read")
             return False
         if unread:
-            # Read again, as the broker snapshot's reading is, at most
-            # SNAPSHOT_ATTEMPTS times in a row: a component IBKR never gives
+            # Read again at most SNAPSHOT_ATTEMPTS times in a row (each
+            # account summary paced, snapshot.read_account): a component IBKR never gives
             # would otherwise hold the day's stream behind the reconciliation
             # in silence (fail closed and tell a person, AGENTS.md).
             self._reconciliation_unread += 1
-            log.info("ibkr reconciliation read again next step (attempt %d of %d): %s could not be read",
-                     self._reconciliation_unread, SNAPSHOT_ATTEMPTS, ",".join(unread))
+            log.info("ibkr reconciliation read again next step (attempt %d of %d): %s could not be read; the "
+                     "account summary %s", self._reconciliation_unread, SNAPSHOT_ATTEMPTS, ",".join(unread),
+                     reading.summary)
             if self._reconciliation_unread >= SNAPSHOT_ATTEMPTS:
                 raise ReconcileIncomplete(
                     "the reconciliation owed after the start or reconnect could not be read in {} attempts ({} "
-                    "could not be read), so no stream input is sent: a reconciliation with values IBKR did not "
+                    "could not be read; the last account summary {}), so no stream input is sent: a reconciliation with values IBKR did not "
                     "give would compare nothing (ADR 0019: an unavailable balance is not zero). Check IB "
                     "Gateway's link and the account's currency and positions, then start the adapter again "
                     "(docs/manual/market-data.md, \"What happens to the file\")".format(
-                        SNAPSHOT_ATTEMPTS, ", ".join(unread)))
+                        SNAPSHOT_ATTEMPTS, ", ".join(unread), reading.summary))
             return False
         self._reconciliation_unread = 0
         input_id = self._new_id(RECONCILIATION_TYPE)
@@ -771,11 +784,18 @@ class AdapterLoop:
         request ID ended, the account changed on every attempt, or the read
         time does not follow the last snapshot the engine holds);
         SnapshotRefused when the account could not be read in full within
-        SNAPSHOT_ATTEMPTS. market_open is the NYSE session's state at the
-        stamp.
+        BROKER_SNAPSHOT_ATTEMPTS, each read after one that left a component
+        unread waiting its SNAPSHOT_RETRY_WAITS first. market_open is the
+        NYSE session's state at the stamp.
         """
         unread = None
-        for attempt in range(1, SNAPSHOT_ATTEMPTS + 1):
+        summary = ""
+        for attempt in range(1, BROKER_SNAPSHOT_ATTEMPTS + 1):
+            if unread is not None:
+                wait = SNAPSHOT_RETRY_WAITS[attempt - 2]
+                log.info("ibkr broker snapshot waits %.0fs before attempt %d of %d", wait, attempt,
+                         BROKER_SNAPSHOT_ATTEMPTS)
+                self.conn.pause(wait)
             self._pump_all()
             if not self.ready():
                 log.info("ibkr link went during the broker snapshot; the stream waits until it is reconciled")
@@ -809,18 +829,19 @@ class AdapterLoop:
                 return None
             if self._activity() != before:
                 log.info("ibkr broker snapshot read again (attempt %d of %d): an order report or execution "
-                         "arrived between its reads", attempt, SNAPSHOT_ATTEMPTS)
+                         "arrived between its reads", attempt, BROKER_SNAPSHOT_ATTEMPTS)
                 unread = None
                 continue
             incomplete = reading.unread | (confirm.unread if confirm is not None else frozenset())
             if incomplete:
                 unread = sorted(incomplete)
-                log.info("ibkr broker snapshot read again (attempt %d of %d): %s could not be read", attempt,
-                         SNAPSHOT_ATTEMPTS, ",".join(unread))
+                summary = (confirm if confirm is not None and confirm.unread else reading).summary
+                log.info("ibkr broker snapshot read again (attempt %d of %d): %s could not be read; the account "
+                         "summary %s", attempt, BROKER_SNAPSHOT_ATTEMPTS, ",".join(unread), summary)
                 continue
             if _holdings(reading) != _holdings(confirm):
                 log.info("ibkr broker snapshot read again (attempt %d of %d): the account's holdings, open orders "
-                         "or cash changed between its reads", attempt, SNAPSHOT_ATTEMPTS)
+                         "or cash changed between its reads", attempt, BROKER_SNAPSHOT_ATTEMPTS)
                 unread = None
                 continue
             judged = self._not_as_of_close(confirm, close, closes, broker)
@@ -855,11 +876,12 @@ class AdapterLoop:
                 reading=confirm, unverified=unverified)
         if unread is not None:
             raise SnapshotRefused(
-                "the account could not be read in full for the broker snapshot in {} attempts ({} could not be "
-                "read), so the day's stream is not delivered: a snapshot with values IBKR did not give would "
-                "withhold the sale back to 98% for nothing. Check IB Gateway's link and the account's currency "
-                "and positions, then start the adapter again (docs/manual/market-data.md, \"What happens to the "
-                "file\")".format(SNAPSHOT_ATTEMPTS, ", ".join(unread)))
+                "the account could not be read in full for the broker snapshot in {} attempts over {:.0f} seconds "
+                "({} could not be read; the last account summary {}), so the day's stream is not delivered: a "
+                "snapshot with values IBKR did not give would withhold the sale back to 98% for nothing. Check IB "
+                "Gateway's link and the account's currency and positions, then start the adapter again "
+                "(docs/manual/ibkr-adapter.md, \"What can go wrong\")".format(
+                    BROKER_SNAPSHOT_ATTEMPTS, sum(SNAPSHOT_RETRY_WAITS), ", ".join(unread), summary))
         return None
 
     def _broker_lists(self):

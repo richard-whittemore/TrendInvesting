@@ -44,7 +44,7 @@ from test_connection import Clock, config
 from test_loop import COMMISSION_WAIT, RECEIVED, SUMMARY, Ids, Unanswered
 from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, StreamRefused, market_open,
                       read_stream)
-from loop import AdapterLoop, Outbox
+from loop import BROKER_SNAPSHOT_ATTEMPTS, AdapterLoop, Outbox
 from relay import RELEASED, EngineUnavailable, OutboxInvalid, PendingInput, read_engine_log
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 from snapshot import BROKER_SNAPSHOT_TYPE
@@ -887,6 +887,49 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(loop.outbox.load(), [])
         self.assertFalse(Path(self.pending + DELIVERED_SUFFIX).exists())
 
+    def test_a_summary_ibkr_refuses_right_after_the_reconcile_is_waited_out_and_the_snapshot_delivered(self):
+        # The server's first dry-run start, 2026-10-25: the reconcile's read
+        # succeeded, and IB Gateway 10.50 refused each summary asked for
+        # within a second of cancelling the one before (IBKR's limit of two
+        # account-summary subscriptions, error 322), so the snapshot's three
+        # back-to-back attempts all found the balances unread and the
+        # adapter stopped (SnapshotRefused).
+        self.fake.summary_cancel_grace = 1.0
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        self.fake.clock = loop._monotonic
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(self.types(), FIRST + DAY)
+        self.assertEqual(self.brokers()[0]["payload"]["unreadable"], [])
+
+    def test_the_snapshots_attempts_are_spaced_and_each_logs_why_the_summary_was_not_read(self):
+        class Timed(FakeTWS):
+            asked_at = []
+
+            def req_account_summary(self, req_id, group, tags):
+                self.asked_at.append(self.clock())
+                super().req_account_summary(req_id, group, tags)
+        fake = Timed()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop(fake=fake)
+        fake.clock = loop._monotonic
+        loop.start()
+        fake.end_summary = False
+        import delivery
+        with self.assertLogs("ibkr", level="INFO") as logs, \
+                self.assertRaises(getattr(delivery, "SnapshotRefused", StreamRefused)) as caught:
+            self.settle(loop)
+        attempts = fake.asked_at[1:]  # the first is the start's reconcile
+        gaps = [later - earlier for earlier, later in zip(attempts, attempts[1:])]
+        self.assertEqual(len(attempts), 4, attempts)
+        for gap, wait in zip(gaps, (5, 15, 30)):
+            self.assertGreaterEqual(gap, wait, gaps)
+        self.assertLessEqual(attempts[-1] - attempts[0], 60, "the stated total")
+        self.assertIn("did not end", "\n".join(o for o in logs.output if "read again" in o))
+        self.assertIn("did not end", str(caught.exception))
+
     # -- the broker's reports and the stream --------------------------------
     def place_the_days_order(self):
         """FRIDAY's close releases the paper order; IBKR accepts it."""
@@ -929,10 +972,12 @@ class DeliveryTests(unittest.TestCase):
             fills = 0
 
             def req_mkt_data(self, req_id, contract_):
-                if 0 < self.fills <= 3:
+                # One fill during every attempt's marks: two shares of the
+                # nine each time, so every attempt is overtaken.
+                if 0 < self.fills <= BROKER_SNAPSHOT_ATTEMPTS:
                     n = self.fills
                     self.fills += 1
-                    self.fill(7, shares="3", price=401.25, exec_id="0001f4e8.t.0{}.01".format(n), cum_qty=str(3 * n),
+                    self.fill(7, shares="2", price=401.25, exec_id="0001f4e8.t.0{}.01".format(n), cum_qty=str(2 * n),
                               time="20270114 15:59:00 US/Eastern")
                 super().req_mkt_data(req_id, contract_)
         fake = FillsDuringEveryMark()
@@ -946,7 +991,7 @@ class DeliveryTests(unittest.TestCase):
         write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
         loop.step()
         self.assertEqual(self.types().count(BROKER_SNAPSHOT_TYPE), 1, "no snapshot overtaken by a fill is sent")
-        self.assertEqual(self.types().count(FILL_TYPE), 3)
+        self.assertEqual(self.types().count(FILL_TYPE), BROKER_SNAPSHOT_ATTEMPTS)
         self.settle(loop)
         self.assertEqual(self.types()[-6:], LATER + DAY)
 

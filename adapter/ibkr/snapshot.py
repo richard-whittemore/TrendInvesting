@@ -49,6 +49,7 @@ one-off market-data snapshot: a quote, a previous close or a delayed price
 is never taken for it, and only a request that completed with no price that
 is not valid gives one.
 """
+import logging
 import math
 from collections import namedtuple
 from datetime import datetime, timezone
@@ -57,9 +58,12 @@ from types import SimpleNamespace
 from account import EXCESS_LIQUIDITY, NET_LIQUIDATION, SUMMARY_GROUP, SUMMARY_TAGS, TOTAL_CASH
 from account import SnapshotIncomplete, SnapshotInvalid, _add_balance, _add_position, _server_time
 from connection import LIST_ENDED, LIST_READING, NotConnected
+from masking import mask_accounts
 from orders import FINISHED, UnrecognisedOrderReport, open_order_record, order_key, order_label
 from sender import CURRENCY, EXCHANGE, SEC_TYPE
 from values import to_decimal
+
+log = logging.getLogger("ibkr")
 
 BROKER_SNAPSHOT_TYPE = "account.broker.snapshot"
 # internal/event BrokerSnapshotReadAtVersion: the read time beside the stamp.
@@ -88,6 +92,15 @@ LAST_PRICE_TICK = 4
 # The currency the engine's balances are in; a balance in another is unreadable.
 BASE_CURRENCY = "USD"
 
+# IBKR's refusal of an account summary while it still counts two as active
+# (TWS API "Message Codes" 322, "Maximum number of account summary requests
+# exceeded"; reqAccountSummary allows two subscriptions at a time). It says
+# nothing about the balances, so it is waited out and the summary asked
+# again after each of SUMMARY_LIMIT_WAITS seconds (20 s more at most in one
+# read); only a refusal that outlasts them leaves the balances unread.
+SUMMARY_LIMIT_CODE = 322
+SUMMARY_LIMIT_WAITS = (5.0, 15.0)
+
 # IBKR's order statuses as an open order's status in the snapshot: one that
 # can still execute is working, pending or cancel-pending (a cancel-pending
 # order may still fill). Inactive is pending, since IBKR also uses it for an
@@ -106,7 +119,7 @@ Record = namedtuple("Record", "event_type schema_version payload")
 """One recorded input: its event type, schema version and JSON-ready payload."""
 
 AccountReading = namedtuple("AccountReading", (
-    "account_id positions balances open_orders unread as_of unended"), defaults=(frozenset(),))
+    "account_id positions balances open_orders unread as_of unended summary"), defaults=(frozenset(), ""))
 """One read of the account. positions maps symbol to whole shares, balances
 tag to Money, open_orders lists open-order payload rows; unread holds the
 components that could not be read; as_of is a whole-second UTC datetime.
@@ -115,7 +128,25 @@ open orders) that were asked for and that IBKR had not ended when the read
 gave up, however it gave up (a timeout, Gateway losing IBKR's servers,
 which it restores on the same socket, or the link closing): their late
 answers may still arrive on that link, where nothing tells them from a
-later read's, so no later read on that link can be trusted to be complete."""
+later read's, so no later read on that link can be trusted to be complete.
+summary says what became of the account summary, as logged: it ended
+(naming any balance missing, in another currency or unreadable), IBKR
+answered an error under it (its code and message, account numbers
+masked), it did not end in time, or the link went first."""
+
+
+class _Summary:
+    """One account-summary request's answer: its rows, whether it ended, and any error IBKR sent under its ID."""
+
+    def __init__(self, req_id):
+        self.id = req_id
+        self.ended = False
+        self.error = None  # (code, message)
+        self.invalid = set()  # the unread markers of rows whose value could not be read
+
+    @property
+    def answered(self):
+        return self.ended or self.error is not None
 
 
 def read_account(conn):
@@ -130,6 +161,9 @@ def read_account(conn):
     positions, balances, orders = {}, {}, {}
     received = conn.now_utc()
     done = {"positions": False, "summary": False, "orders": False}
+    summary = None
+    if conn.connected:
+        conn.pace_account_summary()
     asked = conn.connected
     if asked:
         # The open orders are this read's own list, ended only by its own
@@ -140,14 +174,14 @@ def read_account(conn):
         except NotConnected:
             asked = False
     if asked:
-        summary_id = conn.new_req_id()
+        summary = _Summary(conn.new_req_id())
         conn.api.req_positions()
-        conn.api.req_account_summary(summary_id, SUMMARY_GROUP, ",".join(SUMMARY_TAGS))
+        conn.api.req_account_summary(summary.id, SUMMARY_GROUP, ",".join(SUMMARY_TAGS))
         try:
             for event in conn.events(conn.config.request_timeout):
                 if not conn.connected:
                     break
-                _take(event, account, summary_id, positions, balances, orders, unread, done,
+                _take(event, account, summary, positions, balances, orders, unread, done,
                       conn.open_order_list(ticket))
                 done["orders"] = conn.open_order_list(ticket) == LIST_ENDED
                 if all(done.values()):
@@ -155,7 +189,9 @@ def read_account(conn):
         finally:
             if conn.connected:
                 conn.api.cancel_positions()
-                conn.api.cancel_account_summary(summary_id)
+                conn.cancel_account_summary(summary.id)
+        _log_summary(conn, summary, balances)
+        summary = _ask_past_limit(conn, account, summary, balances)
     as_of = None
     if conn.connected:
         try:
@@ -170,8 +206,10 @@ def read_account(conn):
         unread.add(POSITIONS)
     if not done["orders"]:
         unread.add(OPEN_ORDERS)
-    if not done["summary"]:
+    if summary is None or not summary.ended or summary.error is not None:
         unread.update({NET, EXCESS, CASH})
+    else:
+        unread.update(summary.invalid)
     for tag, component in ((NET_LIQUIDATION, NET), (EXCESS_LIQUIDITY, EXCESS), (TOTAL_CASH, CASH)):
         if tag not in balances:
             unread.add(component)
@@ -191,28 +229,97 @@ def read_account(conn):
         balances=balances,
         open_orders=[] if OPEN_ORDERS in unread else sorted(orders.values(), key=lambda o: o["broker_order_id"]),
         unread=frozenset(unread),
-        as_of=as_of.replace(microsecond=0))
+        as_of=as_of.replace(microsecond=0),
+        summary=_summary_outcome(conn, summary, balances) if summary is not None else
+        "not asked: the link to IB Gateway was down")
 
 
-def _take(event, account, summary_id, positions, balances, orders, unread, done, open_order_list):
+def _ask_past_limit(conn, account, summary, balances):
+    """The summary asked again after each of SUMMARY_LIMIT_WAITS while IBKR refuses it with its limit (322)."""
+    for wait in SUMMARY_LIMIT_WAITS:
+        if not conn.connected or summary.error is None or summary.error[0] != SUMMARY_LIMIT_CODE:
+            return summary
+        log.info("ibkr account summary refused by IBKR's limit of two at a time (error %d): asked again in %.0fs",
+                 SUMMARY_LIMIT_CODE, wait)
+        conn.pause(wait)
+        conn.pace_account_summary()
+        if not conn.connected:
+            return summary
+        balances.clear()
+        summary = _Summary(conn.new_req_id())
+        conn.api.req_account_summary(summary.id, SUMMARY_GROUP, ",".join(SUMMARY_TAGS))
+        try:
+            for event in conn.events(conn.config.request_timeout):
+                if not conn.connected:
+                    break
+                _take_summary(event, account, summary, balances)
+                if summary.answered:
+                    break
+        finally:
+            if conn.connected:
+                conn.cancel_account_summary(summary.id)
+        _log_summary(conn, summary, balances)
+    return summary
+
+
+def _summary_outcome(conn, summary, balances):
+    """What became of summary, for the log and the reading (AccountReading.summary), account numbers masked."""
+    if summary.error is not None:
+        code, message = summary.error
+        text = "errored: IBKR code {}: {}".format(code, message)
+    elif not summary.ended:
+        text = ("did not end within {}s".format(conn.config.request_timeout) if conn.connected
+                else "the link to IB Gateway went before it ended")
+    else:
+        problems = []
+        for tag in SUMMARY_TAGS:
+            if tag not in balances:
+                problems.append("{} missing".format(tag))
+            elif balances[tag].currency != BASE_CURRENCY:
+                problems.append("{} in {}".format(tag, balances[tag].currency))
+        problems.extend("{} unreadable".format(c) for c in sorted(summary.invalid))
+        text = "ended" + ("; " + ", ".join(problems) if problems else "")
+    return mask_accounts(text, conn.config.account_id)
+
+
+def _log_summary(conn, summary, balances):
+    """Log what became of one account-summary request (_summary_outcome); a summary not read in full is a warning."""
+    outcome = _summary_outcome(conn, summary, balances)
+    level = logging.INFO if outcome == "ended" else logging.WARNING
+    log.log(level, "ibkr account summary req_id=%d %s", summary.id, outcome)
+
+
+def _take(event, account, summary, positions, balances, orders, unread, done, open_order_list):
     """Apply one callback to the read; an open order counts only while the read's own list is answered."""
     name, args = event.name, event.args
     if name == "position":
         _take_position(positions, account, unread, *args)
     elif name == "position_end":
         done["positions"] = True
-    elif name == "account_summary" and args[0] == summary_id:
+    elif _take_summary(event, account, summary, balances):
+        done["summary"] = summary.answered
+    elif name == "open_order" and open_order_list == LIST_READING:
+        _take_order(orders, account, unread, *args)
+
+
+def _take_summary(event, account, summary, balances):
+    """Apply one callback under summary's request ID (a row, its end, or IBKR's error); False for any other."""
+    name, args = event.name, event.args
+    if name not in ("account_summary", "account_summary_end", "error") or not args or args[0] != summary.id:
+        return False
+    if name == "account_summary":
         try:
             _add_balance(balances, account, *args[1:])
         except SnapshotInvalid:
-            unread.add({NET_LIQUIDATION: NET, EXCESS_LIQUIDITY: EXCESS, TOTAL_CASH: CASH}[args[2]])
-    elif name == "account_summary_end" and args[0] == summary_id:
-        done["summary"] = True
-    elif name == "error" and args[0] == summary_id:
-        unread.update({NET, EXCESS, CASH})
-        done["summary"] = True
-    elif name == "open_order" and open_order_list == LIST_READING:
-        _take_order(orders, account, unread, *args)
+            summary.invalid.add({NET_LIQUIDATION: NET, EXCESS_LIQUIDITY: EXCESS, TOTAL_CASH: CASH}[args[2]])
+    elif name == "account_summary_end":
+        summary.ended = True
+    else:
+        # Any error under the summary's ID fails it closed (ADR 0019: an
+        # unavailable balance is not zero); its code and message are kept
+        # for the log.
+        summary.error = (args[1] if len(args) > 1 else None, str(args[2]) if len(args) > 2 else "")
+    return True
 
 
 def _take_position(positions, account, unread, row_account, contract, quantity, avg_cost):

@@ -466,3 +466,89 @@ class CloseStampedFiguresTests(unittest.TestCase):
         reading = read_account(h.conn)
         with self.assertRaises(ValueError):
             broker_snapshot_record(reading, market_open=False, close=CLOSE, net_liquidation=Decimal("8530"))
+
+
+class AccountSummaryTests(unittest.TestCase):
+    """IBKR's account summary: why a read of it failed is logged, and requests are paced (IBKR's 322 limit).
+
+    IBKR allows two account-summary subscriptions at a time and a cancel
+    takes a moment to count (TWS API, reqAccountSummary; "Message Codes"
+    322). On 2026-10-25 IB Gateway 10.50 refused every summary the adapter
+    asked for within a second of cancelling the one before it, and the log
+    said only which balances were missing.
+    """
+
+    def paced(self, grace=2.0):
+        h = connected()
+        h.fake.summary = full_summary()
+        h.fake.clock = h.clock
+        h.fake.summary_cancel_grace = grace
+        return h
+
+    def test_an_error_under_the_summary_is_logged_with_ibkrs_code_and_message_and_the_account_masked(self):
+        h = connected()
+        h.fake.summary_error = 321
+        h.fake.summary_error_message = "Error validating request: account {} not found".format(ACCOUNT)
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            reading = read_account(h.conn)
+        text = "\n".join(logs.output)
+        self.assertIn("errored", text)
+        self.assertIn("321", text)
+        self.assertIn("Error validating request: account <account> not found", text)
+        self.assertNotIn(ACCOUNT, text)
+        self.assertIn("321", reading.summary)
+        self.assertNotIn(ACCOUNT, reading.summary)
+        self.assertEqual(len(h.fake.called("req_account_summary")), 1, "an error other than 322 is not asked again")
+
+    def test_a_summary_that_never_ends_is_logged_as_timed_out(self):
+        h = connected()
+        h.fake.summary = full_summary()
+        h.fake.end_summary = False
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            reading = read_account(h.conn)
+        self.assertIn("did not end", "\n".join(logs.output))
+        self.assertIn("did not end", reading.summary)
+        self.assertIn("net-liquidation", reading.unread)
+
+    def test_a_summary_that_ended_is_logged_as_ended_with_any_balance_missing_or_in_another_currency(self):
+        h = connected()
+        h.fake.summary = [(ACCOUNT, "NetLiquidation", "8530.00", "EUR"), (ACCOUNT, "TotalCashValue", "1", "USD")]
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            reading = read_account(h.conn)
+        text = "\n".join(logs.output)
+        self.assertIn("ended", text)
+        self.assertIn("ExcessLiquidity missing", text)
+        self.assertIn("NetLiquidation in EUR", text)
+        self.assertIn("ExcessLiquidity missing", reading.summary)
+
+    def test_a_summary_asked_for_soon_after_a_cancel_waits_until_ibkr_counts_the_cancel(self):
+        h = self.paced()
+        self.assertEqual(read_account(h.conn).unread, frozenset())
+        second = read_account(h.conn)
+        self.assertEqual(second.unread, frozenset(), second.summary)
+        self.assertGreaterEqual(sum(h.sleeps), 2.0)
+        self.assertEqual(len(h.fake.called("req_account_summary")), 2, "paced, it is asked once")
+
+    def test_ibkrs_limit_refusal_is_waited_out_and_the_summary_asked_again(self):
+        # IBKR still counts the cancel longer than the pacing allows: its
+        # 322 is waited out, never read as a missing balance.
+        h = self.paced(grace=4.0)
+        read_account(h.conn)
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset(), reading.summary)
+        self.assertEqual(reading.balances["NetLiquidation"].amount, Decimal("25012.34"))
+        self.assertEqual(len(h.fake.called("req_account_summary")), 3)
+        text = "\n".join(logs.output)
+        self.assertIn("322", text)
+        self.assertIn("Maximum number of account summary requests exceeded", text)
+
+    def test_ibkrs_limit_refusal_that_persists_leaves_the_balances_unread_naming_322(self):
+        h = self.paced(grace=1000.0)
+        read_account(h.conn)
+        reading = read_account(h.conn)
+        self.assertTrue({"net-liquidation", "excess-liquidity", "total-cash"} <= reading.unread)
+        self.assertIn("322", reading.summary)
+        # Asked a bounded number of times, each after a wait.
+        self.assertLessEqual(len(h.fake.called("req_account_summary")), 5)
+        self.assertEqual(len(h.fake.called("req_account_summary")), len(h.fake.called("cancel_account_summary")))
