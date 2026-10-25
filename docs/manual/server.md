@@ -555,9 +555,10 @@ IPs, UMask and backups.
 
 The server has 2 GB and no swap by design, shared by the IB Gateway (the
 largest), the dashboard, the engine and the data job. The data job keeps only
-the configured instrument's bars from each recorded session and reads one
-recording at a time, so its peak is about 53 MB whole-process (about 10 MB of
-Python objects) whether it is the warm-up (two years, about 456 sessions) or
+the configured instrument's bars from each recorded session and holds at most one
+day's recordings (two when both the grouped and universe recordings exist),
+so its peak is about 53 MB whole-process (about 10 MB of
+Python objects; about 59 MB and 16 MB for days with both recordings) whether it is the warm-up (two years, about 456 sessions) or
 a daily firing, measured on synthetic sessions of 10,000 instruments; the
 budget is 100 MB ([market data](market-data.md), "Memory the data job
 needs"). If a job is ever killed for memory anyway (`journalctl -k | grep -i

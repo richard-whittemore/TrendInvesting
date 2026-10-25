@@ -16,15 +16,17 @@ INSTRUMENTS = 3000   # instruments in each recorded session (the real day holds 
 # held at once is ~120 MB. One recording at a time plus the configured
 # instrument's history fits well inside this budget (bytes, tracemalloc peak).
 BUDGET = 16 * 1024 * 1024
+PAIRED_BUDGET = 16 * 1024 * 1024
 
 
-def record_history(data, days, instruments=INSTRUMENTS):
+def record_history(data, days, instruments=INSTRUMENTS, kinds=("grouped",)):
     for day in days:
         bars = [spy(day)] + [{"T": "X{:05d}".format(n), "o": 10.0 + n, "h": 11.0 + n, "l": 9.0 + n,
                               "c": 10.5 + n, "v": 1000 + n, "vw": 10.4 + n, "n": 50, "t": 0}
                              for n in range(instruments)]
-        record.write(str(data), {"kind": "grouped", "source": "synthetic", "session": day.isoformat(),
-                                 "fetched_at": "2026-01-01T00:00:00Z", "adjusted": False, "bars": bars})
+        for kind in kinds:
+            record.write(str(data), {"kind": kind, "source": "synthetic", "session": day.isoformat(),
+                                     "fetched_at": "2026-01-01T00:00:00Z", "adjusted": False, "bars": bars})
 
 
 def peak_of(job, now, *extra):
@@ -59,6 +61,17 @@ class MemoryBudgetTest(unittest.TestCase):
             self.assertEqual(status, 0, err)
             self.assertLess(peak, BUDGET, "daily peak {:.1f} MB".format(peak / 1e6))
             self.assertTrue((job.stream_dir() / "boost-{}.jsonl".format(self.days[-1])).exists())
+
+    def test_a_day_with_both_recordings_stays_inside_the_budget(self):
+        # Two recordings of one day are held together for the agreement check,
+        # so the peak is two days' recordings plus the kept bars, not more.
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(d)
+            record_history(job.data, self.days, kinds=("grouped", "universe"))
+            status, err, peak = peak_of(job, after_settle(self.days[-2]), "--backfill-from", BASE.isoformat())
+            self.assertEqual(status, 0, err)
+            print("paired-recording peak {:.2f} MB".format(peak / 1e6))
+            self.assertLess(peak, PAIRED_BUDGET, "paired warm-up peak {:.1f} MB".format(peak / 1e6))
 
     def test_the_other_instruments_change_no_byte_of_the_stream(self):
         days = self.days[:12]
