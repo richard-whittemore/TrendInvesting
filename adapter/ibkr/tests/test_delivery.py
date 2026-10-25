@@ -956,6 +956,46 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("0000beef.h.01.01", str(caught.exception))
         self.assertEqual(self.types(), [])
 
+    def test_a_link_restored_while_the_reconcile_pumps_the_open_orders_quiet_reconciles_again(self):
+        # The account read was complete and unchanged; then, while the
+        # reconcile pumps the open orders quiet after it, Gateway reports
+        # its link to IBKR's servers restored with data lost (1101), a loss
+        # the reads never saw begin, and an order placed by hand executed
+        # during it. The link is connected throughout the pump (an 1100
+        # there stops it at once, NotConnected), so only the link's change
+        # of state shows the outage: the orders, executions and account
+        # read before it are not matched, and the link is reconciled again
+        # from fresh reads, which find the execution (ADR 0025 point 5;
+        # ADR 0019: one cutoff).
+        import loop as loop_module
+        from connection import Connection
+        armed, fired = [], []
+        read_account, resync = loop_module.read_account, Connection.resync_open_orders
+
+        def read_then_arm(conn):
+            reading = read_account(conn)
+            armed.append(True)
+            return reading
+
+        def resync_with_an_outage(conn):
+            if armed and not fired:
+                fired.append(True)
+                self.fake.executions.append((contract(), execution(exec_id="0000beef.h.01.02", order_id=0,
+                                                                   perm_id=778, order_ref="", client_id=0)))
+                self.fake.callbacks.error(-1, 1101, "Connectivity between IB and Trader Workstation has been "
+                                                    "restored - data lost.")
+            return resync(conn)
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        with mock.patch.object(loop_module, "read_account", read_then_arm), \
+                mock.patch.object(Connection, "resync_open_orders", resync_with_an_outage), \
+                self.assertRaises(ReconcileMismatch) as caught:
+            loop.start()
+            self.settle(loop)
+        self.assertEqual(fired, [True], "the restoration came while the reconcile pumped the open orders quiet")
+        self.assertIn("0000beef.h.01.02", str(caught.exception))
+        self.assertEqual(self.types(), [])
+
     def place_and_refuse_the_next_summary(self, code, fill):
         """The day's order is placed and accepted; the next day's first summary is refused with code, fill at the wait after."""
         self.place_the_days_order()

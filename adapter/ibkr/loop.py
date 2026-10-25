@@ -218,13 +218,17 @@ SNAPSHOT_ATTEMPTS = 3
 # back to back stopped the adapter for good on 2026-10-25. So a broker
 # snapshot is read at most BROKER_SNAPSHOT_ATTEMPTS times, waiting 50 s in
 # all between them. Each attempt's reads come on top: up to two account
-# reads (the second only after a complete first), each paced up to
-# ACCOUNT_SUMMARY_SPACING (3 s) and waiting out IBKR's 322 up to 20 s
-# (snapshot.SUMMARY_LIMIT_WAITS), plus every request's own wait, up to its
-# request_timeout or mark_timeout. With answers that come at once and a
-# summary IBKR keeps refusing, that is about 50 + 4 x (3 + 3 + 20) = 154 s
-# plus the requests' own time, roughly three minutes; with requests
-# that time out it is longer, so no total is promised. The stop
+# reads (the second only after a complete first). Each read is paced up to
+# ACCOUNT_SUMMARY_SPACING (3 s) before its first ask and again before each
+# of its two 322 re-asks, and waits out IBKR's 322 for 5 s and 15 s
+# (snapshot.SUMMARY_LIMIT_WAITS): at most 3 x 3 + 20 = 29 s of waits a
+# read, so at most 50 + 4 x 2 x 29 = 282 s in all, plus every request's
+# own wait, up to its request_timeout or mark_timeout. A pace waits only
+# what is left of the 3 s since the last cancel, so one after a wait of
+# 5 s or more costs nothing: with answers that come at once and a summary
+# IBKR keeps refusing (no read complete, so one read an attempt), the
+# attempts take 50 + 3 + 4 x 20 = 133 s plus the requests' own time; with
+# requests that time out it is longer, so no total is promised. The stop
 # (SnapshotRefused) states the time the attempts actually took.
 SNAPSHOT_RETRY_WAITS = (5.0, 15.0, 30.0)
 BROKER_SNAPSHOT_ATTEMPTS = len(SNAPSHOT_RETRY_WAITS) + 1
