@@ -551,6 +551,22 @@ backup" (for a recording or a data file), that is what it means today. The
 gap is tracked in the open issue on server secrets per unit, IBC trusted
 IPs, UMask and backups.
 
+## Memory
+
+The server has 2 GB and no swap by design, shared by the IB Gateway (the
+largest), the dashboard, the engine and the data job. The data job keeps only
+the configured instrument's bars from each recorded session and holds at most one
+day's recordings (two when both the grouped and universe recordings exist),
+so its peak is about 53 MB whole-process (about 10 MB of
+Python objects; about 59 MB and 16 MB for days with both recordings) whether it is the warm-up (two years, about 456 sessions) or
+a daily firing, measured on synthetic sessions of 10,000 instruments; the
+budget is 100 MB ([market data](market-data.md), "Memory the data job
+needs"). If a job is ever killed for memory anyway (`journalctl -k | grep -i
+"out of memory"`), pause the Gateway and the dashboard around the warm-up:
+`sudo systemctl stop ti-gateway ti-dashboard`, run the warm-up, then `sudo
+systemctl start ti-gateway ti-dashboard` (the Gateway logs in again and may
+ask for the phone approval).
+
 ## The clock
 
 The program compares the server's clock with IBKR's. If the server's clock

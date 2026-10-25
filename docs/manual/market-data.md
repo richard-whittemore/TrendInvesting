@@ -407,6 +407,34 @@ sessions as the longest indicator window (200 for the trend average), and
 writes the run's first file, holding the whole history. Any other date is
 refused, because the indicators are seeded from the configured one.
 
+**Memory the data job needs.** Each recorded session holds every instrument
+Massive returns (about 10,000), but Boost reads one. The job therefore reads
+a day's recording, keeps only the configured instrument's bar from it and lets
+the rest go before it reads the next day. Memory holds at most one day's
+recordings (two when both the grouped and the universe recording exist, as
+they are held together to check they agree) plus the kept bars, in the warm-up and in every daily
+firing alike (the daily firing re-reads the whole recorded history to check
+the files already written, so it needs the same care). Measured on synthetic
+sessions of 10,000 instruments: the job's Python-memory peak is about 10 MB
+and its whole-process peak about 53 MB (a day with both recordings peaks at
+about 16 MB of Python objects and so roughly 59 MB whole-process), the same for 150 sessions as for 456
+(the two years from 2025-01-02), where before it grew with the history, to
+about 1.1 GB at only 150 sessions. The budget is 100 MB for the job, so it
+fits beside the Gateway and the dashboard on the 2 GB server with a wide
+margin. If the server is short of memory anyway (the kernel's log,
+`journalctl -k | grep -i "out of memory"`, shows the job killed), pause the
+two big neighbours for the warm-up and start them again afterwards:
+
+```sh
+sudo systemctl stop ti-gateway ti-dashboard
+# run the warm-up above and wait for ti-warmup.service: Deactivated successfully.
+sudo systemctl start ti-gateway ti-dashboard
+```
+
+The Gateway logs in again when it starts, so the phone prompt may need
+approving ("Unlocking the secrets after a boot" in [the server](server.md)).
+Nothing is lost by the pause: the job resumes from what it has recorded.
+
 Massive's free plan reaches back two years only, so the Boost
 configuration's `warm_up_start` must lie within the last two years. The
 shipped dry-run file says 2025-01-02, a session inside that window with well
