@@ -226,11 +226,13 @@ def load_sessions(directory, first, last, retracted=(), tickers=None):
     each ``retracted`` day, which must have no bar recording.
 
     With ``tickers`` (a set), each session keeps only those tickers' bars and
-    no universe recording, and a recording is read, checked and dropped
-    before the next is read, so memory holds one recording plus the named
-    instruments' bars, not every instrument of every session. Every check
-    (the two recordings agree, a ticker is not repeated) still runs on the
-    whole recording."""
+    no universe recording. A day's recordings are read and checked in full
+    (a ticker is not repeated; when both the grouped and universe recordings
+    exist, they are held together for the agreement check, with canonical
+    copies of their bars). Then only the named tickers' bars are kept, and
+    the recordings are released before the next day is read. So memory holds
+    at most one day's recordings (two when both exist) plus the kept bars,
+    not every instrument of every session."""
     out = []
     for day in nyse_calendar.sessions(first, last):
         if day in retracted:
