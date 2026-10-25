@@ -2,6 +2,9 @@
 
 A stop message or a log line is pasted into tickets and chats, and the
 repository is public: no account number leaves the machine that way.
+
+Rule: ADR 0028 (the account numbers are secrets). Callers pass the configured
+account_id, so that number is masked even where it does not match the pattern.
 """
 import re
 
@@ -11,7 +14,10 @@ ACCOUNT_NUMBER = re.compile(r"\b(?:[A-Z]{1,2}[0-9]{5,9}|DU(?=[A-Z0-9]*[0-9])[A-Z
 
 
 def mask_accounts(text, account_id):
-    """text with the configured account and anything shaped like an IBKR account number replaced by <account>."""
+    """text with the configured account and anything shaped like an IBKR account number replaced by <account>.
+
+    Rule: ADR 0028 (the account numbers are secrets). Callers must pass the configured account_id.
+    """
     if account_id:
         text = text.replace(account_id, "<account>")
     return ACCOUNT_NUMBER.sub("<account>", text)

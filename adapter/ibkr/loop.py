@@ -210,6 +210,8 @@ EVENT_TIME_FIELD = {LIFECYCLE_TYPE: "occurred_at", FILL_TYPE: "filled_at"}
 ENGINE_WAIT_POLL = 0.05
 # How many reads in a row of the reconciliation owed after a start or
 # reconnect may leave its positions or cash unread before the adapter stops.
+# Rule: ADR 0019 (an unavailable balance is not zero): a read left unread is
+# never sent as zero; the adapter stops for a person instead.
 SNAPSHOT_ATTEMPTS = 3
 # The seconds one delivery waits before reading the account again for a
 # broker snapshot after a reading left a component unread: IBKR's refusals
@@ -229,7 +231,9 @@ SNAPSHOT_ATTEMPTS = 3
 # IBKR keeps refusing (no read complete, so one read an attempt), the
 # attempts take 50 + 3 + 4 x 20 = 133 s plus the requests' own time; with
 # requests that time out it is longer, so no total is promised. The stop
-# (SnapshotRefused) states the time the attempts actually took.
+# (SnapshotRefused) states the time the attempts actually took. Rule: ADR 0019
+# (an unavailable balance is not zero): a wait only postpones a read; a snapshot
+# still incomplete after the last attempt is refused, never completed with zeros.
 SNAPSHOT_RETRY_WAITS = (5.0, 15.0, 30.0)
 BROKER_SNAPSHOT_ATTEMPTS = len(SNAPSHOT_RETRY_WAITS) + 1
 # How many reconciles in a row the link may be dropped during (the open
@@ -523,7 +527,8 @@ class AdapterLoop:
                 # A read the outage cut off before IBKR ended its positions
                 # or open orders leaves their late ends on this socket, where
                 # one would complete the next read's: the link is dropped,
-                # never read on again (see the module).
+                # never read on again (see the module; ADR 0025 point 5: a late end
+                # must not complete a later read).
                 self._unended(reading)
             self._link_unchanged(changes)
             if reading.unread:
@@ -582,6 +587,9 @@ class AdapterLoop:
         with an account read after it, even on a socket Gateway restored
         (ADR 0025 point 5; ADR 0019: one cutoff): the restored link is
         reconciled again from fresh reads.
+
+        Callers must treat it as a cut-off: call this after each read of the
+        reconcile, and never use a read taken before it.
         """
         if self.conn.link_changes != changes:
             raise LinkChanged("the link to IB Gateway was lost or dropped during the reconcile's reads")
@@ -617,7 +625,9 @@ class AdapterLoop:
             # Read again at most SNAPSHOT_ATTEMPTS times in a row (each
             # account summary paced, snapshot.read_account): a component IBKR never gives
             # would otherwise hold the day's stream behind the reconciliation
-            # in silence (fail closed and tell a person, AGENTS.md).
+            # in silence (fail closed and tell a person, AGENTS.md). An unread
+            # component is never sent as zero (ADR 0019: an unavailable balance
+            # is not zero).
             self._reconciliation_unread += 1
             log.info("ibkr reconciliation read again next step (attempt %d of %d): %s could not be read; the "
                      "account summary %s", self._reconciliation_unread, SNAPSHOT_ATTEMPTS, ",".join(unread),
@@ -819,6 +829,10 @@ class AdapterLoop:
         BROKER_SNAPSHOT_ATTEMPTS, each read after one that left a component
         unread waiting its SNAPSHOT_RETRY_WAITS first. market_open is the
         NYSE session's state at the stamp.
+
+        Rule: ADR 0019 (an unavailable balance is not zero; one cutoff): a
+        snapshot is taken only from one complete reading whose holdings agree.
+        Callers must not deliver anything when it raises SnapshotRefused.
         """
         unread = None
         summary = ""

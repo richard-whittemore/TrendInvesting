@@ -58,10 +58,13 @@ REQUEST_ID_BASE = 1 << 30
 # Gateway 10.50 refused (error 322) each summary asked for within a second
 # of cancelling the one before. So a summary is asked for no sooner than
 # this many seconds after the last one was cancelled
-# (Connection.pace_account_summary).
+# (Connection.pace_account_summary). The pacing keeps IBKR from refusing a
+# summary, whose balances would otherwise stay unread (ADR 0019: an unavailable
+# balance is not zero).
 ACCOUNT_SUMMARY_SPACING = 3.0
 # How long one sleep of Connection.pause lasts at most, so the callbacks
-# that arrive meanwhile are applied (and fanned out) at least this often.
+# that arrive meanwhile are applied (and fanned out) at least this often;
+# a link change ends the wait early (ADR 0025 point 5).
 PAUSE_SLICE = 1.0
 
 ConnectionStatus = namedtuple(
@@ -105,7 +108,13 @@ def _utc_now():
 
 
 class LinkChanged(NotConnected):
-    """The link changed state during a read (Connection.link_changes), even if Gateway restored it: the read stands for nothing."""
+    """The link changed state during a read (Connection.link_changes), even if Gateway restored it: the read stands for nothing.
+
+    Rule: ADR 0019 (one cutoff: positions, cash and orders must describe one
+    coherent cutoff) and ADR 0025 point 5 (a restored link is reconciled again
+    from fresh reads). Callers must treat it as a cut-off: reconcile from fresh
+    reads, and never combine a read taken before the change with one taken after.
+    """
 
 
 class Connection:
@@ -144,7 +153,9 @@ class Connection:
         # connected, restored, lost, dropped). A read that sees it change
         # spans an outage, even one Gateway restored on the same socket, and
         # nothing it read before the change is combined with anything after
-        # (ADR 0019: one cutoff; ADR 0025 point 5).
+        # (ADR 0019: one cutoff; ADR 0025 point 5). A caller that compares it
+        # before and after a read treats any change as a cut-off and reconciles
+        # from fresh reads.
         self.link_changes = 0
         self.next_order_id = None
         self.managed_accounts = frozenset()
@@ -173,7 +184,8 @@ class Connection:
         # traffic, not a stray (see placing).
         self._placed = set()
         # Monotonic time from which a new account summary may be asked for
-        # (see pace_account_summary); None before any was cancelled.
+        # (see pace_account_summary; ADR 0019: a refused summary leaves its
+        # balances unread, never zero); None before any was cancelled.
         self._summary_free_at = None
         self._reset_list_alignment()
 
@@ -372,7 +384,13 @@ class Connection:
         self._placed.add(order_id)
 
     def cancel_account_summary(self, req_id):
-        """Cancel the account summary req_id; the next is asked no sooner than ACCOUNT_SUMMARY_SPACING after."""
+        """Cancel the account summary req_id; the next is asked no sooner than ACCOUNT_SUMMARY_SPACING after.
+
+        Rule: ADR 0019 (an unavailable balance is not zero): IBKR counts a cancel
+        late, and a refused summary leaves its balances unread. Callers must ask
+        for the next summary through pace_account_summary, never req_account_summary
+        directly.
+        """
         self.api.cancel_account_summary(req_id)
         self._summary_free_at = self._monotonic() + ACCOUNT_SUMMARY_SPACING
 
@@ -382,6 +400,10 @@ class Connection:
         The pacing holds across a reconnect too: it costs a few seconds, and
         whether IBKR frees a session's subscriptions as soon as its socket
         closes is not documented.
+
+        Rule: ADR 0019 (an unavailable balance is not zero). Callers must call
+        this before every req_account_summary, and treat a link change during
+        the wait as a cut-off (ADR 0025 point 5).
         """
         if self._summary_free_at is None:
             return
@@ -399,6 +421,10 @@ class Connection:
         wait is bounded). It ends early once the link goes or changes state
         at all (link_changes), even if Gateway restored it meanwhile, so
         the caller sees the outage.
+
+        Rule: ADR 0025 point 5 and ADR 0019 (one cutoff). A caller must compare
+        link_changes after the return and, on any change, treat its read as a
+        cut-off.
         """
         deadline = self._monotonic() + seconds
         changes = self.link_changes

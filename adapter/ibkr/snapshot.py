@@ -98,6 +98,10 @@ BASE_CURRENCY = "USD"
 # nothing about the balances, so it is waited out and the summary asked
 # again after each of SUMMARY_LIMIT_WAITS seconds (20 s more at most in one
 # read); only a refusal that outlasts them leaves the balances unread.
+# Rule: ADR 0019 (an unavailable balance is not zero): until the refusal is
+# waited out, the balances are unread, never zero.
+# Rule: ADR 0019 (an unavailable balance is not zero): until the refusal is
+# waited out, the balances are unread, never zero.
 SUMMARY_LIMIT_CODE = 322
 SUMMARY_LIMIT_WAITS = (5.0, 15.0)
 
@@ -132,11 +136,21 @@ later read's, so no later read on that link can be trusted to be complete.
 summary says what became of the account summary, as logged: it ended
 (naming any balance missing, in another currency or unreadable), IBKR
 answered an error under it (its code and message, account numbers
-masked), it did not end in time, or the link went first."""
+masked), it did not end in time, or the link went first.
+
+Rule: ADR 0019 (an unavailable balance is not zero; collection failures with
+explicit missing components). Callers must treat every component in unread
+as unavailable, never as zero, and must not combine a reading with one taken
+before a link change."""
 
 
 class _Summary:
-    """One account-summary request's answer: its rows, whether it ended, and any error IBKR sent under its ID."""
+    """One account-summary request's answer: its rows, whether it ended, and any error IBKR sent under its ID.
+
+    Rule: ADR 0019 (an unavailable balance is not zero). An error under the
+    request leaves every balance it covers unread, and a row whose value cannot
+    be read is marked in invalid.
+    """
 
     def __init__(self, req_id):
         self.id = req_id
@@ -159,6 +173,10 @@ def read_account(conn):
     lost, even if Gateway restored it, or dropped) leaves every component
     unread: nothing read before an outage is combined with anything read
     after it (ADR 0019: one cutoff; ADR 0025 point 5).
+
+    Callers must treat each component the record marks unread as unavailable,
+    not zero, and reconcile from a fresh read before using any of them (ADR
+    0019: an unavailable balance is not zero).
     """
     account = conn.config.account_id
     unread = set()
@@ -246,6 +264,10 @@ def _ask_past_limit(conn, account, summary, balances, changes):
 
     Never once the link changed since the read began (changes, its
     link_changes then): that read stands for nothing (read_account).
+
+    Rule: ADR 0019 (one cutoff; an unavailable balance is not zero) and ADR
+    0025 point 5: a refusal is waited out, never read as zero, and a link
+    change ends the read.
     """
     for wait in SUMMARY_LIMIT_WAITS:
         if (not conn.connected or conn.link_changes != changes or summary.error is None
@@ -277,7 +299,11 @@ def _ask_past_limit(conn, account, summary, balances, changes):
 
 
 def _summary_outcome(conn, summary, balances):
-    """What became of summary, for the log and the reading (AccountReading.summary), account numbers masked."""
+    """What became of summary, for the log and the reading (AccountReading.summary), account numbers masked.
+
+    Rule: ADR 0019 (collection failures with explicit missing components): each
+    summary not read in full names what is missing.
+    """
     if summary.error is not None:
         code, message = summary.error
         text = "errored: IBKR code {}: {}".format(code, message)
@@ -297,7 +323,11 @@ def _summary_outcome(conn, summary, balances):
 
 
 def _log_summary(conn, summary, balances):
-    """Log what became of one account-summary request (_summary_outcome); a summary not read in full is a warning."""
+    """Log what became of one account-summary request (_summary_outcome); a summary not read in full is a warning.
+
+    Rule: ADR 0019 (collection failures with explicit missing components): a
+    summary not read in full is logged as a warning, never as success.
+    """
     outcome = _summary_outcome(conn, summary, balances)
     level = logging.INFO if outcome == "ended" else logging.WARNING
     log.log(level, "ibkr account summary req_id=%d %s", summary.id, outcome)
