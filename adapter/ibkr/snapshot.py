@@ -299,8 +299,10 @@ def _ask_past_limit(conn, account, summary, balances, changes):
 def _summary_outcome(conn, summary, balances):
     """What became of summary, for the log and the reading (AccountReading.summary), account numbers masked.
 
-    Rule: ADR 0019 (collection failures with explicit missing components): each
-    summary not read in full names what is missing.
+    Rule: ADR 0019 (collection failures with explicit missing components): a
+    summary not read in full says why: IBKR's error, no end in time, the link
+    gone, or, when it ended, each balance missing, in another currency or
+    unreadable.
     """
     if summary.error is not None:
         code, message = summary.error
