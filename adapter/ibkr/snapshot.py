@@ -100,8 +100,6 @@ BASE_CURRENCY = "USD"
 # read); only a refusal that outlasts them leaves the balances unread.
 # Rule: ADR 0019 (an unavailable balance is not zero): until the refusal is
 # waited out, the balances are unread, never zero.
-# Rule: ADR 0019 (an unavailable balance is not zero): until the refusal is
-# waited out, the balances are unread, never zero.
 SUMMARY_LIMIT_CODE = 322
 SUMMARY_LIMIT_WAITS = (5.0, 15.0)
 
