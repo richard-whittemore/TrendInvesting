@@ -92,6 +92,12 @@ class FakeTWS(TWSApi):
         self.clock = None
         self.summary_cancel_grace = None
         self._summary_cancelled_at = None
+        # A code the next account summary alone is refused with (322, IBKR's
+        # limit, or another), and what happens at the adapter's next wait
+        # after that refusal (run by waited(), which a test's sleep calls).
+        self.refuse_next_summary = None
+        self.after_refusal = None
+        self._at_next_wait = None
         self.drop_during_summary = False
         self.open_orders = []
         self.end_open_orders = True
@@ -233,6 +239,12 @@ class FakeTWS(TWSApi):
 
     def req_account_summary(self, req_id, group, tags):
         self.calls.append(("req_account_summary", req_id, group, tags))
+        if self.refuse_next_summary is not None:
+            code, self.refuse_next_summary = self.refuse_next_summary, None
+            self._at_next_wait, self.after_refusal = self.after_refusal, None
+            self.callbacks.error(req_id, code, SUMMARY_LIMIT_MESSAGE if code == SUMMARY_LIMIT_CODE
+                                 else "synthetic summary refusal")
+            return
         if (self.summary_cancel_grace is not None and self._summary_cancelled_at is not None
                 and self.clock() - self._summary_cancelled_at < self.summary_cancel_grace):
             self.callbacks.error(req_id, SUMMARY_LIMIT_CODE, SUMMARY_LIMIT_MESSAGE)
@@ -247,6 +259,12 @@ class FakeTWS(TWSApi):
             self.callbacks.account_summary(req_id, account, tag, value, currency)
         if self.end_summary:
             self.callbacks.account_summary_end(req_id)
+
+    def waited(self):
+        """The adapter waited (its sleep): run what refuse_next_summary's refusal left for its next wait."""
+        act, self._at_next_wait = self._at_next_wait, None
+        if act is not None:
+            act()
 
     def cancel_account_summary(self, req_id):
         self.calls.append(("cancel_account_summary", req_id))

@@ -104,6 +104,10 @@ def _utc_now():
     return datetime.now(timezone.utc)
 
 
+class LinkChanged(NotConnected):
+    """The link changed state during a read (Connection.link_changes), even if Gateway restored it: the read stands for nothing."""
+
+
 class Connection:
     """The adapter's single link to IB Gateway, consumed on one thread.
 
@@ -136,6 +140,12 @@ class Connection:
         # Gateway losing IBKR's servers), for a stop that names why the
         # link kept going; None again once a connect succeeds.
         self.last_drop_reason = None
+        # How many times the link's state has changed (each state reported:
+        # connected, restored, lost, dropped). A read that sees it change
+        # spans an outage, even one Gateway restored on the same socket, and
+        # nothing it read before the change is combined with anything after
+        # (ADR 0019: one cutoff; ADR 0025 point 5).
+        self.link_changes = 0
         self.next_order_id = None
         self.managed_accounts = frozenset()
         self.last_server_time = None
@@ -180,6 +190,7 @@ class Connection:
     def _report(self, state, reason="", attempt=None, ibkr_code=None, data_lost=None):
         status = ConnectionStatus(state, reason, self.config.client_id, self._wall_clock(),
                                   attempt, ibkr_code, data_lost)
+        self.link_changes += 1
         if state in ("disconnected", "connectivity-lost"):
             self.last_drop_reason = reason
         log.info("ibkr link state=%s reason=%s client_id=%d attempt=%s code=%s", state, reason,
@@ -381,15 +392,29 @@ class Connection:
             self.pause(wait)
 
     def pause(self, seconds):
-        """Wait seconds (the injected sleep), applying every callback as it arrives; ends early if the link goes."""
+        """Wait seconds (the injected sleep), applying every callback as it arrives; ends early if the link changes.
+
+        The deadline is checked after every callback, so callbacks that keep
+        arriving cannot hold the wait past it (fail closed, AGENTS.md: a
+        wait is bounded). It ends early once the link goes or changes state
+        at all (link_changes), even if Gateway restored it meanwhile, so
+        the caller sees the outage.
+        """
         deadline = self._monotonic() + seconds
+        changes = self.link_changes
         while True:
-            while self.pump(0) is not None:
-                pass
+            drained = False
+            while True:
+                if self.pump(0) is None:
+                    drained = True
+                    break
+                if self._monotonic() >= deadline or self.link_changes != changes:
+                    break
             remaining = deadline - self._monotonic()
-            if remaining <= 0 or not self.connected:
+            if remaining <= 0 or not self.connected or self.link_changes != changes:
                 return
-            self._sleep(min(remaining, PAUSE_SLICE))
+            if drained:
+                self._sleep(min(remaining, PAUSE_SLICE))
 
     def new_req_id(self):
         req_id = self._next_req_id

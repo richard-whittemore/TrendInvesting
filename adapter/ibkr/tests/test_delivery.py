@@ -42,9 +42,9 @@ from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, LoggedEngine, ru
 from fake_tws import ACCOUNT, FakeTWS, contract, execution
 from test_connection import Clock, config
 from test_loop import COMMISSION_WAIT, RECEIVED, SUMMARY, Ids, Unanswered
-from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, StreamRefused, market_open,
+from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, SnapshotRefused, StreamRefused, market_open,
                       read_stream)
-from loop import BROKER_SNAPSHOT_ATTEMPTS, AdapterLoop, Outbox
+from loop import BROKER_SNAPSHOT_ATTEMPTS, AdapterLoop, Outbox, ReconcileMismatch
 from relay import RELEASED, EngineUnavailable, OutboxInvalid, PendingInput, read_engine_log
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 from snapshot import BROKER_SNAPSHOT_TYPE
@@ -149,10 +149,13 @@ class DeliveryTests(unittest.TestCase):
     def loop(self, engine=None, fake=None, streams=True, engine_log=None, now=RECEIVED):
         clock = Clock()
 
+        gateway = fake or self.fake
+
         def sleep(seconds):
             clock.now += seconds
+            gateway.waited()
         loop = AdapterLoop(config(mode="paper", paper_sending_enabled=True, commission_wait=COMMISSION_WAIT),
-                           fake or self.fake, engine or self.engine, self.pending, engine_log or self.engine_log,
+                           gateway, engine or self.engine, self.pending, engine_log or self.engine_log,
                            now=now if callable(now) else (lambda: now), today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0,
                            new_id=self.new_id, streams=str(self.streams) if streams else None)
         self.addCleanup(loop.close)
@@ -929,6 +932,89 @@ class DeliveryTests(unittest.TestCase):
         self.assertLessEqual(attempts[-1] - attempts[0], 60, "the stated total")
         self.assertIn("did not end", "\n".join(o for o in logs.output if "read again" in o))
         self.assertIn("did not end", str(caught.exception))
+
+    def test_a_link_lost_and_restored_during_the_reconciles_limit_wait_reconciles_again(self):
+        # Gateway loses IBKR's servers and restores the same socket while
+        # the start's reconcile waits out IBKR's 322, and an order placed by
+        # hand executes meanwhile: the reconcile's orders and executions,
+        # read before the outage, are not matched with an account read
+        # after it; the restored link is reconciled again from fresh reads,
+        # which find the execution (ADR 0025 point 5).
+        def outage():
+            self.fake.executions.append((contract(), execution(exec_id="0000beef.h.01.01", order_id=0, perm_id=777,
+                                                               order_ref="", client_id=0)))
+            self.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+            self.fake.callbacks.error(-1, 1101, "Connectivity between IB and Trader Workstation has been restored - "
+                                                "data lost.")
+        self.fake.refuse_next_summary = 322
+        self.fake.after_refusal = outage
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        with self.assertRaises(ReconcileMismatch) as caught:
+            loop.start()
+            self.settle(loop)
+        self.assertIn("0000beef.h.01.01", str(caught.exception))
+        self.assertEqual(self.types(), [])
+
+    def place_and_refuse_the_next_summary(self, code, fill):
+        """The day's order is placed and accepted; the next day's first summary is refused with code, fill at the wait after."""
+        self.place_the_days_order()
+        loop = self.loop()
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(len(self.fake.placed), 1)
+        snapshots = self.types().count(BROKER_SNAPSHOT_TYPE)
+
+        waits = []
+
+        def filled():
+            waits.append(True)
+            fill()
+            self.fake.positions = [(ACCOUNT, contract(), Decimal("156"), 312.5)]
+        self.fake.refuse_next_summary = code
+        self.fake.after_refusal = filled
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            self.settle(loop)
+        self.assertEqual(waits, [True], "the fill came during the wait after the refusal")
+        self.assertIn("ibkr broker snapshot read again (attempt 1 of", "\n".join(logs.output))
+        types = self.types()
+        later = [n for n, t in enumerate(types) if t == BROKER_SNAPSHOT_TYPE][snapshots:]
+        self.assertEqual(len(later), 1, "one snapshot for the day")
+        self.assertLess(types.index(FILL_TYPE), later[0], "the fill is journalled before the snapshot")
+        self.assertEqual(self.engine.inputs()[later[0]]["payload"]["positions"][0]["quantity"], 156,
+                         "the snapshot was read again after the fill, so it holds it")
+
+    def day_fill(self):
+        self.fake.fill(7, shares="9", price=401.25, exec_id="0001f4e8.t.01.01", cum_qty="9",
+                       time="20270114 15:59:00 US/Eastern")
+
+    def test_a_fill_during_a_limit_wait_restarts_the_snapshots_reading(self):
+        # The positions were read before IBKR's 322 was waited out: a fill
+        # during the wait makes them stale, so the reading starts again
+        # (ADR 0019: one cutoff).
+        self.place_and_refuse_the_next_summary(322, self.day_fill)
+
+    def test_a_fill_during_the_wait_between_snapshot_attempts_is_journalled_before_the_snapshot(self):
+        # A first attempt left the balances unread (an error other than
+        # 322), and a fill arrives during the 5 s wait before the next.
+        self.place_and_refuse_the_next_summary(321, self.day_fill)
+
+    def test_the_snapshots_stop_states_the_time_its_attempts_took(self):
+        # IBKR refuses every summary with its limit: each read also waits
+        # out the 322 twice (5 s and 15 s), so the attempts take far longer
+        # than the 50 s of waits between them.
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        self.fake.clock = loop._monotonic
+        loop.start()
+        self.fake.summary_cancel_grace = 1e9
+        started = loop._monotonic()
+        with self.assertRaises(SnapshotRefused) as caught:
+            self.settle(loop)
+        took = loop._monotonic() - started
+        self.assertGreater(took, 130)
+        self.assertIn("over {:.0f} seconds".format(took), str(caught.exception))
 
     # -- the broker's reports and the stream --------------------------------
     def place_the_days_order(self):

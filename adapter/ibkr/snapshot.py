@@ -154,7 +154,11 @@ def read_account(conn):
 
     Nothing that fails here raises: each component that did not arrive, came
     in a form the engine cannot represent, or was lost with the link is
-    marked unread, so the record still states what could be read.
+    marked unread, so the record still states what could be read. A link
+    that changed state at all during the read (Connection.link_changes:
+    lost, even if Gateway restored it, or dropped) leaves every component
+    unread: nothing read before an outage is combined with anything read
+    after it (ADR 0019: one cutoff; ADR 0025 point 5).
     """
     account = conn.config.account_id
     unread = set()
@@ -162,6 +166,7 @@ def read_account(conn):
     received = conn.now_utc()
     done = {"positions": False, "summary": False, "orders": False}
     summary = None
+    changes = conn.link_changes
     if conn.connected:
         conn.pace_account_summary()
     asked = conn.connected
@@ -191,14 +196,15 @@ def read_account(conn):
                 conn.api.cancel_positions()
                 conn.cancel_account_summary(summary.id)
         _log_summary(conn, summary, balances)
-        summary = _ask_past_limit(conn, account, summary, balances)
+        summary = _ask_past_limit(conn, account, summary, balances, changes)
     as_of = None
     if conn.connected:
         try:
             as_of = datetime.fromtimestamp(_server_time(conn, conn.config.request_timeout), timezone.utc)
         except SnapshotIncomplete:
             pass
-    if not conn.connected or as_of is None:
+    link_changed = conn.link_changes != changes
+    if not conn.connected or as_of is None or link_changed:
         # A read with no server time after it is not bounded by IBKR's clock.
         unread.update({POSITIONS, NET, EXCESS, CASH, OPEN_ORDERS})
         as_of = received
@@ -226,24 +232,32 @@ def read_account(conn):
         unended=frozenset(unended),
         account_id=account,
         positions={} if POSITIONS in unread else positions,
-        balances=balances,
+        balances={} if link_changed else balances,
         open_orders=[] if OPEN_ORDERS in unread else sorted(orders.values(), key=lambda o: o["broker_order_id"]),
         unread=frozenset(unread),
         as_of=as_of.replace(microsecond=0),
-        summary=_summary_outcome(conn, summary, balances) if summary is not None else
-        "not asked: the link to IB Gateway was down")
+        summary=("the link to IB Gateway was lost or dropped during the read, so none of it stands"
+                 if link_changed else _summary_outcome(conn, summary, balances) if summary is not None else
+                 "not asked: the link to IB Gateway was down"))
 
 
-def _ask_past_limit(conn, account, summary, balances):
-    """The summary asked again after each of SUMMARY_LIMIT_WAITS while IBKR refuses it with its limit (322)."""
+def _ask_past_limit(conn, account, summary, balances, changes):
+    """The summary asked again after each of SUMMARY_LIMIT_WAITS while IBKR refuses it with its limit (322).
+
+    Never once the link changed since the read began (changes, its
+    link_changes then): that read stands for nothing (read_account).
+    """
     for wait in SUMMARY_LIMIT_WAITS:
-        if not conn.connected or summary.error is None or summary.error[0] != SUMMARY_LIMIT_CODE:
+        if (not conn.connected or conn.link_changes != changes or summary.error is None
+                or summary.error[0] != SUMMARY_LIMIT_CODE):
             return summary
         log.info("ibkr account summary refused by IBKR's limit of two at a time (error %d): asked again in %.0fs",
                  SUMMARY_LIMIT_CODE, wait)
         conn.pause(wait)
+        if not conn.connected or conn.link_changes != changes:
+            return summary
         conn.pace_account_summary()
-        if not conn.connected:
+        if not conn.connected or conn.link_changes != changes:
             return summary
         balances.clear()
         summary = _Summary(conn.new_req_id())

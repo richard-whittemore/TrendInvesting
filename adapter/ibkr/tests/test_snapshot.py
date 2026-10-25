@@ -552,3 +552,40 @@ class AccountSummaryTests(unittest.TestCase):
         # Asked a bounded number of times, each after a wait.
         self.assertLessEqual(len(h.fake.called("req_account_summary")), 5)
         self.assertEqual(len(h.fake.called("req_account_summary")), len(h.fake.called("cancel_account_summary")))
+
+    def test_a_link_lost_and_restored_during_a_limit_wait_leaves_the_whole_reading_unread(self):
+        # Gateway loses IBKR's servers and restores the same socket while the
+        # read waits out IBKR's 322: the positions and open orders read
+        # before the outage are not combined with a summary read after it
+        # (ADR 0019: one cutoff; ADR 0025 point 5: a link lost is reconciled
+        # again), so nothing of the reading stands.
+        h = self.paced(grace=4.0)
+        h.fake.positions = [(ACCOUNT, contract(), Decimal("147"), 312.5)]
+        read_account(h.conn)
+        sleep = h.conn._sleep
+        state = {"armed": False, "done": False}
+        refuse = h.fake.req_account_summary
+
+        def summary(req_id, group, tags):
+            refuse(req_id, group, tags)
+            state["armed"] = True
+
+        def outage(seconds):
+            sleep(seconds)
+            if state["armed"] and not state["done"]:
+                state["done"] = True
+                h.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+                h.fake.callbacks.error(-1, 1101, "Connectivity between IB and Trader Workstation has been "
+                                                 "restored - data lost.")
+        h.fake.req_account_summary = summary
+        h.conn._sleep = outage
+        reading = read_account(h.conn)
+        self.assertTrue(state["done"], "the outage came during the read's waits")
+        while h.conn.pump(0) is not None:
+            pass
+        self.assertTrue(h.conn.connected, "restored on the same socket")
+        self.assertTrue({"positions", "open-orders", "net-liquidation", "excess-liquidity", "total-cash"}
+                        <= reading.unread, reading.unread)
+        self.assertEqual(reading.positions, {})
+        self.assertEqual(reading.open_orders, [])
+        self.assertIn("link", reading.summary)

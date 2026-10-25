@@ -172,7 +172,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from connection import Connection, NotConnected
+from connection import Connection, LinkChanged, NotConnected
 from delivery import (DELIVERED_SUFFIX, Deliverer, PostCloseReading, SnapshotRefused, market_open, nyse_calendar,
                       run_name)
 from orders import (OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker,
@@ -217,8 +217,15 @@ SNAPSHOT_ATTEMPTS = 3
 # Gateway briefly without IBKR's servers pass in seconds, and three reads
 # back to back stopped the adapter for good on 2026-10-25. So a broker
 # snapshot is read at most BROKER_SNAPSHOT_ATTEMPTS times, waiting 50 s in
-# all between them (each read's own pacing and 322 waits, snapshot.py, come
-# on top: under three minutes in all with the deployed request_timeout).
+# all between them. Each attempt's reads come on top: up to two account
+# reads (the second only after a complete first), each paced up to
+# ACCOUNT_SUMMARY_SPACING (3 s) and waiting out IBKR's 322 up to 20 s
+# (snapshot.SUMMARY_LIMIT_WAITS), plus every request's own wait, up to its
+# request_timeout or mark_timeout. With answers that come at once and a
+# summary IBKR keeps refusing, that is about 50 + 4 x (3 + 3 + 20) = 154 s
+# plus the requests' own time, roughly three minutes; with requests
+# that time out it is longer, so no total is promised. The stop
+# (SnapshotRefused) states the time the attempts actually took.
 SNAPSHOT_RETRY_WAITS = (5.0, 15.0, 30.0)
 BROKER_SNAPSHOT_ATTEMPTS = len(SNAPSHOT_RETRY_WAITS) + 1
 # How many reconciles in a row the link may be dropped during (the open
@@ -453,7 +460,8 @@ class AdapterLoop:
         """Read IBKR's account in full, match its open orders and executions to the journal, then mark the link reconciled.
 
         A link lost or dropped during the reads (the open orders never
-        quiet, a socket close) leaves the link not reconciled and the
+        quiet, a socket close, Gateway losing IBKR's servers even if it
+        restores them before the reads end: LinkChanged) leaves the link not reconciled and the
         adapter running: maintain() connects again and the new link is
         reconciled (Connection.drop), so nothing is sent meanwhile (ADR
         0025 point 5). RECONCILE_CUTOFFS such cut-offs in a row, with no
@@ -465,7 +473,7 @@ class AdapterLoop:
         try:
             self._reconcile()
         except (NotConnected, BrokerOrdersIncomplete, ReconcileIncomplete) as err:
-            if self.conn.connected:
+            if self.conn.connected and not isinstance(err, LinkChanged):
                 raise
             self._reconcile_cutoffs += 1
             reason = self.conn.last_drop_reason or "link lost, no drop reported"
@@ -499,6 +507,7 @@ class AdapterLoop:
         """
         for _ in range(OPEN_ORDER_DISAGREEMENTS + 1):
             seen = set(self._account_executions)
+            changes = self.conn.link_changes
             try:
                 broker = collect_settled_broker_orders(self.conn)
             except OpenOrdersUnsettled as err:
@@ -506,12 +515,14 @@ class AdapterLoop:
                                           "read in full is unread)".format(err)) from None
             strays = self.conn.open_order_strays
             reading = read_account(self.conn)
+            self._link_unchanged(changes)
             if reading.unread:
                 raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread; the account summary "
                                           "{}); nothing is sent until a read is complete (ADR 0019: an unavailable "
                                           "balance is not zero)".format(", ".join(sorted(reading.unread)),
                                                                         reading.summary))
             self.conn.resync_open_orders()
+            self._link_unchanged(changes)
             new_executions = self._account_executions - seen - {r.exec_id for r in broker.executions}
             if (self.conn.open_order_strays == strays and not new_executions
                     and agrees_with_account(broker, reading.open_orders)):
@@ -553,6 +564,17 @@ class AdapterLoop:
         # after a reconciliation that already shows its shares.
         if any(i.event_type == ACCOUNT_SNAPSHOT_TYPE for i in read_engine_log(self._engine_log_path).inputs):
             self._reconciliation_due = True
+
+    def _link_unchanged(self, changes):
+        """Raise LinkChanged if the link changed state since link_changes was changes: the reconcile is cut off.
+
+        Its orders and executions, read before an outage, are never matched
+        with an account read after it, even on a socket Gateway restored
+        (ADR 0025 point 5; ADR 0019: one cutoff): the restored link is
+        reconciled again from fresh reads.
+        """
+        if self.conn.link_changes != changes:
+            raise LinkChanged("the link to IB Gateway was lost or dropped during the reconcile's reads")
 
     def _send_reconciliation(self):
         """Record the reconciliation a reconcile owes the engine, from a fresh read with nothing awaiting its commission.
@@ -790,6 +812,7 @@ class AdapterLoop:
         """
         unread = None
         summary = ""
+        started = self._monotonic()
         for attempt in range(1, BROKER_SNAPSHOT_ATTEMPTS + 1):
             if unread is not None:
                 wait = SNAPSHOT_RETRY_WAITS[attempt - 2]
@@ -881,7 +904,7 @@ class AdapterLoop:
                 "snapshot with values IBKR did not give would withhold the sale back to 98% for nothing. Check IB "
                 "Gateway's link and the account's currency and positions, then start the adapter again "
                 "(docs/manual/ibkr-adapter.md, \"What can go wrong\")".format(
-                    BROKER_SNAPSHOT_ATTEMPTS, sum(SNAPSHOT_RETRY_WAITS), ", ".join(unread), summary))
+                    BROKER_SNAPSHOT_ATTEMPTS, self._monotonic() - started, ", ".join(unread), summary))
         return None
 
     def _broker_lists(self):

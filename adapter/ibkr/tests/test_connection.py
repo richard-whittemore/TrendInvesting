@@ -11,6 +11,7 @@ if tests_dir not in sys.path:
 
 from fake_tws import FakeTWS, ACCOUNT
 from config import AdapterConfig
+from tws import Event
 from connection import AccountNotManaged, Connection, ClientIdInUse, ConnectFailed, NotConnected
 
 
@@ -512,6 +513,60 @@ class MaintainTests(unittest.TestCase):
         with self.assertRaises(ClientIdInUse):
             h.conn.maintain()
         self.assertEqual(len(h.fake.called("connect")), 2)
+
+
+class PauseTests(unittest.TestCase):
+    """Connection.pause applies callbacks while it waits, and returns by its deadline whatever arrives."""
+
+    def test_a_flood_of_callbacks_cannot_hold_a_pause_past_its_deadline(self):
+        h = Harness()
+        h.conn.connect()
+        tick = 0.01  # the time each callback takes its subscribers
+
+        class Flood:
+            """A queue that is never empty: a callback is always waiting (capped, so a failing pause still ends)."""
+            taken = 0
+
+            def get(self, timeout):
+                if Flood.taken >= 200_000:
+                    return None
+                Flood.taken += 1
+                return Event("tick_price", (1, 4, 1.0, None))
+        h.conn.inbox = Flood()
+
+        def slow(event):
+            h.clock.now += tick
+        h.conn.subscribe(slow)
+        start = h.clock.now
+        h.conn.pause(3.0)
+        self.assertLessEqual(h.clock.now - start, 3.0 + tick, "pause returned by its deadline")
+        self.assertLess(Flood.taken, 200_000)
+
+    def test_a_link_lost_and_restored_during_a_pause_ends_it(self):
+        # Gateway loses IBKR's servers and restores the same socket while
+        # the pause waits: the wait ends so its caller sees the link changed
+        # (ADR 0025 point 5), even though the link is up again.
+        h = Harness()
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        changes = h.conn.link_changes
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            h.clock.now += seconds
+            if len(sleeps) == 1:
+                h.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+                h.fake.callbacks.error(-1, 1101, "Connectivity between IB and Trader Workstation has been "
+                                                 "restored - data lost.")
+        h.conn._sleep = sleep
+        h.conn.pause(10.0)
+        self.assertGreater(h.conn.link_changes, changes)
+        self.assertLess(sum(sleeps), 10.0, "the pause ended once the link changed")
+        while h.conn.pump(0) is not None:
+            pass
+        self.assertTrue(h.conn.connected, "restored on the same socket")
+        self.assertTrue(h.conn.needs_reconciliation)
 
 
 class LoggingTests(unittest.TestCase):
