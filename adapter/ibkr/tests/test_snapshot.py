@@ -570,28 +570,106 @@ class AccountValuesTests(unittest.TestCase):
         self.assertIn("NetLiquidation in EUR", text)
         self.assertIn("ExcessLiquidity missing", reading.summary)
 
-    def test_the_total_cash_is_ibkrs_base_total_not_one_currencys_cash(self):
-        # IBKR sends TotalCashValue once per currency held and once as
-        # "BASE", the total in the base currency (the account summary's
-        # TotalCashValue): the total is taken, in NetLiquidation's currency.
+    def test_the_total_cash_is_ibkrs_total_cash_value_in_the_base_currency_beside_its_cash_ledger(self):
+        # IBKR's key list (EWrapper::updateAccountValue) gives TotalCashValue
+        # as the account's total, in the currency the value is expressed in,
+        # with -S and -C segment variants; the per-currency cash ledger is
+        # CashBalance and TotalCashBalance, with their "BASE" totals. The
+        # fake sends all of these (ledger_rows): the cash is TotalCashValue.
         h = connected()
-        h.fake.base_cash_rows = False
-        h.fake.summary = [(ACCOUNT, "NetLiquidation", "25012.34", "USD"), (ACCOUNT, "ExcessLiquidity", "15800", "USD"),
-                          (ACCOUNT, "TotalCashValue", "400.00", "USD"), (ACCOUNT, "TotalCashValue", "100.00", "EUR"),
-                          (ACCOUNT, "TotalCashValue", "512.30", "BASE")]
+        h.fake.summary = full_summary()
         reading = read_account(h.conn)
         self.assertEqual(reading.unread, frozenset(), reading.summary)
         self.assertEqual(reading.balances["TotalCashValue"], Money(Decimal("512.30"), "USD"))
 
+    def test_a_total_cash_base_row_that_disagrees_with_the_base_currencys_is_unreadable(self):
+        h = connected()
+        h.fake.summary = full_summary() + [(ACCOUNT, "TotalCashValue", "600.00", "BASE")]
+        reading = read_account(h.conn)
+        self.assertIn("total-cash", reading.unread)
+        self.assertNotIn("TotalCashValue", reading.balances)
+
+    def test_total_cash_given_in_two_currencies_is_ambiguous_and_unreadable_even_with_a_base_row(self):
+        h = connected()
+        h.fake.ledger_rows = False
+        h.fake.summary = [(ACCOUNT, "NetLiquidation", "25012.34", "USD"), (ACCOUNT, "ExcessLiquidity", "15800", "USD"),
+                          (ACCOUNT, "TotalCashValue", "400.00", "USD"), (ACCOUNT, "TotalCashValue", "100.00", "EUR"),
+                          (ACCOUNT, "TotalCashValue", "512.30", "BASE")]
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset({"total-cash"}), reading.summary)
+        self.assertNotIn("TotalCashValue", reading.balances)
+
     def test_cash_in_two_currencies_without_ibkrs_base_total_is_unreadable(self):
         h = connected()
-        h.fake.base_cash_rows = False
+        h.fake.ledger_rows = False
         h.fake.summary = [(ACCOUNT, "NetLiquidation", "25012.34", "USD"), (ACCOUNT, "ExcessLiquidity", "15800", "USD"),
                           (ACCOUNT, "TotalCashValue", "400.00", "USD"), (ACCOUNT, "TotalCashValue", "100.00", "EUR")]
         reading = read_account(h.conn)
         self.assertEqual(reading.unread, frozenset({"total-cash"}))
         self.assertNotIn("TotalCashValue", reading.balances)
         self.assertIn("total-cash unreadable", reading.summary)
+
+    def test_every_row_of_a_balance_is_validated_not_only_the_one_taken(self):
+        for row in [(ACCOUNT, "NetLiquidation", "not-a-number", "BASE"),
+                    (ACCOUNT, "ExcessLiquidity", "", "BASE"),
+                    (ACCOUNT, "TotalCashValue", "n/a", "BASE")]:
+            h = connected()
+            h.fake.summary = full_summary() + [row]
+            reading = read_account(h.conn)
+            marker = {"NetLiquidation": "net-liquidation", "ExcessLiquidity": "excess-liquidity",
+                      "TotalCashValue": "total-cash"}[row[1]]
+            self.assertIn(marker, reading.unread, row)
+            self.assertNotIn(row[1], reading.balances, row)
+
+    def test_cash_held_in_another_currency_is_unreadable_since_the_engine_books_us_dollars_only(self):
+        for key in ("CashBalance", "TotalCashBalance"):
+            h = connected()
+            h.fake.summary = full_summary() + [(ACCOUNT, key, "250.00", "EUR")]
+            reading = read_account(h.conn)
+            self.assertEqual(reading.unread, frozenset({"total-cash"}), key)
+            self.assertIn("cash in EUR", reading.summary)
+
+    def test_a_zero_cash_row_in_another_currency_is_no_holding(self):
+        h = connected()
+        h.fake.summary = full_summary() + [(ACCOUNT, "CashBalance", "0.00", "EUR"),
+                                           (ACCOUNT, "TotalCashBalance", "0", "EUR")]
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset(), reading.summary)
+
+    def test_a_cash_row_in_another_currency_that_is_not_a_number_is_unreadable(self):
+        h = connected()
+        h.fake.summary = full_summary() + [(ACCOUNT, "CashBalance", "?", "EUR")]
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset({"total-cash"}), reading.summary)
+
+    def test_the_same_amount_written_differently_in_one_download_is_no_conflict(self):
+        h = connected()
+        h.fake.summary = full_summary() + [(ACCOUNT, "ExcessLiquidity", "15800.000", "USD"),
+                                           (ACCOUNT, "TotalCashValue", "512.3", "USD")]
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset(), reading.summary)
+        self.assertEqual(reading.balances["ExcessLiquidity"], Money(Decimal("15800.00"), "USD"))
+
+    def test_only_ibkrs_documented_informational_notices_leave_the_download_standing(self):
+        # TWS API "Message Codes": 2104, 2106 and 2158 are notifications on
+        # connecting, 2107 and 2108 an inactive farm "available upon demand".
+        for code, fails in ((2104, False), (2106, False), (2107, False), (2108, False), (2158, False),
+                            (2103, True), (2105, True), (2150, True), (2199, True)):
+            h = connected()
+            h.fake.summary = full_summary()
+            ask = h.fake.req_account_updates
+
+            def with_notice(subscribe, account_id, ask=ask, h=h, code=code):
+                if subscribe:
+                    h.fake.callbacks.error(-1, code, "synthetic notice")
+                ask(subscribe, account_id)
+            h.fake.req_account_updates = with_notice
+            reading = read_account(h.conn)
+            if fails:
+                self.assertIn("total-cash", reading.unread, code)
+                self.assertIn(str(code), reading.summary)
+            else:
+                self.assertEqual(reading.unread, frozenset(), (code, reading.summary))
 
     def test_a_value_restated_with_another_figure_in_one_download_is_unreadable(self):
         h = connected()
@@ -636,3 +714,101 @@ class AccountValuesTests(unittest.TestCase):
         self.assertEqual(reading.open_orders, [])
         self.assertEqual(reading.balances, {})
         self.assertIn("link", reading.summary)
+
+
+def waits_land_in_flight(h):
+    """The adapter's sleeps let IBKR's callbacks in flight land (FakeTWS.in_flight)."""
+    def sleep(seconds):
+        h.sleeps.append(seconds)
+        h.clock.now += seconds
+        h.fake.waited()
+    h.conn._sleep = sleep
+
+
+class SeparateDownloadsTests(unittest.TestCase):
+    """Each read takes only its own download's rows: none from before its subscription, none after its end.
+
+    IBKR's account values carry no request ID, so nothing in a row tells one
+    download from another. Rule: ADR 0019 (one coherent cutoff; an
+    unavailable balance is not zero) and ADR 0025 point 5 (a late answer
+    must not complete a later read).
+    """
+
+    def test_rows_queued_before_the_subscription_are_not_the_downloads(self):
+        h = connected()
+        h.fake.summary = full_summary()
+        ask = h.fake.req_positions
+
+        def then_stale_values():
+            # Queued after the positions are asked, before the values are.
+            ask()
+            h.fake.callbacks.account_value("ExcessLiquidity", "1.00", "USD", ACCOUNT)
+            h.fake.callbacks.account_download_end(ACCOUNT)
+        h.fake.req_positions = then_stale_values
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset(), reading.summary)
+        self.assertEqual(reading.balances["ExcessLiquidity"], Money(Decimal("15800.00"), "USD"))
+
+    def test_rows_after_the_downloads_end_are_ignored_while_the_rest_of_the_read_finishes(self):
+        h = connected()
+        h.fake.summary = [r for r in full_summary() if r[1] != "TotalCashValue"]
+        h.fake.end_positions = False
+        ask = h.fake.req_account_updates
+
+        def then_updates(subscribe, account_id):
+            ask(subscribe, account_id)
+            if subscribe:
+                h.fake.callbacks.account_value("TotalCashValue", "999.00", "USD", ACCOUNT)
+                h.fake.callbacks.account_value("ExcessLiquidity", "1.00", "USD", ACCOUNT)
+                h.fake.callbacks.position_end()
+        h.fake.req_account_updates = then_updates
+        reading = read_account(h.conn)
+        self.assertNotIn("positions", reading.unread)
+        self.assertIn("total-cash", reading.unread, "a later update does not fill the ended download")
+        self.assertNotIn("TotalCashValue", reading.balances)
+        self.assertNotIn("excess-liquidity", reading.unread, "nor does it unsettle what the download read")
+        self.assertEqual(reading.balances["ExcessLiquidity"], Money(Decimal("15800.00"), "USD"))
+
+    def test_rows_ibkr_sent_before_the_last_unsubscription_took_effect_are_not_the_next_reads(self):
+        h = connected()
+        waits_land_in_flight(h)
+        h.fake.summary = full_summary()
+        read_account(h.conn)
+        h.fake.in_flight.append(lambda: h.fake.callbacks.account_value("ExcessLiquidity", "1.00", "USD", ACCOUNT))
+        h.fake.in_flight.append(lambda: h.fake.callbacks.account_download_end(ACCOUNT))
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset(), reading.summary)
+        self.assertEqual(reading.balances["ExcessLiquidity"], Money(Decimal("15800.00"), "USD"))
+
+    def test_ibkrs_2100_answering_the_adapters_own_unsubscription_does_not_fail_the_next_read(self):
+        h = connected()
+        waits_land_in_flight(h)
+        h.fake.summary = full_summary()
+        h.fake.unsubscribe_notice = True
+        for n in range(3):
+            reading = read_account(h.conn)
+            self.assertEqual(reading.unread, frozenset(), "read {}: {}".format(n + 1, reading.summary))
+
+    def test_a_download_left_unfinished_is_waited_out_before_the_next_subscription(self):
+        h = connected()
+        waits_land_in_flight(h)
+        h.fake.summary = full_summary()
+        h.fake.end_summary = False
+        self.assertIn("account-values", read_account(h.conn).unended)
+        h.fake.end_summary = True
+        h.fake.in_flight.append(lambda: h.fake.callbacks.account_download_end(ACCOUNT))
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset(), reading.summary)
+        self.assertTrue(h.conn.connected)
+
+    def test_a_download_whose_end_never_comes_drops_the_link_before_another_is_asked(self):
+        h = connected()
+        waits_land_in_flight(h)
+        h.fake.summary = full_summary()
+        h.fake.end_summary = False
+        read_account(h.conn)
+        h.fake.end_summary = True
+        reading = read_account(h.conn)
+        self.assertFalse(h.conn.connected)
+        self.assertTrue({"net-liquidation", "excess-liquidity", "total-cash"} <= reading.unread)
+        self.assertEqual(len(h.fake.called("req_account_updates")), 2, "no second subscription on that link")

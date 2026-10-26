@@ -169,6 +169,13 @@ def read_account(conn):
     changes = conn.link_changes
     asked = conn.connected
     if asked:
+        # The account values first, before anything is asked: what is pumped
+        # settling them is consumed (Connection.settle_account_values).
+        try:
+            conn.settle_account_values()
+        except NotConnected:
+            asked = False
+    if asked:
         # The open orders are this read's own list, ended only by its own
         # end, and asked first: an earlier list still outstanding is waited
         # for before anything else is asked (Connection.ask_all_open_orders).
@@ -178,8 +185,8 @@ def read_account(conn):
             asked = False
     if asked:
         conn.api.req_positions()
-        summary = ask_account_values(conn, account)
         try:
+            summary = ask_account_values(conn, account)
             for event in conn.events(conn.config.request_timeout):
                 if not conn.connected:
                     break
@@ -187,12 +194,15 @@ def read_account(conn):
                 done["orders"] = conn.open_order_list(ticket) == LIST_ENDED
                 if all(done.values()):
                     break
+        except NotConnected:
+            pass  # the link went before the values were asked for: every component is unread below
         finally:
             if conn.connected:
                 conn.api.cancel_positions()
-            end_account_values(conn, account)
-        balances, invalid = summary.balances()
-        _log_summary(conn, summary, balances, invalid)
+            end_account_values(conn, account, summary)
+        if summary is not None:
+            balances, invalid = summary.balances()
+            _log_summary(conn, summary, balances, invalid)
     as_of = None
     if conn.connected:
         try:
@@ -224,7 +234,7 @@ def read_account(conn):
             unended.add(POSITIONS)
         if not done["orders"]:
             unended.add(OPEN_ORDERS)
-        if not summary.ended:
+        if summary is not None and not summary.ended:
             unended.add(ACCOUNT_VALUES)
     return AccountReading(
         unended=frozenset(unended),
@@ -256,7 +266,9 @@ def _summary_outcome(conn, summary, balances, invalid):
     else:
         problems = []
         for tag in SUMMARY_TAGS:
-            if tag in invalid:
+            if tag in invalid and tag == TOTAL_CASH and summary.foreign_cash:
+                problems.append("{} unreadable: cash in {}".format(MARKERS[tag], ", ".join(summary.foreign_cash)))
+            elif tag in invalid:
                 problems.append("{} unreadable".format(MARKERS[tag]))
             elif tag not in balances:
                 problems.append("{} missing".format(tag))

@@ -66,23 +66,66 @@ adapter stopped. The account summary is no longer used.
 
 The rules have not changed:
 
-- **Total cash** is IBKR's total in the account's base currency (IBKR
-  labels it `BASE`), which is what the account summary gave. Net
-  liquidation and Excess Liquidity are IBKR's one figure for each. A
-  figure in a currency other than US dollars, a figure IBKR gives twice
-  with different amounts in one download, one that is not a number, and
-  cash held in two currencies with no `BASE` total are all **unreadable**.
-  None of them is ever taken as zero.
-- **IBKR's errors.** IBKR's account-updates messages carry no request
-  number. So any IBKR error with no request number that arrives during the
-  download makes the balances unreadable, except IBKR's notices about its
-  market-data connections (codes 2102 to 2199).
+- **Which figures.** Each balance is the figure IBKR sends for the whole
+  account (its `NetLiquidation`, `TotalCashValue` and `ExcessLiquidity`)
+  in the account's base currency, which must be US dollars. Total cash is
+  `TotalCashValue`, the same figure the account summary gave. IBKR's
+  separate figures for its securities and commodities segments (the
+  `-S` and `-C` names) are not read.
+- **What is unreadable.** Any of these makes that balance **unreadable**,
+  never zero:
+  - the balance in a currency other than US dollars;
+  - the balance given in two currencies, so it is unclear which one is
+    the total;
+  - an extra row for it labelled `BASE` with a different amount;
+  - any of its rows that is not a number;
+  - two different amounts for it in one download. The same amount
+    written two ways (`512.30` and `512.300`) is not a difference.
+- **Cash in another currency.** IBKR also sends a cash line per currency
+  the account holds (`CashBalance` and `TotalCashBalance`). The engine
+  keeps its books in US dollars only. So if one of those lines shows a
+  non-zero amount in any currency other than US dollars, total cash is
+  unreadable, and the log names the currency (`total-cash unreadable:
+  cash in EUR`). A line of zero, or the `BASE` total line, is fine. Net
+  liquidation and Excess Liquidity are still read, since IBKR states
+  them in US dollars.
+- **Only this read's own download counts.** IBKR's account-update
+  messages carry no request number, so the adapter draws the line itself:
+  - values that arrive before it subscribes are thrown away;
+  - so are values that arrive after IBKR says this download is
+    finished. The download's figures stay as they were when it finished,
+    even while the read waits for positions or open orders.
+  - Before each read subscribes, the adapter waits until no account
+    value has arrived for 2 seconds since the last read unsubscribed.
+    That clears out anything IBKR sent just before the unsubscribe took
+    effect, including IBKR's code 2100 ("API client has been unsubscribed
+    from account data"), which can be IBKR's answer to the adapter's own
+    unsubscribe. If values keep coming for 10 seconds, the link is
+    dropped and made again.
+- **IBKR's errors.** Any IBKR error with no request number during the
+  download makes the balances unreadable, 2100 among them. The only
+  exceptions are the five notices IBKR's message-code list calls normal
+  and about its data farms: 2104, 2106, 2107, 2108 and 2158. A data farm
+  *disconnected* (2103, 2105) or a broken link to IBKR (2110) still fails
+  the download.
 - **A link lost** during the download voids the whole read, as it always
   has.
-- **A download IBKR never finishes.** IBKR's "finished" message carries no
-  request number either, so a late one could cut a later read short. The
-  link is dropped and made again, and reconciled from fresh reads, as for
-  positions or open orders cut off the same way.
+- **A download IBKR never finishes.** The adapter always unsubscribes,
+  however the read ends. But IBKR's "finished" message carries no request
+  number either, so a late one could cut a later read short. What happens
+  next depends on when it happened:
+  - **At start, or right after a reconnect** (the reconciliation before
+    anything is sent): the read is incomplete, and the adapter **stops**
+    with "could not be read in full". Start it again once IB Gateway is
+    healthy (the stops table below).
+  - **Later** (the reconciliation sent to the engine once the link is
+    reconciled, the reading after the close, and the broker snapshot read
+    with the market data): the link is dropped and made again, and reconciled
+    from fresh reads before anything is sent, as for positions or open
+    orders cut off the same way.
+  - Either way, a later read on the same link first waits up to the
+    request time limit for the late "finished". If it does not come, the
+    link is dropped and made again, and that read is unread.
 
 The broker snapshot is still read twice, with the marks read between the
 two reads. Both reads must be complete, with no order report or
@@ -195,7 +238,7 @@ the order stays released:
 | The Gateway's nightly restart (11:45 PM New York) or Sunday re-login (09:00) | The link drops and comes back as above. An order IBKR accepted stays at IBKR, and is found again on reconnect | Approve the Sunday phone prompt. Not yet rehearsed against a real Gateway |
 | Gateway is down when an order is due | The order is refused before "about to send" and waits; it goes out once the link is back the same New York day | Bring the Gateway back. Past the day, it is stale (above) |
 | The adapter's unit failed, and you were paged: a page from the server (title ending `failed`, naming `ti-adapter-boost.service`) with the adapter's last journal line as the reason, such as a stop for an incomplete reconciliation | The adapter stops itself on every condition in "Every stop, and the command that settles it" and systemd never restarts it (`Restart=no`). `ti-unit-failed@` paged you within a minute through PagerDuty and your own ntfy server, once for this failure (a restart that fails again before the adapter is seen well is the same failure, with a reminder at most once an hour); before this, nothing paged until the reporter's "no engine heartbeat" alert after two sessions. The reporter's firing pages it too if that page did not go, and resolves it once the adapter is no longer failed | Read the reason on the page, find it in "Every stop, and the command that settles it", run the settling command if it names one, then start the adapter ([paper trading](paper-trading.md), "Starting the adapter"). `journalctl -u ti-adapter-boost` has the whole reason |
-| The balances (net liquidation, total cash, Excess Liquidity) could not be read. On 2026-10-25, with the old way of reading them (IBKR's account summary), IB Gateway refused every read after the second on a connection with code 322 ("Maximum number of account summary requests exceeded; desubscribe to previous request first") although each had been cancelled, and the adapter stopped with `SnapshotRefused` | The balances now come from IBKR's account updates, a fresh download each read, so code 322 can no longer stop it ("How the balances are read" above). Each download logs what became of it: `ibkr account values ended`, or a warning `... errored: IBKR code C: IBKR's message` (account numbers shown as `<account>`), `... did not end within 10s`, `... the link to IB Gateway went before it ended`, or `ended; NetLiquidation in EUR` / `ExcessLiquidity missing` / `total-cash unreadable`. A download IBKR never finishes drops the link, which is made again and reconciled before anything is sent. A broker snapshot left incomplete is read again after 5, 15 and 30 seconds (`ibkr broker snapshot waits 15s before attempt 3 of 4`), each "read again" line naming the download's outcome. Only then does it stop (`SnapshotRefused`, as in the stops table, with the time the attempts took). A fill during any of these waits starts the reading again. A link lost during a read voids the whole read (positions, orders, executions and balances), even one IB Gateway restores within seconds; the link is reconciled again from fresh reads before anything is sent. If the outage cut the read off before IBKR finished its positions, open orders or account values (answers that carry no request number), the link is dropped and made again first. A late "finished" from the voided read can then never complete the next one | Read the last `ibkr account values` lines (`journalctl -u ti-adapter-boost`). Code 2100 or 2101: another program on the same Gateway (TWS, a second API client) asked for this or another account's updates; close it. Code 322 should never appear now; if it does, the installed adapter is older than this change, so run `sudo deploy/provision.sh adapter`. "did not end": check IB Gateway is logged in and has IBKR's servers. A balance in another currency, missing, or "total-cash unreadable": check in IBKR that the account's base currency is US dollars and that it holds no cash in another currency. Then start the adapter again (`sudo systemctl start ti-adapter-boost`) |
+| The balances (net liquidation, total cash, Excess Liquidity) could not be read. On 2026-10-25, with the old way of reading them (IBKR's account summary), IB Gateway refused every read after the second on a connection with code 322 ("Maximum number of account summary requests exceeded; desubscribe to previous request first") although each had been cancelled, and the adapter stopped with `SnapshotRefused` | The balances now come from IBKR's account updates, a fresh download each read, so code 322 can no longer stop it ("How the balances are read" above). Each download logs what became of it: `ibkr account values ended`, or a warning `... errored: IBKR code C: IBKR's message` (account numbers shown as `<account>`), `... did not end within 10s`, `... the link to IB Gateway went before it ended`, or `ended; NetLiquidation in EUR` / `ExcessLiquidity missing` / `total-cash unreadable`. A download IBKR never finishes stops the adapter at start or right after a reconnect; later, it drops the link, which is made again and reconciled before anything is sent. A broker snapshot left incomplete is read again after 5, 15 and 30 seconds (`ibkr broker snapshot waits 15s before attempt 3 of 4`), each "read again" line naming the download's outcome. Only then does it stop (`SnapshotRefused`, as in the stops table, with the time the attempts took). A fill during any of these waits starts the reading again. A link lost during a read voids the whole read (positions, orders, executions and balances), even one IB Gateway restores within seconds; the link is reconciled again from fresh reads before anything is sent. If the outage cut the read off before IBKR finished its positions, open orders or account values (answers that carry no request number), the link is dropped and made again first. A late "finished" from the voided read can then never complete the next one | Read the last `ibkr account values` lines (`journalctl -u ti-adapter-boost`). Code 2100 or 2101: another program on the same Gateway (TWS, a second API client) asked for this or another account's updates; close it. Code 322 should never appear now; if it does, the installed adapter is older than this change, so run `sudo deploy/provision.sh adapter`. "did not end": check IB Gateway is logged in and has IBKR's servers. A balance in another currency, missing, or "total-cash unreadable" (with "cash in EUR" or another currency if the account holds some): check in IBKR that the account's base currency is US dollars and that it holds no cash in another currency (convert it to US dollars). Then start the adapter again (`sudo systemctl start ti-adapter-boost`) |
 | The adapter stops mid-send | Stops with "was being handed to the broker" | The first row of the stops table |
 | The engine restarts after a crash | On reconnect the adapter asks for its waiting input's reply again and receives the order decided before the crash, once | Nothing ([re-delivery](redelivery.md)) |
 | IBKR refuses the order | Records the refusal with IBKR's reason; the engine reads the order as ended | Read the reason (`journal-query orders`). In paper it is usually an account setting |

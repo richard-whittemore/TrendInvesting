@@ -31,6 +31,19 @@ FIRST_NOTICE_CODE = 2100
 # The adapter's note, queued in the Inbox, that it has just asked for every
 # open order (see Connection.ask_all_open_orders).
 OPEN_ORDERS_ASKED = "open_orders_asked"
+# The adapter's note, queued in the Inbox just before it subscribes to the
+# account's values, carrying that download's ticket (see
+# Connection.ask_account_values).
+ACCOUNT_VALUES_ASKED = "account_values_asked"
+NOTES = (OPEN_ORDERS_ASKED, ACCOUNT_VALUES_ASKED)
+# The callbacks of an account-values subscription (reqAccountUpdates), and
+# IBKR's 2100, "API client has been unsubscribed from account data", which
+# may answer the adapter's own unsubscription: none carries a request ID.
+ACCOUNT_VALUE_MESSAGES = ("account_value", "account_download_end")
+CODE_ACCOUNT_UNSUBSCRIBED = 2100
+# After an unsubscription, how long the link must bring no account-values
+# callback before the next subscription (see Connection.settle_account_values).
+ACCOUNT_VALUES_QUIET = 2.0
 # Where one open-order list stands (Connection.open_order_list): callbacks
 # still older than the request, the list being answered, or its end taken.
 LIST_BEFORE = "before"
@@ -175,6 +188,17 @@ class Connection:
         # traffic, not a stray (see placing).
         self._placed = set()
         self._reset_list_alignment()
+        self._reset_account_values()
+
+    def _reset_account_values(self):
+        # Account-values downloads asked for on this link (their tickets);
+        # whether the last one was unsubscribed before IBKR ended it; and
+        # the monotonic time until which the link must stay quiet of
+        # account-values callbacks before the next subscription (None once
+        # it has). See settle_account_values.
+        self._values_asked = 0
+        self._values_unended = False
+        self._values_quiet_until = None
 
     def _reset_list_alignment(self):
         # The volunteered rows and end connect kept for pump(), which are
@@ -290,6 +314,83 @@ class Connection:
         self.inbox.note(OPEN_ORDERS_ASKED)
         self.api.req_all_open_orders()
         return self._lists_requested
+
+    def settle_account_values(self):
+        """Bring the link level with IBKR's account values before a read subscribes to them; NotConnected if it cannot.
+
+        IBKR's account values (updateAccountValue, accountDownloadEnd, and
+        the 2100 that may answer an unsubscription) carry no request ID, so
+        nothing in a callback tells one subscription's from the next. After
+        the last read's unsubscription, IBKR may still have rows on the way
+        that it sent before the unsubscription took effect, and the 2100
+        answering it. So: a download the last read gave up on before IBKR
+        ended it is waited out (its late end taken) up to request_timeout,
+        and the link is dropped if the end does not come (a late end would
+        end the next download early); then the link is pumped until no
+        account-values callback has arrived for ACCOUNT_VALUES_QUIET seconds
+        since the unsubscription, and dropped if they keep coming for
+        VOLUNTEER_MAX seconds. What is pumped here is taken as nobody's:
+        no read is subscribed. The read must call this before it asks for
+        anything else, since every callback pumped here is consumed.
+
+        Rule: ADR 0019 (one coherent cutoff; an unavailable balance is not
+        zero) and ADR 0025 point 5 (a late answer must not complete a later
+        read).
+        """
+        self.require_connected()
+        deadline = self._monotonic() + self.config.request_timeout
+        while self._values_unended:
+            self._settle_step(deadline, "account-values-unended")
+        hard = self._monotonic() + VOLUNTEER_MAX
+        while self._values_quiet_until is not None:
+            if self._monotonic() >= self._values_quiet_until:
+                self._values_quiet_until = None
+                break
+            self._settle_step(min(self._values_quiet_until, hard), "account-values-unquiet", hard)
+
+    def _settle_step(self, until, reason, hard=None):
+        """One step of settle_account_values: take a callback or wait; drop the link and raise once past the bound."""
+        if not self.connected:
+            raise NotConnected("IB Gateway link is down")
+        bound = until if hard is None else hard
+        taken = self.pump(0) is not None
+        now = self._monotonic()
+        # A callback already here is taken before the bound is checked; a
+        # stream that never lets up is still bounded, one slice past it.
+        if (now >= bound + PAUSE_SLICE) if taken else (now >= bound):
+            log.info("ibkr account values: the link is not level with IBKR's account values (%s), so it is "
+                     "made again", reason)
+            self.drop(reason)
+            raise NotConnected("IB Gateway link dropped: {}".format(reason))
+        if not taken:
+            self._sleep(max(0.0, min(PAUSE_SLICE, until - now)))
+
+    def ask_account_values(self, account):
+        """Subscribe to account's values (reqAccountUpdates); return the download's ticket.
+
+        The request is noted in the Inbox, with the ticket, just before it is
+        sent: every account-values callback queued ahead of the note arrived
+        before the subscription and is no part of its download
+        (account.AccountValues). Call settle_account_values first.
+        """
+        self.require_connected()
+        self._values_asked += 1
+        self.inbox.note(ACCOUNT_VALUES_ASKED, self._values_asked)
+        self.api.req_account_updates(True, account)
+        return self._values_asked
+
+    def end_account_values(self, account, ended):
+        """Unsubscribe from account's values if the link is up; ended says whether IBKR ended the download.
+
+        The next read settles the link first (settle_account_values): a
+        dead socket ends every subscription itself, and a new link starts
+        level.
+        """
+        if not self.connected:
+            return
+        self.api.req_account_updates(False, account)
+        self._values_unended = self._values_unended or not ended
+        self._values_quiet_until = self._monotonic() + ACCOUNT_VALUES_QUIET
 
     def _await_list_end(self):
         """Take callbacks until the outstanding open-order list ends; drop the link if it does not in request_timeout."""
@@ -428,6 +529,7 @@ class Connection:
         self._list_ends = 0
         self._placed = set()
         self._reset_list_alignment()
+        self._reset_account_values()
         # One deadline covers the socket connect, IBKR's handshake and the
         # wait for nextValidId: EClient.connect is synchronous, so a deadline
         # started after it returns would not bound a stalled socket.
@@ -597,7 +699,7 @@ class Connection:
         if event is None:
             return None
         self._apply(event)
-        if event.name == OPEN_ORDERS_ASKED:
+        if event.name in NOTES:
             return event  # the adapter's own note, not IBKR's callback
         for handler in self._subscribers:
             handler(event)
@@ -625,6 +727,9 @@ class Connection:
                 self._report("disconnected", "connection-closed")
         elif event.name == OPEN_ORDERS_ASKED:
             self._lists_noted += 1
+        elif event.name in ACCOUNT_VALUE_MESSAGES or (
+                event.name == "error" and len(event.args) >= 2 and event.args[1] == CODE_ACCOUNT_UNSUBSCRIBED):
+            self._account_values_seen(event)
         elif event.name in LIST_MESSAGES and self._list_ends >= self._lists_noted and self._volunteered:
             self._volunteered -= 1  # Gateway's volunteered list, which connect took
         elif event.name == "open_order":
@@ -651,6 +756,15 @@ class Connection:
             self.last_server_time = event.args[0]
             self._probe_sent_at = None
         elif event.name == "error":
+            self._apply_error(event.args[1])
+
+    def _account_values_seen(self, event):
+        """Note an account-values callback for settle_account_values; an error is still applied as any other."""
+        if event.name == "account_download_end":
+            self._values_unended = False
+        if self._values_quiet_until is not None:
+            self._values_quiet_until = max(self._values_quiet_until, self._monotonic() + ACCOUNT_VALUES_QUIET)
+        if event.name == "error":
             self._apply_error(event.args[1])
 
     def _is_echo(self, event):

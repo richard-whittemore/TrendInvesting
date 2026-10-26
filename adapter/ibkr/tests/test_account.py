@@ -181,6 +181,44 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaises(SnapshotInvalid):
             read_snapshot(h.conn)
 
+    def test_a_read_that_gives_up_unsubscribes_and_the_next_waits_for_the_late_end_first(self):
+        # Rule: ADR 0025 point 5 (a late answer must not complete a later
+        # read) and ADR 0019 (one cutoff): the late end of a download the
+        # last read gave up on is taken before the next one is asked for.
+        h = connected()
+        h.conn._sleep = lambda seconds: (setattr(h.clock, "now", h.clock.now + seconds), h.fake.waited())
+        h.fake.summary = full_summary()
+        h.fake.end_summary = False
+        with self.assertRaises(SnapshotIncomplete):
+            read_snapshot(h.conn)
+        self.assertEqual(h.fake.called("req_account_updates")[-1], ("req_account_updates", False, ACCOUNT))
+        h.fake.end_summary = True
+        h.fake.in_flight.append(lambda: h.fake.callbacks.account_download_end(ACCOUNT))
+        snap = read_snapshot(h.conn)
+        self.assertEqual(snap.total_cash, Money(Decimal("512.30"), "USD"))
+
+    def test_a_read_after_one_whose_download_never_ended_drops_the_link_instead(self):
+        h = connected()
+        h.conn._sleep = lambda seconds: setattr(h.clock, "now", h.clock.now + seconds)
+        h.fake.summary = full_summary()
+        h.fake.end_summary = False
+        with self.assertRaises(SnapshotIncomplete):
+            read_snapshot(h.conn)
+        h.fake.end_summary = True
+        with self.assertRaises(SnapshotIncomplete) as caught:
+            read_snapshot(h.conn)
+        self.assertIn("connection", caught.exception.missing)
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(len(h.fake.called("req_account_updates")), 2, "never subscribed again on that link")
+
+    def test_a_read_that_raises_midway_still_unsubscribes(self):
+        h = connected()
+        h.fake.summary = full_summary()
+        h.fake.positions = [(ACCOUNT, contract(), Decimal("1"), 1.0)] * 2
+        with self.assertRaises(SnapshotInvalid):
+            read_snapshot(h.conn)
+        self.assertEqual(h.fake.called("req_account_updates")[-1], ("req_account_updates", False, ACCOUNT))
+
     def test_disconnected_refuses_to_read(self):
         h = Harness()
         with self.assertRaises(SnapshotIncomplete):
