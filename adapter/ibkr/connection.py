@@ -53,15 +53,6 @@ LIST_MESSAGES = ("open_order", "open_order_end")
 # both, so request IDs start far above any order ID an account reaches
 # (IBKR's are 32-bit) and an error on a request never names an order.
 REQUEST_ID_BASE = 1 << 30
-# IBKR allows at most two account-summary subscriptions at a time (TWS API,
-# reqAccountSummary), and a cancel takes a moment to count: on 2026-10-25 IB
-# Gateway 10.50 refused (error 322) each summary asked for within a second
-# of cancelling the one before. So a summary is asked for no sooner than
-# this many seconds after the last one was cancelled
-# (Connection.pace_account_summary). The pacing keeps IBKR from refusing a
-# summary, whose balances would otherwise stay unread (ADR 0019: an unavailable
-# balance is not zero).
-ACCOUNT_SUMMARY_SPACING = 3.0
 # How long one sleep of Connection.pause lasts at most, so the callbacks
 # that arrive meanwhile are applied (and fanned out) at least this often;
 # a link change ends the wait early (ADR 0025 point 5).
@@ -183,10 +174,6 @@ class Connection:
         # Order IDs placed on this session, whose openOrder echo is expected
         # traffic, not a stray (see placing).
         self._placed = set()
-        # Monotonic time from which a new account summary may be asked for
-        # (see pace_account_summary; ADR 0019: a refused summary leaves its
-        # balances unread, never zero); None before any was cancelled.
-        self._summary_free_at = None
         self._reset_list_alignment()
 
     def _reset_list_alignment(self):
@@ -382,36 +369,6 @@ class Connection:
         is still a stray (ADR 0019: a list not read in full is unread).
         """
         self._placed.add(order_id)
-
-    def cancel_account_summary(self, req_id):
-        """Cancel the account summary req_id; the next is asked no sooner than ACCOUNT_SUMMARY_SPACING after.
-
-        Rule: ADR 0019 (an unavailable balance is not zero): IBKR counts a cancel
-        late, and a refused summary leaves its balances unread. Callers must ask
-        for the next summary through pace_account_summary, never req_account_summary
-        directly.
-        """
-        self.api.cancel_account_summary(req_id)
-        self._summary_free_at = self._monotonic() + ACCOUNT_SUMMARY_SPACING
-
-    def pace_account_summary(self):
-        """Wait, applying callbacks, until IBKR can have counted the last summary's cancel (ACCOUNT_SUMMARY_SPACING).
-
-        The pacing holds across a reconnect too: it costs a few seconds, and
-        whether IBKR frees a session's subscriptions as soon as its socket
-        closes is not documented.
-
-        Rule: ADR 0019 (an unavailable balance is not zero). Callers must call
-        this before every req_account_summary, and treat a link change during
-        the wait as a cut-off (ADR 0025 point 5).
-        """
-        if self._summary_free_at is None:
-            return
-        wait = self._summary_free_at - self._monotonic()
-        if wait > 0:
-            log.info("ibkr account summary waits %.1fs after the last one's cancel: IBKR allows two at a time and "
-                     "counts a cancel late (error 322)", wait)
-            self.pause(wait)
 
     def pause(self, seconds):
         """Wait seconds (the injected sleep), applying every callback as it arrives; ends early if the link changes.

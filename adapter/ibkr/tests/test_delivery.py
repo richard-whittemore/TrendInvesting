@@ -44,7 +44,7 @@ from test_connection import Clock, config
 from test_loop import COMMISSION_WAIT, RECEIVED, SUMMARY, Ids, Unanswered
 from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, SnapshotRefused, StreamRefused, market_open,
                       read_stream)
-from loop import BROKER_SNAPSHOT_ATTEMPTS, AdapterLoop, Outbox, ReconcileMismatch
+from loop import BROKER_SNAPSHOT_ATTEMPTS, AdapterLoop, Outbox, ReconcileIncomplete, ReconcileMismatch
 from relay import RELEASED, EngineUnavailable, OutboxInvalid, PendingInput, read_engine_log
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 from snapshot import BROKER_SNAPSHOT_TYPE
@@ -859,12 +859,12 @@ class DeliveryTests(unittest.TestCase):
         class PartialOnce(FakeTWS):
             reads = 0
 
-            def req_account_summary(self, req_id, group, tags):
+            def req_account_updates(self, subscribe, account_id):
                 # The second read (the first is the start's reconciliation)
-                # times out: IBKR never ends the summary.
-                self.reads += 1
+                # times out: IBKR never ends the account values.
+                self.reads += subscribe
                 self.end_summary = self.reads != 2
-                super().req_account_summary(req_id, group, tags)
+                super().req_account_updates(subscribe, account_id)
         fake = PartialOnce()
         fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -873,9 +873,12 @@ class DeliveryTests(unittest.TestCase):
         self.settle(loop)
         self.assertEqual(self.types(), FIRST + DAY)
         self.assertEqual(self.brokers()[0]["payload"]["unreadable"], [])
-        # The start's reconciliation, the partial read, then a complete read
-        # and the read after the marks that confirms nothing changed.
-        self.assertEqual(fake.reads, 4)
+        # The start's reconciliation and the partial read; its values never
+        # ended (their end carries no request ID), so the link is made again
+        # and reconciled (the third), then a complete read and the read
+        # after the marks that confirms nothing changed.
+        self.assertEqual(fake.reads, 5)
+        self.assertEqual(len(fake.called("connect")), 2)
 
     def test_an_account_read_that_stays_partial_stops_for_a_person_and_records_nothing(self):
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -883,43 +886,46 @@ class DeliveryTests(unittest.TestCase):
         loop.start()
         self.fake.end_summary = False
         import delivery
-        with self.assertRaises(getattr(delivery, "SnapshotRefused", StreamRefused)) as caught:
+        # The values never end: the link is made again and its reconcile
+        # finds them unread too, so the adapter stops.
+        with self.assertRaises((getattr(delivery, "SnapshotRefused", StreamRefused), ReconcileIncomplete)) as caught:
             self.settle(loop)
         self.assertIn("net-liquidation", str(caught.exception))
         self.assertEqual(self.types(), [])
         self.assertEqual(loop.outbox.load(), [])
         self.assertFalse(Path(self.pending + DELIVERED_SUFFIX).exists())
 
-    def test_a_summary_ibkr_refuses_right_after_the_reconcile_is_waited_out_and_the_snapshot_delivered(self):
-        # The server's first dry-run start, 2026-10-25: the reconcile's read
-        # succeeded, and IB Gateway 10.50 refused each summary asked for
-        # within a second of cancelling the one before (IBKR's limit of two
-        # account-summary subscriptions, error 322), so the snapshot's three
-        # back-to-back attempts all found the balances unread and the
-        # adapter stopped (SnapshotRefused).
-        self.fake.summary_cancel_grace = 1.0
+    def test_the_reconcile_and_both_snapshot_reads_on_one_connection_are_complete_and_delivered(self):
+        # The server's dry-run start of 2026-10-25, after a fresh IB Gateway
+        # restart: the reconcile's account summary and the snapshot's first
+        # were answered, and every later one on the connection was refused
+        # with error 322 for minutes, although each had been cancelled (the
+        # fake gateway answers two summaries a connection, as IB Gateway
+        # 10.50 did), so the adapter stopped (SnapshotRefused). The balances
+        # never depend on IBKR honouring a cancel (ADR 0019: a fresh reading).
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         loop = self.loop()
-        self.fake.clock = loop._monotonic
         loop.start()
         self.settle(loop)
         self.assertEqual(self.types(), FIRST + DAY)
         self.assertEqual(self.brokers()[0]["payload"]["unreadable"], [])
+        self.assertEqual(self.fake.called("connect"), [self.fake.calls[0]], "one connection throughout")
 
     def test_the_snapshots_attempts_are_spaced_and_each_logs_why_the_summary_was_not_read(self):
         class Timed(FakeTWS):
             asked_at = []
 
-            def req_account_summary(self, req_id, group, tags):
-                self.asked_at.append(self.clock())
-                super().req_account_summary(req_id, group, tags)
+            def req_account_updates(self, subscribe, account_id):
+                if subscribe:
+                    self.asked_at.append(self.clock())
+                super().req_account_updates(subscribe, account_id)
         fake = Timed()
         fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         loop = self.loop(fake=fake)
         fake.clock = loop._monotonic
         loop.start()
-        fake.end_summary = False
+        fake.summary = [row for row in fake.summary if row[1] != "ExcessLiquidity"]
         import delivery
         with self.assertLogs("ibkr", level="INFO") as logs, \
                 self.assertRaises(getattr(delivery, "SnapshotRefused", StreamRefused)) as caught:
@@ -930,29 +936,34 @@ class DeliveryTests(unittest.TestCase):
         for gap, wait in zip(gaps, (5, 15, 30)):
             self.assertGreaterEqual(gap, wait, gaps)
         self.assertLessEqual(attempts[-1] - attempts[0], 60, "the stated total")
-        self.assertIn("did not end", "\n".join(o for o in logs.output if "read again" in o))
-        self.assertIn("did not end", str(caught.exception))
+        self.assertIn("ExcessLiquidity missing", "\n".join(o for o in logs.output if "read again" in o))
+        self.assertIn("ExcessLiquidity missing", str(caught.exception))
 
-    def test_a_link_lost_and_restored_during_the_reconciles_limit_wait_reconciles_again(self):
+    def test_a_link_lost_and_restored_during_the_reconciles_account_read_reconciles_again(self):
         # Gateway loses IBKR's servers and restores the same socket while
-        # the start's reconcile waits out IBKR's 322, and an order placed by
-        # hand executes meanwhile: the reconcile's orders and executions,
-        # read before the outage, are not matched with an account read
-        # after it; the restored link is reconciled again from fresh reads,
-        # which find the execution (ADR 0025 point 5).
-        def outage():
-            self.fake.executions.append((contract(), execution(exec_id="0000beef.h.01.01", order_id=0, perm_id=777,
-                                                               order_ref="", client_id=0)))
-            self.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
-            self.fake.callbacks.error(-1, 1101, "Connectivity between IB and Trader Workstation has been restored - "
-                                                "data lost.")
-        self.fake.refuse_next_summary = 322
-        self.fake.after_refusal = outage
+        # the start's reconcile downloads the account values, and an order
+        # placed by hand executes meanwhile: the reconcile's orders and
+        # executions, read before the outage, are not matched with an
+        # account read after it; the restored link is reconciled again from
+        # fresh reads, which find the execution (ADR 0025 point 5).
+        ask, fired = self.fake.req_account_updates, []
+
+        def with_outage(subscribe, account_id):
+            if subscribe and not fired:
+                fired.append(True)
+                self.fake.executions.append((contract(), execution(exec_id="0000beef.h.01.01", order_id=0,
+                                                                   perm_id=777, order_ref="", client_id=0)))
+                self.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+                self.fake.callbacks.error(-1, 1101, "Connectivity between IB and Trader Workstation has been "
+                                                    "restored - data lost.")
+            ask(subscribe, account_id)
+        self.fake.req_account_updates = with_outage
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         loop = self.loop()
         with self.assertRaises(ReconcileMismatch) as caught:
             loop.start()
             self.settle(loop)
+        self.assertEqual(fired, [True])
         self.assertIn("0000beef.h.01.01", str(caught.exception))
         self.assertEqual(self.types(), [])
 
@@ -996,8 +1007,8 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("0000beef.h.01.02", str(caught.exception))
         self.assertEqual(self.types(), [])
 
-    def place_and_refuse_the_next_summary(self, code, fill):
-        """The day's order is placed and accepted; the next day's first summary is refused with code, fill at the wait after."""
+    def place_and_short_the_next_values(self, fill):
+        """The day's order is placed and accepted; the next day's first account values lack a balance, fill at the wait after."""
         self.place_the_days_order()
         loop = self.loop()
         loop.start()
@@ -1011,7 +1022,7 @@ class DeliveryTests(unittest.TestCase):
             waits.append(True)
             fill()
             self.fake.positions = [(ACCOUNT, contract(), Decimal("156"), 312.5)]
-        self.fake.refuse_next_summary = code
+        self.fake.omit_next = "ExcessLiquidity"
         self.fake.after_refusal = filled
         write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
         with self.assertLogs("ibkr", level="INFO") as logs:
@@ -1029,31 +1040,23 @@ class DeliveryTests(unittest.TestCase):
         self.fake.fill(7, shares="9", price=401.25, exec_id="0001f4e8.t.01.01", cum_qty="9",
                        time="20270114 15:59:00 US/Eastern")
 
-    def test_a_fill_during_a_limit_wait_restarts_the_snapshots_reading(self):
-        # The positions were read before IBKR's 322 was waited out: a fill
-        # during the wait makes them stale, so the reading starts again
-        # (ADR 0019: one cutoff).
-        self.place_and_refuse_the_next_summary(322, self.day_fill)
-
     def test_a_fill_during_the_wait_between_snapshot_attempts_is_journalled_before_the_snapshot(self):
-        # A first attempt left the balances unread (an error other than
-        # 322), and a fill arrives during the 5 s wait before the next.
-        self.place_and_refuse_the_next_summary(321, self.day_fill)
+        # A first attempt left a balance unread, and a fill arrives during
+        # the 5 s wait before the next.
+        self.place_and_short_the_next_values(self.day_fill)
 
     def test_the_snapshots_stop_states_the_time_its_attempts_took(self):
-        # IBKR refuses every summary with its limit: each read also waits
-        # out the 322 twice (5 s and 15 s), so the attempts take far longer
-        # than the 50 s of waits between them.
+        # IBKR's values lack a balance every time: the attempts take the
+        # 50 s of waits between them and the reads' own time.
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         loop = self.loop()
-        self.fake.clock = loop._monotonic
         loop.start()
-        self.fake.summary_cancel_grace = 1e9
+        self.fake.summary = [row for row in self.fake.summary if row[1] != "ExcessLiquidity"]
         started = loop._monotonic()
         with self.assertRaises(SnapshotRefused) as caught:
             self.settle(loop)
         took = loop._monotonic() - started
-        self.assertGreater(took, 130)
+        self.assertGreaterEqual(took, 50)
         self.assertIn("over {:.0f} seconds".format(took), str(caught.exception))
 
     # -- the broker's reports and the stream --------------------------------

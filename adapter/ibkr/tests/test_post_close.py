@@ -401,13 +401,13 @@ class PostCloseTests(unittest.TestCase):
         class CashLostAfterTheReconnect(FakeTWS):
             armed = False
 
-            def req_account_summary(self, req_id, group, tags):
-                if self.armed:
+            def req_account_updates(self, subscribe, account_id):
+                if subscribe and self.armed:
                     self.armed = False
-                    super().req_account_summary(req_id, group, tags)
+                    super().req_account_updates(subscribe, account_id)
                     self.summary = [row for row in self.summary if row[1] != "TotalCashValue"]
                     return
-                super().req_account_summary(req_id, group, tags)
+                super().req_account_updates(subscribe, account_id)
         fake = CashLostAfterTheReconnect()
         fake.summary, fake.positions, fake.marks, fake.server_time = (self.fake.summary, self.fake.positions,
                                                                       self.fake.marks, self.fake.server_time)

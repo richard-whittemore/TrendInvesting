@@ -48,15 +48,16 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snap.server_time_completed, SERVER_TIME + 1)
         self.assertIsNotNone(snap.received_at.tzinfo)
         self.assertIn(("cancel_positions",), h.fake.calls)
-        self.assertEqual(len(h.fake.called("cancel_account_summary")), 1)
+        self.assertEqual(h.fake.called("req_account_updates"),
+                         [("req_account_updates", True, ACCOUNT), ("req_account_updates", False, ACCOUNT)])
 
-    def test_summary_requests_exactly_the_three_balances(self):
+    def test_the_balances_are_the_configured_accounts_values_never_an_account_summary(self):
         h = connected()
         h.fake.summary = full_summary()
-        read_snapshot(h.conn)
-        _, _, group, tags = h.fake.called("req_account_summary")[0]
-        self.assertEqual(group, "All")
-        self.assertEqual(set(tags.split(",")), {"NetLiquidation", "TotalCashValue", "ExcessLiquidity"})
+        for _ in range(4):
+            read_snapshot(h.conn)
+        self.assertEqual(h.fake.called("req_account_summary"), [])
+        self.assertEqual({c[2] for c in h.fake.called("req_account_updates")}, {ACCOUNT})
 
     def test_a_missing_balance_is_not_zero(self):
         h = connected()

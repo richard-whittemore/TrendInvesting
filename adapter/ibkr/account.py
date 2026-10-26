@@ -1,4 +1,4 @@
-"""One account snapshot assembled from IBKR's position and account-summary callbacks.
+"""One account snapshot assembled from IBKR's position and account-value callbacks.
 
 ADR 0025 point 5: on every start and reconnect the adapter reports the
 account's positions and cash. ADR 0019: an unavailable balance is not zero,
@@ -6,21 +6,43 @@ values are exact decimals with their currency, and a snapshot records the
 times that bound it. plan.md section 5: Excess Liquidity feeds the
 margin-cushion alarm.
 
-IBKR does not timestamp positions or account-summary values. The snapshot is
+The balances come from IBKR's account updates (TWS API reqAccountUpdates),
+not its account summary (reqAccountSummary). IBKR allows two account-summary
+subscriptions per connection, and on 2026-10-25 IB Gateway 10.50 freed
+neither when it was cancelled: exactly two summaries were answered on a
+connection and every later one was refused (error 322) for minutes. An
+account-updates subscription is one per client and may be asked for again
+freely, so each read is a fresh download that does not depend on IBKR
+honouring a cancel: subscribe, take every updateAccountValue for the
+account until its accountDownloadEnd, unsubscribe (AccountValues).
+
+IBKR does not timestamp positions or account values. The snapshot is
 therefore bracketed by two IBKR server times, one requested before the
-position and summary requests and one after both have finished, plus the
-adapter's own receipt time.
+position and account-value requests and one after both have finished, plus
+the adapter's own receipt time.
 """
 from collections import namedtuple
 
 from connection import NotConnected
 from values import to_decimal
 
-SUMMARY_GROUP = "All"
 NET_LIQUIDATION = "NetLiquidation"
 TOTAL_CASH = "TotalCashValue"
 EXCESS_LIQUIDITY = "ExcessLiquidity"
 SUMMARY_TAGS = (NET_LIQUIDATION, TOTAL_CASH, EXCESS_LIQUIDITY)
+# IBKR's pseudo-currency for a value in the account's base currency
+# (reqAccountUpdates sends TotalCashValue once per currency held and once
+# as "BASE", the total in the base currency, which is what the account
+# summary's TotalCashValue is).
+BASE_LABEL = "BASE"
+# IBKR's notices under no request ID that say nothing about the account
+# values (TWS API "Message Codes" 2102 to 2199: market-data farm and
+# similar connection notices). Any other error under no request ID while
+# the values download, 2100 (this client unsubscribed from the account's
+# data) and 2101 (another account subscribed) among them, fails the
+# download closed (ADR 0019: an unavailable balance is not zero).
+NOTICE_CODES = range(2102, 2200)
+NO_REQUEST_ID = -1
 
 Money = namedtuple("Money", "amount currency")
 
@@ -49,6 +71,105 @@ class SnapshotInvalid(Exception):
     """IBKR reported something this snapshot cannot represent faithfully."""
 
 
+class AccountValues:
+    """One download of the account's values (reqAccountUpdates): the rows for one account until its end.
+
+    take applies a callback: an updateAccountValue row for the account (rows
+    for another account and other keys are skipped), its accountDownloadEnd,
+    or an error under no request ID that is not a notice (NOTICE_CODES),
+    which fails it. balances() gives the three balances and the tags that
+    could not be read.
+
+    Rule: ADR 0019 (an unavailable balance is not zero; values are exact
+    decimals with their currency): a value is taken only from this
+    download's own rows; a tag whose rows conflict or cannot be read is
+    invalid, never guessed.
+    """
+
+    def __init__(self, account):
+        self.account = account
+        self.ended = False
+        self.error = None  # (code, message)
+        self._rows = {}  # tag -> {currency: value text}
+        self._conflicts = set()
+
+    @property
+    def answered(self):
+        return self.ended or self.error is not None
+
+    def take(self, event):
+        """Apply one callback; False for one that is not the download's (so the caller may take it)."""
+        name, args = event.name, event.args
+        if name == "account_value" and len(args) == 4:
+            key, value, currency, row_account = args
+            if row_account == self.account and key in SUMMARY_TAGS:
+                rows = self._rows.setdefault(key, {})
+                if currency in rows and rows[currency] != value:
+                    self._conflicts.add(key)
+                rows[currency] = value
+            return True
+        if name == "account_download_end" and args:
+            if args[0] == self.account:
+                self.ended = True
+            return True
+        if name == "error" and len(args) >= 2 and args[0] == NO_REQUEST_ID and args[1] not in NOTICE_CODES:
+            self.error = (args[1], str(args[2]) if len(args) > 2 else "")
+            return True
+        return False
+
+    def balances(self):
+        """(balances, invalid): tag to Money for each tag read, and the tags whose rows could not be read.
+
+        NetLiquidation and ExcessLiquidity are each IBKR's one row in the
+        account's base currency. TotalCashValue is the "BASE" row (the
+        total, as the account summary gives it) in NetLiquidation's
+        currency, or, with no BASE row, the one currency's row if it is the
+        only one. A tag with more than one candidate, a row restated with
+        another value, or a value that is not a number is invalid. A tag
+        with no row is in neither: it is missing.
+        """
+        balances, invalid = {}, set()
+        for tag in (NET_LIQUIDATION, EXCESS_LIQUIDITY, TOTAL_CASH):
+            rows = self._rows.get(tag)
+            if not rows:
+                continue
+            if tag in self._conflicts:
+                invalid.add(tag)
+                continue
+            real = {c: v for c, v in rows.items() if c != BASE_LABEL}
+            if tag == TOTAL_CASH and BASE_LABEL in rows:
+                base = balances.get(NET_LIQUIDATION)
+                if base is None:
+                    invalid.add(tag)
+                    continue
+                currency, value = base.currency, rows[BASE_LABEL]
+            elif len(real) == 1:
+                (currency, value), = real.items()
+            else:
+                invalid.add(tag)
+                continue
+            if not currency:
+                invalid.add(tag)
+                continue
+            try:
+                balances[tag] = Money(to_decimal(value, tag), currency)
+            except ValueError:
+                invalid.add(tag)
+        return balances, invalid
+
+
+def ask_account_values(conn, account):
+    """Subscribe to account's values (reqAccountUpdates) and return the AccountValues that takes the download."""
+    conn.api.req_account_updates(True, account)
+    return AccountValues(account)
+
+
+def end_account_values(conn, account):
+    """Unsubscribe from account's values, if the link is up (a dead socket ends every subscription itself)."""
+    if conn.connected:
+        conn.api.req_account_updates(False, account)
+
+
 def read_snapshot(conn):
     """Read the configured account's positions and balances through conn, failing closed.
 
@@ -61,12 +182,10 @@ def read_snapshot(conn):
     timeout = conn.config.request_timeout
     requested = _server_time(conn, timeout)
 
-    summary_id = conn.new_req_id()
     conn.api.req_positions()
-    conn.api.req_account_summary(summary_id, SUMMARY_GROUP, ",".join(SUMMARY_TAGS))
+    values = ask_account_values(conn, account)
     positions = {}
-    balances = {}
-    positions_done = summary_done = summary_failed = False
+    positions_done = False
     try:
         for event in conn.events(timeout):
             if not conn.connected:
@@ -76,27 +195,25 @@ def read_snapshot(conn):
                 _add_position(positions, account, *args)
             elif name == "position_end":
                 positions_done = True
-            elif name == "account_summary" and args[0] == summary_id:
-                _add_balance(balances, account, *args[1:])
-            elif name == "account_summary_end" and args[0] == summary_id:
-                summary_done = True
-            elif name == "error" and args[0] == summary_id:
-                summary_failed = True
+            elif values.take(event) and values.error is not None:
                 break
-            if positions_done and summary_done:
+            if positions_done and values.ended:
                 break
     finally:
         if conn.connected:
             conn.api.cancel_positions()
-            conn.api.cancel_account_summary(summary_id)
+        end_account_values(conn, account)
 
+    balances, invalid = values.balances()
+    if invalid:
+        raise SnapshotInvalid("{} could not be read from IBKR's account values".format(", ".join(sorted(invalid))))
     missing = []
     if not conn.connected:
         missing.append("connection")
     if not positions_done:
         missing.append("positions")
-    if not summary_done or summary_failed:
-        missing.append("account-summary")
+    if not values.ended or values.error is not None:
+        missing.append("account-values")
     missing.extend(tag for tag in SUMMARY_TAGS if tag not in balances)
     if missing:
         raise SnapshotIncomplete(missing)
@@ -139,17 +256,3 @@ def _add_position(positions, account, row_account, contract, quantity, avg_cost)
             quantity=to_decimal(quantity, "position"), avg_cost=to_decimal(avg_cost, "avg_cost"))
     except ValueError as err:
         raise SnapshotInvalid(str(err)) from None
-
-
-def _add_balance(balances, account, row_account, tag, value, currency):
-    if row_account != account or tag not in SUMMARY_TAGS:
-        return
-    if not currency:
-        raise SnapshotInvalid("{} has no currency".format(tag))
-    try:
-        money = Money(to_decimal(value, tag), currency)
-    except ValueError as err:
-        raise SnapshotInvalid(str(err)) from None
-    if tag in balances and balances[tag] != money:
-        raise SnapshotInvalid("{} reported twice with different values".format(tag))
-    balances[tag] = money

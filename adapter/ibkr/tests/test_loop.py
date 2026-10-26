@@ -267,7 +267,7 @@ class LoopTests(unittest.TestCase):
         loop = self.loop()
         loop.start()
         calls = [c[0] for c in self.fake.calls]
-        self.assertLess(calls.index("req_account_summary"), len(calls))
+        self.assertLess(calls.index("req_account_updates"), len(calls))
         self.assertIn("req_executions", calls)
         self.assertFalse(loop.conn.needs_reconciliation)
 

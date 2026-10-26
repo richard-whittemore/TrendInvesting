@@ -108,11 +108,8 @@ class _EClient:
     def cancelPositions(self):
         self.requests.append(("cancelPositions",))
 
-    def reqAccountSummary(self, reqId, group, tags):
-        self.requests.append(("reqAccountSummary", reqId, group, tags))
-
-    def cancelAccountSummary(self, reqId):
-        self.requests.append(("cancelAccountSummary", reqId))
+    def reqAccountUpdates(self, subscribe, acctCode):
+        self.requests.append(("reqAccountUpdates", subscribe, acctCode))
 
     def reqAllOpenOrders(self):
         self.requests.append(("reqAllOpenOrders",))
@@ -440,8 +437,8 @@ class ForwardingTests(unittest.TestCase):
         client.req_current_time()
         client.req_positions()
         client.cancel_positions()
-        client.req_account_summary(3, "All", "NetLiquidation")
-        client.cancel_account_summary(3)
+        client.req_account_updates(True, "DU0000001")
+        client.req_account_updates(False, "DU0000001")
         client.req_all_open_orders()
         client.req_executions(4, "DU0000001")
         client.req_mkt_data(5, types.SimpleNamespace(conId=756733, symbol="SPY", secType="STK", currency="USD",
@@ -451,10 +448,11 @@ class ForwardingTests(unittest.TestCase):
         client.disconnect()
         self.assertEqual(client._client.requests, [
             ("connect", "127.0.0.1", 4002, 11), ("reqCurrentTime",), ("reqPositions",),
-            ("cancelPositions",), ("reqAccountSummary", 3, "All", "NetLiquidation"),
-                        # Every client's executions (client filter 0): IBKR then
+            ("cancelPositions",), ("reqAccountUpdates", True, "DU0000001"),
+            ("reqAccountUpdates", False, "DU0000001"), ("reqAllOpenOrders",),
+            # Every client's executions (client filter 0): IBKR then
             # returns other clients' to the Master API client ID.
-            ("cancelAccountSummary", 3), ("reqAllOpenOrders",), ("reqExecutions", 4, "DU0000001", 0),
+            ("reqExecutions", 4, "DU0000001", 0),
             # A one-off snapshot of the contract by its conId: no generic
             # ticks (IBKR refuses them on a snapshot), not a regulatory one.
             ("reqMktData", 5, 756733, "SPY", "STK", "USD", "SMART", "", True, False, []),
@@ -483,8 +481,8 @@ class ForwardingTests(unittest.TestCase):
                 w.currentTime(5)
                 w.position("A", "c", 1, 2.0)
                 w.positionEnd()
-                w.accountSummary(3, "A", "NetLiquidation", "1", "USD")
-                w.accountSummaryEnd(3)
+                w.updateAccountValue("NetLiquidation", "1", "USD", "A")
+                w.accountDownloadEnd("A")
                 w.openOrder(7, "c", "o", "s")
                 w.openOrderEnd()
                 w.orderStatus(7, "Submitted", 0, 1, 0.0, 9, 0, 0.0, 11, "", 0.0)
@@ -498,7 +496,7 @@ class ForwardingTests(unittest.TestCase):
                 names = [e.name for e in inbox.events()]
                 self.assertEqual(names, [
                     "next_valid_id", "managed_accounts", "error", "current_time", "position", "position_end",
-                    "account_summary", "account_summary_end", "open_order", "open_order_end",
+                    "account_value", "account_download_end", "open_order", "open_order_end",
                     "order_status", "exec_details", "exec_details_end", "commission_report",
                     "commission_report", "tick_price", "tick_snapshot_end", "connection_closed"])
 

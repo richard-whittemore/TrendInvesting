@@ -18,6 +18,7 @@ if str(tests_dir) not in sys.path:
 
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, contract, order
 from test_account import connected, full_summary
+from account import Money
 from datetime import datetime, timezone
 
 from snapshot import (ACCOUNT_SNAPSHOT_TYPE, ACCOUNT_SNAPSHOT_VERSION, BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION,
@@ -193,8 +194,9 @@ class BrokerSnapshotTests(unittest.TestCase):
         h.fake.req_all_open_orders = lost
         reading = read_account(h.conn)
         self.assertFalse(h.conn.connected)
-        # The positions, asked behind the list, were cut off with it.
-        self.assertEqual(reading.unended, frozenset({"open-orders", "positions"}))
+        # The positions and the account values, asked behind the list, were
+        # cut off with it.
+        self.assertEqual(reading.unended, frozenset({"open-orders", "positions", "account-values"}))
 
     def test_no_server_time_after_the_read_leaves_it_unbounded_and_unreadable(self):
         h = scripted()
@@ -468,24 +470,46 @@ class CloseStampedFiguresTests(unittest.TestCase):
             broker_snapshot_record(reading, market_open=False, close=CLOSE, net_liquidation=Decimal("8530"))
 
 
-class AccountSummaryTests(unittest.TestCase):
-    """IBKR's account summary: why a read of it failed is logged, and requests are paced (IBKR's 322 limit).
+class ReadsOnOneConnectionTests(unittest.TestCase):
+    """Every read on one connection is complete, however many came before it.
 
-    IBKR allows two account-summary subscriptions at a time and a cancel
-    takes a moment to count (TWS API, reqAccountSummary; "Message Codes"
-    322). On 2026-10-25 IB Gateway 10.50 refused every summary the adapter
-    asked for within a second of cancelling the one before it, and the log
-    said only which balances were missing.
+    On 2026-10-25 IB Gateway 10.50 answered exactly two account summaries a
+    connection and refused every later one with error 322 for minutes,
+    although each was cancelled once read (the fake gateway does the same).
+    Rule: ADR 0019 (a fresh reading; an unavailable balance is not zero):
+    the balances never depend on IBKR honouring a cancel.
     """
 
-    def paced(self, grace=2.0):
+    def test_the_third_and_later_reads_on_one_connection_read_every_balance(self):
         h = connected()
         h.fake.summary = full_summary()
-        h.fake.clock = h.clock
-        h.fake.summary_cancel_grace = grace
-        return h
+        for n in range(1, 6):
+            reading = read_account(h.conn)
+            self.assertEqual(reading.unread, frozenset(), "read {}: {}".format(n, reading.summary))
+            self.assertEqual(reading.balances["NetLiquidation"], Money(Decimal("25012.34"), "USD"))
+            self.assertEqual(reading.balances["TotalCashValue"], Money(Decimal("512.30"), "USD"))
+            self.assertEqual(reading.balances["ExcessLiquidity"], Money(Decimal("15800.00"), "USD"))
+        self.assertEqual(h.fake.called("req_account_summary"), [], "no account summary is asked for")
 
-    def test_an_error_under_the_summary_is_logged_with_ibkrs_code_and_message_and_the_account_masked(self):
+    def test_each_read_is_a_fresh_download_of_the_account_values_and_ends_its_subscription(self):
+        h = connected()
+        h.fake.summary = full_summary()
+        read_account(h.conn)
+        h.fake.summary = [(a, t, "26000.00" if t == "NetLiquidation" else v, c) for a, t, v, c in full_summary()]
+        reading = read_account(h.conn)
+        self.assertEqual(reading.balances["NetLiquidation"], Money(Decimal("26000.00"), "USD"))
+        self.assertEqual(h.fake.called("req_account_updates"),
+                         [("req_account_updates", True, ACCOUNT), ("req_account_updates", False, ACCOUNT)] * 2)
+
+
+class AccountValuesTests(unittest.TestCase):
+    """IBKR's account values (reqAccountUpdates): why a read of them failed is logged, and nothing is guessed.
+
+    Rule: ADR 0019 (an unavailable balance is not zero; collection failures
+    with explicit missing components).
+    """
+
+    def test_an_error_during_the_download_is_logged_with_ibkrs_code_and_message_and_the_account_masked(self):
         h = connected()
         h.fake.summary_error = 321
         h.fake.summary_error_message = "Error validating request: account {} not found".format(ACCOUNT)
@@ -498,9 +522,31 @@ class AccountSummaryTests(unittest.TestCase):
         self.assertNotIn(ACCOUNT, text)
         self.assertIn("321", reading.summary)
         self.assertNotIn(ACCOUNT, reading.summary)
-        self.assertEqual(len(h.fake.called("req_account_summary")), 1, "an error other than 322 is not asked again")
+        self.assertTrue({"net-liquidation", "excess-liquidity", "total-cash"} <= reading.unread)
 
-    def test_a_summary_that_never_ends_is_logged_as_timed_out(self):
+    def test_ibkrs_unsubscribed_notice_during_the_download_fails_it_closed(self):
+        # 2100: IBKR unsubscribed this client from the account's data.
+        h = connected()
+        h.fake.summary_error = 2100
+        h.fake.summary_error_message = "API client has been unsubscribed from account data."
+        reading = read_account(h.conn)
+        self.assertTrue({"net-liquidation", "excess-liquidity", "total-cash"} <= reading.unread)
+        self.assertIn("2100", reading.summary)
+
+    def test_a_market_data_farm_notice_during_the_download_does_not_fail_it(self):
+        h = connected()
+        h.fake.summary = full_summary()
+        ask = h.fake.req_account_updates
+
+        def with_notice(subscribe, account_id):
+            if subscribe:
+                h.fake.callbacks.error(-1, 2104, "Market data farm connection is OK:usfarm")
+            ask(subscribe, account_id)
+        h.fake.req_account_updates = with_notice
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset(), reading.summary)
+
+    def test_values_that_never_end_are_logged_as_timed_out_and_leave_the_link_unread_on(self):
         h = connected()
         h.fake.summary = full_summary()
         h.fake.end_summary = False
@@ -509,8 +555,11 @@ class AccountSummaryTests(unittest.TestCase):
         self.assertIn("did not end", "\n".join(logs.output))
         self.assertIn("did not end", reading.summary)
         self.assertIn("net-liquidation", reading.unread)
+        # Its end carries no request ID: a late one would end a later read's.
+        self.assertIn("account-values", reading.unended)
+        self.assertIn(("req_account_updates", False, ACCOUNT), h.fake.calls, "unsubscribed all the same")
 
-    def test_a_summary_that_ended_is_logged_as_ended_with_any_balance_missing_or_in_another_currency(self):
+    def test_values_that_ended_are_logged_as_ended_with_any_balance_missing_or_in_another_currency(self):
         h = connected()
         h.fake.summary = [(ACCOUNT, "NetLiquidation", "8530.00", "EUR"), (ACCOUNT, "TotalCashValue", "1", "USD")]
         with self.assertLogs("ibkr", level="INFO") as logs:
@@ -521,66 +570,63 @@ class AccountSummaryTests(unittest.TestCase):
         self.assertIn("NetLiquidation in EUR", text)
         self.assertIn("ExcessLiquidity missing", reading.summary)
 
-    def test_a_summary_asked_for_soon_after_a_cancel_waits_until_ibkr_counts_the_cancel(self):
-        h = self.paced()
-        self.assertEqual(read_account(h.conn).unread, frozenset())
-        second = read_account(h.conn)
-        self.assertEqual(second.unread, frozenset(), second.summary)
-        self.assertGreaterEqual(sum(h.sleeps), 2.0)
-        self.assertEqual(len(h.fake.called("req_account_summary")), 2, "paced, it is asked once")
-
-    def test_ibkrs_limit_refusal_is_waited_out_and_the_summary_asked_again(self):
-        # IBKR still counts the cancel longer than the pacing allows: its
-        # 322 is waited out, never read as a missing balance.
-        h = self.paced(grace=4.0)
-        read_account(h.conn)
-        with self.assertLogs("ibkr", level="INFO") as logs:
-            reading = read_account(h.conn)
-        self.assertEqual(reading.unread, frozenset(), reading.summary)
-        self.assertEqual(reading.balances["NetLiquidation"].amount, Decimal("25012.34"))
-        self.assertEqual(len(h.fake.called("req_account_summary")), 3)
-        text = "\n".join(logs.output)
-        self.assertIn("322", text)
-        self.assertIn("Maximum number of account summary requests exceeded", text)
-
-    def test_ibkrs_limit_refusal_that_persists_leaves_the_balances_unread_naming_322(self):
-        h = self.paced(grace=1000.0)
-        read_account(h.conn)
+    def test_the_total_cash_is_ibkrs_base_total_not_one_currencys_cash(self):
+        # IBKR sends TotalCashValue once per currency held and once as
+        # "BASE", the total in the base currency (the account summary's
+        # TotalCashValue): the total is taken, in NetLiquidation's currency.
+        h = connected()
+        h.fake.base_cash_rows = False
+        h.fake.summary = [(ACCOUNT, "NetLiquidation", "25012.34", "USD"), (ACCOUNT, "ExcessLiquidity", "15800", "USD"),
+                          (ACCOUNT, "TotalCashValue", "400.00", "USD"), (ACCOUNT, "TotalCashValue", "100.00", "EUR"),
+                          (ACCOUNT, "TotalCashValue", "512.30", "BASE")]
         reading = read_account(h.conn)
-        self.assertTrue({"net-liquidation", "excess-liquidity", "total-cash"} <= reading.unread)
-        self.assertIn("322", reading.summary)
-        # Asked a bounded number of times, each after a wait.
-        self.assertLessEqual(len(h.fake.called("req_account_summary")), 5)
-        self.assertEqual(len(h.fake.called("req_account_summary")), len(h.fake.called("cancel_account_summary")))
+        self.assertEqual(reading.unread, frozenset(), reading.summary)
+        self.assertEqual(reading.balances["TotalCashValue"], Money(Decimal("512.30"), "USD"))
 
-    def test_a_link_lost_and_restored_during_a_limit_wait_leaves_the_whole_reading_unread(self):
-        # Gateway loses IBKR's servers and restores the same socket while the
-        # read waits out IBKR's 322: the positions and open orders read
-        # before the outage are not combined with a summary read after it
-        # (ADR 0019: one cutoff; ADR 0025 point 5: a link lost is reconciled
-        # again), so nothing of the reading stands.
-        h = self.paced(grace=4.0)
+    def test_cash_in_two_currencies_without_ibkrs_base_total_is_unreadable(self):
+        h = connected()
+        h.fake.base_cash_rows = False
+        h.fake.summary = [(ACCOUNT, "NetLiquidation", "25012.34", "USD"), (ACCOUNT, "ExcessLiquidity", "15800", "USD"),
+                          (ACCOUNT, "TotalCashValue", "400.00", "USD"), (ACCOUNT, "TotalCashValue", "100.00", "EUR")]
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset({"total-cash"}))
+        self.assertNotIn("TotalCashValue", reading.balances)
+        self.assertIn("total-cash unreadable", reading.summary)
+
+    def test_a_value_restated_with_another_figure_in_one_download_is_unreadable(self):
+        h = connected()
+        h.fake.summary = full_summary() + [(ACCOUNT, "ExcessLiquidity", "1.00", "USD")]
+        reading = read_account(h.conn)
+        self.assertIn("excess-liquidity", reading.unread)
+        self.assertNotIn("ExcessLiquidity", reading.balances)
+
+    def test_values_for_another_account_and_other_keys_are_skipped(self):
+        h = connected()
+        h.fake.summary = (full_summary(OTHER_ACCOUNT) + [(ACCOUNT, "NetLiquidation-S", "1", "USD")]
+                          + full_summary())
+        reading = read_account(h.conn)
+        self.assertEqual(reading.unread, frozenset(), reading.summary)
+        self.assertEqual(reading.balances["NetLiquidation"], Money(Decimal("25012.34"), "USD"))
+
+    def test_a_link_lost_and_restored_during_the_download_leaves_the_whole_reading_unread(self):
+        # Gateway loses IBKR's servers and restores the same socket while
+        # the values download: the positions and open orders read before the
+        # outage are not combined with values read after it (ADR 0019: one
+        # cutoff; ADR 0025 point 5: a link lost is reconciled again), so
+        # nothing of the reading stands.
+        h = connected()
+        h.fake.summary = full_summary()
         h.fake.positions = [(ACCOUNT, contract(), Decimal("147"), 312.5)]
-        read_account(h.conn)
-        sleep = h.conn._sleep
-        state = {"armed": False, "done": False}
-        refuse = h.fake.req_account_summary
+        ask = h.fake.req_account_updates
 
-        def summary(req_id, group, tags):
-            refuse(req_id, group, tags)
-            state["armed"] = True
-
-        def outage(seconds):
-            sleep(seconds)
-            if state["armed"] and not state["done"]:
-                state["done"] = True
+        def with_outage(subscribe, account_id):
+            if subscribe:
                 h.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
                 h.fake.callbacks.error(-1, 1101, "Connectivity between IB and Trader Workstation has been "
                                                  "restored - data lost.")
-        h.fake.req_account_summary = summary
-        h.conn._sleep = outage
+            ask(subscribe, account_id)
+        h.fake.req_account_updates = with_outage
         reading = read_account(h.conn)
-        self.assertTrue(state["done"], "the outage came during the read's waits")
         while h.conn.pump(0) is not None:
             pass
         self.assertTrue(h.conn.connected, "restored on the same socket")
@@ -588,4 +634,5 @@ class AccountSummaryTests(unittest.TestCase):
                         <= reading.unread, reading.unread)
         self.assertEqual(reading.positions, {})
         self.assertEqual(reading.open_orders, [])
+        self.assertEqual(reading.balances, {})
         self.assertIn("link", reading.summary)
