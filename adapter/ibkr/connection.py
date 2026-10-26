@@ -192,12 +192,13 @@ class Connection:
 
     def _reset_account_values(self):
         # Account-values downloads asked for on this link (their tickets);
-        # whether the last one was unsubscribed before IBKR ended it; and
+        # the account whose download was unsubscribed before IBKR ended it
+        # (None when none was); and
         # the monotonic time until which the link must stay quiet of
         # account-values callbacks before the next subscription (None once
         # it has). See settle_account_values.
         self._values_asked = 0
-        self._values_unended = False
+        self._values_unended = None  # the account whose download the last read gave up on
         self._values_quiet_until = None
 
     def _reset_list_alignment(self):
@@ -324,11 +325,14 @@ class Connection:
         the last read's unsubscription, IBKR may still have rows on the way
         that it sent before the unsubscription took effect, and the 2100
         answering it. So: a download the last read gave up on before IBKR
-        ended it is waited out (its late end taken) up to request_timeout,
-        and the link is dropped if the end does not come (a late end would
-        end the next download early); then the link is pumped until no
-        account-values callback has arrived for ACCOUNT_VALUES_QUIET seconds
-        since the unsubscription, and dropped if they keep coming for
+        ended it is waited out (its late end, naming that download's
+        account, taken; an end naming another account is no end of it) up
+        to request_timeout, and the link is dropped if the end does not
+        come (a late end would end the next download early); then the link
+        is pumped until no account-values callback has arrived for
+        ACCOUNT_VALUES_QUIET seconds since the unsubscription, judged only
+        after a drain that takes every callback already queued, and
+        dropped if they keep coming for
         VOLUNTEER_MAX seconds. What is pumped here is taken as nobody's:
         no read is subscribed. The read must call this before it asks for
         anything else, since every callback pumped here is consumed.
@@ -344,8 +348,17 @@ class Connection:
         hard = self._monotonic() + VOLUNTEER_MAX
         while self._values_quiet_until is not None:
             if self._monotonic() >= self._values_quiet_until:
-                self._values_quiet_until = None
-                break
+                # A callback queued during the last wait is taken before the
+                # link is called quiet; one found counts quiet again from it
+                # (ADR 0019: one coherent cutoff).
+                while self.connected and self.pump(0) is not None:
+                    pass
+                if not self.connected:
+                    raise NotConnected("IB Gateway link is down")
+                if self._monotonic() >= self._values_quiet_until:
+                    self._values_quiet_until = None
+                    break
+                continue
             self._settle_step(min(self._values_quiet_until, hard), "account-values-unquiet", hard)
 
     def _settle_step(self, until, reason, hard=None):
@@ -389,7 +402,7 @@ class Connection:
         if not self.connected:
             return
         self.api.req_account_updates(False, account)
-        self._values_unended = self._values_unended or not ended
+        self._values_unended = self._values_unended or (None if ended else account)
         self._values_quiet_until = self._monotonic() + ACCOUNT_VALUES_QUIET
 
     def _await_list_end(self):
@@ -760,8 +773,10 @@ class Connection:
 
     def _account_values_seen(self, event):
         """Note an account-values callback for settle_account_values; an error is still applied as any other."""
-        if event.name == "account_download_end":
-            self._values_unended = False
+        # Only the unfinished download's own account ends it: an end naming
+        # another account under the login is no end of it (ADR 0025 point 5).
+        if event.name == "account_download_end" and event.args and event.args[0] == self._values_unended:
+            self._values_unended = None
         if self._values_quiet_until is not None:
             self._values_quiet_until = max(self._values_quiet_until, self._monotonic() + ACCOUNT_VALUES_QUIET)
         if event.name == "error":

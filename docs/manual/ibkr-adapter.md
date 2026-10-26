@@ -59,10 +59,11 @@ says the download is finished, then unsubscribes. Each read is a fresh
 download, and IBKR lets a program subscribe again as often as it likes.
 
 The adapter used to read the balances from IBKR's **account summary**.
-IBKR allows only two of those per connection. On 2026-10-25 IB Gateway
-10.50 never freed one when the adapter cancelled it: two reads worked,
-then every later one was refused (IBKR's code 322) for minutes, and the
-adapter stopped. The account summary is no longer used.
+IBKR allows only two of those per connection. On 2026-10-25, with IB
+Gateway 10.50, two reads worked and every later one was refused (IBKR's
+code 322) for minutes, although the adapter had cancelled each, and the
+adapter stopped. Why Gateway refused them is not confirmed. The account
+summary is no longer used.
 
 The rules have not changed:
 
@@ -97,11 +98,19 @@ The rules have not changed:
     even while the read waits for positions or open orders.
   - Before each read subscribes, the adapter waits until no account
     value has arrived for 2 seconds since the last read unsubscribed.
+    A value that arrives during the last moment of that wait still
+    counts: the adapter takes everything waiting before it calls the
+    link quiet, and the 2 seconds start again from that value.
     That clears out anything IBKR sent just before the unsubscribe took
     effect, including IBKR's code 2100 ("API client has been unsubscribed
     from account data"), which can be IBKR's answer to the adapter's own
     unsubscribe. If values keep coming for 10 seconds, the link is
     dropped and made again.
+  - If the last read gave up before IBKR finished its download, the
+    next read first waits for that download's late "finished" message.
+    Only a "finished" naming this account counts: one for another
+    account under the same login is ignored, and if this account's
+    never comes the link is dropped and made again.
 - **IBKR's errors.** Any IBKR error with no request number during the
   download makes the balances unreadable, 2100 among them. The only
   exceptions are the five notices IBKR's message-code list calls normal

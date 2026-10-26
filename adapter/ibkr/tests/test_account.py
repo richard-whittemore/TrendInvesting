@@ -211,6 +211,44 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(h.conn.connected)
         self.assertEqual(len(h.fake.called("req_account_updates")), 2, "never subscribed again on that link")
 
+    def test_an_account_value_that_lands_during_the_last_quiet_sleep_keeps_the_link_unsettled(self):
+        # Rule: ADR 0019 (one coherent cutoff): the link is quiet only once
+        # a drain after the last wait finds no account-values callback.
+        h = connected()
+        h.fake.summary = full_summary()
+        read_snapshot(h.conn)
+        quiet_from = h.clock.now
+        landed = []
+
+        def sleep(seconds):
+            h.clock.now += seconds
+            if not landed and h.clock.now >= quiet_from + 2.0:
+                landed.append(h.clock.now)
+                h.fake.callbacks.account_value("TotalCashValue", "9.99", "USD", ACCOUNT)
+
+        h.conn._sleep = sleep
+        h.conn.settle_account_values()
+        self.assertTrue(landed, "a row landed during the last sleep")
+        self.assertIsNone(h.conn.pump(0), "the row was taken by the settle, not left for the next read")
+        self.assertGreaterEqual(h.clock.now, landed[0] + 2.0, "quiet is counted again from that row")
+
+    def test_an_end_for_another_account_does_not_end_the_unfinished_download(self):
+        # Rule: ADR 0025 point 5: only the configured account's own end
+        # settles the download the last read gave up on.
+        h = connected()
+        h.conn._sleep = lambda seconds: (setattr(h.clock, "now", h.clock.now + seconds), h.fake.waited())
+        h.fake.summary = full_summary()
+        h.fake.end_summary = False
+        with self.assertRaises(SnapshotIncomplete):
+            read_snapshot(h.conn)
+        h.fake.end_summary = True
+        h.fake.in_flight.append(lambda: h.fake.callbacks.account_download_end(OTHER_ACCOUNT))
+        with self.assertRaises(SnapshotIncomplete) as caught:
+            read_snapshot(h.conn)
+        self.assertIn("connection", caught.exception.missing)
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(len(h.fake.called("req_account_updates")), 2, "never subscribed again on that link")
+
     def test_a_read_that_raises_midway_still_unsubscribes(self):
         h = connected()
         h.fake.summary = full_summary()
