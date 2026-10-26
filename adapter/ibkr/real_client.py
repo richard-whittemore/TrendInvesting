@@ -263,11 +263,11 @@ def _forwarder_class():
         def positionEnd(self):
             self._send("position_end")
 
-        def accountSummary(self, reqId, account, tag, value, currency):
-            self._send("account_summary", reqId, account, tag, value, currency)
+        def updateAccountValue(self, key, val, currency, accountName):
+            self._send("account_value", key, val, currency, accountName)
 
-        def accountSummaryEnd(self, reqId):
-            self._send("account_summary_end", reqId)
+        def accountDownloadEnd(self, accountName):
+            self._send("account_download_end", accountName)
 
         def openOrder(self, orderId, contract, order, orderState):
             self._send("open_order", orderId, contract, order, orderState)
@@ -460,11 +460,8 @@ class IbapiClient(TWSApi):
     def cancel_positions(self):
         self._client.cancelPositions()
 
-    def req_account_summary(self, req_id, group, tags):
-        self._client.reqAccountSummary(req_id, group, tags)
-
-    def cancel_account_summary(self, req_id):
-        self._client.cancelAccountSummary(req_id)
+    def req_account_updates(self, subscribe, account_id):
+        self._client.reqAccountUpdates(subscribe, account_id)
 
     def req_all_open_orders(self):
         self._client.reqAllOpenOrders()

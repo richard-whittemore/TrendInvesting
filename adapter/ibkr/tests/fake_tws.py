@@ -26,7 +26,11 @@ SERVER_TIME = 1_800_000_000
 # IBKR's refusal of an account summary while two are still counted as active
 # ("Message Codes": 322, error processing request).
 SUMMARY_LIMIT_CODE = 322
-SUMMARY_LIMIT_MESSAGE = "Error processing request: Maximum number of account summary requests exceeded."
+SUMMARY_LIMIT_MESSAGE = ("Error processing request.-'bW' : cause - Maximum number of account summary requests "
+                         "exceeded; desubscribe to previous request first")
+# The pseudo-currency label a per-currency cash row (CashBalance,
+# TotalCashBalance) carries for its total in the account's base currency.
+BASE = "BASE"
 
 
 def contract(con_id=756733, symbol="SPY", sec_type="STK", currency="USD", exchange="SMART"):
@@ -84,17 +88,41 @@ class FakeTWS(TWSApi):
         self.summary_error = None
         # The message IBKR sends with summary_error.
         self.summary_error_message = "synthetic summary failure"
-        # IBKR allows two account-summary subscriptions at a time and a
-        # cancel takes a moment to count (TWS API, reqAccountSummary): with
-        # a grace set, a request within that many seconds of the last cancel
-        # (by clock, a callable of seconds) is refused with error 322, as
-        # IB Gateway 10.50 refused one on 2026-10-25.
-        self.clock = None
-        self.summary_cancel_grace = None
-        self._summary_cancelled_at = None
-        # A code the next account summary alone is refused with (322, IBKR's
-        # limit, or another), and what happens at the adapter's next wait
-        # after that refusal (run by waited(), which a test's sleep calls).
+        # IBKR allows two account-summary subscriptions per connection
+        # (TWS API, reqAccountSummary), and on 2026-10-25 IB Gateway 10.50
+        # never freed one when it was cancelled: exactly two summaries were
+        # answered on a connection and every later one was refused with
+        # error 322, for minutes. So here too: summary_slots summaries a
+        # connection, a cancel frees none, a new connection frees them all.
+        self.summary_slots = 2
+        self._summaries_held = set()
+        # The account values (reqAccountUpdates) are answered from summary's
+        # rows, each as updateAccountValue, then accountDownloadEnd (with
+        # end_summary). With ledger_rows, a TotalCashValue in US dollars
+        # also brings the rows IBKR's key list and its own sample client
+        # (apidemo AccountInfoPanel) show beside it: the security segment's
+        # TotalCashValue-S, and the per-currency cash rows CashBalance and
+        # TotalCashBalance in US dollars and as the "BASE" total. IBKR's
+        # documentation gives TotalCashValue itself no "BASE" row.
+        # summary_error, drop_during_summary and refuse_next_summary act on
+        # that download as on a summary; an error carries IBKR's request ID
+        # -1, as an account-updates error does.
+        self.ledger_rows = True
+        # Callbacks IBKR has already sent but the adapter has not yet
+        # received (in flight): each lands at the adapter's next wait
+        # (waited) or just ahead of the answer to its next subscription,
+        # whichever comes first.
+        self.in_flight = []
+        # Whether an unsubscription is answered with IBKR's 2100 ("API client
+        # has been unsubscribed from account data"), in flight as above.
+        self.unsubscribe_notice = False
+        # A tag the next account-values download alone leaves out (it still
+        # ends), arming after_refusal for the adapter's next wait as
+        # refuse_next_summary does.
+        self.omit_next = None
+        # A code the next account read alone is refused with, and what
+        # happens at the adapter's next wait after that refusal (run by
+        # waited(), which a test's sleep calls).
         self.refuse_next_summary = None
         self.after_refusal = None
         self._at_next_wait = None
@@ -178,7 +206,9 @@ class FakeTWS(TWSApi):
             raise ConnectFailed("socket connect did not finish within {}s".format(timeout))
         if behaviour == "socket-error":
             raise ConnectionRefusedError("synthetic connection refused")
-        # An abandoned session's answers never reach the new one.
+        # An abandoned session's answers never reach the new one, and its
+        # account-summary subscriptions end with it.
+        self._summaries_held = set()
         self._later.clear()
         self._held = []
         waiting = callbacks.get
@@ -239,15 +269,14 @@ class FakeTWS(TWSApi):
 
     def req_account_summary(self, req_id, group, tags):
         self.calls.append(("req_account_summary", req_id, group, tags))
+        if len(self._summaries_held) >= self.summary_slots:
+            self.callbacks.error(req_id, SUMMARY_LIMIT_CODE, SUMMARY_LIMIT_MESSAGE)
+            return
+        self._summaries_held.add(req_id)
         if self.refuse_next_summary is not None:
             code, self.refuse_next_summary = self.refuse_next_summary, None
             self._at_next_wait, self.after_refusal = self.after_refusal, None
-            self.callbacks.error(req_id, code, SUMMARY_LIMIT_MESSAGE if code == SUMMARY_LIMIT_CODE
-                                 else "synthetic summary refusal")
-            return
-        if (self.summary_cancel_grace is not None and self._summary_cancelled_at is not None
-                and self.clock() - self._summary_cancelled_at < self.summary_cancel_grace):
-            self.callbacks.error(req_id, SUMMARY_LIMIT_CODE, SUMMARY_LIMIT_MESSAGE)
+            self.callbacks.error(req_id, code, "synthetic summary refusal")
             return
         if self.summary_error is not None:
             self.callbacks.error(req_id, self.summary_error, self.summary_error_message)
@@ -260,16 +289,59 @@ class FakeTWS(TWSApi):
         if self.end_summary:
             self.callbacks.account_summary_end(req_id)
 
+    def cancel_account_summary(self, req_id):
+        # Recorded, but the subscription stays counted (see summary_slots).
+        self.calls.append(("cancel_account_summary", req_id))
+
+    def req_account_updates(self, subscribe, account_id):
+        self.calls.append(("req_account_updates", subscribe, account_id))
+        if not subscribe:
+            if self.unsubscribe_notice:
+                self.in_flight.append(lambda: self.callbacks.error(
+                    -1, 2100, "API client has been unsubscribed from account data."))
+            return
+        self.land_in_flight()
+        if self.refuse_next_summary is not None:
+            code, self.refuse_next_summary = self.refuse_next_summary, None
+            self._at_next_wait, self.after_refusal = self.after_refusal, None
+            self.callbacks.error(-1, code, "synthetic account-values refusal")
+            return
+        if self.summary_error is not None:
+            self.callbacks.error(-1, self.summary_error, self.summary_error_message)
+            return
+        omit, self.omit_next = self.omit_next, None
+        if omit is not None:
+            self._at_next_wait, self.after_refusal = self.after_refusal, None
+        rows = []
+        for account, tag, value, currency in self.summary:
+            if tag == omit:
+                continue
+            rows.append((tag, value, currency, account))
+            if self.ledger_rows and tag == "TotalCashValue" and currency == "USD":
+                rows.extend([("TotalCashValue-S", value, currency, account),
+                             ("CashBalance", value, currency, account), ("CashBalance", value, BASE, account),
+                             ("TotalCashBalance", value, currency, account),
+                             ("TotalCashBalance", value, BASE, account)])
+        for i, row in enumerate(rows):
+            if self.drop_during_summary and i == 1:
+                self.drop()
+                return
+            self.callbacks.account_value(*row)
+        if self.end_summary:
+            self.callbacks.account_download_end(account_id)
+
     def waited(self):
-        """The adapter waited (its sleep): run what refuse_next_summary's refusal left for its next wait."""
+        """The adapter waited (its sleep): land what was in flight and run what refuse_next_summary's refusal left."""
+        self.land_in_flight()
         act, self._at_next_wait = self._at_next_wait, None
         if act is not None:
             act()
 
-    def cancel_account_summary(self, req_id):
-        self.calls.append(("cancel_account_summary", req_id))
-        if self.clock is not None:
-            self._summary_cancelled_at = self.clock()
+    def land_in_flight(self):
+        """Deliver every callback in flight (in_flight), in the order IBKR sent them."""
+        landing, self.in_flight = self.in_flight, []
+        for send in landing:
+            send()
 
     # -- orders ----------------------------------------------------------
     def req_all_open_orders(self):

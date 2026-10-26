@@ -31,6 +31,19 @@ FIRST_NOTICE_CODE = 2100
 # The adapter's note, queued in the Inbox, that it has just asked for every
 # open order (see Connection.ask_all_open_orders).
 OPEN_ORDERS_ASKED = "open_orders_asked"
+# The adapter's note, queued in the Inbox just before it subscribes to the
+# account's values, carrying that download's ticket (see
+# Connection.ask_account_values).
+ACCOUNT_VALUES_ASKED = "account_values_asked"
+NOTES = (OPEN_ORDERS_ASKED, ACCOUNT_VALUES_ASKED)
+# The callbacks of an account-values subscription (reqAccountUpdates), and
+# IBKR's 2100, "API client has been unsubscribed from account data", which
+# may answer the adapter's own unsubscription: none carries a request ID.
+ACCOUNT_VALUE_MESSAGES = ("account_value", "account_download_end")
+CODE_ACCOUNT_UNSUBSCRIBED = 2100
+# After an unsubscription, how long the link must bring no account-values
+# callback before the next subscription (see Connection.settle_account_values).
+ACCOUNT_VALUES_QUIET = 2.0
 # Where one open-order list stands (Connection.open_order_list): callbacks
 # still older than the request, the list being answered, or its end taken.
 LIST_BEFORE = "before"
@@ -53,15 +66,6 @@ LIST_MESSAGES = ("open_order", "open_order_end")
 # both, so request IDs start far above any order ID an account reaches
 # (IBKR's are 32-bit) and an error on a request never names an order.
 REQUEST_ID_BASE = 1 << 30
-# IBKR allows at most two account-summary subscriptions at a time (TWS API,
-# reqAccountSummary), and a cancel takes a moment to count: on 2026-10-25 IB
-# Gateway 10.50 refused (error 322) each summary asked for within a second
-# of cancelling the one before. So a summary is asked for no sooner than
-# this many seconds after the last one was cancelled
-# (Connection.pace_account_summary). The pacing keeps IBKR from refusing a
-# summary, whose balances would otherwise stay unread (ADR 0019: an unavailable
-# balance is not zero).
-ACCOUNT_SUMMARY_SPACING = 3.0
 # How long one sleep of Connection.pause lasts at most, so the callbacks
 # that arrive meanwhile are applied (and fanned out) at least this often;
 # a link change ends the wait early (ADR 0025 point 5).
@@ -183,11 +187,19 @@ class Connection:
         # Order IDs placed on this session, whose openOrder echo is expected
         # traffic, not a stray (see placing).
         self._placed = set()
-        # Monotonic time from which a new account summary may be asked for
-        # (see pace_account_summary; ADR 0019: a refused summary leaves its
-        # balances unread, never zero); None before any was cancelled.
-        self._summary_free_at = None
         self._reset_list_alignment()
+        self._reset_account_values()
+
+    def _reset_account_values(self):
+        # Account-values downloads asked for on this link (their tickets);
+        # the account whose download was unsubscribed before IBKR ended it
+        # (None when none was); and
+        # the monotonic time until which the link must stay quiet of
+        # account-values callbacks before the next subscription (None once
+        # it has). See settle_account_values.
+        self._values_asked = 0
+        self._values_unended = None  # the account whose download the last read gave up on
+        self._values_quiet_until = None
 
     def _reset_list_alignment(self):
         # The volunteered rows and end connect kept for pump(), which are
@@ -304,6 +316,102 @@ class Connection:
         self.api.req_all_open_orders()
         return self._lists_requested
 
+    def settle_account_values(self):
+        """Bring the link level with IBKR's account values before a read subscribes to them; NotConnected if it cannot.
+
+        IBKR's account values (updateAccountValue, accountDownloadEnd, and
+        the 2100 that may answer an unsubscription) carry no request ID, so
+        nothing in a callback tells one subscription's from the next. After
+        the last read's unsubscription, IBKR may still have rows on the way
+        that it sent before the unsubscription took effect, and the 2100
+        answering it. So: a download the last read gave up on before IBKR
+        ended it is waited out (its late end, naming that download's
+        account, taken; an end naming another account is no end of it) up
+        to request_timeout, and the link is dropped if the end does not
+        come (a late end would end the next download early); then the link
+        is pumped until no account-values callback has arrived for
+        ACCOUNT_VALUES_QUIET seconds since the unsubscription, judged only
+        after a drain that takes every callback already queued, and
+        dropped if they keep coming for
+        VOLUNTEER_MAX seconds, that drain included. What is pumped here is taken as nobody's:
+        no read is subscribed. The read must call this before it asks for
+        anything else, since every callback pumped here is consumed.
+
+        Rule: ADR 0019 (one coherent cutoff; an unavailable balance is not
+        zero) and ADR 0025 point 5 (a late answer must not complete a later
+        read).
+        """
+        self.require_connected()
+        deadline = self._monotonic() + self.config.request_timeout
+        while self._values_unended:
+            self._settle_step(deadline, "account-values-unended")
+        hard = self._monotonic() + VOLUNTEER_MAX
+        while self._values_quiet_until is not None:
+            if self._monotonic() >= self._values_quiet_until:
+                # A callback queued during the last wait is taken before the
+                # link is called quiet; one found counts quiet again from it
+                # (ADR 0019: one coherent cutoff). The drain is held to the
+                # same hard bound as every other settle step (ADR 0019:
+                # bounded waits), one slice past it as _settle_step allows.
+                while self.connected and self.pump(0) is not None:
+                    if self._monotonic() >= hard + PAUSE_SLICE:
+                        self._drop_unlevel("account-values-unquiet")
+                if not self.connected:
+                    raise NotConnected("IB Gateway link is down")
+                if self._monotonic() >= self._values_quiet_until:
+                    self._values_quiet_until = None
+                    break
+                continue
+            self._settle_step(min(self._values_quiet_until, hard), "account-values-unquiet", hard)
+
+    def _settle_step(self, until, reason, hard=None):
+        """One step of settle_account_values: take a callback or wait; drop the link and raise once past the bound."""
+        if not self.connected:
+            raise NotConnected("IB Gateway link is down")
+        bound = until if hard is None else hard
+        taken = self.pump(0) is not None
+        now = self._monotonic()
+        # A callback already here is taken before the bound is checked; a
+        # stream that never lets up is still bounded, one slice past it.
+        if (now >= bound + PAUSE_SLICE) if taken else (now >= bound):
+            self._drop_unlevel(reason)
+        if not taken:
+            self._sleep(max(0.0, min(PAUSE_SLICE, until - now)))
+
+    def _drop_unlevel(self, reason):
+        """Drop a link not level with IBKR's account values and raise NotConnected."""
+        log.info("ibkr account values: the link is not level with IBKR's account values (%s), so it is "
+                 "made again", reason)
+        self.drop(reason)
+        raise NotConnected("IB Gateway link dropped: {}".format(reason))
+
+    def ask_account_values(self, account):
+        """Subscribe to account's values (reqAccountUpdates); return the download's ticket.
+
+        The request is noted in the Inbox, with the ticket, just before it is
+        sent: every account-values callback queued ahead of the note arrived
+        before the subscription and is no part of its download
+        (account.AccountValues). Call settle_account_values first.
+        """
+        self.require_connected()
+        self._values_asked += 1
+        self.inbox.note(ACCOUNT_VALUES_ASKED, self._values_asked)
+        self.api.req_account_updates(True, account)
+        return self._values_asked
+
+    def end_account_values(self, account, ended):
+        """Unsubscribe from account's values if the link is up; ended says whether IBKR ended the download.
+
+        The next read settles the link first (settle_account_values): a
+        dead socket ends every subscription itself, and a new link starts
+        level.
+        """
+        if not self.connected:
+            return
+        self.api.req_account_updates(False, account)
+        self._values_unended = self._values_unended or (None if ended else account)
+        self._values_quiet_until = self._monotonic() + ACCOUNT_VALUES_QUIET
+
     def _await_list_end(self):
         """Take callbacks until the outstanding open-order list ends; drop the link if it does not in request_timeout."""
         for _ in self.events(self.config.request_timeout):
@@ -383,36 +491,6 @@ class Connection:
         """
         self._placed.add(order_id)
 
-    def cancel_account_summary(self, req_id):
-        """Cancel the account summary req_id; the next is asked no sooner than ACCOUNT_SUMMARY_SPACING after.
-
-        Rule: ADR 0019 (an unavailable balance is not zero): IBKR counts a cancel
-        late, and a refused summary leaves its balances unread. Callers must ask
-        for the next summary through pace_account_summary, never req_account_summary
-        directly.
-        """
-        self.api.cancel_account_summary(req_id)
-        self._summary_free_at = self._monotonic() + ACCOUNT_SUMMARY_SPACING
-
-    def pace_account_summary(self):
-        """Wait, applying callbacks, until IBKR can have counted the last summary's cancel (ACCOUNT_SUMMARY_SPACING).
-
-        The pacing holds across a reconnect too: it costs a few seconds, and
-        whether IBKR frees a session's subscriptions as soon as its socket
-        closes is not documented.
-
-        Rule: ADR 0019 (an unavailable balance is not zero). Callers must call
-        this before every req_account_summary, and treat a link change during
-        the wait as a cut-off (ADR 0025 point 5).
-        """
-        if self._summary_free_at is None:
-            return
-        wait = self._summary_free_at - self._monotonic()
-        if wait > 0:
-            log.info("ibkr account summary waits %.1fs after the last one's cancel: IBKR allows two at a time and "
-                     "counts a cancel late (error 322)", wait)
-            self.pause(wait)
-
     def pause(self, seconds):
         """Wait seconds (the injected sleep), applying every callback as it arrives; ends early if the link changes.
 
@@ -471,6 +549,7 @@ class Connection:
         self._list_ends = 0
         self._placed = set()
         self._reset_list_alignment()
+        self._reset_account_values()
         # One deadline covers the socket connect, IBKR's handshake and the
         # wait for nextValidId: EClient.connect is synchronous, so a deadline
         # started after it returns would not bound a stalled socket.
@@ -640,7 +719,7 @@ class Connection:
         if event is None:
             return None
         self._apply(event)
-        if event.name == OPEN_ORDERS_ASKED:
+        if event.name in NOTES:
             return event  # the adapter's own note, not IBKR's callback
         for handler in self._subscribers:
             handler(event)
@@ -668,6 +747,9 @@ class Connection:
                 self._report("disconnected", "connection-closed")
         elif event.name == OPEN_ORDERS_ASKED:
             self._lists_noted += 1
+        elif event.name in ACCOUNT_VALUE_MESSAGES or (
+                event.name == "error" and len(event.args) >= 2 and event.args[1] == CODE_ACCOUNT_UNSUBSCRIBED):
+            self._account_values_seen(event)
         elif event.name in LIST_MESSAGES and self._list_ends >= self._lists_noted and self._volunteered:
             self._volunteered -= 1  # Gateway's volunteered list, which connect took
         elif event.name == "open_order":
@@ -694,6 +776,17 @@ class Connection:
             self.last_server_time = event.args[0]
             self._probe_sent_at = None
         elif event.name == "error":
+            self._apply_error(event.args[1])
+
+    def _account_values_seen(self, event):
+        """Note an account-values callback for settle_account_values; an error is still applied as any other."""
+        # Only the unfinished download's own account ends it: an end naming
+        # another account under the login is no end of it (ADR 0025 point 5).
+        if event.name == "account_download_end" and event.args and event.args[0] == self._values_unended:
+            self._values_unended = None
+        if self._values_quiet_until is not None:
+            self._values_quiet_until = max(self._values_quiet_until, self._monotonic() + ACCOUNT_VALUES_QUIET)
+        if event.name == "error":
             self._apply_error(event.args[1])
 
     def _is_echo(self, event):

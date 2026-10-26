@@ -214,25 +214,16 @@ ENGINE_WAIT_POLL = 0.05
 # never sent as zero; the adapter stops for a person instead.
 SNAPSHOT_ATTEMPTS = 3
 # The seconds one delivery waits before reading the account again for a
-# broker snapshot after a reading left a component unread: IBKR's refusals
-# of an account summary (its limit of two at a time, error 322) and a
-# Gateway briefly without IBKR's servers pass in seconds, and three reads
-# back to back stopped the adapter for good on 2026-10-25. So a broker
-# snapshot is read at most BROKER_SNAPSHOT_ATTEMPTS times, waiting 50 s in
-# all between them. Each attempt's reads come on top: up to two account
-# reads (the second only after a complete first). Each read is paced up to
-# ACCOUNT_SUMMARY_SPACING (3 s) before its first ask and again before each
-# of its two 322 re-asks, and waits out IBKR's 322 for 5 s and 15 s
-# (snapshot.SUMMARY_LIMIT_WAITS): at most 3 x 3 + 20 = 29 s of waits a
-# read, so at most 50 + 4 x 2 x 29 = 282 s in all, plus every request's
-# own wait, up to its request_timeout or mark_timeout. A pace waits only
-# what is left of the 3 s since the last cancel, so one after a wait of
-# 5 s or more costs nothing: with answers that come at once and a summary
-# IBKR keeps refusing (no read complete, so one read an attempt), the
-# attempts take 50 + 3 + 4 x 20 = 133 s plus the requests' own time; with
-# requests that time out it is longer, so no total is promised. The stop
-# (SnapshotRefused) states the time the attempts actually took. Rule: ADR 0019
-# (an unavailable balance is not zero): a wait only postpones a read; a snapshot
+# broker snapshot after a reading left a component unread: a Gateway briefly
+# without IBKR's servers, or an account-values download IBKR did not finish,
+# passes in seconds, and three reads back to back stopped the adapter for
+# good on 2026-10-25. So a broker snapshot is read at most
+# BROKER_SNAPSHOT_ATTEMPTS times, waiting 50 s in all between them. Each
+# attempt's reads come on top: up to two account reads (the second only
+# after a complete first), each up to its request_timeout, and the marks up
+# to mark_timeout, so no total is promised. The stop (SnapshotRefused)
+# states the time the attempts actually took. Rule: ADR 0019 (an
+# unavailable balance is not zero): a wait only postpones a read; a snapshot
 # still incomplete after the last attempt is refused, never completed with zeros.
 SNAPSHOT_RETRY_WAITS = (5.0, 15.0, 30.0)
 BROKER_SNAPSHOT_ATTEMPTS = len(SNAPSHOT_RETRY_WAITS) + 1
@@ -532,7 +523,7 @@ class AdapterLoop:
                 self._unended(reading)
             self._link_unchanged(changes)
             if reading.unread:
-                raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread; the account summary "
+                raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread; the account values "
                                           "{}); nothing is sent until a read is complete (ADR 0019: an unavailable "
                                           "balance is not zero)".format(", ".join(sorted(reading.unread)),
                                                                         reading.summary))
@@ -622,20 +613,20 @@ class AdapterLoop:
                      "read")
             return False
         if unread:
-            # Read again at most SNAPSHOT_ATTEMPTS times in a row (each
-            # account summary paced, snapshot.read_account): a component IBKR never gives
+            # Read again at most SNAPSHOT_ATTEMPTS times in a row
+            # (snapshot.read_account): a component IBKR never gives
             # would otherwise hold the day's stream behind the reconciliation
             # in silence (fail closed and tell a person, AGENTS.md). An unread
             # component is never sent as zero (ADR 0019: an unavailable balance
             # is not zero).
             self._reconciliation_unread += 1
             log.info("ibkr reconciliation read again next step (attempt %d of %d): %s could not be read; the "
-                     "account summary %s", self._reconciliation_unread, SNAPSHOT_ATTEMPTS, ",".join(unread),
+                     "account values %s", self._reconciliation_unread, SNAPSHOT_ATTEMPTS, ",".join(unread),
                      reading.summary)
             if self._reconciliation_unread >= SNAPSHOT_ATTEMPTS:
                 raise ReconcileIncomplete(
                     "the reconciliation owed after the start or reconnect could not be read in {} attempts ({} "
-                    "could not be read; the last account summary {}), so no stream input is sent: a reconciliation with values IBKR did not "
+                    "could not be read; the last account values {}), so no stream input is sent: a reconciliation with values IBKR did not "
                     "give would compare nothing (ADR 0019: an unavailable balance is not zero). Check IB "
                     "Gateway's link and the account's currency and positions, then start the adapter again "
                     "(docs/manual/market-data.md, \"What happens to the file\")".format(
@@ -884,7 +875,7 @@ class AdapterLoop:
                 unread = sorted(incomplete)
                 summary = (confirm if confirm is not None and confirm.unread else reading).summary
                 log.info("ibkr broker snapshot read again (attempt %d of %d): %s could not be read; the account "
-                         "summary %s", attempt, BROKER_SNAPSHOT_ATTEMPTS, ",".join(unread), summary)
+                         "values %s", attempt, BROKER_SNAPSHOT_ATTEMPTS, ",".join(unread), summary)
                 continue
             if _holdings(reading) != _holdings(confirm):
                 log.info("ibkr broker snapshot read again (attempt %d of %d): the account's holdings, open orders "
@@ -924,7 +915,7 @@ class AdapterLoop:
         if unread is not None:
             raise SnapshotRefused(
                 "the account could not be read in full for the broker snapshot in {} attempts over {:.0f} seconds "
-                "({} could not be read; the last account summary {}), so the day's stream is not delivered: a "
+                "({} could not be read; the last account values {}), so the day's stream is not delivered: a "
                 "snapshot with values IBKR did not give would withhold the sale back to 98% for nothing. Check IB "
                 "Gateway's link and the account's currency and positions, then start the adapter again "
                 "(docs/manual/ibkr-adapter.md, \"What can go wrong\")".format(

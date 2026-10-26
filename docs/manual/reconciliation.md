@@ -207,8 +207,9 @@ to the private channel for the reasons, which can carry amounts.
 
 ## What the adapter sends
 
-The adapter reads positions, the account summary (net liquidation, total cash,
-Excess Liquidity) and every open order in one pass, then asks IBKR the time.
+The adapter reads positions, the account values (net liquidation, total cash,
+Excess Liquidity, from IBKR's account updates: [the IBKR adapter](ibkr-adapter.md),
+"How the balances are read") and every open order in one pass, then asks IBKR the time.
 The open orders in the records below are the list taken in that one-pass
 read. The rule of two agreeing reads (and the stop after three disagreements)
 belongs to the start's and reconnect's reconciliation read, described at the

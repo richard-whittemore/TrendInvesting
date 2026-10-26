@@ -5,7 +5,6 @@ gateway (adapter/ibkr/tests/fake_tws.py, invented account and figures) in
 place of ibapi and IB Gateway, which the container does not have.
 """
 import sys
-import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -35,11 +34,10 @@ gateway.summary = [(ACCOUNT, "NetLiquidation", Decimal("100000"), "USD"),
                    (ACCOUNT, "TotalCashValue", Decimal("100000"), "USD"),
                    (ACCOUNT, "ExcessLiquidity", Decimal("100000"), "USD")]
 gateway.positions = []
-# As IB Gateway 10.50 did on 2026-10-25: an account summary asked for within
-# a second of cancelling the one before is refused with IBKR's error 322
-# (two at a time, a cancel counted late), which the adapter must wait out.
-gateway.clock = time.monotonic
-gateway.summary_cancel_grace = 1.0
+# As IB Gateway 10.50 did on 2026-10-25: two account summaries a connection,
+# a cancel frees neither, every later one refused with IBKR's error 322. The
+# adapter reads its balances from the account values, so it never meets it.
+gateway.summary_slots = 2
 sys.exit(main(sys.argv[3:], api_factory=lambda cfg: gateway,
               ibapi_version=lambda: tuple(int(p) for p in pin[0].split(".")),
               protobuf_version=lambda: pin[2]))

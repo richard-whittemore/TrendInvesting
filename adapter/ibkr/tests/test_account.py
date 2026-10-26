@@ -11,6 +11,7 @@ if tests_dir not in sys.path:
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, SERVER_TIME, contract
 from test_connection import Harness
 from account import read_snapshot, Money, SnapshotIncomplete, SnapshotInvalid
+from connection import NotConnected, PAUSE_SLICE, VOLUNTEER_MAX
 
 
 def full_summary(account=ACCOUNT):
@@ -48,15 +49,16 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snap.server_time_completed, SERVER_TIME + 1)
         self.assertIsNotNone(snap.received_at.tzinfo)
         self.assertIn(("cancel_positions",), h.fake.calls)
-        self.assertEqual(len(h.fake.called("cancel_account_summary")), 1)
+        self.assertEqual(h.fake.called("req_account_updates"),
+                         [("req_account_updates", True, ACCOUNT), ("req_account_updates", False, ACCOUNT)])
 
-    def test_summary_requests_exactly_the_three_balances(self):
+    def test_the_balances_are_the_configured_accounts_values_never_an_account_summary(self):
         h = connected()
         h.fake.summary = full_summary()
-        read_snapshot(h.conn)
-        _, _, group, tags = h.fake.called("req_account_summary")[0]
-        self.assertEqual(group, "All")
-        self.assertEqual(set(tags.split(",")), {"NetLiquidation", "TotalCashValue", "ExcessLiquidity"})
+        for _ in range(4):
+            read_snapshot(h.conn)
+        self.assertEqual(h.fake.called("req_account_summary"), [])
+        self.assertEqual({c[2] for c in h.fake.called("req_account_updates")}, {ACCOUNT})
 
     def test_a_missing_balance_is_not_zero(self):
         h = connected()
@@ -179,6 +181,109 @@ class SnapshotTests(unittest.TestCase):
         h.fake.positions = [(ACCOUNT, contract(), Decimal("1"), 1.0)] * 2
         with self.assertRaises(SnapshotInvalid):
             read_snapshot(h.conn)
+
+    def test_a_read_that_gives_up_unsubscribes_and_the_next_waits_for_the_late_end_first(self):
+        # Rule: ADR 0025 point 5 (a late answer must not complete a later
+        # read) and ADR 0019 (one cutoff): the late end of a download the
+        # last read gave up on is taken before the next one is asked for.
+        h = connected()
+        h.conn._sleep = lambda seconds: (setattr(h.clock, "now", h.clock.now + seconds), h.fake.waited())
+        h.fake.summary = full_summary()
+        h.fake.end_summary = False
+        with self.assertRaises(SnapshotIncomplete):
+            read_snapshot(h.conn)
+        self.assertEqual(h.fake.called("req_account_updates")[-1], ("req_account_updates", False, ACCOUNT))
+        h.fake.end_summary = True
+        h.fake.in_flight.append(lambda: h.fake.callbacks.account_download_end(ACCOUNT))
+        snap = read_snapshot(h.conn)
+        self.assertEqual(snap.total_cash, Money(Decimal("512.30"), "USD"))
+
+    def test_a_read_after_one_whose_download_never_ended_drops_the_link_instead(self):
+        h = connected()
+        h.conn._sleep = lambda seconds: setattr(h.clock, "now", h.clock.now + seconds)
+        h.fake.summary = full_summary()
+        h.fake.end_summary = False
+        with self.assertRaises(SnapshotIncomplete):
+            read_snapshot(h.conn)
+        h.fake.end_summary = True
+        with self.assertRaises(SnapshotIncomplete) as caught:
+            read_snapshot(h.conn)
+        self.assertIn("connection", caught.exception.missing)
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(len(h.fake.called("req_account_updates")), 2, "never subscribed again on that link")
+
+    def test_an_account_value_that_lands_during_the_last_quiet_sleep_keeps_the_link_unsettled(self):
+        # Rule: ADR 0019 (one coherent cutoff): the link is quiet only once
+        # a drain after the last wait finds no account-values callback.
+        h = connected()
+        h.fake.summary = full_summary()
+        read_snapshot(h.conn)
+        quiet_from = h.clock.now
+        landed = []
+
+        def sleep(seconds):
+            h.clock.now += seconds
+            if not landed and h.clock.now >= quiet_from + 2.0:
+                landed.append(h.clock.now)
+                h.fake.callbacks.account_value("TotalCashValue", "9.99", "USD", ACCOUNT)
+
+        h.conn._sleep = sleep
+        h.conn.settle_account_values()
+        self.assertTrue(landed, "a row landed during the last sleep")
+        self.assertIsNone(h.conn.pump(0), "the row was taken by the settle, not left for the next read")
+        self.assertGreaterEqual(h.clock.now, landed[0] + 2.0, "quiet is counted again from that row")
+
+    def test_a_flood_during_the_final_drain_is_bounded_by_volunteer_max_and_drops_the_link(self):
+        # Rule: ADR 0019 (bounded waits): the drain taken before the link is
+        # called quiet is held to the settle's own VOLUNTEER_MAX bound, so a
+        # stream that never lets up drops the link instead of pumping forever.
+        h = connected()
+        h.fake.summary = full_summary()
+        read_snapshot(h.conn)
+        start = h.clock.now
+        h.conn._sleep = lambda seconds: setattr(h.clock, "now", h.clock.now + seconds)
+        pump = h.conn.pump
+        calls = []
+
+        def flooding_pump(timeout):
+            calls.append(timeout)
+            if len(calls) > 100000:
+                raise AssertionError("the final drain never stopped")
+            if h.clock.now >= start + 2.0:
+                h.clock.now += 0.01
+                h.fake.callbacks.account_value("TotalCashValue", "9.99", "USD", ACCOUNT)
+            return pump(timeout)
+
+        h.conn.pump = flooding_pump
+        with self.assertRaises(NotConnected):
+            h.conn.settle_account_values()
+        self.assertFalse(h.conn.connected, "the link is dropped, as when the quiet wait runs out")
+        self.assertLessEqual(h.clock.now, start + VOLUNTEER_MAX + PAUSE_SLICE + 0.01)
+
+    def test_an_end_for_another_account_does_not_end_the_unfinished_download(self):
+        # Rule: ADR 0025 point 5: only the configured account's own end
+        # settles the download the last read gave up on.
+        h = connected()
+        h.conn._sleep = lambda seconds: (setattr(h.clock, "now", h.clock.now + seconds), h.fake.waited())
+        h.fake.summary = full_summary()
+        h.fake.end_summary = False
+        with self.assertRaises(SnapshotIncomplete):
+            read_snapshot(h.conn)
+        h.fake.end_summary = True
+        h.fake.in_flight.append(lambda: h.fake.callbacks.account_download_end(OTHER_ACCOUNT))
+        with self.assertRaises(SnapshotIncomplete) as caught:
+            read_snapshot(h.conn)
+        self.assertIn("connection", caught.exception.missing)
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(len(h.fake.called("req_account_updates")), 2, "never subscribed again on that link")
+
+    def test_a_read_that_raises_midway_still_unsubscribes(self):
+        h = connected()
+        h.fake.summary = full_summary()
+        h.fake.positions = [(ACCOUNT, contract(), Decimal("1"), 1.0)] * 2
+        with self.assertRaises(SnapshotInvalid):
+            read_snapshot(h.conn)
+        self.assertEqual(h.fake.called("req_account_updates")[-1], ("req_account_updates", False, ACCOUNT))
 
     def test_disconnected_refuses_to_read(self):
         h = Harness()

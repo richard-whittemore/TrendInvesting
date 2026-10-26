@@ -42,6 +42,12 @@ class TWSApi:
     the defaults the paper test confirms from IBKR's own view of the order
     (not every field ibapi's Order has). IBKR answers on the Inbox.
 
+    req_account_updates(True, account_id) subscribes to the account's values
+    (TWS API reqAccountUpdates): IBKR answers each as account_value and ends
+    the download with account_download_end, both naming the account and
+    neither carrying a request ID; req_account_updates(False, account_id)
+    unsubscribes. One subscription per client, asked for again freely.
+
     req_mkt_data asks for one market-data snapshot of a contract (a plain
     object with conId, symbol, secType, currency and exchange, as
     place_order's contract): IBKR answers with tick_price callbacks under
@@ -71,10 +77,7 @@ class TWSApi:
     def cancel_positions(self):
         raise NotImplementedError
 
-    def req_account_summary(self, req_id, group, tags):
-        raise NotImplementedError
-
-    def cancel_account_summary(self, req_id):
+    def req_account_updates(self, subscribe, account_id):
         raise NotImplementedError
 
     def req_all_open_orders(self):
@@ -119,8 +122,8 @@ class Inbox:
         "current_time",         # (epoch_seconds)
         "position",             # (account, contract, position, avg_cost)
         "position_end",         # ()
-        "account_summary",      # (req_id, account, tag, value, currency)
-        "account_summary_end",  # (req_id)
+        "account_value",        # (key, value, currency, account)
+        "account_download_end",  # (account)
         "open_order",           # (order_id, contract, order, order_state)
         "open_order_end",       # ()
         "order_status",         # (order_id, status, filled, remaining, avg_fill_price, perm_id,
@@ -135,14 +138,15 @@ class Inbox:
     def __init__(self):
         self._queue = queue.Queue()
 
-    def note(self, name):
-        """Queue the adapter's own note name behind every callback already received.
+    def note(self, name, *args):
+        """Queue the adapter's own note name (with args) behind every callback already received.
 
-        Not a callback: Connection.ask_all_open_orders notes a request here
-        just before it is sent, so whatever is queued ahead of the note
-        arrived before the request left and cannot be its answer.
+        Not a callback: Connection.ask_all_open_orders and
+        Connection.ask_account_values note a request here just before it is
+        sent, so whatever is queued ahead of the note arrived before the
+        request left and cannot be its answer.
         """
-        self._queue.put(Event(name, ()))
+        self._queue.put(Event(name, args))
 
     def get(self, timeout):
         """Return the next callback, or None if none arrives within timeout seconds."""
