@@ -333,7 +333,7 @@ class Connection:
         ACCOUNT_VALUES_QUIET seconds since the unsubscription, judged only
         after a drain that takes every callback already queued, and
         dropped if they keep coming for
-        VOLUNTEER_MAX seconds. What is pumped here is taken as nobody's:
+        VOLUNTEER_MAX seconds, that drain included. What is pumped here is taken as nobody's:
         no read is subscribed. The read must call this before it asks for
         anything else, since every callback pumped here is consumed.
 
@@ -350,9 +350,12 @@ class Connection:
             if self._monotonic() >= self._values_quiet_until:
                 # A callback queued during the last wait is taken before the
                 # link is called quiet; one found counts quiet again from it
-                # (ADR 0019: one coherent cutoff).
+                # (ADR 0019: one coherent cutoff). The drain is held to the
+                # same hard bound as every other settle step (ADR 0019:
+                # bounded waits), one slice past it as _settle_step allows.
                 while self.connected and self.pump(0) is not None:
-                    pass
+                    if self._monotonic() >= hard + PAUSE_SLICE:
+                        self._drop_unlevel("account-values-unquiet")
                 if not self.connected:
                     raise NotConnected("IB Gateway link is down")
                 if self._monotonic() >= self._values_quiet_until:
@@ -371,12 +374,16 @@ class Connection:
         # A callback already here is taken before the bound is checked; a
         # stream that never lets up is still bounded, one slice past it.
         if (now >= bound + PAUSE_SLICE) if taken else (now >= bound):
-            log.info("ibkr account values: the link is not level with IBKR's account values (%s), so it is "
-                     "made again", reason)
-            self.drop(reason)
-            raise NotConnected("IB Gateway link dropped: {}".format(reason))
+            self._drop_unlevel(reason)
         if not taken:
             self._sleep(max(0.0, min(PAUSE_SLICE, until - now)))
+
+    def _drop_unlevel(self, reason):
+        """Drop a link not level with IBKR's account values and raise NotConnected."""
+        log.info("ibkr account values: the link is not level with IBKR's account values (%s), so it is "
+                 "made again", reason)
+        self.drop(reason)
+        raise NotConnected("IB Gateway link dropped: {}".format(reason))
 
     def ask_account_values(self, account):
         """Subscribe to account's values (reqAccountUpdates); return the download's ticket.

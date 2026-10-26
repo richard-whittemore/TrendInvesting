@@ -104,8 +104,9 @@ The rules have not changed:
     That clears out anything IBKR sent just before the unsubscribe took
     effect, including IBKR's code 2100 ("API client has been unsubscribed
     from account data"), which can be IBKR's answer to the adapter's own
-    unsubscribe. If values keep coming for 10 seconds, the link is
-    dropped and made again.
+    unsubscribe. If values keep coming for 10 seconds, even while the
+    adapter is taking everything waiting, the link is dropped and made
+    again.
   - If the last read gave up before IBKR finished its download, the
     next read first waits for that download's late "finished" message.
     Only a "finished" naming this account counts: one for another

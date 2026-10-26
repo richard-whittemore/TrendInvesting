@@ -11,6 +11,7 @@ if tests_dir not in sys.path:
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, SERVER_TIME, contract
 from test_connection import Harness
 from account import read_snapshot, Money, SnapshotIncomplete, SnapshotInvalid
+from connection import NotConnected, PAUSE_SLICE, VOLUNTEER_MAX
 
 
 def full_summary(account=ACCOUNT):
@@ -231,6 +232,33 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(landed, "a row landed during the last sleep")
         self.assertIsNone(h.conn.pump(0), "the row was taken by the settle, not left for the next read")
         self.assertGreaterEqual(h.clock.now, landed[0] + 2.0, "quiet is counted again from that row")
+
+    def test_a_flood_during_the_final_drain_is_bounded_by_volunteer_max_and_drops_the_link(self):
+        # Rule: ADR 0019 (bounded waits): the drain taken before the link is
+        # called quiet is held to the settle's own VOLUNTEER_MAX bound, so a
+        # stream that never lets up drops the link instead of pumping forever.
+        h = connected()
+        h.fake.summary = full_summary()
+        read_snapshot(h.conn)
+        start = h.clock.now
+        h.conn._sleep = lambda seconds: setattr(h.clock, "now", h.clock.now + seconds)
+        pump = h.conn.pump
+        calls = []
+
+        def flooding_pump(timeout):
+            calls.append(timeout)
+            if len(calls) > 100000:
+                raise AssertionError("the final drain never stopped")
+            if h.clock.now >= start + 2.0:
+                h.clock.now += 0.01
+                h.fake.callbacks.account_value("TotalCashValue", "9.99", "USD", ACCOUNT)
+            return pump(timeout)
+
+        h.conn.pump = flooding_pump
+        with self.assertRaises(NotConnected):
+            h.conn.settle_account_values()
+        self.assertFalse(h.conn.connected, "the link is dropped, as when the quiet wait runs out")
+        self.assertLessEqual(h.clock.now, start + VOLUNTEER_MAX + PAUSE_SLICE + 0.01)
 
     def test_an_end_for_another_account_does_not_end_the_unfinished_download(self):
         # Rule: ADR 0025 point 5: only the configured account's own end
