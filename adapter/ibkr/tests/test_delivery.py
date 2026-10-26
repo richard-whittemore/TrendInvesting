@@ -42,9 +42,9 @@ from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, LoggedEngine, ru
 from fake_tws import ACCOUNT, FakeTWS, contract, execution
 from test_connection import Clock, config
 from test_loop import COMMISSION_WAIT, RECEIVED, SUMMARY, Ids, Unanswered
-from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, StreamRefused, market_open,
+from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, SnapshotRefused, StreamRefused, market_open,
                       read_stream)
-from loop import AdapterLoop, Outbox
+from loop import BROKER_SNAPSHOT_ATTEMPTS, AdapterLoop, Outbox, ReconcileMismatch
 from relay import RELEASED, EngineUnavailable, OutboxInvalid, PendingInput, read_engine_log
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 from snapshot import BROKER_SNAPSHOT_TYPE
@@ -149,10 +149,13 @@ class DeliveryTests(unittest.TestCase):
     def loop(self, engine=None, fake=None, streams=True, engine_log=None, now=RECEIVED):
         clock = Clock()
 
+        gateway = fake or self.fake
+
         def sleep(seconds):
             clock.now += seconds
+            gateway.waited()
         loop = AdapterLoop(config(mode="paper", paper_sending_enabled=True, commission_wait=COMMISSION_WAIT),
-                           fake or self.fake, engine or self.engine, self.pending, engine_log or self.engine_log,
+                           gateway, engine or self.engine, self.pending, engine_log or self.engine_log,
                            now=now if callable(now) else (lambda: now), today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0,
                            new_id=self.new_id, streams=str(self.streams) if streams else None)
         self.addCleanup(loop.close)
@@ -887,6 +890,172 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(loop.outbox.load(), [])
         self.assertFalse(Path(self.pending + DELIVERED_SUFFIX).exists())
 
+    def test_a_summary_ibkr_refuses_right_after_the_reconcile_is_waited_out_and_the_snapshot_delivered(self):
+        # The server's first dry-run start, 2026-10-25: the reconcile's read
+        # succeeded, and IB Gateway 10.50 refused each summary asked for
+        # within a second of cancelling the one before (IBKR's limit of two
+        # account-summary subscriptions, error 322), so the snapshot's three
+        # back-to-back attempts all found the balances unread and the
+        # adapter stopped (SnapshotRefused).
+        self.fake.summary_cancel_grace = 1.0
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        self.fake.clock = loop._monotonic
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(self.types(), FIRST + DAY)
+        self.assertEqual(self.brokers()[0]["payload"]["unreadable"], [])
+
+    def test_the_snapshots_attempts_are_spaced_and_each_logs_why_the_summary_was_not_read(self):
+        class Timed(FakeTWS):
+            asked_at = []
+
+            def req_account_summary(self, req_id, group, tags):
+                self.asked_at.append(self.clock())
+                super().req_account_summary(req_id, group, tags)
+        fake = Timed()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop(fake=fake)
+        fake.clock = loop._monotonic
+        loop.start()
+        fake.end_summary = False
+        import delivery
+        with self.assertLogs("ibkr", level="INFO") as logs, \
+                self.assertRaises(getattr(delivery, "SnapshotRefused", StreamRefused)) as caught:
+            self.settle(loop)
+        attempts = fake.asked_at[1:]  # the first is the start's reconcile
+        gaps = [later - earlier for earlier, later in zip(attempts, attempts[1:])]
+        self.assertEqual(len(attempts), 4, attempts)
+        for gap, wait in zip(gaps, (5, 15, 30)):
+            self.assertGreaterEqual(gap, wait, gaps)
+        self.assertLessEqual(attempts[-1] - attempts[0], 60, "the stated total")
+        self.assertIn("did not end", "\n".join(o for o in logs.output if "read again" in o))
+        self.assertIn("did not end", str(caught.exception))
+
+    def test_a_link_lost_and_restored_during_the_reconciles_limit_wait_reconciles_again(self):
+        # Gateway loses IBKR's servers and restores the same socket while
+        # the start's reconcile waits out IBKR's 322, and an order placed by
+        # hand executes meanwhile: the reconcile's orders and executions,
+        # read before the outage, are not matched with an account read
+        # after it; the restored link is reconciled again from fresh reads,
+        # which find the execution (ADR 0025 point 5).
+        def outage():
+            self.fake.executions.append((contract(), execution(exec_id="0000beef.h.01.01", order_id=0, perm_id=777,
+                                                               order_ref="", client_id=0)))
+            self.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+            self.fake.callbacks.error(-1, 1101, "Connectivity between IB and Trader Workstation has been restored - "
+                                                "data lost.")
+        self.fake.refuse_next_summary = 322
+        self.fake.after_refusal = outage
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        with self.assertRaises(ReconcileMismatch) as caught:
+            loop.start()
+            self.settle(loop)
+        self.assertIn("0000beef.h.01.01", str(caught.exception))
+        self.assertEqual(self.types(), [])
+
+    def test_a_link_restored_while_the_reconcile_pumps_the_open_orders_quiet_reconciles_again(self):
+        # The account read was complete and unchanged; then, while the
+        # reconcile pumps the open orders quiet after it, Gateway reports
+        # its link to IBKR's servers restored with data lost (1101), a loss
+        # the reads never saw begin, and an order placed by hand executed
+        # during it. The link is connected throughout the pump (an 1100
+        # there stops it at once, NotConnected), so only the link's change
+        # of state shows the outage: the orders, executions and account
+        # read before it are not matched, and the link is reconciled again
+        # from fresh reads, which find the execution (ADR 0025 point 5;
+        # ADR 0019: one cutoff).
+        import loop as loop_module
+        from connection import Connection
+        armed, fired = [], []
+        read_account, resync = loop_module.read_account, Connection.resync_open_orders
+
+        def read_then_arm(conn):
+            reading = read_account(conn)
+            armed.append(True)
+            return reading
+
+        def resync_with_an_outage(conn):
+            if armed and not fired:
+                fired.append(True)
+                self.fake.executions.append((contract(), execution(exec_id="0000beef.h.01.02", order_id=0,
+                                                                   perm_id=778, order_ref="", client_id=0)))
+                self.fake.callbacks.error(-1, 1101, "Connectivity between IB and Trader Workstation has been "
+                                                    "restored - data lost.")
+            return resync(conn)
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        with mock.patch.object(loop_module, "read_account", read_then_arm), \
+                mock.patch.object(Connection, "resync_open_orders", resync_with_an_outage), \
+                self.assertRaises(ReconcileMismatch) as caught:
+            loop.start()
+            self.settle(loop)
+        self.assertEqual(fired, [True], "the restoration came while the reconcile pumped the open orders quiet")
+        self.assertIn("0000beef.h.01.02", str(caught.exception))
+        self.assertEqual(self.types(), [])
+
+    def place_and_refuse_the_next_summary(self, code, fill):
+        """The day's order is placed and accepted; the next day's first summary is refused with code, fill at the wait after."""
+        self.place_the_days_order()
+        loop = self.loop()
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(len(self.fake.placed), 1)
+        snapshots = self.types().count(BROKER_SNAPSHOT_TYPE)
+
+        waits = []
+
+        def filled():
+            waits.append(True)
+            fill()
+            self.fake.positions = [(ACCOUNT, contract(), Decimal("156"), 312.5)]
+        self.fake.refuse_next_summary = code
+        self.fake.after_refusal = filled
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            self.settle(loop)
+        self.assertEqual(waits, [True], "the fill came during the wait after the refusal")
+        self.assertIn("ibkr broker snapshot read again (attempt 1 of", "\n".join(logs.output))
+        types = self.types()
+        later = [n for n, t in enumerate(types) if t == BROKER_SNAPSHOT_TYPE][snapshots:]
+        self.assertEqual(len(later), 1, "one snapshot for the day")
+        self.assertLess(types.index(FILL_TYPE), later[0], "the fill is journalled before the snapshot")
+        self.assertEqual(self.engine.inputs()[later[0]]["payload"]["positions"][0]["quantity"], 156,
+                         "the snapshot was read again after the fill, so it holds it")
+
+    def day_fill(self):
+        self.fake.fill(7, shares="9", price=401.25, exec_id="0001f4e8.t.01.01", cum_qty="9",
+                       time="20270114 15:59:00 US/Eastern")
+
+    def test_a_fill_during_a_limit_wait_restarts_the_snapshots_reading(self):
+        # The positions were read before IBKR's 322 was waited out: a fill
+        # during the wait makes them stale, so the reading starts again
+        # (ADR 0019: one cutoff).
+        self.place_and_refuse_the_next_summary(322, self.day_fill)
+
+    def test_a_fill_during_the_wait_between_snapshot_attempts_is_journalled_before_the_snapshot(self):
+        # A first attempt left the balances unread (an error other than
+        # 322), and a fill arrives during the 5 s wait before the next.
+        self.place_and_refuse_the_next_summary(321, self.day_fill)
+
+    def test_the_snapshots_stop_states_the_time_its_attempts_took(self):
+        # IBKR refuses every summary with its limit: each read also waits
+        # out the 322 twice (5 s and 15 s), so the attempts take far longer
+        # than the 50 s of waits between them.
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        self.fake.clock = loop._monotonic
+        loop.start()
+        self.fake.summary_cancel_grace = 1e9
+        started = loop._monotonic()
+        with self.assertRaises(SnapshotRefused) as caught:
+            self.settle(loop)
+        took = loop._monotonic() - started
+        self.assertGreater(took, 130)
+        self.assertIn("over {:.0f} seconds".format(took), str(caught.exception))
+
     # -- the broker's reports and the stream --------------------------------
     def place_the_days_order(self):
         """FRIDAY's close releases the paper order; IBKR accepts it."""
@@ -929,10 +1098,12 @@ class DeliveryTests(unittest.TestCase):
             fills = 0
 
             def req_mkt_data(self, req_id, contract_):
-                if 0 < self.fills <= 3:
+                # One fill during every attempt's marks: two shares of the
+                # nine each time, so every attempt is overtaken.
+                if 0 < self.fills <= BROKER_SNAPSHOT_ATTEMPTS:
                     n = self.fills
                     self.fills += 1
-                    self.fill(7, shares="3", price=401.25, exec_id="0001f4e8.t.0{}.01".format(n), cum_qty=str(3 * n),
+                    self.fill(7, shares="2", price=401.25, exec_id="0001f4e8.t.0{}.01".format(n), cum_qty=str(2 * n),
                               time="20270114 15:59:00 US/Eastern")
                 super().req_mkt_data(req_id, contract_)
         fake = FillsDuringEveryMark()
@@ -946,7 +1117,7 @@ class DeliveryTests(unittest.TestCase):
         write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
         loop.step()
         self.assertEqual(self.types().count(BROKER_SNAPSHOT_TYPE), 1, "no snapshot overtaken by a fill is sent")
-        self.assertEqual(self.types().count(FILL_TYPE), 3)
+        self.assertEqual(self.types().count(FILL_TYPE), BROKER_SNAPSHOT_ATTEMPTS)
         self.settle(loop)
         self.assertEqual(self.types()[-6:], LATER + DAY)
 
@@ -1232,6 +1403,53 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual([o["client_order_id"] for o in snapshots[1]["payload"]["open_orders"]],
                          [json.loads((tests_dir / "testdata" / "paper_released.json").read_text())["client_order_id"]],
                          "the working order is in the snapshot: no late answer completed a later read")
+
+    def test_a_reconcile_cut_off_during_its_positions_is_never_read_again_on_the_same_link(self):
+        class LosesIbkrDuringPositions(FakeTWS):
+            connects = 0
+            lose = True
+            lost_on = None
+
+            def connect(self, *args):
+                self.connects += 1
+                super().connect(*args)
+
+            def req_positions(self):
+                if self.lose:
+                    # Gateway loses IBKR's servers during the start's
+                    # reconcile's positions and restores them on the same
+                    # socket; the positions' end comes later.
+                    self.lose, self.lost_on = False, self.connects
+                    self.calls.append(("req_positions",))
+                    self.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+                    self.callbacks.error(-1, 1102, "Connectivity between IB and Trader Workstation has been "
+                                                   "restored - data maintained.")
+                    return
+                if self.lost_on == self.connects:
+                    # The abandoned read's end arrives first, on the same
+                    # link; this read's own positions come after the rest
+                    # of its answers.
+                    self.lost_on = None
+                    self.calls.append(("req_positions",))
+                    self.callbacks.position_end()
+                    for account, con, pos, avg in self.positions:
+                        self._later.append(lambda a=account, c=con, p=pos, v=avg: self.callbacks.position(a, c, p, v))
+                    self._later.append(self.callbacks.position_end)
+                    return
+                super().req_positions()
+        fake = LosesIbkrDuringPositions()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        self.fake = fake
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop(fake=fake)
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            loop.start()
+            self.settle(loop)
+        reconciled = [o for o in logs.output if "ibkr reconciled" in o]
+        self.assertTrue(reconciled, logs.output)
+        self.assertIn("positions=1 ", reconciled[0],
+                      "the reconcile holds the account's position: no late end completed a later read")
+        self.assertGreater(fake.connects, 1, "the link was made again, not taken back as Gateway restored it")
 
     # -- a fresh run strikes an earlier run's batch -------------------------
     def test_a_stop_while_a_fresh_run_strikes_an_earlier_batch_never_parts_its_snapshot_from_its_stream(self):

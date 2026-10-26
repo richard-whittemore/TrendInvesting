@@ -23,6 +23,10 @@ OTHER_ACCOUNT = "DU0000002"
 # IBKR's statuses of an order that has ended.
 ENDED = ("Cancelled", "ApiCancelled", "Inactive")
 SERVER_TIME = 1_800_000_000
+# IBKR's refusal of an account summary while two are still counted as active
+# ("Message Codes": 322, error processing request).
+SUMMARY_LIMIT_CODE = 322
+SUMMARY_LIMIT_MESSAGE = "Error processing request: Maximum number of account summary requests exceeded."
 
 
 def contract(con_id=756733, symbol="SPY", sec_type="STK", currency="USD", exchange="SMART"):
@@ -78,6 +82,22 @@ class FakeTWS(TWSApi):
         self.end_positions = True
         self.end_summary = True
         self.summary_error = None
+        # The message IBKR sends with summary_error.
+        self.summary_error_message = "synthetic summary failure"
+        # IBKR allows two account-summary subscriptions at a time and a
+        # cancel takes a moment to count (TWS API, reqAccountSummary): with
+        # a grace set, a request within that many seconds of the last cancel
+        # (by clock, a callable of seconds) is refused with error 322, as
+        # IB Gateway 10.50 refused one on 2026-10-25.
+        self.clock = None
+        self.summary_cancel_grace = None
+        self._summary_cancelled_at = None
+        # A code the next account summary alone is refused with (322, IBKR's
+        # limit, or another), and what happens at the adapter's next wait
+        # after that refusal (run by waited(), which a test's sleep calls).
+        self.refuse_next_summary = None
+        self.after_refusal = None
+        self._at_next_wait = None
         self.drop_during_summary = False
         self.open_orders = []
         self.end_open_orders = True
@@ -219,8 +239,18 @@ class FakeTWS(TWSApi):
 
     def req_account_summary(self, req_id, group, tags):
         self.calls.append(("req_account_summary", req_id, group, tags))
+        if self.refuse_next_summary is not None:
+            code, self.refuse_next_summary = self.refuse_next_summary, None
+            self._at_next_wait, self.after_refusal = self.after_refusal, None
+            self.callbacks.error(req_id, code, SUMMARY_LIMIT_MESSAGE if code == SUMMARY_LIMIT_CODE
+                                 else "synthetic summary refusal")
+            return
+        if (self.summary_cancel_grace is not None and self._summary_cancelled_at is not None
+                and self.clock() - self._summary_cancelled_at < self.summary_cancel_grace):
+            self.callbacks.error(req_id, SUMMARY_LIMIT_CODE, SUMMARY_LIMIT_MESSAGE)
+            return
         if self.summary_error is not None:
-            self.callbacks.error(req_id, self.summary_error, "synthetic summary failure")
+            self.callbacks.error(req_id, self.summary_error, self.summary_error_message)
             return
         for i, (account, tag, value, currency) in enumerate(self.summary):
             if self.drop_during_summary and i == 1:
@@ -230,8 +260,16 @@ class FakeTWS(TWSApi):
         if self.end_summary:
             self.callbacks.account_summary_end(req_id)
 
+    def waited(self):
+        """The adapter waited (its sleep): run what refuse_next_summary's refusal left for its next wait."""
+        act, self._at_next_wait = self._at_next_wait, None
+        if act is not None:
+            act()
+
     def cancel_account_summary(self, req_id):
         self.calls.append(("cancel_account_summary", req_id))
+        if self.clock is not None:
+            self._summary_cancelled_at = self.clock()
 
     # -- orders ----------------------------------------------------------
     def req_all_open_orders(self):
