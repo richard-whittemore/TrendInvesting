@@ -66,7 +66,8 @@ Halted never becomes Degraded again.
 
 **A pending cash read is not a state.** When an IRA's reconciliation finds
 only its cash different, on a day the Flex reader has not yet read (a deposit
-or withdrawal you made that day, which the reader records at 9:30 p.m.), the
+or withdrawal you made that day, which the reader records the next weekday
+morning, from 5:30 a.m., once IBKR's statement shows it), the
 account stays in the state it is in; you get one reconciliation alert,
 `<account>: reconciliation pending-cash-read (<id>)`. With more cash than the
 book (a deposit), buys carry on, sized without the new cash until the

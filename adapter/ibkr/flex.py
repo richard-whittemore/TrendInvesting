@@ -68,11 +68,42 @@ read from IBKR"). One reading:
    period (COVERAGE_SUFFIX beside the costs ledger), checked as the cash
    ledger's is, so a first costs reading reaches back to the first run's
    approval day even where the cash ledger was read before.
+5. writes the executions proof (EXECUTIONS_NAME, in the cash ledger's
+   folder; ADR 0019, amended 2026-10-27, "Flex"): every execution the
+   account's Trade Confirmation statement lists, by its execution ID (or
+   trade ID) and time, the statement's period, the account it was checked
+   against, when it was asked for, and covered_until, the moment up to which
+   it lists every execution. The adapter's morning reading of the session
+   before stands for that session's close only with this proof
+   (loop.AdapterLoop._morning_proof). Only a Trade Confirmation statement
+   is a proof: the query the secrets name as TI_IBKR_FLEX_TRADES_QUERY_ID,
+   asked for in the same reading after the cash query. An Activity statement
+   is refreshed once a day and its securities day ends at IBKR's 8:20 p.m.
+   cutoff, so its Trades section never proves an evening; with no trades
+   query named the proof is "none". covered_until is the start of the
+   statement's last day (toDate; IBKR's overnight session gives an
+   execution late in an evening the next day's trade date) and no later
+   than EXECUTION_LAG before it was asked for (IBKR: a new execution is
+   typically in a newly generated Trade Confirmation report within 5 to 10
+   minutes). The statement is read strictly: its TradeConfirms section must
+   hold only TradeConfirm rows, each at an execution or order level, with no
+   element inside it, dated with its time, of this account; a summary row
+   (which totals executions it does not list), any other element, or a
+   missing section sets the proof aside. Invariant: no reading leaves an
+   earlier proof standing for itself. Once a reading holds the lock it
+   writes the proof set aside ("not finished") before it asks IBKR for
+   anything, then, when it ends, "read", "none" or "set-aside" with why,
+   each whole and atomically; a reading stopped part way leaves the
+   set-aside one. Only a reading that cannot open its lock leaves the
+   earlier proof in place, and the adapter checks every proof's period,
+   fetch time, account and coverage before it trusts it
+   (read_executions). A trades query set aside fails the reading, as a
+   costs refusal does, and never stops a transfer being recorded.
 
 Each reading's period is kept beside the ledger (COVERAGE_SUFFIX): its
 fromDate and covered_to, the day before its toDate. The last day of a
 statement is not complete when it is read (IBKR may post a day's transfer
-after its own end-of-day processing, after the evening's reading), so it is
+after its own end-of-day processing, after a reading), so it is
 covered only once a later statement reads it again; the ledger's IDs keep a
 transfer read twice from being written twice. A statement that starts later
 than the day after covered_to leaves days in neither, and a transfer on them
@@ -103,8 +134,9 @@ The equity before a transfer (equity_before) is, in order:
   aside until the first close snapshot is committed.
 
 Both approximations assume the close snapshot was read after the transfer,
-as the post-close reading is (17:05 New York or later); a transfer IBKR
-times later that evening is taken as held by it. A close snapshot is one
+as the post-close reading is (the next morning, when the data job's file
+arrives, or that evening); a transfer IBKR times later that evening is taken
+as held by it. A close snapshot is one
 stamped as of its session's official close (snapshot.py: 4 p.m., 1 p.m. on
 an early close), found by the data job's NYSE calendar, the one the adapter
 stamps by (adapter/marketdata/nyse_calendar.py).
@@ -182,6 +214,22 @@ STATUS_SUFFIX = ".status.json"
 COVERAGE_SUFFIX = ".coverage.json"
 COSTS_NAME = "costs.jsonl"
 COVERAGE_FIELDS = ("from_date", "covered_to")
+# The executions proof, in the cash ledger's folder (step 5 of the module).
+EXECUTIONS_NAME = "executions.json"
+# How long before the moment it was asked for a statement is taken to list every execution. Rule: IBKR's Flex Web
+# Service documentation: "Typically a new execution will be available for inclusion in a newly generated Flex Query
+# report within 5 to 10 minutes"; six times that is the margin (ADR 0019, amended 2026-10-27).
+EXECUTION_LAG = timedelta(minutes=60)
+# The one section an execution is read from: a Trade Confirmation statement's (step 5 of the module).
+TRADE_CONFIRMS = ("TradeConfirms", "TradeConfirm")
+# The levels of detail a TradeConfirm row may have: each is one execution, or one order's executions together,
+# dated by its own time. Every other level (a summary) totals executions it does not list, and is refused.
+EXECUTION_LEVELS = frozenset(("EXECUTION", "ORDER"))
+PROOF_READ, PROOF_NONE, PROOF_SET_ASIDE = "read", "none", "set-aside"
+PROOF_FIELDS = {PROOF_READ: ("account_id", "checked_at", "covered_until", "executions", "fetched_at", "from_date",
+                             "query", "section", "state", "to_date"),
+                PROOF_NONE: ("account_id", "checked_at", "reason", "state"),
+                PROOF_SET_ASIDE: ("account_id", "checked_at", "code", "reason", "state")}
 # The owner's decisions on transfers dated by day alone on an evening approval's day: {transaction ID: decision}.
 RESOLUTIONS_SUFFIX = ".resolutions.json"
 IN_FIRST_BOOK = "in-first-book"
@@ -201,8 +249,9 @@ REQUEST_TIMEOUT = 60
 # A statement IBKR is still generating (code 1019) is asked for again every
 # GENERATION_WAIT seconds, GENERATION_ATTEMPTS times in all. With each
 # request taking up to REQUEST_TIMEOUT, a reading's worst case is SendRequest
-# and every attempt to their timeout plus the waits (about 36 minutes);
-# ti-flex@.service's TimeoutStartSec is above it, and a reading stopped
+# and every attempt to their timeout plus the waits (about 36 minutes), for
+# each query a reading asks for (two with a trades query); ti-flex@.service's
+# TimeoutStartSec is above it, and a reading stopped
 # anyway leaves its status file saying "running" (read_once).
 GENERATION_WAIT = 10
 GENERATION_ATTEMPTS = 30
@@ -348,8 +397,8 @@ def _flex_day(text):
         return None
 
 
-def parse_statement(data, account_id):
-    """The Statement for account_id in the Flex query response data (bytes); StatementRefused otherwise."""
+def _account_statement(data, account_id):
+    """The FlexStatement element for account_id in the Flex query response data (bytes); StatementRefused otherwise."""
     try:
         root = ElementTree.fromstring(data)
     except ElementTree.ParseError:
@@ -365,7 +414,12 @@ def parse_statement(data, account_id):
                                "must cover this instance's account".format(len(statements)))
     if len(mine) > 1:
         raise StatementRefused("the Flex statement holds this instance's account {} times".format(len(mine)))
-    statement = mine[0]
+    return mine[0]
+
+
+def parse_statement(data, account_id):
+    """The Statement for account_id in the Flex query response data (bytes); StatementRefused otherwise."""
+    statement = _account_statement(data, account_id)
     section = statement.find("CashTransactions")
     if section is None:
         raise StatementRefused("the Flex statement has no Cash Transactions section; add it to the Flex query in "
@@ -405,6 +459,124 @@ def parse_statement(data, account_id):
         raise StatementRefused("the Flex statement does not state its period as fromDate and toDate (yyyyMMdd, the "
                                "first not after the last), so the days it covers cannot be checked")
     return Statement(account_id, from_date, to_date, postings)
+
+
+Executions = namedtuple("Executions", "section from_date to_date rows")
+"""The executions a Flex statement lists: its section's name, its period (yyyyMMdd) and each (ID, time) row."""
+
+
+def parse_executions(data, account_id):
+    """The Executions of account_id in data's TradeConfirms section, or None when the statement has no such section;
+    StatementRefused when the statement, the section or a row is not as IBKR writes one (step 5 of the module)."""
+    statement = _account_statement(data, account_id)
+    section_tag, row_tag = TRADE_CONFIRMS
+    section = statement.find(section_tag)
+    if section is None:
+        return None
+    rows, seen = [], set()
+    for n, row in enumerate(section, 1):
+        where = "{} row {}".format(section_tag, n)
+        if row.tag != row_tag:
+            raise StatementRefused("{} is a {} element, not a {}: a section not as IBKR writes it proves "
+                                   "nothing".format(where, row.tag, row_tag))
+        level = row.get("levelOfDetail", "")
+        if level not in EXECUTION_LEVELS:
+            raise StatementRefused("{} is at level of detail {!r}, not an execution's or an order's: a summary "
+                                   "totals executions it does not list, so the statement proves nothing; set the "
+                                   "Trade Confirmation query to list executions (docs/manual/reconciliation.md)"
+                                   .format(where, level))
+        if row.get("accountId", account_id) != account_id:
+            raise StatementRefused("{} is for another account".format(where))
+        ident = row.get("execID") or row.get("ibExecID") or row.get("tradeID") or ""
+        if not ident.strip() or ident != ident.strip():
+            raise StatementRefused("{} has no execution or trade ID".format(where))
+        if len(row):
+            raise StatementRefused("{} (execution {}) holds an element inside it, which IBKR's rows do not"
+                                   .format(where, ident))
+        at, dated_only = _flex_time(row.get("dateTime"), "{} (execution {})".format(where, ident))
+        if dated_only:
+            raise StatementRefused("{} (execution {}) is dated by day alone, so whether it came after a close is not "
+                                   "known; keep the Flex query's default date/time format, with the time "
+                                   "(docs/manual/reconciliation.md)".format(where, ident))
+        if (ident, at) not in seen:
+            seen.add((ident, at))
+            rows.append((ident, at))
+    first, last = _flex_day(statement.get("fromDate")), _flex_day(statement.get("toDate"))
+    if first is None or last is None or first > last:
+        raise StatementRefused("the Flex statement does not state its period as fromDate and toDate (yyyyMMdd, the "
+                               "first not after the last), so the executions it covers cannot be checked")
+    return Executions(section_tag, statement.get("fromDate"), statement.get("toDate"), rows)
+
+
+def covered_until(to_date, fetched_at):
+    """The moment up to which a statement ending on to_date (yyyyMMdd), asked for at fetched_at, lists every
+    execution: the start of its last New York day, and no later than EXECUTION_LAG before it was asked for (step 5 of
+    the module)."""
+    start = datetime.combine(_flex_day(to_date), clock(0), tzinfo=NEW_YORK).astimezone(timezone.utc)
+    return min(start, fetched_at - EXECUTION_LAG)
+
+
+def executions_path(ledger_path):
+    """The executions proof's file: EXECUTIONS_NAME beside the cash ledger."""
+    return os.path.join(os.path.dirname(os.path.abspath(ledger_path)), EXECUTIONS_NAME)
+
+
+Proof = namedtuple("Proof", "state reason fetched_at from_day to_day covered_until executions")
+"""The executions proof as read (read_executions): its state, why when it is not "read", and for one that is the
+moment its statement was asked for, its first and last days (dates), covered_until and each (ID, time) execution."""
+
+
+def read_executions(path, account_id):
+    """The executions proof at path, for account_id, as a Proof, or None when none is written; StatementRefused when
+    it is not as this reader writes it: its fields, its period, its fetch time after the reading began, the coverage
+    the rule gives for that period and fetch time (covered_until), and its account (step 5 of the module)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as err:
+        raise StatementRefused("the executions proof {} cannot be read: {}".format(path, err)) from None
+    refused = StatementRefused("the executions proof {} is not as the Flex reader writes it".format(path))
+    try:
+        proof = json.loads(text)
+    except ValueError:
+        raise refused from None
+    if not isinstance(proof, dict):
+        raise refused
+    state = proof.get("state")
+    if not isinstance(state, str) or state not in PROOF_FIELDS or tuple(sorted(proof)) != PROOF_FIELDS[state]:
+        raise refused
+    if not isinstance(proof["account_id"], str) or not proof["account_id"]:
+        raise refused
+    if proof["account_id"] != account_id:
+        raise StatementRefused("the executions proof {} is for another account: a proof stands only for the account "
+                               "its statement was checked against".format(path))
+    try:
+        checked_at = _strict_stamp(proof["checked_at"])
+        if state != PROOF_READ:
+            if not isinstance(proof["reason"], str):
+                raise ValueError("its reason")
+            return Proof(state, proof["reason"], None, None, None, None, [])
+        if not isinstance(proof["executions"], list) or not all(
+                isinstance(e, dict) and tuple(sorted(e)) == ("at", "id") and isinstance(e["id"], str) and e["id"]
+                for e in proof["executions"]):
+            raise ValueError("an execution")
+        executions = [(e["id"], _strict_stamp(e["at"])) for e in proof["executions"]]
+        first, last = _flex_day(proof["from_date"]), _flex_day(proof["to_date"])
+        if first is None or last is None or first > last:
+            raise ValueError("its period")
+        fetched_at = _strict_stamp(proof["fetched_at"])
+        if fetched_at < checked_at:
+            raise ValueError("its fetch time")
+        covered = _strict_stamp(proof["covered_until"])
+        if covered != covered_until(proof["to_date"], fetched_at):
+            raise ValueError("its coverage")
+        if proof["query"] != "trades" or proof["section"] != TRADE_CONFIRMS[0]:
+            raise ValueError("its section")
+        return Proof(state, "", fetched_at, first, last, covered, executions)
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        raise refused from None
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -491,6 +663,13 @@ def _parse_stamp(text):
         return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return None
+
+
+def _strict_stamp(text):
+    moment = _parse_stamp(text)
+    if not isinstance(text, str) or moment is None:
+        raise ValueError("a time")
+    return moment
 
 
 def read_chain(engine_log_path):
@@ -924,7 +1103,12 @@ def _write_whole(path, text):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-    directory = os.open(os.path.dirname(os.path.abspath(path)), os.O_RDONLY)
+    _sync_directory(os.path.dirname(os.path.abspath(path)))
+
+
+def _sync_directory(folder):
+    """The folder's entries made durable: a file renamed into it or removed from it stays so after a crash."""
+    directory = os.open(folder, os.O_RDONLY)
     try:
         os.fsync(directory)
     finally:
@@ -1094,10 +1278,11 @@ def record_resolutions(ledger_path, decisions, wait=LOCK_WAIT, sleep=time.sleep)
 
 
 def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_get, sleep=time.sleep,
-              now=lambda: datetime.now(timezone.utc), err=None):
-    """One reading (see the module): True when the statement was read, every new transfer written and every new cost
-    written, False when the reader, or its costs alone, were set aside. Either way the status file beside ledger_path,
-    and the costs ledger's own beside it, say which, and why."""
+              now=lambda: datetime.now(timezone.utc), err=None, trades_query_id=None):
+    """One reading (see the module): True when the statement was read, every new transfer written, every new cost
+    written and the executions proof written read or none, False when the reader, its costs or its proof were set
+    aside. Either way the status file beside ledger_path, the costs ledger's own beside it, and the executions proof,
+    say which, and why. trades_query_id, when given, is the Trade Confirmation query the proof is read from."""
     def say(text):
         if err is not None:
             print(mask(text, token, account_id), file=err)
@@ -1113,6 +1298,9 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
         # Said first, so a reading stopped part way (its unit's timeout, a kill) leaves "running" with its time,
         # never the previous reading's "read" (docs/manual/reconciliation.md, "The status file"). The costs say
         # theirs in their own step (_read_costs_once).
+        # The proof is set aside first, so no stop from here on leaves the earlier one standing for this reading;
+        # a proof that cannot be written never stops the cash reading (step 5 of the module).
+        proof_unwritten = _write_proof(ledger_path, _unfinished_proof(checked_at, account_id), say)
         _write_whole(status_path, _running(checked_at))
         try:
             ledger = read_ledger(ledger_path)
@@ -1177,8 +1365,72 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             _write_whole(costs_file + STATUS_SUFFIX, json.dumps(costs_status, sort_keys=True) + "\n")
         except OSError as unwritten:
             say("flex: the costs status cannot be written: " + str(unwritten))
+            ok = False
+        proof = _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say)
+        if _write_proof(ledger_path, json.dumps(proof, sort_keys=True) + "\n", say) or proof_unwritten:
             return False
-    return ok and costs_status["state"] == "read"
+    return ok and costs_status["state"] == "read" and proof["state"] != PROOF_SET_ASIDE
+
+
+def _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say):
+    """The executions proof of this reading (step 5 of the module): from the Trade Confirmation query when one is
+    named, asked for now; "none" when none is named. A refusal sets the proof aside alone."""
+    proof = {"checked_at": status["checked_at"], "account_id": account_id}
+    if not trades_query_id:
+        proof.update(state=PROOF_NONE, reason="no Trade Confirmation query is named (TI_IBKR_FLEX_TRADES_QUERY_ID), so "
+                                              "no execution is proven after a close: only a Trade Confirmation "
+                                              "statement lists an evening's executions the next morning")
+        say("flex: no executions proof: " + proof["reason"])
+        return proof
+    try:
+        fetched_at = now()
+        executions = parse_executions(fetch_statement(token, trades_query_id, get=get, sleep=sleep), account_id)
+        if executions is None:
+            raise StatementRefused("the trades query's statement has no Trade Confirmations (TradeConfirms) section; "
+                                   "it must be a Trade Confirmation Flex query (docs/manual/reconciliation.md)")
+    except (StatementRefused, FlexRejected, FlexUnavailable, OSError) as refused:
+        proof.update(_set_aside(refused, token, account_id), state=PROOF_SET_ASIDE)
+        say("flex: executions proof set aside: " + proof["reason"])
+        return proof
+    proof.update(state=PROOF_READ, query="trades", section=executions.section, from_date=executions.from_date,
+                 to_date=executions.to_date, fetched_at=_stamp(fetched_at),
+                 covered_until=_stamp(covered_until(executions.to_date, fetched_at)),
+                 executions=[{"id": i, "at": _stamp(at)} for i, at in executions.rows])
+    say("flex: executions proof: {} execution(s) for {} to {}, every one listed up to {}".format(
+        len(executions.rows), executions.from_date, executions.to_date, proof["covered_until"]))
+    return proof
+
+
+def _write_proof(ledger_path, text, say):
+    """Write the executions proof text whole; on failure remove the earlier proof, so none stands for this reading,
+    say why and return True (step 5 of the module). The cash and costs ledgers are written either way."""
+    path = executions_path(ledger_path)
+    try:
+        _write_whole(path, text)
+        return False
+    except OSError as unwritten:
+        try:
+            os.unlink(path)
+            left = "the earlier proof is removed, so the morning delivery finds none"
+            try:
+                _sync_directory(os.path.dirname(path))
+            except OSError as unsynced:
+                left += ", but its removal may not survive a crash ({})".format(unsynced.strerror or unsynced)
+        except FileNotFoundError:
+            left = "no earlier proof is left"
+        except OSError as stuck:
+            left = "the earlier proof could not be removed either ({}): its folder is not writable".format(
+                stuck.strerror or stuck)
+        say("flex: the executions proof cannot be written ({}); {}".format(unwritten.strerror or unwritten, left))
+        return True
+
+
+def _unfinished_proof(checked_at, account_id):
+    """The executions proof a reading begun at checked_at writes before it asks IBKR for anything (step 5 of the
+    module): set aside until the reading ends."""
+    return json.dumps({"state": PROOF_SET_ASIDE, "checked_at": checked_at, "account_id": account_id, "code": None,
+                       "reason": "a Flex reading began at {} and has not finished (it is running, or was stopped "
+                                 "part way)".format(checked_at)}, sort_keys=True) + "\n"
 
 
 def _running(checked_at):
@@ -1274,6 +1526,20 @@ def read_key(path, key):
     return found[0]
 
 
+def read_optional_key(path, key):
+    """key's bare value in the KEY=VALUE file at path, or None when it has no such line or the line is empty;
+    StatementRefused for two lines or a value that is not bare, never echoing a value."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError as err:
+        raise StatementRefused("cannot read the secrets file {}: {}".format(path, err.strerror or err)) from None
+    found = [line for line in lines if "=" in line and line.split("=", 1)[0] == key]
+    if not found or (len(found) == 1 and not found[0].split("=", 1)[1].strip()):
+        return None
+    return read_key(path, key)
+
+
 INSTANCES = ("boost", "trad-ira", "roth-ira")
 
 
@@ -1324,9 +1590,10 @@ def command(args, err, get=_get, sleep=time.sleep, now=lambda: datetime.now(time
     try:
         token = read_key(args.secrets, "TI_IBKR_FLEX_TOKEN")
         query_id = read_key(args.secrets, "TI_IBKR_FLEX_QUERY_ID")
+        trades_query_id = read_optional_key(args.secrets, "TI_IBKR_FLEX_TRADES_QUERY_ID")
         account_id = read_key(args.account_secrets, account_key(args.instance))
     except StatementRefused as refusal:
         print("refused: {}".format(mask(str(refusal))), file=err)
         return 1
     return 0 if read_once(token, query_id, account_id, args.engine_log, args.ledger, get=get, sleep=sleep,
-                          now=now, err=err) else 1
+                          now=now, err=err, trades_query_id=trades_query_id) else 1

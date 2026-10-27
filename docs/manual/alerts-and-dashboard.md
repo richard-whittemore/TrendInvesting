@@ -614,7 +614,7 @@ the editor and save:
 ```
 [Service]
 ExecStart=
-ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service,ti-data.service -self-unit ti-reporter@%i.service
+ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -resolve-units ti-data.service -self-unit ti-reporter@%i.service
 ```
 
 then run `sudo systemctl edit --drop-in=no-github-issues.conf ti-unit-failed@.service`
@@ -1433,14 +1433,15 @@ rise, which is why both are shown.
   the reader has recorded: "transfers recorded through <day>", the
   `covered_to` of its status file beside the ledger
   ([reconciliation](reconciliation.md), "The status file"). The reader runs
-  at 21:30 New York, after the close's summary is sent, and IBKR may post a
-  day's transfer only the next evening, so when the summary's day is later
+  each weekday morning (5:30 New York, again at 6:30 and 7:30), and IBKR may post a
+  day's transfer only after its own end-of-day processing, so when the summary's day is later
   than that it adds "deposits or withdrawals from the last two trading
   sessions may not be recorded yet; a transfer appears in the summary two
   trading sessions after it posts (a Friday transfer on Tuesday's)". A
-  transfer posted on day D is first in the statement the reader reads on the
-  evening of the next session, after that day's summary is sent, so the
-  summary two sessions after D is the first to include it. A session is a
+  transfer posted on day D is in the statement the reader reads the morning
+  after it, or the morning after the next session at the latest, after that
+  day's summary is sent, so the summary two sessions after D is the first
+  that is sure to include it. A session is a
   New York Stock Exchange trading day: weekends and exchange holidays are not
   sessions and are skipped, so a Friday (or weekend) transfer is in Tuesday's
   summary, a Thursday one in Monday's, and one posted before a holiday waits
@@ -1510,7 +1511,7 @@ account's own record: IBKR reports each execution's commission, and the
 engine's log keeps it with the fill, so every fill from the account's first run
 on counts. Fees and interest, and any commission IBKR posts to the account
 without a fill (an adjustment), come from the **costs ledger**, which the Flex
-reader writes beside the cash ledger every evening
+reader writes beside the cash ledger each weekday morning
 (`/var/lib/trend-investing/flex/<instance>/costs.jsonl`; the reconciliation
 chapter, "Deposits and withdrawals, read from IBKR", says how). The reader
 cannot see the engine's log, so it writes every commission IBKR posts, and
@@ -1549,7 +1550,8 @@ the reporter and the dashboard do the matching:
   the text says how many.
 
 **What may be missing, and how it is said.** IBKR's report lags: a posting of
-day D is in the statement read on the evening of the next session, so the
+day D is in the statement read the morning after it, or the morning after
+the next session at the latest, so the
 last two sessions' costs may not be there yet (the text says so, and says
 "costs recorded through <day>"). Until the Flex reader has written a costs
 ledger, the card shows the commissions on fills only and says "fees and
@@ -1794,7 +1796,7 @@ passes `-clock-check`.
 | The equity card or the summary says "deposits and withdrawals not readable (<why>): the comparison assumes none ..." | The ledger exists but cannot be read (not readable by `ti-trader`), or a line of it is not a cash movement as the Flex reader writes it, or does not end with a whole line. Nothing of it is used, never a part | The Flex reader stops on the same ledger: follow its status file ([reconciliation](reconciliation.md), "What can go wrong"). Never edit the ledger by hand |
 | The equity card or the summary says "SPY price return only: dividends not counted" (or "price return only for <from>–<to>") | Some or all of SPY's bars in the period are of the older form, which carries no dividend-adjusted price, or the adjusted price's base changed between two runs on that step, so the SPY side leaves those dividends out | Nothing to do for a period already recorded; bars from the current market-data job carry the adjusted price. If new days still say so, check the data job ([market data](market-data.md)) |
 | The equity card or the summary says "ledger not accepted: it belongs to <x>, not <y>" | The `-cash-ledger` named is in another account's `flex/<instance>` folder than the engine folder it is paired with. Nothing of it is read, and the comparison assumes no transfer | Correct the unit's `-cash-ledger` to the account's own `/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl` ("Running the dashboard", above) |
-| The equity card or the summary says "deposits or withdrawals from the last two trading sessions may not be recorded yet; a transfer appears in the summary two trading sessions after it posts (a Friday transfer on Tuesday's)" (or "how far the Flex reader has recorded is not known ...") | The Flex reader has not yet read the summary's day: it runs at 21:30 New York, after the close's summary, and IBKR may post a day's transfer only the next evening. A transfer from the last two trading sessions is not in the comparison yet; it is in the summary two trading sessions after it posts (a Friday transfer on Tuesday's) | Nothing, if a later line says the day is recorded. If "not known" stays, check the reader's status file ([reconciliation](reconciliation.md), "What can go wrong") |
+| The equity card or the summary says "deposits or withdrawals from the last two trading sessions may not be recorded yet; a transfer appears in the summary two trading sessions after it posts (a Friday transfer on Tuesday's)" (or "how far the Flex reader has recorded is not known ...") | The Flex reader has not yet read the summary's day: it runs each weekday morning (5:30 New York, again at 6:30 and 7:30), and IBKR may post a day's transfer only after its own end-of-day processing. A transfer from the last two trading sessions is not in the comparison yet; it is in the summary two trading sessions after it posts (a Friday transfer on Tuesday's) | Nothing, if a later line says the day is recorded. If "not known" stays, check the reader's status file ([reconciliation](reconciliation.md), "What can go wrong") |
 | The equity card or the summary says "the recorded withdrawals reached or exceeded the SPY shadow's value on <date>; dollar figures are not meaningful after that day" (or "... dollar figures restart from <date>") | Your recorded withdrawals took the SPY shadow account to zero that day, so its dollar figures (the gap and the dollar line) mean nothing until your next deposit restarts it; the verdict, which is time-weighted, stays | Nothing to fix: it is a true statement of the record. If the withdrawal was not yours, check the ledger's transfers against IBKR's activity ([reconciliation](reconciliation.md)) |
 | It will not start: "dashboard: -cash-ledger ... must be SOURCE=PATH ...", "... names ..., which is no -journal or -engine-dir", "... is given twice for ..." or "... names no ledger file" | It refuses to guess which account a ledger belongs to; a `-journal`'s ledger is always named | Name each ledger as `SOURCE=PATH` with SOURCE exactly the `-engine-dir` or `-journal` it belongs to ("Running the dashboard", above) |
 | It will not start: "dashboard: ... is neither loopback nor a Tailscale address ..." or "... is not an address of this host's Tailscale interface" | It refuses to listen anywhere but loopback or this machine's own Tailscale address | Use `-addr 127.0.0.1:8088` (the unit's) and publish it with `sudo tailscale serve --bg 8088` |

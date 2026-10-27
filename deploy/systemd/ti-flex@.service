@@ -1,5 +1,5 @@
 [Unit]
-Description=Flex reader for account %i: IBKR's Cash Transactions, each new deposit or withdrawal into its cash ledger and each commission, fee and interest posting into its costs ledger
+Description=Flex reader for account %i: IBKR's Cash Transactions, each new deposit or withdrawal into its cash ledger and each commission, fee and interest posting into its costs ledger, and the executions proof from its Trade Confirmations
 # One instance per account: ti-flex@boost, ti-flex@trad-ira, ti-flex@roth-ira.
 # IBKR's Flex Web Service only: the reader needs the network, not IB Gateway,
 # and nothing else depends on it (the engine, the adapter and the trading
@@ -27,13 +27,15 @@ AssertPathExists=/run/trend-investing/secrets/accounts/%i.env
 
 [Service]
 Type=oneshot
-# Above the reader's worst case: SendRequest and 30 GetStatement attempts,
+# Above the reader's worst case: for each of its two queries (the cash
+# query and the trades query), SendRequest and 30 GetStatement attempts,
 # each to its 60-second request timeout, and the 29 waits of 10 seconds
 # between them (flex.REQUEST_TIMEOUT, GENERATION_ATTEMPTS, GENERATION_WAIT;
-# about 36 minutes). A reading that hangs past this is stopped and shows as
+# about 36 minutes a query, 72 in all). A firing of the timer while a reading
+# still runs starts nothing. A reading that hangs past this is stopped and shows as
 # failed rather than staying "activating"; its status file then still says
 # "running" with the time it began, never the previous reading's "read".
-TimeoutStartSec=45min
+TimeoutStartSec=80min
 User=ti-trader
 Group=ti-trader
 Environment=TZ=America/New_York
@@ -43,7 +45,7 @@ Environment=TZ=America/New_York
 # its absence reaches the check below.
 EnvironmentFile=-/var/lib/trend-investing/engines/%i/run.env
 ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/%i/run.env || { echo "ti-flex@%i: /var/lib/trend-investing/engines/%i/run.env is missing or empty: start the %i engine once first (its durable log gives the equity before each transfer)" >&2; exit 1; }'
-# TI_IBKR_FLEX_TOKEN and TI_IBKR_FLEX_QUERY_ID from %d/secrets, and the
+# TI_IBKR_FLEX_TOKEN, TI_IBKR_FLEX_QUERY_ID and TI_IBKR_FLEX_TRADES_QUERY_ID (optional) from %d/secrets, and the
 # account's number from %d/account (IBKR_ACCOUNT_BOOST in accounts/boost.env,
 # IBKR_ACCOUNT_TRAD_IRA in accounts/trad-ira.env, ...): read, never printed.
 # The token is sent to IBKR's Flex Web Service only.
@@ -55,7 +57,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Its cash ledger and its costs ledger (costs.jsonl, in the same folder), and
+# Its cash ledger, its costs ledger (costs.jsonl) and its executions proof
+# (executions.json, read by the adapter), in the same folder, and
 # beside them the status, coverage, resolutions and lock files and the .tmp
 # each whole-file write renames over its file, and nothing else.
 ReadWritePaths=/var/lib/trend-investing/flex/%i

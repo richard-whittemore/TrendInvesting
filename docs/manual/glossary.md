@@ -56,7 +56,10 @@ target before it is traded. See [momentum](momentum.md).
 
 **As of the close** (a reading). The IBKR adapter's one account reading
 after a session's close, stamped as the account at that close: allowed when
-it is read after the close on the close's own New York date, with no open
+it is read after the close on the close's own New York date, or the next
+morning before the open with the Flex reader's executions proof (your
+decision of 2026-10-27; [reconciliation](reconciliation.md), "The
+executions proof"), with no open
 order for the account at IBKR from any client (working, pending or
 cancel-pending), IBKR's executions read in full and none at or since the
 close, every holding with an official close in the file, IBKR's own net

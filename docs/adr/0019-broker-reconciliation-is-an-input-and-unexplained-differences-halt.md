@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4, and an ended run's never-sent sale is settled for the fresh run's approval)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4, and an ended run's never-sent sale is settled for the fresh run's approval; amended 2026-10-27 by the owner ("Flex"): the morning reading stands for the close with the Flex executions proof)
 - Date: 2026-09-17
 
 ## In plain English
@@ -1058,3 +1058,213 @@ the classification `pending-cash-read`, the action `alert` and the field
 `repeat_of` (the reading a repeated pending cash read names);
 `risk.order.refused` version 4 adds the refusal reason
 `pending-cash-decrease`.
+
+## Amendment (2026-10-27, owner decision, "Flex"): the morning reading stands for the close with the Flex executions proof
+
+**Why.** Massive's free plan, which the owner decided on 2026-10-27 to keep,
+serves a session's grouped daily bars only on the morning after it (HTTP 403
+all evening on the session's own date), so the data job writes session D's
+file on the morning of D+1 (06:05, 07:05 and 08:05 New York). The adapter
+reads the account when it delivers the file. Condition 1 of the amendment of
+2026-10-18 required that reading to be on the close's own New York date,
+since IBKR's `reqExecutions` reaches back only to midnight (ADR 0025 point
+5): a reading the next morning cannot rule out an execution between the
+close and midnight. On 2026-10-27 at 08:39 New York the engine therefore
+withheld Monday's session (`stale-account-snapshot`, "read on a later New
+York date than the close"), and with every file arriving the next morning
+it would withhold every session.
+
+**Decision (the owner, 2026-10-27, "Flex").** The adapter keeps taking its
+one after-close reading when it delivers the file, the morning of D+1 (or
+later), and that reading stands for D's close when every other condition of
+the amendment of 2026-10-18 holds and the span from D's close to the
+midnight IBKR's own execution list starts at is proven, as follows. A
+reading on the close's own date is checked as before, unchanged.
+
+1. **The Flex reader's executions proof covers the close to that midnight.**
+   The Flex reader (`ti-flex@<instance>`) also writes an executions proof
+   beside its cash ledger (`executions.json`): every execution IBKR's Flex
+   statement lists for the account, by its execution ID (or trade ID) and
+   time, the statement's period, the moment the reader asked for it, and the
+   moment up to which it lists every execution (`covered_until`). The
+   reading stands only when the proof was read (not set aside, not "none"),
+   its statement starts on or before D, its `covered_until` is at or after
+   the midnight (New York) that starts the reading's own day, and it lists
+   **no execution at or after D's close** (the NYSE calendar's close, 1 p.m.
+   on an early close; one at the close's own second counts, as condition 1
+   already counts it).
+2. **IBKR's own list since that midnight shows none** at or after the close
+   (condition 1's check of IBKR's list, unchanged).
+3. **The journal holds no fill stamped at or after the close** (the
+   adapter's outbox, the engine's durable log, and the log of every earlier
+   run its Run approvals chain back to, as the previous close's book reads
+   them, so a fresh run started after the close hides no fill of the run
+   before it; the walk stops only after a run whose business, every input
+   but its configuration and approval, was all recorded before the close,
+   and goes past a run with none; a chain that cannot be read withholds).
+4. **The reading is before the next session's open** (09:30 New York on the
+   next NYSE trading day), so the account has not traded since.
+
+Anything unproven withholds the session as before: both snapshots stamped
+at the read time, every failed proof named in `not_as_of_close`, the engine
+withholding the session (`stale-account-snapshot`) and the reporter paging
+the owner once with the reason, which names the proof that failed (no proof
+written, a proof set aside and why, a statement that does not reach the
+midnight, a statement starting after D, the execution IDs it lists after the
+close, an execution in IBKR's own list, the journalled fill, or a reading
+after the open).
+
+**When a statement lists every execution, from IBKR's documentation.**
+
+- IBKR's Flex Web Service documentation: "Activity Statement Flex Queries
+  contain data that is only updated once daily at close of business, so
+  there is no benefit to generating and retrieving these reports more than
+  once per day", and "Typically a new execution will be available for
+  inclusion in a newly generated Flex Query report within 5 to 10 minutes"
+  of a Trade Confirmation Flex query; "The Flex Web Service is not suitable
+  for active polling for newly generated reports. Rather, it is best used to
+  capture the desired reports once daily, or at most intermittently
+  throughout the day in the case of Trade Confirmation reports"
+  (interactivebrokers.com/docs/web-api, Flex Web Service, Introduction).
+- IBKR's Web API documentation of statements: "The reporting window closes
+  at 5:15PM EST for commodities and 8:20PM EST for securities. Statements
+  will be available around midnight (EST)" (interactivebrokers.com/docs/
+  web-api, Account Management, Reporting, Activity Statements).
+- IBKR's overnight session trades US stocks and ETFs from 8:00 p.m. to
+  3:50 a.m. New York, Sunday evening to Friday morning, and "Trades executed
+  between 8:00 pm ET and 12:00 am ET will carry a trade date of the
+  following trade day" (interactivebrokers.com, Trading, "Overnight
+  Trading"; a session starting on a day the NYSE is closed may trade from
+  6:00 p.m.).
+
+So an **Activity** statement read the morning of D+1 ends on D and lists
+D's executions only up to the 8:20 p.m. securities cutoff: one between then
+and midnight (an overnight-session trade) is in the next day's statement,
+available only around the next midnight. An Activity statement can never
+prove D's evening on the morning of D+1, and the owner's first plan (one
+Activity query with Cash Transactions and Trades) would withhold every
+session. A **Trade Confirmation** statement lists executions within minutes
+and, read the morning of D+1 with a period that includes that day, lists
+the whole evening. The rule the proof applies to any statement is therefore
+the conservative one: a statement lists every execution **up to the start
+of its last day** (`toDate`; an execution late on a day can carry the next
+day's trade date) **and no later than an hour before the reader asked for
+it** (six times IBKR's "5 to 10 minutes"). For a Trade Confirmation
+statement read at 05:30 whose period ends today, that is midnight, which is
+what the reading needs; for an Activity statement read the same morning it
+is the start of D, which fails. The proof is taken from a separate **Trade
+Confirmation Flex query** the owner sets up (`TI_IBKR_FLEX_TRADES_QUERY_ID`,
+read with the same Flex token, asked for in the same reading after the cash
+query). **Only a Trade Confirmation statement is a proof**: an Activity
+statement's Trades section is never taken, and with no trades query set the
+proof is "none", so sessions delivered the next morning are withheld and
+the page says why. Whether IBKR's "Last N Calendar Days" period
+of a Trade Confirmation query includes the day it is run on is not stated in
+IBKR's documentation; the rule fails closed if it does not (the statement
+then ends yesterday and covers only to yesterday's start), and the first
+live reading's proof (`to_date`, `covered_until`) shows which.
+
+**The proof is read strictly, and bound to the account.** The statement's
+TradeConfirms section must hold only TradeConfirm rows, each at an
+execution's or an order's level of detail, of this account, dated with its
+time, with nothing inside it; a summary row (it totals executions it does
+not list), any other element, a row dated by day alone or a missing section
+sets the proof aside, never an empty "read". The proof records the account
+its statement was checked against, and the adapter refuses a proof for any
+other account. It refuses a proof whose fields, period, fetch time or
+coverage are not as the reader writes them (its `covered_until` must be the
+one the rule above gives for its last day and fetch time). Once a reading
+holds the reader's lock it writes the proof set aside ("not finished")
+first, before its status file and before it asks IBKR for anything, and
+rewrites it whole when it ends, so a reading stopped part way leaves a
+set-aside proof. A proof that cannot be written never stops the cash and
+costs being recorded: the earlier proof is removed instead (the morning
+delivery then finds none), and the reading fails so the owner sees it. A
+reading leaves the earlier proof in place only when it never gets that far
+(its command refuses its arguments or secrets, or it cannot open its lock)
+or when the folder is so unwritable that the earlier proof cannot be
+removed either; the checks above still bound such a proof to its own
+account, period and fetch time. A proof that fails in a way a later firing can clear (missing, set
+aside, not yet covering) is waited for until 09:00 whether it fails before
+the account is read or by the end of the read (a firing that rewrites it
+during the read).
+
+**Where IBKR's own list starts.** IBKR's TWS API returns, through IB
+Gateway, only the executions since midnight (ADR 0025 point 5), and gives
+each execution's time in the zone of the Gateway's login. The midnight is
+therefore the Gateway's: the deployment runs IB Gateway with
+`TZ=America/New_York` (`ti-gateway.service`, checked by a test), so it is
+meant to be New York's, the midnight the proof must reach. An explicit
+`ExecutionFilter` time cannot widen the list (a filter only narrows it), so
+the boundary is verified at run time on every connection, with or without
+an execution: at each reconcile (every connect and reconnect) the adapter
+reads the session's connection time IB Gateway gave at the handshake (TWS
+API `EClient.twsConnectionTime`, "YYYYMMDD HH:MM:SS Zone" in the Gateway's
+own zone; IBKR documents the call but not the format, so it is read
+defensively). Its zone, everything after the date and the time, stands
+only when it is a New York zone name (`US/Eastern`, `America/New_York`,
+`EST5EDT`), or an abbreviation or long name (`EST` or `Eastern Standard
+Time`, `EDT` or `Eastern Daylight Time`) that New York used at the date and
+time stated, at either reading of the local hour repeated when daylight
+saving time ends; the date and time must themselves read. A time missing,
+not of that shape, or in any other zone withholds the morning reading, the
+page and the adapter's journal quoting the Gateway's text exactly as it
+gave it. Every execution time IBKR reports in the account on the
+connection gets exactly the same check (the same shape, the same date and
+time reading, the same zones, season-checked the same way), quoted as IBKR
+gave it, and one that fails withholds too. Both the connection time and
+the execution times seen are read afresh at each reconcile, so a Gateway
+set right and reconnected is trusted again without restarting the
+adapter. A fill journalled with a time that has no zone, or one
+that cannot be read, cannot be placed against the close and withholds too.
+
+**When it runs.** The Flex reader moves from 21:30 to each weekday morning
+at 05:30, 06:30 and 07:30 New York, each before one of the data job's
+firings. Until 09:00 New York on a later date than the close, a batch whose
+proof is not yet written, is set aside or does not yet reach the midnight
+waits for the reader's next firing rather than have its session withheld;
+at or after 09:00, or at once when the proof lists an execution after the
+close or no Flex ledger is configured, the session is withheld. The cash
+ledger's own rules are unchanged (its last day is still read again by the
+next statement), and a morning reading only covers more of it than an
+evening one did.
+
+**No unverified window.** From the close to the 8:20 p.m. cutoff and on to
+midnight: the Trade Confirmation statement (the start of its last day being
+the reading's own midnight, and the reader asking for it at least an hour
+after that midnight). From midnight to the reading: IBKR's own execution
+list, read with the reading under its one cutoff. Across any weekend or
+holiday between them the same holds, since the statement must reach the
+midnight of the reading's own day (a Monday reading of Friday's session
+needs a statement ending Monday; one ending Sunday covers only to Sunday's
+start and withholds). Every fill the adapter journalled is checked too, and
+the holdings and cash are still compared with the previous close's book
+adjusted by the fills (condition 2): a trade no list shows still changes
+them.
+
+**Orders.** Unchanged: the orders the engine releases at D's close are
+released the morning of D+1, when the batch is delivered, and sent as DAY
+limit orders for D+1, as before.
+
+**What this does not cover.** For a reading the next morning, the residual
+of the amendment of 2026-10-18 (a round trip by another client that IBKR's
+API lists do not show this client) is covered from the close to midnight by
+the Flex statement, which lists the account's executions whichever client
+placed them; for a reading the same evening it stays as it was. A posting overnight (interest, a dividend) moves the cash
+between the close and the morning reading; it is within the existing 1%
+drift bound or withholds, as a posting between the close and an evening
+reading did. A transfer IBKR posts between midnight and the morning reading
+is in the reading's cash but dated after the close's day, which the cash
+rules take the close's book to hold until midnight only: the next
+reconciliation then finds the difference, pending until the reader covers
+that day and then Degraded, as for a transfer posted late on a close's
+evening (the amendment of 2026-10-21). The proof's `covered_until` assumes,
+as the cash reader already does, that a Flex `dateTime` is New York time.
+
+**What changes where.** The IBKR adapter (`loop.py`: the morning proof
+replaces the same-date condition for a reading on a later date; the batch
+waits for the proof until 09:00) and its Flex reader (`flex.py`: the
+executions proof; `ti-flex@.timer`: the morning firings), and one secret,
+`TI_IBKR_FLEX_TRADES_QUERY_ID`. The engine, its schemas and its rules are
+unchanged: a snapshot stamped as of the close is the one the engine already
+reads, and a withheld one is stamped as before. No RulesVersion change.

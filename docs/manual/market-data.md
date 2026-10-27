@@ -320,17 +320,14 @@ refusal.
 not served on the evening of the session: asked at 17:05, 18:05 or 20:05 on
 the day, Massive answers "403 forbidden", and the same request succeeds the
 next morning (confirmed on the real server: a run at about 7 a.m. on
-2026-10-27 recorded the session). But the engine withheld that session
-(`stale-account-snapshot`): the adapter's account reading is taken the next
-morning, after the session's close, and the engine accepts only a reading as
-of the close. So until the Flex proof is in place, a session recorded the
-next morning is withheld and places no order, whichever hour the job runs
-(the free plan's evening firings could only ever 403, so mornings are no
-worse). The change that lets the engine accept the morning reading, when
-IBKR's Flex statement proves no execution after the close, is made
-separately; see the Flex reader in
-[reconciliation](reconciliation.md), "Deposits and withdrawals, read from
-IBKR".
+2026-10-27 recorded the session). The adapter's account reading is then
+taken the next morning, and it stands for the session's close only with the
+Flex reader's executions proof (your decision of 2026-10-27): IBKR's Trade
+Confirmation statement, read each weekday morning before the job, showing
+no execution from the close to midnight
+([reconciliation](reconciliation.md), "The executions proof"). Without the
+proof by 09:00 New York the session is withheld (`stale-account-snapshot`)
+and places no order.
 
 What the job does with that answer:
 
@@ -771,13 +768,16 @@ days), it takes them all, oldest first.
    close and the next open the account changes only through an order still
    working, an execution, a corporate action IBKR books overnight or a cash
    posting (interest, a fee), so when the reading is taken after the close
-   of the file's last session, on that session's own New York date, with no
-   open order for the account at IBKR (working, pending or cancel-pending,
+   of the file's last session, either on that session's own New York date
+   or on a later date before the next session opens with the Flex reader's
+   executions proof (your decision of 2026-10-27), with no open order for the account at IBKR (working, pending or cancel-pending,
    from any client; in either read of the account and in the last list of
    open orders, read after both), no execution in the account at or since
    the close (IBKR's own list, asked for every client and read last; it
-   reaches back only to midnight, which is why the date must be the
-   close's; a closing-auction fill stamped at the close itself counts),
+   reaches back only to midnight, which is why a reading on a later date
+   needs the executions proof to cover the close to that midnight
+   ([reconciliation](reconciliation.md), "The executions proof"); a
+   closing-auction fill stamped at the close itself counts),
    every holding with an official close in the file, IBKR's own net
    liquidation at the read above zero, the holdings exactly the previous
    close's plus or minus the fills since, and the cash the previous close's
@@ -994,8 +994,7 @@ which writes the sessions again from its recordings, and start the adapter
   written down or sent. Once the link is back and matched, the adapter takes
   a fresh snapshot and hands the file over then.
 - **The reading cannot stand for the close**: it was read before the
-  close or on a later New York date than the close (the adapter was not
-  running that evening); IBKR shows an open order for the account from any
+  close, or read on a later New York date than the close without the Flex reader's executions proof reaching the midnight that starts the reading's day (no proof, one set aside, or a statement ending too early), with an execution at or after the close in that proof, a fill journalled at or after the close, or read at or after the next session's open ([reconciliation](reconciliation.md), "The executions proof"); IBKR shows an open order for the account from any
   client (working, pending or cancel-pending); IBKR's executions could not
   be read in full, or one is at or since the close; a holding has no
   official close in the file; IBKR's own net liquidation is not above zero;
@@ -1023,11 +1022,13 @@ which writes the sessions again from its recordings, and start the adapter
   reports its balances in US dollars, then start the adapter again; the
   file is delivered then. This is not one of the refused-file cases: leave
   the file where it is.
-- **The adapter was not running at 17:05** and starts the next morning: it
-  delivers the file then, and an order the engine releases at that close is
-  for a session already past, so it is never sent (the adapter stops on it:
+- **The adapter was not running when the file was written** and starts
+  later that morning: it delivers the file then, behind a reading that
+  stands for the close only with the executions proof and only before the
+  next open. Started after 09:30 it is withheld, and an order released for
+  a day already past is never sent (the adapter stops on it:
   [paper trading](paper-trading.md), "What can go wrong"). Keep the adapter
-  running through the evening of a paper day.
+  running on a paper day.
 - **A fresh run with the old run's file still in the outbox** (you started a
   new `TI_RUN` before the old file was all sent): its snapshot and lines are
   dropped unsent together, in one write, with one log line, so a stop

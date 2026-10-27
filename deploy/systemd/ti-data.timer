@@ -8,9 +8,10 @@ Description=Run the market-data step on weekday mornings, for the previous sessi
 # to Friday read the day before, Monday reads Friday, and the morning after a
 # holiday reads the session before it (adapter/marketdata/tests/test_tidata.py
 # checks every firing against every session). All three are before the 9:30
-# open, but the engine withholds a session delivered the next morning until
-# its account reading is proven as of the close (docs/manual/market-data.md,
-# "The free plan's timing"). A
+# open; the adapter's morning reading stands for the session's close with the
+# Flex reader's executions proof (ti-flex@.timer, 05:30, 06:30 and 07:30;
+# ADR 0019, amended 2026-10-27), else the session is withheld
+# (docs/manual/market-data.md, "The free plan's timing"). A
 # 403 at the first two firings is a quiet wait; one that persists at the last
 # is a failure that pages (ti-data.service; docs/manual/market-data.md, "The
 # free plan's timing"). Once the session's file exists a later firing finds it

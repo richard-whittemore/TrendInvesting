@@ -488,6 +488,15 @@ class IbapiClient(TWSApi):
     def cancel_mkt_data(self, req_id):
         self._client.cancelMktData(req_id)
 
+    def connection_time(self):
+        """IB Gateway's connection time for this session, as ibapi keeps it from the connect handshake
+        (EClient.twsConnectionTime), or None with no session or a value that is not text."""
+        client = self._client
+        if client is None or not client.isConnected():
+            return None
+        text = client.twsConnectionTime()
+        return text if isinstance(text, str) else None
+
     def can_place_orders(self):
         """Whether this client may place orders: the sending switch, the paper gate's last check (AGENTS.md rule 5).
 

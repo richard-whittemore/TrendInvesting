@@ -73,7 +73,11 @@ before the close and each session's bars before its close (ADR 0019's
 snapshot rule; ADR 0021). The owner's decision of 2026-10-18 (ADR 0019,
 ADR 0025 point 5, ADR 0026 point 1, amended): the reading is the account
 as of the batch's last close when it is taken after that close on its own
-New York date, with no open order for the account at IBKR (in either
+New York date, or (the owner's decision of 2026-10-27, ADR 0019 amended
+that day) on a later date before the next open with the Flex reader's
+executions proof covering the close to the midnight IBKR's own list starts
+at and no fill journalled since the close (_morning_proof; until
+PROOF_WAIT_UNTIL the batch waits for that proof, _awaits_proof), with no open order for the account at IBKR (in either
 account read or the last open-order list), no execution in it at or since
 the close, every holding valued at an official close of the batch, IBKR's
 own net liquidation positive, and its holdings and cash those of the
@@ -169,17 +173,18 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time as clock_time, timezone
 from decimal import Decimal
 
 from connection import Connection, LinkChanged, NotConnected
-from delivery import (DELIVERED_SUFFIX, Deliverer, PostCloseReading, SnapshotRefused, market_open, nyse_calendar,
-                      run_name)
+from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReading, SnapshotRefused, market_open,
+                      nyse_calendar, run_name)
 from orders import (OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker,
                     agrees_with_account, collect_broker_orders, collect_settled_broker_orders, match_on_reconnect,
                     order_key)
-from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay, earlier_run,
-                   read_engine_log, released_client_order_ids, run_identity, run_logs)
+from relay import (LOG_INPUT, OUTBOX_SUFFIX, RUN_APPROVED, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
+                   Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
+                   run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
 from account import NET_LIQUIDATION, TOTAL_CASH
@@ -244,6 +249,74 @@ MARK_SOURCE = "marketdata"
 # beyond it the reading is stamped at its read time (ADR 0019, amended
 # 2026-10-18; the engine checks the same bound, event.CashDriftBound).
 CASH_DRIFT_BOUND = Decimal("0.01")
+# Until this New York time on a later date than a batch's close, a batch whose
+# executions proof is not yet written or does not yet cover waits for the Flex
+# reader's next firing (05:30, 06:30 and 07:30; ti-flex@.timer) rather than
+# have its session withheld; at or after it, it is withheld. Before the 09:30
+# open, so a session decided is decided before the next one starts (ADR 0019,
+# amended 2026-10-27).
+PROOF_WAIT_UNTIL = clock_time(9, 0)
+# The zone names IB Gateway gives an execution's time when its login is on
+# New York time. IBKR's executions reach back only to midnight in that zone
+# (ADR 0025 point 5); ti-gateway.service sets TZ=America/New_York, and an
+# execution reported in any other zone shows the list's midnight is not New
+# York's, so a morning reading is withheld (ADR 0019, amended 2026-10-27).
+NEW_YORK_ZONES = frozenset(("US/Eastern", "America/New_York", "EST5EDT"))
+# New York's abbreviations, and the long names IB Gateway may give for them, each New York's only while it is in
+# force there.
+NEW_YORK_ABBREVIATIONS = {"EST": "EST", "EDT": "EDT", "Eastern Standard Time": "EST",
+                          "Eastern Daylight Time": "EDT"}
+
+
+def gateway_zone_problem(text, what="IB Gateway's connection time"):
+    """Why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", does not show it on New York time; "" when it
+    does. what names the text in the reason, which quotes it exactly as given.
+
+    The TWS API gives a session's connection time (EClient.twsConnectionTime)
+    and each execution's time in the Gateway's own zone, the zone its
+    execution list's midnight is in (ADR 0025 point 5). IBKR documents the
+    call, not the format, so it is read defensively (ADR 0019, amended
+    2026-10-27; AGENTS.md: fail closed): the zone, everything after the date
+    and time, must be a New York zone name (NEW_YORK_ZONES), or an
+    abbreviation or long name (NEW_YORK_ABBREVIATIONS) New York used at the
+    time stated, at either reading of a local time repeated when daylight
+    saving time ends; a local time New York skipped when daylight saving
+    time began, anything else, or a text not of that shape, is a problem.
+    """
+    parts = text.split(None, 2) if isinstance(text, str) else []
+    if len(parts) != 3:
+        return ("{} {!r} is not 'YYYYMMDD HH:MM:SS Zone', so the zone its list of executions starts its midnight "
+                "in is not known".format(what, text))
+    try:
+        local = datetime.strptime(parts[0] + " " + parts[1], "%Y%m%d %H:%M:%S")
+    except ValueError:
+        return ("{} {!r} does not state a date and time that can be read, so the zone it is in is not "
+                "trusted".format(what, text))
+    zone = parts[2].strip()
+    if zone in NEW_YORK_ZONES or zone in NEW_YORK_ABBREVIATIONS:
+        # A wall-clock time New York skipped (the hour the clocks go forward) does not come back from UTC as
+        # itself: the text is no New York reading at all. The repeated autumn hour does, at its first reading.
+        aware = local.replace(tzinfo=nyse_calendar.NEW_YORK)
+        try:
+            back = aware.astimezone(timezone.utc).astimezone(nyse_calendar.NEW_YORK).replace(tzinfo=None)
+            used = {local.replace(tzinfo=nyse_calendar.NEW_YORK, fold=fold).tzname() for fold in (0, 1)}
+        except (OverflowError, ValueError, OSError) as err:
+            # Fail closed (AGENTS.md): a time the calendar cannot place is no New York reading.
+            return ("{} {!r} cannot be placed in New York's calendar ({}), so it is not a New York "
+                    "reading".format(what, text, type(err).__name__))
+        if back != local:
+            return ("{} {!r} is a time that did not happen in New York (the clocks went forward over it), so it "
+                    "is not a New York reading".format(what, text))
+    if zone in NEW_YORK_ZONES:
+        return ""
+    if zone in NEW_YORK_ABBREVIATIONS:
+        if NEW_YORK_ABBREVIATIONS[zone] in used:
+            return ""
+        return ("{} {!r} is in {}, which is not what New York uses at that date and time: the Gateway is not on New "
+                "York time".format(what, text, zone))
+    return ("{} {!r} is in the zone {!r}, not New York's: IBKR's executions reach back only to midnight in the "
+            "Gateway's own zone, so the midnight its list starts at is not New York's; set IB Gateway to New York "
+            "time (ti-gateway.service, TZ=America/New_York, and its login's time zone)".format(what, text, zone))
 
 
 class ReconcileIncomplete(Exception):
@@ -301,6 +374,15 @@ def _event_time_readable(payload, field):
     except (AttributeError, ValueError):
         return False
     return at.tzinfo is not None
+
+
+def _recorded_at_or_after(envelope, moment):
+    """Whether a logged input's recorded time is at or after moment; True when it cannot be read (fail closed)."""
+    try:
+        at = datetime.fromisoformat(str(envelope["recorded_at"]).replace("Z", "+00:00"))
+        return at.tzinfo is None or at >= moment
+    except (KeyError, TypeError, ValueError):
+        return True
 
 
 def _stamp(at):
@@ -395,6 +477,16 @@ class AdapterLoop:
         # How many reconciles in a row the link was dropped during, since it
         # was last reconciled (reconcile, RECONCILE_CUTOFFS).
         self._reconcile_cutoffs = 0
+        # The close whose batch last logged that it waits for the executions proof (_awaits_proof).
+        self._proof_waited = None
+        # Set by _morning_proof when the proof failed in a way a later firing of the Flex reader can clear,
+        # before PROOF_WAIT_UNTIL: the batch then waits rather than withhold (_post_close_reading).
+        self._proof_retryable = False
+        # Every execution time IBKR reported in the account on this connection, as it gave it
+        # (_count_execution), and why IB Gateway's own zone, read at this connection's reconcile, is not New
+        # York's ("" when it is): both are read afresh at every reconcile (gateway_zone_problem).
+        self._execution_zones = set()
+        self._gateway_zone = "IB Gateway's connection time has not been read yet (no reconcile has run)"
         self.delivery = None if streams is None else Deliverer(
             streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._post_close_reading, new_id)
 
@@ -468,7 +560,20 @@ class AdapterLoop:
         (ReconcileIncomplete, naming the last drop's reason): a link that
         drops in every reconcile would otherwise cycle with nothing sent
         and no one told (fail closed and tell a person, AGENTS.md).
+
+        Each reconcile starts this connection's evidence of IB Gateway's zone
+        afresh: the zones of the executions it reports, and its connection
+        time's zone (gateway_zone_problem), so a Gateway set right and
+        reconnected is trusted again without a restart (ADR 0019, amended
+        2026-10-27).
         """
+        self._execution_zones = set()
+        try:
+            self._gateway_zone = gateway_zone_problem(self._api.connection_time())
+        except Exception as err:  # any failure to read it is a zone not known (fail closed)
+            self._gateway_zone = "IB Gateway's connection time could not be read ({})".format(type(err).__name__)
+        if self._gateway_zone:
+            log.warning("ibkr %s; a morning reading on this connection is withheld", self._gateway_zone)
         try:
             self._reconcile()
         except (NotConnected, BrokerOrdersIncomplete, ReconcileIncomplete) as err:
@@ -786,6 +891,7 @@ class AdapterLoop:
         if event.name == "exec_details" and len(event.args) == 3:
             if getattr(event.args[2], "acctNumber", None) == self.config.account_id:
                 self._account_executions.add(getattr(event.args[2], "execId", None))
+                self._execution_zones.add(getattr(event.args[2], "time", None))
 
     def _activity(self):
         """A broker snapshot's cutoff watermark: the order reports recorded, and the executions seen.
@@ -825,6 +931,8 @@ class AdapterLoop:
         snapshot is taken only from one complete reading whose holdings agree.
         Callers must not deliver anything when it raises SnapshotRefused.
         """
+        if self._awaits_proof(close):
+            return None
         unread = None
         summary = ""
         started = self._monotonic()
@@ -884,6 +992,10 @@ class AdapterLoop:
                 continue
             judged = self._not_as_of_close(confirm, close, closes, broker)
             if judged is None:
+                return None
+            if self._proof_retryable:
+                log.info("ibkr broker snapshot waits: the Flex reader's executions proof changed during the read "
+                         "and does not hold now; it is read again until %s New York", PROOF_WAIT_UNTIL.strftime("%H:%M"))
                 return None
             why, valuation, drift, unexplained, unverified = judged
             stamp = None if why else close
@@ -962,7 +1074,11 @@ class AdapterLoop:
         - read after the close, on the session's own New York date: IBKR's
           executions reach back only to midnight (ADR 0025 point 5), so only
           then does its list cover every execution since the close (and the
-          next open is on a later date);
+          next open is on a later date); or on a later date with the morning
+          proof (_morning_proof; the owner's decision of 2026-10-27, ADR
+          0019 amended that day): before the next open, the Flex reader's
+          executions proof covering the close to the reading's midnight with
+          nothing in it at or after the close, and no fill journalled since;
         - no open order for the account, of any client (working, pending or
           cancel-pending, snapshot.OPEN_STATUS), in the account read and in
           the last open-order list IBKR returned (broker);
@@ -997,13 +1113,12 @@ class AdapterLoop:
         holds; when it does not (a clock behind), None: the batch waits.
         """
         reasons = []
+        self._proof_retryable = False
         read_ny, close_ny = reading.as_of.astimezone(nyse_calendar.NEW_YORK), close.astimezone(nyse_calendar.NEW_YORK)
         if not reading.as_of > close:
             reasons.append("it was read at {}, not after the close at {}".format(_stamp(reading.as_of), _stamp(close)))
         elif read_ny.date() != close_ny.date():
-            reasons.append("it was read at {}, on a later New York date than the close at {}: IBKR's executions "
-                           "reach back only to midnight, so none since the close can be ruled out".format(
-                               _stamp(reading.as_of), _stamp(close)))
+            reasons.extend(self._morning_proof(reading, close))
         if reading.open_orders:
             reasons.append("IBKR shows {} open order(s) for the account (working, pending or cancel-pending): "
                            "{}".format(len(reading.open_orders),
@@ -1044,6 +1159,157 @@ class AdapterLoop:
                      "holds, as of %s", _stamp(reading.as_of), _stamp(last))
             return None
         return "; ".join(reasons), valuation, drift, unexplained, unverified
+
+    def _morning_proof(self, reading, close):
+        """Why a reading on a later New York date than close cannot stand for it: [] when every proof holds.
+
+        The owner's decision of 2026-10-27 (ADR 0019, amended 2026-10-27):
+        IBKR's executions reach back only to midnight (ADR 0025 point 5), so
+        a reading the next morning sees in IBKR's own list only those since
+        the midnight its New York day starts at. The span from the close to
+        that midnight is proven by the Flex reader's executions proof
+        (_flex_proof), and the rest by the journal and the reading itself:
+
+        - the reading is before the next session's open (by the NYSE
+          calendar), so the account has not traded since;
+        - the executions proof lists every execution from the session's day
+          up to that midnight, and none at or after the close;
+        - IBKR's own list shows none at or after the close (checked with the
+          other conditions, _not_as_of_close);
+        - the journal (the engine's durable log and the outbox) holds no fill
+          stamped at or after the close.
+        """
+        reasons = []
+        read_ny = reading.as_of.astimezone(nyse_calendar.NEW_YORK)
+        day = close.astimezone(nyse_calendar.NEW_YORK).date()
+        later = ("it was read at {}, on a later New York date than the close at {}: IBKR's executions reach back only "
+                 "to midnight, so those between the close and midnight are proven only by the Flex reader's "
+                 "executions proof, and ".format(_stamp(reading.as_of), _stamp(close)))
+        try:
+            opens = datetime.combine(nyse_calendar.sessions_after(day, 1)[0], SESSION_OPEN, nyse_calendar.NEW_YORK)
+        except nyse_calendar.OutOfRange:
+            opens = None
+        if opens is None or not reading.as_of < opens:
+            reasons.append("it was read at {}, not before the next session's open{}: the account may have traded "
+                           "since the close".format(_stamp(reading.as_of),
+                                                    " at " + _stamp(opens) if opens is not None else ""))
+        midnight = datetime.combine(read_ny.date(), clock_time(0), nyse_calendar.NEW_YORK)
+        proof, decisive = self._flex_proof(close, midnight)
+        reasons.extend(later + why for why in proof)
+        # A proof a later firing of the Flex reader can clear is waited for until PROOF_WAIT_UNTIL, as before the
+        # read (_awaits_proof): one replaced while the account was read is read again, not withheld on.
+        now = self._now().astimezone(nyse_calendar.NEW_YORK)
+        self._proof_retryable = (bool(proof) and not decisive and self._cash_ledger is not None and now > close
+                                 and now.date() != day and now.time() < PROOF_WAIT_UNTIL)
+        if self._gateway_zone:
+            reasons.append(self._gateway_zone)
+        # Each execution time is checked as the connection time is, quoted as IBKR gave it.
+        for text in sorted(self._execution_zones, key=repr):
+            problem = gateway_zone_problem(text, "IBKR's execution time")
+            if problem:
+                reasons.append(problem)
+        fills = self._journalled_fills_since(close)
+        if fills:
+            reasons.append("the journal records {} fill(s) stamped at or after the close, or with a time that cannot "
+                           "be compared with it: {}".format(len(fills), ", ".join(fills)))
+        return reasons
+
+    def _flex_proof(self, close, midnight):
+        """(reasons, decisive): why the Flex reader's executions proof does not show that nothing executed in the
+        account from close up to midnight ([] when it does), and whether it lists such an execution (a reason no later
+        reading of the proof can clear). See flex.py, step 5."""
+        day = close.astimezone(nyse_calendar.NEW_YORK).date()
+        if self._cash_ledger is None:
+            return ["no Flex ledger is configured (--cash-ledger), so no executions proof is read"], False
+        path = flex.executions_path(self._cash_ledger)
+        try:
+            proof = flex.read_executions(path, self.config.account_id)
+        except flex.StatementRefused as refused:
+            return [str(refused)], False
+        if proof is None:
+            return ["no executions proof is written ({}): the Flex reader (ti-flex@<instance>) has not read a "
+                    "statement with the account's executions (docs/manual/reconciliation.md, \"The executions "
+                    "proof\")".format(path)], False
+        if proof.state != flex.PROOF_READ:
+            return ["the executions proof is {}: {}".format(proof.state, proof.reason)], False
+        after = [i for i, at in proof.executions if at >= close]
+        if after:
+            return ["IBKR's Flex statement lists {} execution(s) in the account at or after the close: {}".format(
+                len(after), ", ".join(after))], True
+        reasons = []
+        if proof.from_day > day:
+            reasons.append("the executions proof starts on {}, after the session's day {}".format(
+                proof.from_day.isoformat(), day.isoformat()))
+        if proof.covered_until < midnight:
+            reasons.append("the executions proof lists every execution only up to {}, not up to {}, the midnight "
+                           "IBKR's own list starts at (a statement lists them up to the start of its last day, "
+                           "{})".format(_stamp(proof.covered_until), _stamp(midnight), proof.to_day.isoformat()))
+        return reasons, False
+
+    def _journalled_fills_since(self, close):
+        """The fill IDs journalled stamped at or after close: in the outbox, this run's durable log, and the log of
+        every earlier run its Run approvals chain back to, as the previous close's book reads them
+        (book_basis.previous_close; relay.run_chain), so a fresh run hides no fill of the run before it.
+
+        The walk stops after the first earlier run whose business (every input but its configuration and Run
+        approval) was all recorded strictly before close: each run before it ended earlier still. A run with no
+        business is walked past. A chain that cannot be read is itself a reason (fail closed, AGENTS.md).
+        """
+        payloads = [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
+        try:
+            for n, (_, groups, _) in enumerate(run_chain(self._engine_log_path)):
+                inputs = [envelope for group in groups for _, kind, envelope in group if kind == LOG_INPUT]
+                payloads += [e["payload"] for e in inputs if e["type"] == FILL_TYPE]
+                # A run's configuration and Run approval say nothing about when its business ran: a run holding
+                # nothing else is walked past, never taken as ending before the close.
+                business = [e for e in inputs if e["type"] != RUN_APPROVED and not e["type"].endswith(
+                    ".configuration")]
+                if n > 0 and business and not any(_recorded_at_or_after(e, close) for e in business):
+                    break
+        except ResolveRefused as refused:
+            return ["the chain of runs' logs cannot be read, so their fills cannot be checked ({})".format(refused)]
+        found = []
+        for payload in payloads:
+            ident = str(payload.get("fill_id", "a fill with no ID")) if isinstance(payload, dict) else "a fill"
+            try:
+                at = datetime.fromisoformat(payload["filled_at"].replace("Z", "+00:00"))
+            except (KeyError, AttributeError, TypeError, ValueError):
+                found.append("{} (its time cannot be read)".format(ident))
+                continue
+            if at.tzinfo is None:
+                # Fail closed (AGENTS.md): a time with no zone cannot be placed against the close.
+                found.append("{} (its time has no zone)".format(ident))
+            elif at >= close and ident not in found:
+                found.append(ident)
+        return found
+
+    def _awaits_proof(self, close):
+        """Whether a batch for the session closing at close waits, unread, for the Flex reader's executions proof.
+
+        The owner's decision of 2026-10-27 (ADR 0019, amended 2026-10-27):
+        the reader runs each weekday morning before the data job, and again
+        an hour later; until PROOF_WAIT_UNTIL New York on a later date than
+        the close, a proof not yet written, set aside or not yet covering up
+        to that day's midnight is waited for rather than the session
+        withheld. One that lists an execution after the close, or none with
+        no Flex ledger configured, is decided at once.
+        """
+        if self._cash_ledger is None:
+            return False
+        now = self._now().astimezone(nyse_calendar.NEW_YORK)
+        if not now > close or now.date() == close.astimezone(nyse_calendar.NEW_YORK).date():
+            return False
+        if now.time() >= PROOF_WAIT_UNTIL:
+            return False
+        reasons, decisive = self._flex_proof(close, datetime.combine(now.date(), clock_time(0),
+                                                                     nyse_calendar.NEW_YORK))
+        if not reasons or decisive:
+            return False
+        if self._proof_waited != close:
+            self._proof_waited = close
+            log.info("ibkr broker snapshot waits for the Flex reader's executions proof until %s New York: %s",
+                     PROOF_WAIT_UNTIL.strftime("%H:%M"), "; ".join(reasons))
+        return True
 
     def _since_previous_close(self, reading, valuation, reasons):
         """(drift, unexplained, unverified) of reading against the previous close, adding to reasons what fails.

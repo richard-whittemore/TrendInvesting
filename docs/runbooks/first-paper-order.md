@@ -320,6 +320,19 @@ Order of starting, each on the server, each an explicit step of yours:
    start, `sudo systemctl start ti-adapter-boost`. The adapter refuses to
    start until the engine's socket is open and its durable log exists; for a
    fresh run the engine records the Run approval before it opens its socket.
+   **Turn on the Flex reader before the first morning**: without it
+   there is no executions proof and every session delivered the next morning
+   is withheld at 09:00 (`stale-account-snapshot`). Create the Activity cash
+   query, the Trade Confirmation query and the Flex token
+   (`docs/manual/reconciliation.md`, "What you set up once", steps 1, 2 and
+   4), then fill in the three lines with `sudo ti-secrets edit secrets.env`:
+   `TI_IBKR_FLEX_TOKEN=`, `TI_IBKR_FLEX_QUERY_ID=` (the cash query) and
+   `TI_IBKR_FLEX_TRADES_QUERY_ID=` (the Trade Confirmation query). Once the
+   engine has started (the reader needs its `run.env`), run `sudo systemctl
+   start ti-flex@boost`, check that `sudo journalctl -u ti-flex@boost -n 20`
+   says it read and that `sudo cat
+   /var/lib/trend-investing/flex/boost/executions.json` shows `"state":
+   "read"`, then `sudo systemctl enable --now ti-flex@boost.timer`.
    For a run's first paper day the order is: the engine; then the data
    job's one-time warm-up (`docs/manual/market-data.md`, "The one-time
    warm-up"), which writes the run's first file,
@@ -328,18 +341,32 @@ Order of starting, each on the server, each an explicit step of yours:
    adapter refuses to start until the run's stream folder exists ("the
    run's stream folder ... does not exist"), and once started it delivers
    the warm-up to the engine behind one account reading, with the
-   start-of-run reconciliation. **Do this the evening before the first paper
-   day, or that morning**: the first day's reading must come after the
-   warm-up's, and a warm-up delivered after the first day's 17:05 file is
-   due withholds that day. From then on the timer writes each day's file at
-   17:05 and the adapter, left running, delivers it within seconds behind
-   one reading after the close, which stands for the account as of the
-   close when nothing is working at IBKR and nothing has executed since
-   (`docs/manual/paper-trading.md`, "A paper day"). Keep the adapter
-   running through the evening: a file delivered the next morning is read
-   on a later date than its close, so that session is withheld, and an
-   order released the evening before is for a session already past, which
-   is never sent.
+   start-of-run reconciliation. **Run the warm-up from about 08:15 New York
+   on a weekday, on the day before the first session you want decided or
+   earlier, then start the adapter as soon as it finishes** (about an hour
+   and a half). Massive's free plan serves the previous session from the
+   morning, and the data job takes its 403 as "not served yet" until 08:00,
+   so from 08:15 the warm-up records up to the previous session; a weekend
+   day works the same way, Friday's session being served by then. Do not
+   wait for the data job to write a file first: on a fresh run its firings
+   write nothing until the warm-up has made the run's stream folder. The
+   first session you want decided then arrives in its own file the morning
+   after it, from 06:05, and is delivered behind that morning's reading. From then on, each weekday
+   morning the Flex reader runs at 05:30 (again at 06:30 and 07:30) and
+   writes its executions proof, and the data job writes the previous
+   session's file at 06:05 (again at 07:05 and 08:05). The adapter, left
+   running, delivers each file within seconds behind one reading of the
+   account that morning. That reading stands for the account as of the
+   close when nothing is working at IBKR, the proof shows nothing executed
+   from the close to midnight, IBKR's own list shows nothing since, and
+   nothing is recorded after the close (`docs/manual/paper-trading.md`, "A
+   paper day"). If the proof is not there yet, the delivery waits for the
+   Flex reader's next firing until 09:00; after 09:00 a delivery without
+   the proof is withheld at once. A reading that has its proof still stands
+   for the close until the next session opens (09:30). Set up
+   the Trade Confirmation query first (`docs/manual/reconciliation.md`,
+   "What you set up once", step 4). An order the engine releases is sent
+   that morning, as a DAY order for that day.
    Neither is started or restarted by systemd on its own; every start is
    yours.
    **IBKR market data is not needed.** SPY's mark is the day's official
@@ -720,7 +747,9 @@ commands below are on `main` now **[NOW]**.
   adapter, a transfer, a split; the previous close may be the last run's,
   or the starting book you approved the first run with), the cash moved by
   more than 1% of net liquidation beyond those fills, the reading was on
-  a later date than the close (the adapter was not running that evening),
+  a later date than the close without the Flex reader's executions proof
+  (none by 9:00, one set aside, a statement that does not reach midnight,
+  or an execution after the close in it), or after the next open,
   or the engine already held a snapshot stamped at or after that close.
   Nothing was ordered; the target in force is unchanged.
 - **What to do:** check the account in IBKR for the order, trade, holding
@@ -729,8 +758,9 @@ commands below are on `main` now **[NOW]**.
   out of Normal: settle them as `docs/runbooks/reconciliation.md` says. A trade you placed by hand is reported again at the next
   start's reconciliation; settle it as `docs/runbooks/reconciliation.md`
   says. Otherwise nothing: the next session whose reading passes decides as
-  usual. Keep the adapter running through the evening so the reading is
-  taken on the close's own date.
+  usual. Keep the adapter running, and the Flex reader's Trade Confirmation
+  query set up, so the next morning's reading has its executions proof
+  (`docs/manual/reconciliation.md`, "The executions proof").
 
 ## The rules and their sources
 

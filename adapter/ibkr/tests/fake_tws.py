@@ -80,6 +80,8 @@ class FakeTWS(TWSApi):
         self.connect_timeouts = []
         self.next_order_id = 7
         self.server_time = SERVER_TIME
+        # IB Gateway's connection time for each session (TWS API twsConnectionTime), in the Gateway's zone.
+        self.tws_connection_time = "20261016 09:30:00 US/Eastern"
         self.answer_current_time = True
         self.positions = []
         self.summary = []
@@ -434,6 +436,10 @@ class FakeTWS(TWSApi):
 
     def can_place_orders(self):
         return self.can_place
+
+    def connection_time(self):
+        """The session's connection time as IB Gateway gives it (tws_connection_time; New York's zone unless set)."""
+        return self.tws_connection_time if self.connected else None
 
     def place_order(self, order_id, contract_, order_):
         self.calls.append(("place_order", order_id))
