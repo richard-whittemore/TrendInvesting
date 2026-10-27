@@ -341,14 +341,17 @@ Order of starting, each on the server, each an explicit step of yours:
    adapter refuses to start until the run's stream folder exists ("the
    run's stream folder ... does not exist"), and once started it delivers
    the warm-up to the engine behind one account reading, with the
-   start-of-run reconciliation. **Run the warm-up on the day before the
-   first session you want decided (or earlier), after that morning's data
-   job has written the latest session's file (06:05, again at 07:05 and
-   08:05), and start the adapter as soon as it finishes** (about an hour and
-   a half). The warm-up writes up to the latest session Massive serves (on
-   the free plan, the one before today), so the first session you want
-   decided arrives in its own file the morning after it, from 06:05, and is
-   delivered behind that morning's reading. From then on, each weekday
+   start-of-run reconciliation. **Run the warm-up from about 08:15 New York
+   on a weekday, on the day before the first session you want decided or
+   earlier, then start the adapter as soon as it finishes** (about an hour
+   and a half). Massive's free plan serves the previous session from the
+   morning, and the data job takes its 403 as "not served yet" until 08:00,
+   so from 08:15 the warm-up records up to the previous session; a weekend
+   day works the same way, Friday's session being served by then. Do not
+   wait for the data job to write a file first: on a fresh run its firings
+   write nothing until the warm-up has made the run's stream folder. The
+   first session you want decided then arrives in its own file the morning
+   after it, from 06:05, and is delivered behind that morning's reading. From then on, each weekday
    morning the Flex reader runs at 05:30 (again at 06:30 and 07:30) and
    writes its executions proof, and the data job writes the previous
    session's file at 06:05 (again at 07:05 and 08:05). The adapter, left

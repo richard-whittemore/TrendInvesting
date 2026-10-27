@@ -253,6 +253,13 @@ its RSI). The data job fetches it once from Massive, from the configuration's
 (`docs/manual/market-data.md`, "The one-time warm-up"). The data job asks
 for one session at a time at the free plan's 5 requests a minute, about 12.5
 seconds each, so the 450 or so sessions take **about an hour and a half**.
+Massive's free plan serves the previous session from the morning (the data
+job takes its 403 as "not served yet" until 08:00 New York), so any start
+from about 08:15 on the day after a session records it: this Saturday
+evening's warm-up records up to Friday, and Monday's session, the first
+decided, arrives in its own file on Tuesday morning. The data job's own
+firings write nothing for the run until the warm-up has made its stream
+folder, so there is no file to wait for before it.
 It runs as its own transient unit, so closing your terminal does not stop it,
 and the unit reads the Massive key from the unlocked secrets, never from
 `/etc/trend-investing/secrets.env` (which no longer exists in plain text).

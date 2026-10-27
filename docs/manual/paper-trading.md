@@ -444,11 +444,15 @@ one-time warm-up ([market data](market-data.md), "The one-time warm-up"),
 which writes the run's first file and its folder; then the adapter, which
 refuses to start until that folder exists ("the run's stream folder ...
 does not exist"). It delivers the warm-up straight away, behind one
-reading, with the start-of-run reconciliation. Do this **on the day before
-the first session you want decided, or earlier**, after that morning's data
-job has written the latest session's file, and start the adapter as soon as
-the warm-up finishes: the warm-up's reading is stamped with its own close,
-or its read time, and the first session's snapshot must come after it. From
+reading, with the start-of-run reconciliation. Run the warm-up **from about
+08:15 New York on a weekday, on the day before the first session you want
+decided or earlier**, and start the adapter as soon as it finishes: Massive's
+free plan serves the previous session from the morning (the data job takes
+its 403 as "not served yet" until 08:00), and a weekend day works the same
+way. Do not wait for a file from the data job first: on a fresh run it writes
+nothing until the warm-up has made the run's stream folder. The warm-up's
+reading is stamped with its own close, or its read time, and the first
+session's snapshot must come after it. From
 then on the timer writes each session's file the next morning, from 6:05
 a.m.
 

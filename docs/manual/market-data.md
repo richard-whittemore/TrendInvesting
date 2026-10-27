@@ -768,17 +768,16 @@ days), it takes them all, oldest first.
    close and the next open the account changes only through an order still
    working, an execution, a corporate action IBKR books overnight or a cash
    posting (interest, a fee), so when the reading is taken after the close
-   of the file's last session, on that session's own New York date, with no
-   open order for the account at IBKR (working, pending or cancel-pending,
+   of the file's last session, either on that session's own New York date
+   or on a later date before the next session opens with the Flex reader's
+   executions proof (your decision of 2026-10-27), with no open order for the account at IBKR (working, pending or cancel-pending,
    from any client; in either read of the account and in the last list of
    open orders, read after both), no execution in the account at or since
    the close (IBKR's own list, asked for every client and read last; it
-   reaches back only to midnight, which is why the date must be the
-   close's, or, for the free plan's next-morning reading, why the Flex
-   reader's executions proof must cover the close to midnight (your
-   decision of 2026-10-27; [reconciliation](reconciliation.md), "The
-   executions proof"); a closing-auction fill stamped at the close itself
-   counts),
+   reaches back only to midnight, which is why a reading on a later date
+   needs the executions proof to cover the close to that midnight
+   ([reconciliation](reconciliation.md), "The executions proof"); a
+   closing-auction fill stamped at the close itself counts),
    every holding with an official close in the file, IBKR's own net
    liquidation at the read above zero, the holdings exactly the previous
    close's plus or minus the fills since, and the cash the previous close's
