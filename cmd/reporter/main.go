@@ -188,18 +188,6 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if unitsErr != nil {
 		failures = append(failures, unitsErr)
 	}
-	// The data job is sampled apart: a sample that cannot be taken only
-	// skips its resolve, and fails neither the firing nor the trading units'
-	// step (ADR 0019, "Alerting").
-	if len(resolveOnly) > 0 {
-		resolveSamples, resolveErr := sampleUnitsFor(*systemctl, resolveOnly, "the trading units were checked; only the data job's resolve and backup page are skipped at this firing")
-		if resolveErr != nil {
-			_, _ = fmt.Fprintln(out, resolveErr.Error())
-		}
-		for unit, sample := range resolveSamples {
-			unitSamples[unit] = sample
-		}
-	}
 	failedNow := map[string]bool{}
 	for _, unit := range tradingUnits {
 		failedNow[unit] = unitSamples[unit].failed
@@ -389,7 +377,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// the page of a unit not failed at the sample. A systemctl that could not
 	// be run checked nothing, so no page is resolved on its word.
 	if unitsErr == nil && len(tradingUnits)+len(resolveOnly) > 0 {
-		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat)
+		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat, func(unit string) (unitSample, error) {
+			samples, err := sampleUnitsFor(*systemctl, []string{unit}, "the trading units were checked; only the data job's resolve and backup page are skipped at this firing")
+			return samples[unit], err
+		})
 		if soft != nil {
 			_, _ = fmt.Fprintln(out, "reporter: the data job's page or resolve could not be completed and is retried at the next firing: "+soft.Error())
 		}

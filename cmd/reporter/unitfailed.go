@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -81,7 +82,10 @@ type unitState struct {
 }
 
 func (u *unitState) record() error {
-	return saveState(u.path, u.seen, u.sent, u.repeats, u.baselines)
+	if err := saveState(u.path, u.seen, u.sent, u.repeats, u.baselines); err != nil {
+		return persistError{err}
+	}
+	return nil
 }
 
 // withUnitState runs fn on the unit-failure record under an exclusive lock.
@@ -197,6 +201,9 @@ func failedInvocation(getenv func(string) string, systemctl, unit string, at tim
 // run was recorded at or after it, since that run is newer than the sample.
 func failedRun(u *unitState, unit, run, journalctl string, secrets []string, senders []sender, setAside []channelFault, at, sampledAt time.Time, every time.Duration) error {
 	var errs []error
+	if !remindsUnit(unit) && handledRun(u, unit, run) {
+		return nil
+	}
 	episode, opened := "", time.Time{}
 	for invocation, recorded := range unitRecords(u, unit) {
 		key := report.UnitFailedKey(unit, invocation)
@@ -527,52 +534,74 @@ func splitUnits(list string) []string {
 // answers at the start of the firing, sampledAt their time: an episode whose
 // page or latest failed run was recorded since then has a run newer than the
 // sample, so it is never ended on the sample's word. Both reporters and the hook share the record under a lock.
-func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) (soft, hard error) {
+//
+// A resolve-only unit (the data job) is judged by run identity instead of a
+// clock: current asks systemd for its state under the lock, so no older
+// sample can page or resolve on a newer run's word. A failed run is paged
+// once (failedRun), never again once its episode was resolved (the handled
+// record, written in the same save as the removal), and an inactive or active
+// unit under any run resolves its episode (ADR 0019, "Alerting": each
+// incident once). The returned errors split by cause: a failure to deliver or
+// sample for a resolve-only unit is soft (logged by the caller and retried at
+// the next firing), and every other error, including any failure to persist
+// the record, is hard and fails the firing (ADR 0019: delivery state is
+// durable).
+func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, current func(string) (unitSample, error)) (soft, hard error) {
 	var softErrs, hardErrs []error
 	err := withUnitState(path, at, func(u *unitState) error {
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
 			resolves := slices.Contains(resolveOnly, unit)
-			// The data job's delivery and resolve errors are soft: logged and
-			// retried at the next firing, never a fault of the reporter.
 			fail := func(err error) {
 				if err == nil {
 					return
 				}
-				if resolves {
-					softErrs = append(softErrs, err)
-				} else {
+				if !resolves {
 					hardErrs = append(hardErrs, err)
+					return
+				}
+				persist, other := splitPersist(err)
+				if persist != nil {
+					hardErrs = append(hardErrs, persist)
+				}
+				if other != nil {
+					softErrs = append(softErrs, other)
 				}
 			}
-			if resolves && !sample.failed && sample.state != "inactive" && sample.state != "active" {
-				// A retry in flight (activating) or an unsampled unit: the failure is not over.
-				continue
-			}
-			if sample.failed {
-				// A failed sample older than the unit's recorded recovery never
-				// opens an episode again (ADR 0019, "Alerting": each incident once).
-				if resolves && sampledAt.Before(u.sent[recoveredSampleKey(unit)]) {
+			if resolves {
+				now, err := current(unit)
+				if err != nil {
+					softErrs = append(softErrs, err)
 					continue
 				}
+				sample = now
+				if !sample.failed && sample.state != "inactive" && sample.state != "active" {
+					// A retry in flight (activating): the failure is not over.
+					continue
+				}
+			}
+			if sample.failed {
 				if sample.invocation == "" {
 					sample.invocation = unnamedRun
+				}
+				if resolves {
+					if handledRun(u, unit, sample.invocation) {
+						continue
+					}
+					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, time.Time{}, every))
+					continue
 				}
 				fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
 				continue
 			}
-			resolved := false
 			for invocation, recorded := range unitRecords(u, unit) {
 				key := report.UnitFailedKey(unit, invocation)
-				if !recorded.Before(sampledAt) || !latestRun(u, key).Before(sampledAt) {
+				if resolves {
+					handleRuns(u, unit, key, invocation, at)
+				} else if !recorded.Before(sampledAt) || !latestRun(u, key).Before(sampledAt) {
 					continue
 				}
-				resolved = true
 				fail(resolveKey(u, key, senders, setAside, at))
-			}
-			if resolves && resolved && sampledAt.After(u.sent[recoveredSampleKey(unit)]) {
-				u.sent[recoveredSampleKey(unit)] = sampledAt
-				fail(u.record())
 			}
 		}
 		return nil
@@ -580,9 +609,75 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 	return errors.Join(softErrs...), errors.Join(append(hardErrs, err)...)
 }
 
-// recoveredSampleKey is where the time of the sample that last proved a
-// resolve-only unit well is kept, so an older failed sample is refused.
-func recoveredSampleKey(unit string) string { return channelKey("recovered-sample", "unit:"+unit) }
+// maxHandledRuns bounds the record of resolved failed runs kept per unit.
+const maxHandledRuns = 16
+
+// handledKey is where a resolved failed run of unit is recorded.
+func handledKey(unit, invocation string) string { return channelKey("handled", unit+"/"+invocation) }
+
+// handledRun is whether the failed run of unit was already resolved: it never
+// pages or opens an episode again, however old the sample that names it (ADR
+// 0019, "Alerting": each incident once).
+func handledRun(u *unitState, unit, invocation string) bool {
+	return !u.sent[handledKey(unit, invocation)].IsZero()
+}
+
+// handleRuns records the failed runs of the episode keyed key (its first run
+// and its latest later one) as resolved, keeping the newest maxHandledRuns of
+// unit. It only changes u in memory: resolveKey's save then writes the record
+// and the episode's removal together, so no stored state holds one without the
+// other (ADR 0019: delivery state is durable).
+func handleRuns(u *unitState, unit, key, episode string, at time.Time) {
+	u.sent[handledKey(unit, episode)] = at
+	for k := range u.sent {
+		if run, ok := strings.CutPrefix(k, "run:"); ok && strings.HasSuffix(run, channelKey("", key)) {
+			u.sent[handledKey(unit, strings.TrimSuffix(run, channelKey("", key)))] = at
+		}
+	}
+	prefix := channelKey("handled", unit+"/")
+	var mine []string
+	for k := range u.sent {
+		if strings.HasPrefix(k, prefix) {
+			mine = append(mine, k)
+		}
+	}
+	if len(mine) <= maxHandledRuns {
+		return
+	}
+	sort.Slice(mine, func(i, j int) bool { return u.sent[mine[i]].After(u.sent[mine[j]]) })
+	for _, k := range mine[maxHandledRuns:] {
+		delete(u.sent, k)
+	}
+}
+
+// persistError marks a failure to save the unit-failure record, which is
+// never soft.
+type persistError struct{ error }
+
+func (e persistError) Unwrap() error { return e.error }
+
+// splitPersist separates the persistence failures of err (a joined tree)
+// from its other, delivery, failures.
+func splitPersist(err error) (persist, other error) {
+	var ps, others []error
+	var walk func(error)
+	walk = func(e error) {
+		if j, ok := e.(interface{ Unwrap() []error }); ok {
+			for _, c := range j.Unwrap() {
+				walk(c)
+			}
+			return
+		}
+		var pe persistError
+		if errors.As(e, &pe) {
+			ps = append(ps, e)
+		} else {
+			others = append(others, e)
+		}
+	}
+	walk(err)
+	return errors.Join(ps...), errors.Join(others...)
+}
 
 // unitRecords are the failed runs of unit that some channel took, each with
 // the latest time a channel took it.

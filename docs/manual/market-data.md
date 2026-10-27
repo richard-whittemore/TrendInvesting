@@ -350,8 +350,11 @@ What the job does with that answer:
   same quiet 403 for that day's session, so it writes no stream and exits
   cleanly (which closes the incident). The next trading day's morning
   firing (06:05; on a Friday evening, the following Monday's, since the timer
-  does not run at the weekend or on a holiday) writes one file holding both
-  sessions. To have the stream sooner, run `ti-data --session <date>` for the
+  runs Monday to Friday and not at the weekend) writes one file holding both
+  sessions. The timer also fires on a market holiday; that firing reads the
+  last session before it, finds its file already there and fetches nothing, or
+  waits quietly as above, and the next trading day's firing catches up
+  whatever is missing. To have the stream sooner, run `ti-data --session <date>` for the
   last session once Massive serves it, which is the morning.
 - A 403 for any older session of a catch-up, for a session you ask for with
   `--session` that is not the latest settled one, and any other error (401, 429,
