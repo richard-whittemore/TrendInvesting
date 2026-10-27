@@ -48,6 +48,7 @@ func newStandInSystemd(t *testing.T) standInSystemd {
 	d := "'" + s.dir + "'"
 	systemctl := "#!/bin/sh\necho \"$@\" >>" + d + "/systemctl-calls\nfor a; do unit=$a; done\n" +
 		"case $1 in show) ;; *) exit 2 ;; esac\n" +
+		"if grep -qx \"$unit\" " + d + "/broken 2>/dev/null; then exit 1; fi\n" +
 		"if grep -qx \"$unit\" " + d + "/failed; then echo ActiveState=failed; elif grep -q \"^$unit=\" " + d + "/states; then grep \"^$unit=\" " + d + "/states | sed 's/^[^=]*=/ActiveState=/'; else echo ActiveState=active; fi\n" +
 		"echo InvocationID=$(cat " + d + "/invocation)\n"
 	journalctl := "#!/bin/sh\necho \"$@\" >>" + d + "/journalctl-calls\nf=unit-wide\nq=\n" +
@@ -102,6 +103,11 @@ func (s standInSystemd) fail(units ...string) {
 // state sets unit's ActiveState when it is not failed (activating while a run is in flight, inactive once it ended well).
 func (s standInSystemd) state(unit, state string) {
 	_ = os.WriteFile(filepath.Join(s.dir, "states"), []byte(unit+"="+state+"\n"), 0o600)
+}
+
+// breaks makes `systemctl show` fail for unit, as a timeout would.
+func (s standInSystemd) breaks(unit string) {
+	_ = os.WriteFile(filepath.Join(s.dir, "broken"), []byte(unit+"\n"), 0o600)
 }
 func (s standInSystemd) calls() string {
 	raw, _ := os.ReadFile(filepath.Join(s.dir, "journalctl-calls"))
@@ -1130,17 +1136,125 @@ func TestADataJobRunThatEndedWellEndsItsEpisodeAndTheNextFailureIsTold(t *testin
 	}
 }
 
-func TestAFailedDataJobSampledByTheReporterIsNotPagedOrNamedInTheStateAtStart(t *testing.T) {
+func TestAFailedDataJobSampledByTheReporterIsNeverNamedAndLeavesTheHeartbeatAlone(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	systemd := newStandInSystemd(t)
 	systemd.fail(dataJob)
 	dir := t.TempDir()
-	if err := firing(t, r, dir, systemd, t0.Add(time.Hour), "ti-adapter-boost.service", "-resolve-units", dataJob); err != nil {
+	const hb = "hc.private.test"
+	getenv := func(k string) string {
+		if k == "TI_HEARTBEAT_URL" {
+			return "https://" + hb + "/ping/uuid"
+		}
+		return twoChannels()(k)
+	}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty",
+		"-units", "ti-adapter-boost.service", "-resolve-units", dataJob, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+	if err := run(args, getenv, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r}); err != nil {
 		t.Fatal(err)
 	}
 	for _, host := range []string{ntfyHost, pdHost} {
-		if n := pagesFor(r, host, dataJob); n != 0 {
-			t.Errorf("%s: the reporter paged the data job %d times; only its hook pages", host, n)
+		if n := count(r.to(host), dataJob); n != 1 {
+			t.Errorf("%s: %d messages name the data job, want only its one page (no state-at-start line, no reminder)", host, n)
 		}
+	}
+	if n := len(r.to(hb)); n != 1 {
+		t.Errorf("the heartbeat was pinged %d times with only the data job failed, want 1", n)
+	}
+}
+
+func TestAFailedDataJobTheHookCouldNotDeliverIsPagedOnceByTheReporterAndNeverReminded(t *testing.T) {
+	flaky := &flakyRelay{relay: &relay{sent: map[string][]string{}}, failHost: ntfyHost}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	systemd.invoke(firstRun)
+	systemd.fail(dataJob)
+	if err := notifyAt(t, flaky, dir, systemd, monitored(dataJob, firstRun), t0.Add(time.Hour), dataJob); err == nil {
+		t.Fatal("the hook should fail while ntfy is down")
+	}
+	flaky.setFailing(false)
+	for i := 1; i <= 3; i++ {
+		if err := firing(t, flaky, dir, systemd, t0.Add(time.Hour+time.Duration(i)*70*time.Minute), "ti-adapter-boost.service", "-resolve-units", dataJob); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(flaky.relay, host, dataJob); n != 1 {
+			t.Errorf("%s took %d pages, want the one the reporter's retry delivered", host, n)
+		}
+		if strings.Contains(strings.Join(flaky.to(host), "\n"), "still failing") {
+			t.Errorf("%s was reminded of the data job", host)
+		}
+	}
+}
+
+func TestARecoverySampleOlderThanALaterDataJobFailureDoesNotResolveIt(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unit-failures.json")
+	base := t0.Add(time.Hour)
+	second := "fedcba9876543210fedcba9876543210"
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, firstRun), base, dataJob); err != nil {
+		t.Fatal(err)
+	}
+	// A sample of inactive is taken at base+10m; a retry fails after it, and the hook joins the episode before the reporter takes the lock.
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, second), base.Add(11*time.Minute), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	senders, setAside, err := buildSenders("ntfy,pagerduty", twoChannels(), &http.Client{Transport: r}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sampled := map[string]unitSample{dataJob: {state: "inactive"}}
+	if err := unitStep(path, nil, []string{dataJob}, sampled, base.Add(10*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(12*time.Minute), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(r.to(pdHost), `"event_action":"resolve"`); n != 0 {
+		t.Errorf("a stale inactive sample resolved the incident of a newer failure: %d resolves", n)
+	}
+}
+
+func TestResolveUnitsAcceptsOnlyTheDataJobAndNoUnitAlsoInUnits(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"the engine":     {"-units", "ti-adapter-boost.service", "-resolve-units", "ti-engine@boost.service"},
+		"the adapter":    {"-resolve-units", "ti-adapter-boost.service"},
+		"the reporter":   {"-resolve-units", "ti-reporter@boost.service"},
+		"a unit in both": {"-units", dataJob, "-resolve-units", dataJob},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &relay{sent: map[string][]string{}}
+			systemd := newStandInSystemd(t)
+			dir := t.TempDir()
+			args := append([]string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy",
+				"-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}, extra...)
+			err := run(args, twoChannels(), func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r})
+			if err == nil || !strings.Contains(err.Error(), "-resolve-units") {
+				t.Errorf("err = %v, want a startup refusal naming -resolve-units", err)
+			}
+			if got := systemd.systemctlCalls(); got != "" {
+				t.Errorf("systemctl ran before the refusal: %s", got)
+			}
+		})
+	}
+}
+
+func TestADataJobSampleThatCannotBeTakenNeitherFailsTheFiringNorSkipsTheEnginesStep(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	systemd.fail("ti-adapter-boost.service")
+	systemd.breaks(dataJob)
+	dir := t.TempDir()
+	var out bytes.Buffer
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty",
+		"-units", "ti-adapter-boost.service", "-resolve-units", dataJob, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+	if err := run(args, twoChannels(), func() time.Time { return t0.Add(time.Hour) }, &out, &http.Client{Transport: r}); err != nil {
+		t.Fatalf("a data job sample that failed failed the firing: %v", err)
+	}
+	if n := pagesFor(r, ntfyHost, "ti-adapter-boost.service"); n != 1 {
+		t.Errorf("the adapter's backup page went %d times, want 1", n)
+	}
+	if !strings.Contains(out.String(), dataJob) {
+		t.Errorf("the failed sample was not logged: %q", out.String())
 	}
 }

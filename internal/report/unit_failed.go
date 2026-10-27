@@ -44,7 +44,10 @@ func UnitManualRow(unit string) string {
 
 func isDataJob(unit string) bool { return strings.HasPrefix(unit, "ti-data.") }
 
-// restartSentence says who starts the failed unit again, per unit.
+// restartSentence says who starts the failed unit again, per unit. The rule
+// is the restart model (ADR 0027): systemd never restarts the engine or the
+// adapter, so a stop waits for the owner; the data job is the exception,
+// run again by ti-data.timer (ADR 0019, "Alerting").
 func restartSentence(unit string) string {
 	if isDataJob(unit) {
 		return "The data job is run again by its timer at the next firing; you need not start it unless you fixed its cause and want the session recorded sooner."
@@ -52,7 +55,10 @@ func restartSentence(unit string) string {
 	return "systemd does not restart the engine or the adapter: every stop is for you to read and every start is yours."
 }
 
-// episodeSentence says how often the owner is told and when the page ends.
+// episodeSentence says how often the owner is told and when the page ends,
+// per unit. The rule is each incident once (ADR 0019, "Alerting"); the data
+// job is the exception, never reminded, because its timer runs it again and
+// its incident ends when a run ends well.
 func episodeSentence(unit string) string {
 	if isDataJob(unit) {
 		return "You are told once for this failure; a run that fails again is the same failure and is not paged again, and the incident is resolved when a run ends well."
@@ -137,14 +143,23 @@ func WithFailedUnits(a Alert, inForce bool, failed []string) (Alert, bool) {
 	if len(failed) == 0 {
 		return a, inForce
 	}
-	rows := make([]string, len(failed))
-	for i, unit := range failed {
-		rows[i] = fmt.Sprintf("%s (read %s)", unit, UnitManualRow(unit))
+	var rows, data []string
+	for _, unit := range failed {
+		row := fmt.Sprintf("%s (read %s)", unit, UnitManualRow(unit))
 		if isDataJob(unit) {
-			rows[i] += ", which its timer runs again"
+			data = append(data, row)
+			continue
 		}
+		rows = append(rows, row)
 	}
-	line := "Failed trading unit(s), which systemd does not restart except the data job, run again by its timer: " + strings.Join(rows, "; ") + "."
+	var parts []string
+	if len(rows) > 0 {
+		parts = append(parts, "Failed trading unit(s), which systemd does not restart: "+strings.Join(rows, "; ")+".")
+	}
+	if len(data) > 0 {
+		parts = append(parts, "Failed data job, which its timer runs again: "+strings.Join(data, "; ")+".")
+	}
+	line := strings.Join(parts, " ")
 	if !inForce {
 		a.Severity = Urgent
 		a.Title = fmt.Sprintf("%s: state at reporter start: %s", a.AccountID, "Normal, a trading unit is failed")

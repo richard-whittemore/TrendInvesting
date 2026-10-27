@@ -173,3 +173,12 @@ func TestTheDataJobsPageNeverSaysSystemdDoesNotRestartIt(t *testing.T) {
 		t.Errorf("the state-at-start line words the data job as not restarted:\n%s", a.Body)
 	}
 }
+
+// TestTheStateAtStartLineNamesTheDataJobClauseOnlyWhenTheDataJobIsListed
+// keeps the engine's and adapter's line as it was.
+func TestTheStateAtStartLineNamesTheDataJobClauseOnlyWhenTheDataJobIsListed(t *testing.T) {
+	a, _ := report.WithFailedUnits(report.Alert{AccountID: "boost"}, false, []string{"ti-engine@boost.service"})
+	if strings.Contains(a.Body, "data job") || !strings.Contains(a.Body, "which systemd does not restart: ti-engine@boost.service") {
+		t.Errorf("the engine's state-at-start line changed:\n%s", a.Body)
+	}
+}

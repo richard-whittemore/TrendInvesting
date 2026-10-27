@@ -345,7 +345,10 @@ What the job does with that answer:
   New York on the next trading day) is a failure: the unit shows failed and you are paged, because the
   plan should have served the session by then (the plan lapsed, or the key is
   wrong). Check the plan and the key at the Massive dashboard, then
-  `sudo systemctl start ti-data`.
+  `sudo systemctl start ti-data`. Started in the evening, that run is a quiet
+  wait for the same day's session, writes no stream and exits cleanly
+  (closing the incident): the failed session is recorded at the next morning's
+  firing, or with `ti-data --session <date>` once Massive serves it.
 - A 403 for any older session of a catch-up, for a session you ask for with
   `--session` that is not the latest settled one, and any other error (401, 429,
   500, a timeout), is a failure at every hour.
@@ -353,7 +356,11 @@ What the job does with that answer:
 The evening firings the job once had (17:05, 18:05, 20:05) are gone: on the
 free plan they could only fail, and a quiet failure is not worth having
 three times a day. If you move to a paid plan, the timer can be changed back
-to an evening time, but a 403 in the evening is then a failure that pages.
+to an evening time. On a paid plan the session is served in the evening, so
+what pages is any error other than a 403 (a 401, 429, 500 or timeout), a 403
+for an older session, or a 403 still there at or after 08:00 New York on the
+next trading day; a 403 on the session's own evening is a quiet wait, and an
+evening-only timer has no morning firing to ask again.
 
 **The upgrade option.** Massive's Starter plan serves a session's prices the
 same day after the close. It is your choice and costs money; nothing in the

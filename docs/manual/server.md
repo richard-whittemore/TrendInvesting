@@ -822,15 +822,21 @@ stop, not after two sessions of silence.
 - The data job is the exception to reminders and to the heartbeat. Its timer
   runs it again at the next firing, so a failed data job is paged once by the
   hook and never reminded: a retry that fails again is the same failure, with
-  no second page. The reporter does not page it, name it in a state-at-start
-  page or hold back the outside heartbeat for it (only the engine or the
-  adapter being failed does), so a data job failure never silences the
-  heartbeat that would tell you the server itself went down. The page ends
-  when a later run of the data job ends well (the reporter's firing sees it
-  inactive; a retry still running does not end it), and a run that fails
-  after that pages again. Until then no further page comes, so after you fix
-  the cause, `sudo systemctl start ti-data` and wait for it to finish: that
-  run ending well is what closes the incident.
+  no second page. If the hook could not deliver its page (a channel was down),
+  the reporter's next firing sends it once; it never reminds. The reporter
+  does not name the data job in a state-at-start page or hold back the
+  outside heartbeat for it (only the engine or the adapter being failed
+  does), so a data job failure never silences the heartbeat that would tell
+  you the server itself went down. The page ends when the reporter's firing
+  sees the data job inactive: after a later run ends well (a retry still
+  running does not end it), and also after a reboot or `systemctl
+  reset-failed ti-data`, which clear the failed state without any run. A run
+  that fails after that pages again. Until then no further page comes, so
+  after you fix the cause, `sudo systemctl start ti-data` and wait for it to
+  finish: that run ending well is what closes the incident. Started in the
+  evening it is a quiet wait that writes no stream (market data chapter,
+  "The free plan's timing"): the session is recorded at the next morning's
+  firing.
 - The reason is the failed run's own last journal line. A run that wrote
   nothing (a start systemd refused, such as a missing `run.env`) is explained
   by systemd's own line about that run, such as "Failed to load environment

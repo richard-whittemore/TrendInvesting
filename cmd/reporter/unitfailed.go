@@ -234,14 +234,18 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 	// A channel that has not yet taken the episode's page is sent it first.
 	errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every))
 	if !remindsUnit(unit) {
-		return errors.Join(errs...)
+		noteLaterRun(u, unit, episode, run, at)
+		return errors.Join(append(errs, u.record())...)
 	}
 	return errors.Join(append(errs, remindRun(u, unit, episode, run, senders, at))...)
 }
 
-// remindsUnit is whether a failed unit is reminded hourly: the data job is
-// not (its timer runs it again, and one page is the incident; its episode
-// ends when a run ends well).
+// remindsUnit is whether a failed unit is reminded hourly. The data job is
+// not: its timer runs it again, so one page is the incident, and the episode
+// ends when a run ends well (ADR 0019, "Alerting": each incident once, and a
+// fault that persists is not left silent). Its failed runs are still recorded
+// (noteLaterRun), so a recovery sample older than a newer failure cannot end
+// the episode.
 func remindsUnit(unit string) bool { return unit != "ti-data.service" }
 
 // unnamedRun is what a firing names a failed unit systemd gave no invocation
@@ -274,6 +278,23 @@ func latestRun(u *unitState, key string) time.Time {
 // remindedKey is when channel was last reminded of the episode keyed key.
 func remindedKey(channel, key string) string { return channelKey("reminded:"+channel, key) }
 
+// noteLaterRun records run, a later failed run of the episode begun by
+// episode, as its latest and counts it once (none when run is empty): the
+// record unitStep's stale-sample guard reads (ADR 0019, "Alerting").
+func noteLaterRun(u *unitState, unit, episode, run string, at time.Time) {
+	key := report.UnitFailedKey(unit, episode)
+	if run == "" || !u.sent[failedRunKey(run, key)].IsZero() {
+		return
+	}
+	for k := range u.sent {
+		if strings.HasPrefix(k, "run:") && strings.HasSuffix(k, channelKey("", key)) {
+			delete(u.sent, k)
+		}
+	}
+	u.sent[failedRunKey(run, key)] = at
+	u.repeats[runsKey(key)]++
+}
+
 // remindRun counts run, a later failed run of the episode begun by episode
 // (none when run is empty), and reminds each channel that took the episode's page an
 // unitReminderInterval or more since its page or its last reminder: "still
@@ -283,15 +304,7 @@ func remindedKey(channel, key string) string { return channelKey("reminded:"+cha
 // still failed.
 func remindRun(u *unitState, unit, episode, run string, senders []sender, at time.Time) error {
 	key := report.UnitFailedKey(unit, episode)
-	if run != "" && u.sent[failedRunKey(run, key)].IsZero() {
-		for k := range u.sent {
-			if strings.HasPrefix(k, "run:") && strings.HasSuffix(k, channelKey("", key)) {
-				delete(u.sent, k)
-			}
-		}
-		u.sent[failedRunKey(run, key)] = at
-		u.repeats[runsKey(key)]++
-	}
+	noteLaterRun(u, unit, episode, run, at)
 	runs, since := 1+u.repeats[runsKey(key)], time.Time{}
 	var due, echoes []sender
 	for _, s := range senders {
@@ -467,6 +480,27 @@ func sampleUnits(systemctl string, units []string) (map[string]unitSample, error
 	return samples, errors.Join(failures...)
 }
 
+// checkResolveUnits refuses, at startup, a -resolve-units name that is not a
+// unit the reporter may only resolve (today the data job alone: remindsUnit
+// is false) or that -units also names: a unit on this list is never held
+// against the heartbeat, so listing a trading unit there would silence its
+// backup page (ADR 0019, "Alerting": a fault that persists is not left
+// silent).
+func checkResolveUnits(resolveOnly, monitored []string) error {
+	if err := checkTradingUnits("-resolve-units", resolveOnly); err != nil {
+		return err
+	}
+	for _, unit := range resolveOnly {
+		if slices.Contains(monitored, unit) {
+			return fmt.Errorf("reporter: -resolve-units %q is also in -units: a unit is either monitored or only resolved", unit)
+		}
+		if remindsUnit(unit) {
+			return fmt.Errorf("reporter: -resolve-units %q is a trading unit (the engine, the adapter or the reporter): only ti-data.service may be only resolved, since a trading unit must be paged, reminded and held against the heartbeat", unit)
+		}
+	}
+	return nil
+}
+
 // splitUnits is the -units list.
 func splitUnits(list string) []string {
 	var units []string
@@ -492,9 +526,9 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 		var failures []error
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
-			ownsPage := !slices.Contains(resolveOnly, unit)
-			if !ownsPage && sample.state != "inactive" && sample.state != "active" {
-				// Failed, or a retry in flight (activating): the failure is not over.
+			resolves := slices.Contains(resolveOnly, unit)
+			if resolves && !sample.failed && sample.state != "inactive" && sample.state != "active" {
+				// A retry in flight (activating) or an unsampled unit: the failure is not over.
 				continue
 			}
 			if sample.failed {

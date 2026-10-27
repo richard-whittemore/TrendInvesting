@@ -58,8 +58,8 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # OnFailure hook did not page it (once per failure episode), and the page of a
 # unit no longer failed is resolved. -resolve-units: the shared data job is
 # sampled only to end its failure episode once a run has ended well (inactive;
-# a retry in flight is not well): the reporter never pages, reminds or names it,
-# and it never holds back the heartbeat; its OnFailure hook pages it once. The reporter reads the failed run's journal lines, so it is in the
+# a retry in flight is not well): the reporter pages it once only when its hook could not, never reminds or
+# names it, and it never holds back the heartbeat; its OnFailure hook pages it. The reporter reads the failed run's journal lines, so it is in the
 # journal group. -self-unit: a clean firing resolves the page of an earlier
 # failed one.
 # -run-env: while the engine's run.env is missing or empty and nothing shows a
