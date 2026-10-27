@@ -729,6 +729,16 @@ and the adapter running through it:
 
 After a recovery, read the new run's name for `run-2026-10-24` in the two paths below.
 
+- Before Tuesday 05:30, turn on the Flex reader, or Monday's session is
+  withheld at 09:00 for want of its executions proof: create the Activity
+  cash query, the Trade Confirmation query and the Flex token
+  (`docs/manual/reconciliation.md`, "What you set up once", steps 1, 2 and
+  4); fill in `TI_IBKR_FLEX_TOKEN=`, `TI_IBKR_FLEX_QUERY_ID=` and
+  `TI_IBKR_FLEX_TRADES_QUERY_ID=` with `sudo ti-secrets edit secrets.env`;
+  run `sudo systemctl start ti-flex@boost`; check `sudo journalctl -u
+  ti-flex@boost -n 20` says it read and `sudo cat
+  /var/lib/trend-investing/flex/boost/executions.json` shows `"state":
+  "read"`; then `sudo systemctl enable --now ti-flex@boost.timer`.
 - 16:00 the market closes. Tuesday at 05:30 the Flex reader writes its
   executions proof (`docs/manual/reconciliation.md`, "The executions proof";
   it needs the Trade Confirmation query set up), and the data job fires at

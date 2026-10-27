@@ -380,6 +380,13 @@ class MorningTests(unittest.TestCase):
         self.assertEqual(gateway_zone_problem("20260308 03:30:00 EDT"), "", "the hour after the gap")
         self.assertEqual(gateway_zone_problem("20260308 01:30:00 EST"), "", "the hour before it")
 
+    def test_a_time_at_the_edge_of_the_calendar_withholds_and_never_raises(self):
+        from loop import gateway_zone_problem
+        for text in ("99991231 23:59:59 US/Eastern", "99991231 23:59:59 EST", "00010101 00:00:00 EDT"):
+            with self.subTest(text=text):
+                problem = gateway_zone_problem(text)
+                self.assertIn(text, problem)
+
     def test_new_yorks_long_zone_name_in_force_is_new_york(self):
         self.proof(FRIDAY_MORNING)
         self.fake.tws_connection_time = "20270115 08:05:00 Eastern Standard Time"

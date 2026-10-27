@@ -297,13 +297,19 @@ def gateway_zone_problem(text, what="IB Gateway's connection time"):
         # A wall-clock time New York skipped (the hour the clocks go forward) does not come back from UTC as
         # itself: the text is no New York reading at all. The repeated autumn hour does, at its first reading.
         aware = local.replace(tzinfo=nyse_calendar.NEW_YORK)
-        if aware.astimezone(timezone.utc).astimezone(nyse_calendar.NEW_YORK).replace(tzinfo=None) != local:
+        try:
+            back = aware.astimezone(timezone.utc).astimezone(nyse_calendar.NEW_YORK).replace(tzinfo=None)
+            used = {local.replace(tzinfo=nyse_calendar.NEW_YORK, fold=fold).tzname() for fold in (0, 1)}
+        except (OverflowError, ValueError, OSError) as err:
+            # Fail closed (AGENTS.md): a time the calendar cannot place is no New York reading.
+            return ("{} {!r} cannot be placed in New York's calendar ({}), so it is not a New York "
+                    "reading".format(what, text, type(err).__name__))
+        if back != local:
             return ("{} {!r} is a time that did not happen in New York (the clocks went forward over it), so it "
                     "is not a New York reading".format(what, text))
     if zone in NEW_YORK_ZONES:
         return ""
     if zone in NEW_YORK_ABBREVIATIONS:
-        used = {local.replace(tzinfo=nyse_calendar.NEW_YORK, fold=fold).tzname() for fold in (0, 1)}
         if NEW_YORK_ABBREVIATIONS[zone] in used:
             return ""
         return ("{} {!r} is in {}, which is not what New York uses at that date and time: the Gateway is not on New "

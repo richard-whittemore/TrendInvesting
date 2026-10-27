@@ -320,6 +320,19 @@ Order of starting, each on the server, each an explicit step of yours:
    start, `sudo systemctl start ti-adapter-boost`. The adapter refuses to
    start until the engine's socket is open and its durable log exists; for a
    fresh run the engine records the Run approval before it opens its socket.
+   **Turn on the Flex reader before the first morning**: without it
+   there is no executions proof and every session delivered the next morning
+   is withheld at 09:00 (`stale-account-snapshot`). Create the Activity cash
+   query, the Trade Confirmation query and the Flex token
+   (`docs/manual/reconciliation.md`, "What you set up once", steps 1, 2 and
+   4), then fill in the three lines with `sudo ti-secrets edit secrets.env`:
+   `TI_IBKR_FLEX_TOKEN=`, `TI_IBKR_FLEX_QUERY_ID=` (the cash query) and
+   `TI_IBKR_FLEX_TRADES_QUERY_ID=` (the Trade Confirmation query). Once the
+   engine has started (the reader needs its `run.env`), run `sudo systemctl
+   start ti-flex@boost`, check that `sudo journalctl -u ti-flex@boost -n 20`
+   says it read and that `sudo cat
+   /var/lib/trend-investing/flex/boost/executions.json` shows `"state":
+   "read"`, then `sudo systemctl enable --now ti-flex@boost.timer`.
    For a run's first paper day the order is: the engine; then the data
    job's one-time warm-up (`docs/manual/market-data.md`, "The one-time
    warm-up"), which writes the run's first file,
@@ -328,9 +341,15 @@ Order of starting, each on the server, each an explicit step of yours:
    adapter refuses to start until the run's stream folder exists ("the
    run's stream folder ... does not exist"), and once started it delivers
    the warm-up to the engine behind one account reading, with the
-   start-of-run reconciliation. **Do this before the first paper day's file
-   is written**, which is the next morning from 06:05 New York: the first
-   day's reading must come after the warm-up's. From then on, each weekday
+   start-of-run reconciliation. **Start the warm-up no later than 07:00 New
+   York on the morning after the first session you want decided** (better,
+   the evening before it): the warm-up takes about an hour and a half and
+   the adapter's delivery a minute or two more, and that session's reading
+   must be delivered with its executions proof before 09:00, after which
+   the session is withheld. A warm-up started after that session's close
+   includes the session itself, delivered behind the same morning reading;
+   one started before writes up to the session before, and the session's
+   own file follows at 06:05. From then on, each weekday
    morning the Flex reader runs at 05:30 (again at 06:30 and 07:30) and
    writes its executions proof, and the data job writes the previous
    session's file at 06:05 (again at 07:05 and 08:05). The adapter, left

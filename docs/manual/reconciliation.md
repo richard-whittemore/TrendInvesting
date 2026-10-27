@@ -274,9 +274,11 @@ What happens to an IRA's reconciliation when you move money (built
 there nothing changes and the next decision simply sees the new net
 liquidation):
 
-1. **During the day**, the money lands at IBKR. The Flex reader has not run
-   yet (it runs at 9:30 p.m.), so the evening's reconciliation finds IBKR's
-   cash higher (or lower) than the book and nothing recorded to explain it.
+1. **During the day**, the money lands at IBKR. The Flex reader runs only
+   the next weekday morning (from 5:30 a.m.), and IBKR may list a day's
+   transfer only a day later, so a reconciliation before the reader has
+   recorded it finds IBKR's cash higher (or lower) than the book and nothing
+   recorded to explain it.
    Because the reader has not yet read that day, this is a **pending cash
    read**, not a difference: one reconciliation alert, `<account>: reconciliation
    pending-cash-read (<id>)`, and the account's state does not change. What
@@ -286,11 +288,11 @@ liquidation):
      the new cash, so money IBKR reverses or posted in error is never
      invested. The new cash is taken off whenever the snapshot's cash could
      include it: the reconciliation that found it was read no later than
-     the snapshot's cash. The evening's snapshot is labelled with the close
-     but read after it, alongside that evening's reconciliation, so it
-     counts as holding everything up to midnight New York time that day;
-     a reconciliation that evening is taken off, and one on a later day,
-     after that snapshot's cash was read, is not. If the engine cannot tell
+     the snapshot's cash. A close's snapshot is labelled with the close but
+     read after it (the next morning, when the day's file arrives),
+     alongside its reconciliation, so it counts as holding everything up to
+     midnight New York time on the close's day; a reconciliation of that
+     day is taken off, and one on a later day is not. If the engine cannot tell
      how long the snapshot's cash holds, it takes the new cash off. The
      deposit is invested at the first decision after the reader's record
      explains it;
@@ -314,25 +316,27 @@ liquidation):
    like a withdrawal)" and "buys are withheld until the reader explains it,
    and sells and exits continue". The public relay's copy leaves the amount
    out.
-2. **That evening**, the adapter compares the post-close reading with the
-   previous close. The reader has not recorded the transfer yet, so a deposit
+2. **The next morning**, the Flex reader runs first (5:30), and records the
+   transfer if IBKR's statement already shows it; the adapter's reading then
+   finds it explained. If the statement does not show it yet, the adapter
+   compares the reading after the close with the previous close with the
+   transfer unrecorded, so a deposit
    or withdrawal of more than 1% of the account's net liquidation is more
    than the adapter's drift bound: the reading is stamped at its read time
    (`not_as_of_close`), the engine withholds that session as stale, and the
    reporter pages that as well. A smaller one is within the bound: for a
-   deposit, that evening's decision goes ahead but sizes its buys without the
+   deposit, that session's decision goes ahead but sizes its buys without the
    new cash, still unexplained; for a withdrawal, its sells go and its buys
-   wait, as step 1 says. At 9:30 p.m. the reader
-   records the transfer in the ledger, if IBKR's statement already shows it
-   (it may show a day's transfer only the next evening), and the engine
-   journals it before IBKR's next reading reaches it.
+   wait, as step 1 says. A later morning's reading records the transfer in
+   the ledger once IBKR's statement shows it, and the engine journals it
+   before IBKR's next reading reaches it.
 3. **At the first reconciliation after the reader has covered the day**
-   (usually the next evening, sometimes the one after), the engine checks the
+   (usually the next morning, sometimes the one after), the engine checks the
    pending difference again against what the reader has recorded since.
    Explained to the cent, it is settled: a `risk.reconciliation.result`
    saying `explained`, with the transfer's ID, and no alert. That is the
    usual end. The strategy invests a deposit at the next decision after the
-   reader has recorded it, usually the following evening.
+   reader has recorded it, usually the following morning.
 4. **If the record never explains it**: once the reader's status says it has
    read that day (`covered_to` on or after it) and the difference remains, or
    once more than **two sessions** have closed since it, whatever the reader
@@ -559,7 +563,7 @@ needs only each transfer's amount and date, which are exact.
 - **No day is skipped.** Each reading keeps the days its statement covered
   (`cash-movements.jsonl.coverage.json`, beside the ledger) up to the day
   **before** its last day: IBKR may post a transfer for that last day after
-  the evening's reading, so the next statement must start on or before it
+  the reading, so the next statement must start on or before it
   and read it again (a transfer read twice is still written once). A
   statement that starts later would leave days unread, and a transfer on them
   would be lost once it dropped out of the query's window, so that reading
@@ -831,7 +835,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | Alert: `<account>: reconciliation <classification> (<id>)`, urgent, repeating until acknowledged; `<classification>` is `unexplained`, `unverifiable` or `pending-cash-read`, `<id>` the reconciliation's ID | Sent once per reconciliation that degrades or halts, and once per pending cash read: a later reading of the same pending difference, and its decision, send nothing more. Its text names what differs (or "evidence that could not be compared"), the account's whole state after it, what it still does and what it has stopped; on the public relay, no figures. It ends "Recovery is a person's: docs/runbooks/reconciliation.md." | Read the full text on Pushover or the dashboard. Follow `docs/runbooks/reconciliation.md`, "First, in every case". Acknowledge with `operator acknowledge` and the alert key the text ends with. |
 | `reconciliation-unexplained`. Alert: `<account>: reconciliation unexplained (<id>)` | A difference no journalled event accounts for. The account goes **Degraded** on exactly what differs: a holding's instrument is frozen, unexplained cash refuses every buy. A later difference widens the scope; a later match never brings it back to Normal. | `docs/runbooks/reconciliation.md`, "Find the cause", then "Recover": explain each difference at IBKR, then start a fresh run whose approval clears the incident (`operator approve -clear-incident <id>`), or carries it in force if something is still unexplained ([restart](restart.md)). |
 | `reconciliation-unverifiable`. Alert: `<account>: reconciliation unverifiable (<id>)` | The figures could not be compared, so the account goes **Halted**: no order is released, except, for the joint account, the one sale back to 98%. The private text lists why, for example `the broker's positions could not be read`, `the broker's total cash could not be read`, `no account snapshot has been recorded, so the journal has no book to compare`, `the observation as of ... precedes the book as of ...`, or `the broker's cash is in ...; the book's is in ...`. | Fix what could not be read (the adapter's link, `journalctl -u ti-adapter-boost`), then follow the runbook's "Recover". Leaving Halted is never automatic: it takes a fresh run you approve. |
-| `pending-cash-read`. Alert: `<account>: reconciliation pending-cash-read (<id>)` | Only the cash differs, on a day the Flex reader has not yet read, so a deposit or withdrawal it has not recorded yet may explain it. **No state changes.** More cash than the book: buys are not stopped, but are sized without the new cash until it is explained. Less cash: every buy is refused (`pending-cash-decrease`) until it is settled, the first refusal paging once; sells and exits go on. The private text says how far the reader has read. At each later reconciliation the difference is checked against the transfers recorded since: explained to the cent, it is settled (a result `explained` for it, no alert); once the reader has read its day with the difference still there, or after more than two sessions, the account goes **Degraded** on cash (the `unexplained` row below, same `<id>`). The alert's text says so: the amount and direction, the day, that the account stays in its state (Normal, or the Degraded or Halted state already in force), whether buys continue, and when it becomes Degraded | If you moved money that day, nothing: it clears at the first reconciliation after the reader has covered the day, usually the next evening, sometimes the one after. Acknowledge the alert. If you did not, check IBKR's activity for what moved the cash. Do not approve a fresh run while a cash read is pending: `operator approve` refuses one unless you state the book you checked in IBKR after the transfer |
+| `pending-cash-read`. Alert: `<account>: reconciliation pending-cash-read (<id>)` | Only the cash differs, on a day the Flex reader has not yet read, so a deposit or withdrawal it has not recorded yet may explain it. **No state changes.** More cash than the book: buys are not stopped, but are sized without the new cash until it is explained. Less cash: every buy is refused (`pending-cash-decrease`) until it is settled, the first refusal paging once; sells and exits go on. The private text says how far the reader has read. At each later reconciliation the difference is checked against the transfers recorded since: explained to the cent, it is settled (a result `explained` for it, no alert); once the reader has read its day with the difference still there, or after more than two sessions, the account goes **Degraded** on cash (the `unexplained` row below, same `<id>`). The alert's text says so: the amount and direction, the day, that the account stays in its state (Normal, or the Degraded or Halted state already in force), whether buys continue, and when it becomes Degraded | If you moved money that day, nothing: it clears at the first reconciliation after the reader has covered the day, usually the next morning, sometimes the one after. Acknowledge the alert. If you did not, check IBKR's activity for what moved the cash. Do not approve a fresh run while a cash read is pending: `operator approve` refuses one unless you state the book you checked in IBKR after the transfer |
 | A pending cash read becomes Degraded: the private text says the Flex reader `has covered <day> and its records do not explain it`, or that `<n> sessions have closed since it, more than the 2 sessions a difference may wait for the Flex reader` (the cap is `event.PendingCashReadSessions`) | The difference was not a transfer the reader recorded, or the reader was set aside too long: the account is Degraded on cash, buys stop | Check `ti-flex@<instance>`'s status file; if the reader was set aside, fix it (rows below) and check the ledger now holds the transfer. Then recover as for any unexplained difference (`docs/runbooks/reconciliation.md`) |
 | The private text names `withdrawal ibkr-flex:<id> of <amount> is more than the cash on hand before it, ..., which IBKR refuses` | A recorded withdrawal larger than the account's cash: IBKR would have refused it, so the record and the account disagree. Degraded on cash at once, never pending | Check the withdrawal in IBKR's activity statement and tell the developer; recover as for any unexplained difference |
 | The engine's log says `the Flex ledger ... is refused, so none of its transfers is delivered` (naming the line) | A ledger line is not as the reader writes it, so no record of that ledger reaches the engine; a cash difference a record would have explained is a difference. Said once until it changes | Put the line back as the reader wrote it (as for the reader's own refusal above); never edit the ledger by hand |
@@ -846,7 +850,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | Margin interest on the joint account | Not compared: Boost's book states no cash, so the result says cash is not compared. Nothing is seen. | Check the interest on IBKR's monthly statement yourself. |
 | A $12.30 fee and a $12.30 credit, both unrecorded | Not detected: cash is compared as one net total, and the two cancel. | The statement is the only check. |
 | `ti-flex@<instance>` failed; its status file says IBKR's Flex Web Service **rejected the token or the query** (error 1012 the token expired, 1015 the token is invalid, 1014 the query is invalid, 1011, 1013 or 1016 the service, its IP address or the account is not allowed; these codes are from IBKR's documentation, not yet verified against a live statement) | The Flex reader is set aside for this reading: no request for the statement is made, nothing is written to the ledger, and the token is never printed. Trading is unaffected. It tries again at the next firing | In Client Portal, check the Flex Web Service is on and the token not expired (generate a new one if it is), and the query ID; correct `TI_IBKR_FLEX_TOKEN` or `TI_IBKR_FLEX_QUERY_ID` with `sudo ti-secrets edit secrets.env`, then `sudo systemctl start ti-flex@<instance>` and check `journalctl -u ti-flex@<instance>` says it read |
-| `ti-flex@<instance>` failed; its status file says the Flex Web Service **gave no statement** (busy, error 1009 or 1018; not ready, 1003 to 1008; still generating after 30 tries 10 seconds apart, 1019; the codes from IBKR's documentation, not yet verified against a live statement; or IBKR could not be reached, or answered with a redirect, which the reader never follows since the token would go with it) | Set aside for this reading, nothing written; the next firing asks again | Nothing, if the next evening reads. If it keeps failing, check the server's network, and IBKR's system status |
+| `ti-flex@<instance>` failed; its status file says the Flex Web Service **gave no statement** (busy, error 1009 or 1018; not ready, 1003 to 1008; still generating after 30 tries 10 seconds apart, 1019; the codes from IBKR's documentation, not yet verified against a live statement; or IBKR could not be reached, or answered with a redirect, which the reader never follows since the token would go with it) | Set aside for this reading, nothing written; the next firing asks again | Nothing, if the next firing reads. If it keeps failing, check the server's network, and IBKR's system status |
 | `ti-flex@<instance>` failed; its status file says the Flex statement **is for another account**, or a row is | The whole statement is refused and nothing of it is written; neither account number is printed | Make the Flex query cover this account (Client Portal, the query's account selection); for one query covering several accounts this account must be among them |
 | `ti-flex@<instance>` failed; its status file says the statement **has no Cash Transactions section** | Refused: without the section the reader cannot tell "nothing moved" from "not asked for" | Edit the Flex query in Client Portal and tick **Cash Transactions** (above, "What you set up once") |
 | `ti-flex@<instance>` failed; its status file says the statement **is not XML**, or a row has no transaction ID, type, currency, a number for its amount, or a date as `yyyyMMdd[;HHmmss]` | Refused whole; nothing written | Set the query's format to XML and its date, time and separator formats back to the defaults (`yyyyMMdd`, `HHmmss`, `;`) |

@@ -103,7 +103,7 @@ read from IBKR"). One reading:
 Each reading's period is kept beside the ledger (COVERAGE_SUFFIX): its
 fromDate and covered_to, the day before its toDate. The last day of a
 statement is not complete when it is read (IBKR may post a day's transfer
-after its own end-of-day processing, after the evening's reading), so it is
+after its own end-of-day processing, after a reading), so it is
 covered only once a later statement reads it again; the ledger's IDs keep a
 transfer read twice from being written twice. A statement that starts later
 than the day after covered_to leaves days in neither, and a transfer on them

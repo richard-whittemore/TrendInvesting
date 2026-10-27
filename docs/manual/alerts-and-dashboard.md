@@ -1511,7 +1511,7 @@ account's own record: IBKR reports each execution's commission, and the
 engine's log keeps it with the fill, so every fill from the account's first run
 on counts. Fees and interest, and any commission IBKR posts to the account
 without a fill (an adjustment), come from the **costs ledger**, which the Flex
-reader writes beside the cash ledger every evening
+reader writes beside the cash ledger each weekday morning
 (`/var/lib/trend-investing/flex/<instance>/costs.jsonl`; the reconciliation
 chapter, "Deposits and withdrawals, read from IBKR", says how). The reader
 cannot see the engine's log, so it writes every commission IBKR posts, and
