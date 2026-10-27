@@ -250,9 +250,9 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 // remindsUnit is whether a failed unit is reminded hourly. The data job is
 // not: its timer runs it again, so one page is the incident, and the episode
 // ends when a run ends well (ADR 0019, "Alerting": each incident once, and a
-// fault that persists is not left silent). Its failed runs are still recorded
-// (noteLaterRun), so a recovery sample older than a newer failure cannot end
-// the episode.
+// fault that persists is not left silent). Its latest later failed run is
+// still recorded (noteLaterRun), so that the episode's resolve marks that run
+// handled (handleRuns) and it does not page again.
 func remindsUnit(unit string) bool { return unit != "ti-data.service" }
 
 // unnamedRun is what a firing names a failed unit systemd gave no invocation
@@ -287,7 +287,8 @@ func remindedKey(channel, key string) string { return channelKey("reminded:"+cha
 
 // noteLaterRun records run, a later failed run of the episode begun by
 // episode, as its latest and counts it once (none when run is empty): the
-// record unitStep's stale-sample guard reads (ADR 0019, "Alerting").
+// record the reminders count and, for the data job, the one handleRuns reads
+// when the episode resolves (ADR 0019, "Alerting").
 func noteLaterRun(u *unitState, unit, episode, run string, at time.Time) {
 	key := report.UnitFailedKey(unit, episode)
 	if run == "" || !u.sent[failedRunKey(run, key)].IsZero() {
@@ -538,8 +539,8 @@ func splitUnits(list string) []string {
 // A resolve-only unit (the data job) is judged by run identity instead of a
 // clock: current asks systemd for its state under the lock, so no older
 // sample can page or resolve on a newer run's word. A failed run is paged
-// once (failedRun), never again once its episode was resolved (the handled
-// record, written in the same save as the removal), and an inactive or active
+// once (failedRun), and not again while it is among the newest resolved runs
+// (the bounded handled record, written in the same save as the removal), and an inactive or active
 // unit under any run resolves its episode (ADR 0019, "Alerting": each
 // incident once). The returned errors split by cause: a failure to deliver or
 // sample for a resolve-only unit is soft (logged by the caller and retried at
@@ -615,16 +616,21 @@ const maxHandledRuns = 16
 // handledKey is where a resolved failed run of unit is recorded.
 func handledKey(unit, invocation string) string { return channelKey("handled", unit+"/"+invocation) }
 
-// handledRun is whether the failed run of unit was already resolved: it never
-// pages or opens an episode again, however old the sample that names it (ADR
-// 0019, "Alerting": each incident once).
+// handledRun is whether the failed run of unit is among the newest
+// maxHandledRuns resolved ones: such a run does not page or open an episode
+// again, however old the sample that names it (ADR 0019, "Alerting": each
+// incident once). The de-duplication is bounded, not permanent: a run evicted
+// by maxHandledRuns newer ones would page again if its hook were redelivered.
 func handledRun(u *unitState, unit, invocation string) bool {
 	return !u.sent[handledKey(unit, invocation)].IsZero()
 }
 
 // handleRuns records the failed runs of the episode keyed key (its first run
-// and its latest later one) as resolved, keeping the newest maxHandledRuns of
-// unit. It only changes u in memory: resolveKey's save then writes the record
+// and the latest later one noteLaterRun kept; intermediate runs are not
+// remembered) as resolved, keeping the newest maxHandledRuns of unit, ties
+// in time broken toward the greater invocation ID so eviction is
+// deterministic (ADR 0019, "Alerting": each incident once, within that
+// bound). It only changes u in memory: resolveKey's save then writes the record
 // and the episode's removal together, so no stored state holds one without the
 // other (ADR 0019: delivery state is durable).
 func handleRuns(u *unitState, unit, key, episode string, at time.Time) {
@@ -644,20 +650,26 @@ func handleRuns(u *unitState, unit, key, episode string, at time.Time) {
 	if len(mine) <= maxHandledRuns {
 		return
 	}
-	sort.Slice(mine, func(i, j int) bool { return u.sent[mine[i]].After(u.sent[mine[j]]) })
+	sort.Slice(mine, func(i, j int) bool {
+		if a, b := u.sent[mine[i]], u.sent[mine[j]]; !a.Equal(b) {
+			return a.After(b)
+		}
+		return mine[i] > mine[j]
+	})
 	for _, k := range mine[maxHandledRuns:] {
 		delete(u.sent, k)
 	}
 }
 
 // persistError marks a failure to save the unit-failure record, which is
-// never soft.
+// never soft: delivery state must be durable (ADR 0019, "Alerting"; unitStep).
 type persistError struct{ error }
 
 func (e persistError) Unwrap() error { return e.error }
 
-// splitPersist separates the persistence failures of err (a joined tree)
-// from its other, delivery, failures.
+// splitPersist separates the persistence failures of err (a joined tree),
+// which stay hard, from its other, delivery, failures, which are soft for the
+// data job (ADR 0019, "Alerting": delivery state must be durable).
 func splitPersist(err error) (persist, other error) {
 	var ps, others []error
 	var walk func(error)

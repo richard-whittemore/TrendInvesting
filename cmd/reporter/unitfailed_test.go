@@ -1285,13 +1285,17 @@ func currentIs(sample unitSample) func(string) (unitSample, error) {
 	return func(string) (unitSample, error) { return sample, nil }
 }
 
-func dataStep(t *testing.T, r http.RoundTripper, path string, systemd standInSystemd, at time.Time, now func(string) (unitSample, error)) (soft, hard error) {
+func dataStep(t *testing.T, r http.RoundTripper, path string, systemd standInSystemd, at time.Time, now func(string) (unitSample, error), stale ...unitSample) (soft, hard error) {
 	t.Helper()
 	senders, setAside, err := buildSenders("ntfy,pagerduty", twoChannels(), &http.Client{Transport: r}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return unitStep(path, nil, []string{dataJob}, nil, time.Time{}, systemd.journalctl(), nil, senders, setAside, at, time.Hour, now)
+	samples := map[string]unitSample{}
+	if len(stale) > 0 {
+		samples[dataJob] = stale[0]
+	}
+	return unitStep(path, nil, []string{dataJob}, samples, time.Time{}, systemd.journalctl(), nil, senders, setAside, at, time.Hour, now)
 }
 
 func TestAStaleFailedDataJobSampleCannotPageOrResolveOnItsOwnWord(t *testing.T) {
@@ -1301,8 +1305,8 @@ func TestAStaleFailedDataJobSampleCannotPageOrResolveOnItsOwnWord(t *testing.T) 
 	path := filepath.Join(dir, "unit-failures.json")
 	base := t0.Add(time.Hour)
 	second := "fedcba9876543210fedcba9876543210"
-	// No page was delivered by the hook; the unit has since ended well, so asking systemd under the lock shows it well: nothing is paged.
-	if _, hard := dataStep(t, r, path, systemd, base, currentIs(unitSample{state: "inactive", invocation: second})); hard != nil {
+	// No page was delivered by the hook; the sample taken at the start of the firing says failed, but the unit has since ended well, so asking systemd under the lock shows it well: nothing is paged.
+	if _, hard := dataStep(t, r, path, systemd, base, currentIs(unitSample{state: "inactive", invocation: second}), unitSample{failed: true, state: "failed", invocation: firstRun}); hard != nil {
 		t.Fatal(hard)
 	}
 	if n := pagesFor(r, ntfyHost, dataJob); n != 0 {
@@ -1315,7 +1319,7 @@ func TestAStaleFailedDataJobSampleCannotPageOrResolveOnItsOwnWord(t *testing.T) 
 	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, second), base.Add(2*time.Minute), dataJob); err != nil {
 		t.Fatal(err)
 	}
-	if _, hard := dataStep(t, r, path, systemd, base.Add(3*time.Minute), currentIs(unitSample{failed: true, state: "failed", invocation: second})); hard != nil {
+	if _, hard := dataStep(t, r, path, systemd, base.Add(3*time.Minute), currentIs(unitSample{failed: true, state: "failed", invocation: second}), unitSample{state: "inactive"}); hard != nil {
 		t.Fatal(hard)
 	}
 	if n := count(r.to(pdHost), `"event_action":"resolve"`); n != 0 {
@@ -1374,8 +1378,24 @@ func TestAResolvedDataJobRunNeverPagesAgainAndTheRecordIsBoundedAndSavedWithTheR
 			handled++
 		}
 	}
-	if handled > maxHandledRuns {
-		t.Errorf("%d handled runs kept, want at most %d", handled, maxHandledRuns)
+	if handled != maxHandledRuns {
+		t.Errorf("%d handled runs kept, want %d", handled, maxHandledRuns)
+	}
+	if n := pagesFor(r, ntfyHost, dataJob); n != 1+maxHandledRuns+4 {
+		t.Errorf("%d pages, want one for the first run and one for each of the %d new runs after it", n, maxHandledRuns+4)
+	}
+	if _, kept := sent[handledKey(dataJob, fmt.Sprintf("%032x", 100+maxHandledRuns+3))]; !kept {
+		t.Errorf("the newest handled run was evicted")
+	}
+	if _, kept := sent[handledKey(dataJob, fmt.Sprintf("%032x", 100))]; kept {
+		t.Errorf("the oldest handled run was kept")
+	}
+	// The bound is not permanent: an evicted run is paged again if the hook is redelivered.
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, fmt.Sprintf("%032x", 100)), base.Add(100*time.Hour), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	if n := pagesFor(r, ntfyHost, dataJob); n != 2+maxHandledRuns+4 {
+		t.Errorf("an evicted run did not page again: %d pages", n)
 	}
 }
 
@@ -1386,5 +1406,33 @@ func TestOnlyAFailureToSaveTheRecordIsHardForTheDataJob(t *testing.T) {
 	}
 	if other == nil || !strings.Contains(other.Error(), "502") || strings.Contains(other.Error(), "disk full") {
 		t.Errorf("other = %v", other)
+	}
+}
+
+func TestHandledRunEvictionBreaksTiesByInvocationAndPruneReceiptsLeavesTheRecordAlone(t *testing.T) {
+	at := t0.Add(time.Hour)
+	for round := 0; round < 20; round++ {
+		u := &unitState{seen: map[string]bool{}, sent: map[string]time.Time{}, repeats: map[string]int{}}
+		// 15 newer entries, then two older ones that share a time.
+		for i := 0; i < maxHandledRuns-1; i++ {
+			u.sent[handledKey(dataJob, fmt.Sprintf("%032x", 500+i))] = at.Add(time.Hour)
+		}
+		u.sent[handledKey(dataJob, fmt.Sprintf("%032x", 1))] = at
+		key := report.UnitFailedKey(dataJob, fmt.Sprintf("%032x", 2))
+		handleRuns(u, dataJob, key, fmt.Sprintf("%032x", 2), at)
+		_, lowKept := u.sent[handledKey(dataJob, fmt.Sprintf("%032x", 1))]
+		_, highKept := u.sent[handledKey(dataJob, fmt.Sprintf("%032x", 2))]
+		if lowKept == highKept {
+			t.Fatalf("round %d: exactly one of the tied entries should survive, kept low=%v high=%v", round, lowKept, highKept)
+		}
+		if !highKept {
+			t.Fatalf("round %d: the tie is not broken toward the greater invocation", round)
+		}
+		if pruneReceipts(u.seen, u.sent, u.repeats, at.Add(1000*time.Hour)) {
+			t.Fatal("pruneReceipts changed a record that holds no receipt")
+		}
+		if got := len(u.sent); got != maxHandledRuns {
+			t.Fatalf("pruneReceipts removed handled entries: %d left, want %d", got, maxHandledRuns)
+		}
 	}
 }

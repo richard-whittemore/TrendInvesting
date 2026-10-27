@@ -179,8 +179,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		failures = append(failures, f.err)
 	}
 	withRedaction(senders, secretValues(getenv, *secretsFile))
-	// systemd is asked once, at the start of the firing, before anything is
-	// delivered: a unit that fails while the firing runs is paged by its
+	// systemd is asked once for the trading units, at the start of the firing,
+	// before anything is delivered (the data job is asked again, under the
+	// unit-failure record's lock, by unitStep): a unit that fails while the firing runs is paged by its
 	// hook, and its page is newer than this sample, so it is never resolved
 	// on the sample's word (ADR 0019, "Alerting").
 	sampledAt := now()
