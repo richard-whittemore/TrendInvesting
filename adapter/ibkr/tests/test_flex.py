@@ -1319,12 +1319,8 @@ class ExecutionsTests(ReadOnceHarness):
     def test_a_reading_sets_the_proof_aside_before_it_asks_ibkr(self):
         # A reading stopped part way (its unit's timeout, a kill) leaves a proof set aside, never the last one.
         seen = []
-
-        def get(url, params):
-            seen.append(self.proof())
-            return FakeFlex(statements=("statement.xml", "trade_confirms.xml"))(url, params)
         self.read_trades(confirms())
-        self.assertEqual(self.proof()["state"], "read")
+        self.assertEqual(self.proof()["state"], "read", "setup: a proof read by the reading before")
         service = FakeFlex(statements=("statement.xml", "trade_confirms.xml"))
 
         def watched(url, params):
@@ -1333,6 +1329,40 @@ class ExecutionsTests(ReadOnceHarness):
         self.read_trades(service=watched)
         self.assertEqual(seen[0]["state"], "set-aside")
         self.assertIn("not finished", seen[0]["reason"])
+
+    def test_a_proof_that_cannot_be_set_aside_never_stops_the_cash_and_is_removed(self):
+        # The proof's own file failing (here a directory where its temporary copy goes) never stops a transfer being
+        # recorded, and the earlier proof is removed, so the morning delivery finds none (step 5 of the module).
+        self.read_trades(confirms())
+        self.assertEqual(self.proof()["state"], "read", "setup: a proof read by the reading before")
+        Path(flex.executions_path(str(self.ledger)) + ".tmp").mkdir()
+        self.ledger.unlink()
+        self.assertFalse(self.read_trades())
+        self.assertEqual(len(self.records()), 2, "the cash ledger is written")
+        self.assertEqual(self.status()["state"], "read")
+        self.assertFalse(Path(flex.executions_path(str(self.ledger))).exists(), "no earlier proof is left standing")
+        self.assertIn("executions proof", self.out.getvalue())
+
+    def test_the_proof_is_set_aside_before_the_status_says_running(self):
+        order = []
+        real = flex._write_whole
+
+        def watched(path, text):
+            order.append(Path(path).name)
+            real(path, text)
+        with unittest.mock.patch.object(flex, "_write_whole", watched):
+            self.read_trades()
+        self.assertEqual(order[:2], [flex.EXECUTIONS_NAME, self.ledger.name + flex.STATUS_SUFFIX])
+
+    def test_the_proof_reader_refuses_times_at_the_edge_of_the_calendar(self):
+        self.read_trades(confirms())
+        path = Path(flex.executions_path(str(self.ledger)))
+        good = json.loads(path.read_text())
+        for edge in ("0001-01-01T00:00:00Z", "9999-12-31T23:59:59Z"):
+            with self.subTest(edge=edge):
+                path.write_text(json.dumps(dict(good, checked_at=edge, fetched_at=edge, covered_until=edge)))
+                with self.assertRaises(flex.StatementRefused):
+                    flex.read_executions(str(path), ACCOUNT)
 
     def test_the_proof_reader_reads_what_the_reader_wrote(self):
         self.read_trades(confirms(("700000301", "20270114;163000")))

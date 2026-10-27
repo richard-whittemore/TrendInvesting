@@ -98,6 +98,12 @@ class TWSApi:
     def place_order(self, order_id, contract, order):
         raise NotImplementedError
 
+    def connection_time(self):
+        """The time IB Gateway gave as the session's connection time, as it gave it (TWS API
+        EClient.twsConnectionTime), or None when the session has none: "YYYYMMDD HH:MM:SS Zone", the zone being
+        the Gateway's own (loop.gateway_zone_problem reads it)."""
+        raise NotImplementedError
+
 
 def _recorder(name):
     def record(self, *args):

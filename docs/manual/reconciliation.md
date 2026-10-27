@@ -634,9 +634,13 @@ reaches the midnight that starts the reading's day and lists nothing at or
 after the close ([paper trading](paper-trading.md), "A paper day"; ADR 0019,
 amended 2026-10-27). IBKR's own list starts at midnight in IB Gateway's
 time zone, which its unit sets to New York's (`TZ=America/New_York` in
-`ti-gateway.service`; do not change it): an execution IBKR reports in
-another zone means the list's midnight is not New York's, and the morning
-reading is then withheld, the page naming the zone. A fill recorded with a
+`ti-gateway.service`; do not change it, and keep the Gateway login's time
+zone New York's). The adapter checks it at every connect and reconnect,
+whether or not anything has executed: it reads the connection time the
+Gateway gives (for example `20261027 07:10:01 US/Eastern`, or `EST`/`EDT`),
+and an execution's time too. Any other zone, or a connection time it
+cannot read, withholds the morning reading, the page naming it; once the
+Gateway is set right and the adapter reconnects, it is trusted again. A fill recorded with a
 time that has no zone withholds it too.
 
 **Only a Trade Confirmation query can prove the evening.** An Activity
@@ -673,13 +677,25 @@ the time) or one of another account sets the proof aside alone: the cash
 ledger and the costs are still written, the proof says `"set-aside"` with
 why, and the unit fails so you see it. Once a reading holds the reader's
 lock it rewrites the proof as `"set-aside"` ("a Flex reading began at ...
-and has not finished") before it asks IBKR for anything, and again, whole,
-when it ends. So a reading stopped part way (its unit's 80-minute limit, a
-reboot, a kill) leaves that set-aside proof, and the morning delivery
-waits for the next firing, then withholds. The one exception is a reading
-that cannot open its lock file (the folder missing or not writable): it
-stops with a Python error and leaves the earlier proof as it was. The
-adapter still checks that proof's account, period, fetch time and
+and has not finished") first, before its status file and before it asks
+IBKR for anything, and again, whole, when it ends. So a reading stopped
+part way (its unit's 80-minute limit, a reboot, a kill) leaves that
+set-aside proof, and the morning delivery waits for the next firing, then
+withholds. If the proof itself cannot be written, the deposits,
+withdrawals and costs are still recorded, the earlier proof is deleted
+(the morning delivery then finds none), and the unit fails, its journal
+saying `the executions proof cannot be written`. A reading leaves the
+earlier proof in place in these cases only:
+
+- its command refused before reading (`refused:`: a missing argument, a
+  secrets or account file it cannot read, a token or query ID line not
+  filled in as it needs);
+- it cannot open its lock file (the folder missing or not writable): a
+  Python error naming the path;
+- the proof can neither be written nor deleted (the folder not writable),
+  which the journal says.
+
+The adapter still checks any proof's account, period, fetch time and
 coverage, so an earlier proof covers only the days it was read for. Whether IBKR's *Last N Calendar Days* period includes the day
 it is run on is not in IBKR's documentation: after the first morning
 reading, `sudo cat /var/lib/trend-investing/flex/boost/executions.json`

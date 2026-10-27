@@ -182,8 +182,8 @@ from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReadin
 from orders import (OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker,
                     agrees_with_account, collect_broker_orders, collect_settled_broker_orders, match_on_reconnect,
                     order_key)
-from relay import (LOG_INPUT, OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay,
-                   ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
+from relay import (LOG_INPUT, OUTBOX_SUFFIX, RUN_APPROVED, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
+                   Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
                    run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
@@ -262,6 +262,43 @@ PROOF_WAIT_UNTIL = clock_time(9, 0)
 # execution reported in any other zone shows the list's midnight is not New
 # York's, so a morning reading is withheld (ADR 0019, amended 2026-10-27).
 NEW_YORK_ZONES = frozenset(("US/Eastern", "America/New_York", "EST5EDT"))
+# New York's abbreviations, each New York's only while it is in force there.
+NEW_YORK_ABBREVIATIONS = frozenset(("EST", "EDT"))
+
+
+def gateway_zone_problem(text):
+    """Why IB Gateway's connection time text does not show it on New York time; "" when it does.
+
+    The TWS API gives a session's connection time (EClient.twsConnectionTime)
+    as IB Gateway states it at the handshake, "YYYYMMDD HH:MM:SS Zone", in
+    the Gateway's own zone, the zone its execution list's midnight is in
+    (ADR 0025 point 5). IBKR documents the call, not the format, so it is
+    read defensively (ADR 0019, amended 2026-10-27; AGENTS.md: fail closed):
+    a New York zone name (NEW_YORK_ZONES), or EST or EDT where New York
+    used that abbreviation at the time stated; anything else, or a text not
+    of that shape, is a problem.
+    """
+    parts = text.split() if isinstance(text, str) else []
+    if len(parts) != 3:
+        return ("IB Gateway's connection time {!r} is not 'YYYYMMDD HH:MM:SS Zone', so the zone its list of "
+                "executions starts its midnight in is not known".format(text))
+    try:
+        local = datetime.strptime(parts[0] + " " + parts[1], "%Y%m%d %H:%M:%S")
+    except ValueError:
+        return ("IB Gateway's connection time {!r} does not state a date and time that can be read, so the zone it "
+                "is in is not trusted".format(text))
+    zone = parts[2]
+    if zone in NEW_YORK_ZONES:
+        return ""
+    if zone in NEW_YORK_ABBREVIATIONS:
+        if local.replace(tzinfo=nyse_calendar.NEW_YORK).tzname() == zone:
+            return ""
+        return ("IB Gateway's connection time {!r} is in {}, which is not the abbreviation New York uses at that "
+                "date: the Gateway is not on New York time".format(text, zone))
+    return ("IB Gateway's connection time {!r} is in the zone {!r}, not New York's: IBKR's executions reach back "
+            "only to midnight in the Gateway's own zone, so the midnight its list starts at is not New York's; set "
+            "IB Gateway to New York time (ti-gateway.service, TZ=America/New_York, and its login's time "
+            "zone)".format(text, zone))
 
 
 class ReconcileIncomplete(Exception):
@@ -427,8 +464,11 @@ class AdapterLoop:
         # Set by _morning_proof when the proof failed in a way a later firing of the Flex reader can clear,
         # before PROOF_WAIT_UNTIL: the batch then waits rather than withhold (_post_close_reading).
         self._proof_retryable = False
-        # The zones of every execution time IBKR reported in the account (_count_execution).
+        # The zones of every execution time IBKR reported in the account on this connection
+        # (_count_execution), and why IB Gateway's own zone, read at this connection's reconcile, is not New
+        # York's ("" when it is): both are read afresh at every reconcile (gateway_zone_problem).
         self._execution_zones = set()
+        self._gateway_zone = "IB Gateway's connection time has not been read yet (no reconcile has run)"
         self.delivery = None if streams is None else Deliverer(
             streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._post_close_reading, new_id)
 
@@ -502,7 +542,18 @@ class AdapterLoop:
         (ReconcileIncomplete, naming the last drop's reason): a link that
         drops in every reconcile would otherwise cycle with nothing sent
         and no one told (fail closed and tell a person, AGENTS.md).
+
+        Each reconcile starts this connection's evidence of IB Gateway's zone
+        afresh: the zones of the executions it reports, and its connection
+        time's zone (gateway_zone_problem), so a Gateway set right and
+        reconnected is trusted again without a restart (ADR 0019, amended
+        2026-10-27).
         """
+        self._execution_zones = set()
+        try:
+            self._gateway_zone = gateway_zone_problem(self._api.connection_time())
+        except Exception as err:  # any failure to read it is a zone not known (fail closed)
+            self._gateway_zone = "IB Gateway's connection time could not be read ({})".format(type(err).__name__)
         try:
             self._reconcile()
         except (NotConnected, BrokerOrdersIncomplete, ReconcileIncomplete) as err:
@@ -1131,6 +1182,8 @@ class AdapterLoop:
         now = self._now().astimezone(nyse_calendar.NEW_YORK)
         self._proof_retryable = (bool(proof) and not decisive and self._cash_ledger is not None and now > close
                                  and now.date() != day and now.time() < PROOF_WAIT_UNTIL)
+        if self._gateway_zone:
+            reasons.append(self._gateway_zone)
         foreign = sorted(z for z in self._execution_zones if z not in NEW_YORK_ZONES)
         if foreign:
             reasons.append("IBKR reported an execution in the account with its time in the zone {}, not New "
@@ -1181,15 +1234,20 @@ class AdapterLoop:
         every earlier run its Run approvals chain back to, as the previous close's book reads them
         (book_basis.previous_close; relay.run_chain), so a fresh run hides no fill of the run before it.
 
-        The walk stops after the first earlier run with no input recorded at or after close: each run before it
-        ended earlier still. A chain that cannot be read is itself a reason (fail closed, AGENTS.md).
+        The walk stops after the first earlier run whose business (every input but its configuration and Run
+        approval) was all recorded strictly before close: each run before it ended earlier still. A run with no
+        business is walked past. A chain that cannot be read is itself a reason (fail closed, AGENTS.md).
         """
         payloads = [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
         try:
             for n, (_, groups, _) in enumerate(run_chain(self._engine_log_path)):
                 inputs = [envelope for group in groups for _, kind, envelope in group if kind == LOG_INPUT]
                 payloads += [e["payload"] for e in inputs if e["type"] == FILL_TYPE]
-                if n > 0 and not any(_recorded_at_or_after(e, close) for e in inputs):
+                # A run's configuration and Run approval say nothing about when its business ran: a run holding
+                # nothing else is walked past, never taken as ending before the close.
+                business = [e for e in inputs if e["type"] != RUN_APPROVED and not e["type"].endswith(
+                    ".configuration")]
+                if n > 0 and business and not any(_recorded_at_or_after(e, close) for e in business):
                     break
         except ResolveRefused as refused:
             return ["the chain of runs' logs cannot be read, so their fills cannot be checked ({})".format(refused)]

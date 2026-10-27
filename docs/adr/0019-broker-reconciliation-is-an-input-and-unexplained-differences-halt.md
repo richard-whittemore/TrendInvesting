@@ -1099,7 +1099,9 @@ reading on the close's own date is checked as before, unchanged.
    adapter's outbox, the engine's durable log, and the log of every earlier
    run its Run approvals chain back to, as the previous close's book reads
    them, so a fresh run started after the close hides no fill of the run
-   before it; a chain that cannot be read withholds).
+   before it; the walk stops only after a run whose business, every input
+   but its configuration and approval, was all recorded before the close,
+   and goes past a run with none; a chain that cannot be read withholds).
 4. **The reading is before the next session's open** (09:30 New York on the
    next NYSE trading day), so the account has not traded since.
 
@@ -1173,10 +1175,16 @@ other account. It refuses a proof whose fields, period, fetch time or
 coverage are not as the reader writes them (its `covered_until` must be the
 one the rule above gives for its last day and fetch time). Once a reading
 holds the reader's lock it writes the proof set aside ("not finished")
-before it asks IBKR for anything, and rewrites it whole when it ends, so a
-reading stopped part way leaves a set-aside proof; only a reading that
-cannot open its lock leaves the earlier one, which the checks above still
-bound. A proof that fails in a way a later firing can clear (missing, set
+first, before its status file and before it asks IBKR for anything, and
+rewrites it whole when it ends, so a reading stopped part way leaves a
+set-aside proof. A proof that cannot be written never stops the cash and
+costs being recorded: the earlier proof is removed instead (the morning
+delivery then finds none), and the reading fails so the owner sees it. A
+reading leaves the earlier proof in place only when it never gets that far
+(its command refuses its arguments or secrets, or it cannot open its lock)
+or when the folder is so unwritable that the earlier proof cannot be
+removed either; the checks above still bound such a proof to its own
+account, period and fetch time. A proof that fails in a way a later firing can clear (missing, set
 aside, not yet covering) is waited for until 09:00 whether it fails before
 the account is read or by the end of the read (a firing that rewrites it
 during the read).
@@ -1186,13 +1194,21 @@ Gateway, only the executions since midnight (ADR 0025 point 5), and gives
 each execution's time in the zone of the Gateway's login. The midnight is
 therefore the Gateway's: the deployment runs IB Gateway with
 `TZ=America/New_York` (`ti-gateway.service`, checked by a test), so it is
-New York's, the midnight the proof must reach. An explicit
+meant to be New York's, the midnight the proof must reach. An explicit
 `ExecutionFilter` time cannot widen the list (a filter only narrows it), so
-the boundary is established by that setting and verified at run time: an
-execution IBKR reports in the account with its time in any zone other than
-New York's (`US/Eastern`, `America/New_York`, `EST5EDT`) means the list's
-midnight is not New York's, and the morning reading is withheld, the page
-naming the zone. A fill journalled with a time that has no zone, or one
+the boundary is verified at run time on every connection, with or without
+an execution: at each reconcile (every connect and reconnect) the adapter
+reads the session's connection time IB Gateway gave at the handshake (TWS
+API `EClient.twsConnectionTime`, "YYYYMMDD HH:MM:SS Zone" in the Gateway's
+own zone; IBKR documents the call but not the format, so it is read
+defensively). It stands only when its zone is a New York zone name
+(`US/Eastern`, `America/New_York`, `EST5EDT`) or the abbreviation New York
+used at the time stated (`EST` in winter, `EDT` in summer); a time missing,
+not of that shape, or in any other zone withholds the morning reading, the
+page naming it. Every execution IBKR reports on the connection is checked
+the same way (an execution time in another zone withholds). Both are read
+afresh at each reconcile, so a Gateway set right and reconnected is trusted
+again without restarting the adapter. A fill journalled with a time that has no zone, or one
 that cannot be read, cannot be placed against the close and withholds too.
 
 **When it runs.** The Flex reader moves from 21:30 to each weekday morning

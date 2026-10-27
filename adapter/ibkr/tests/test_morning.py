@@ -303,6 +303,79 @@ class MorningTests(unittest.TestCase):
             loop.step()
         self.assert_withheld("journal", "0001f4e8.earlier.01.01")
 
+    def test_a_fill_two_runs_back_is_found_past_an_empty_run(self):
+        # A run between them with nothing but its configuration and approval says nothing about when it started:
+        # the walk goes past it (book_basis.previous_close walks the same chain).
+        self.proof(FRIDAY_MORNING)
+        payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.twoback.01.01",
+                   "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                   "filled_at": "2027-01-14T21:30:00Z"}
+        commit(self.engine, "fill:twoback", kind=FILL_TYPE, payload=payload, version=5)
+        first = self.engine_log
+        middle = str(Path(self.dir.name) / (RUN + "-2.log"))
+        LoggedEngine(middle, approval=run_approval(ACCOUNT, previous_log=RUN + ".log",
+                                                   previous_log_final_hash=final_hash(first)))
+        fresh = RUN + "-3"
+        self.engine_log = str(Path(self.dir.name) / (fresh + ".log"))
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, previous_log=RUN + "-2.log", previous_log_final_hash=final_hash(middle)))
+        self.folder = self.streams / fresh
+        write_stream(self.folder, THURSDAY, session_envelopes([THURSDAY], run=fresh))
+        self.fake.positions = [(ACCOUNT, contract(), Decimal("148"), 312.5)]
+        self.fake.summary = [(a, t, "99597.75" if t == "TotalCashValue" else v, c) for a, t, v, c in SUMMARY]
+        loop = self.loop()
+        loop.start()
+        for _ in range(40):
+            loop.step()
+        self.assert_withheld("journal", "0001f4e8.twoback.01.01")
+
+    # -- IB Gateway's zone: where IBKR's own list starts -------------------------
+    def test_a_gateway_in_another_zone_withholds_with_no_execution_listed(self):
+        self.proof(FRIDAY_MORNING)
+        self.fake.tws_connection_time = "20270115 05:05:00 US/Pacific"
+        self.deliver(THURSDAY)
+        self.assert_withheld("US/Pacific", "New York")
+
+    def test_a_connection_time_that_cannot_be_read_withholds(self):
+        self.proof(FRIDAY_MORNING)
+        for text in (None, "", "20270115", "20270115 08:05:00", "20270115 08:05:00 Mars/Olympus"):
+            with self.subTest(text=text):
+                self.setUp()
+                self.proof(FRIDAY_MORNING)
+                self.fake.tws_connection_time = text
+                self.deliver(THURSDAY)
+                self.assert_withheld("IB Gateway's connection time")
+
+    def test_new_yorks_abbreviation_in_force_is_new_york(self):
+        self.proof(FRIDAY_MORNING)
+        self.fake.tws_connection_time = "20270115 08:05:00 EST"
+        self.deliver(THURSDAY)
+        self.assert_as_of_close(THURSDAY)
+
+    def test_the_abbreviation_not_in_force_is_not_new_york(self):
+        # EDT in January is no New York zone: a Gateway on a fixed offset, or another place's abbreviation.
+        self.proof(FRIDAY_MORNING)
+        self.fake.tws_connection_time = "20270115 08:05:00 EDT"
+        self.deliver(THURSDAY)
+        self.assert_withheld("EDT")
+
+    def test_a_corrected_gateway_is_trusted_again_after_a_reconnect(self):
+        # The zone, and every execution zone seen, belong to one connection: a reconnect reads them afresh.
+        self.proof(FRIDAY_MORNING)
+        self.fake.tws_connection_time = "20270115 07:00:00 US/Pacific"
+        loop = self.loop()
+        loop.start()
+        ex = execution(exec_id="0005.zone.01.01", order_id=0, perm_id=7171, order_ref="", client_id=0,
+                       time="20270114 10:00:01 US/Pacific")
+        loop._count_execution(SimpleNamespace(name="exec_details", args=(-1, contract(), ex)))
+        self.fake.tws_connection_time = "20270115 08:00:00 US/Eastern"
+        self.fake.drop()
+        for _ in range(10):
+            loop.step()
+        self.assertTrue(loop.ready(), "setup: reconnected and reconciled")
+        self.deliver(THURSDAY, loop)
+        self.assert_as_of_close(THURSDAY)
+
     def test_a_journalled_fill_with_no_zone_withholds(self):
         self.proof(FRIDAY_MORNING)
         loop = self.loop()

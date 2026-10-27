@@ -574,7 +574,7 @@ def read_executions(path, account_id):
         if proof["query"] != "trades" or proof["section"] != TRADE_CONFIRMS[0]:
             raise ValueError("its section")
         return Proof(state, "", fetched_at, first, last, covered, executions)
-    except (KeyError, TypeError, ValueError, AttributeError):
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
         raise refused from None
 
 
@@ -1292,8 +1292,10 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
         # Said first, so a reading stopped part way (its unit's timeout, a kill) leaves "running" with its time,
         # never the previous reading's "read" (docs/manual/reconciliation.md, "The status file"). The costs say
         # theirs in their own step (_read_costs_once).
+        # The proof is set aside first, so no stop from here on leaves the earlier one standing for this reading;
+        # a proof that cannot be written never stops the cash reading (step 5 of the module).
+        proof_unwritten = _write_proof(ledger_path, _unfinished_proof(checked_at, account_id), say)
         _write_whole(status_path, _running(checked_at))
-        _write_whole(executions_path(ledger_path), _unfinished_proof(checked_at, account_id))
         try:
             ledger = read_ledger(ledger_path)
             coverage = read_coverage(coverage_path)
@@ -1359,10 +1361,7 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             say("flex: the costs status cannot be written: " + str(unwritten))
             ok = False
         proof = _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say)
-        try:
-            _write_whole(executions_path(ledger_path), json.dumps(proof, sort_keys=True) + "\n")
-        except OSError as unwritten:
-            say("flex: the executions proof cannot be written: " + str(unwritten))
+        if _write_proof(ledger_path, json.dumps(proof, sort_keys=True) + "\n", say) or proof_unwritten:
             return False
     return ok and costs_status["state"] == "read" and proof["state"] != PROOF_SET_ASIDE
 
@@ -1394,6 +1393,26 @@ def _read_executions_once(status, trades_query_id, token, account_id, get, sleep
     say("flex: executions proof: {} execution(s) for {} to {}, every one listed up to {}".format(
         len(executions.rows), executions.from_date, executions.to_date, proof["covered_until"]))
     return proof
+
+
+def _write_proof(ledger_path, text, say):
+    """Write the executions proof text whole; on failure remove the earlier proof, so none stands for this reading,
+    say why and return True (step 5 of the module). The cash and costs ledgers are written either way."""
+    path = executions_path(ledger_path)
+    try:
+        _write_whole(path, text)
+        return False
+    except OSError as unwritten:
+        try:
+            os.unlink(path)
+            left = "the earlier proof is removed, so the morning delivery finds none"
+        except FileNotFoundError:
+            left = "no earlier proof is left"
+        except OSError as stuck:
+            left = "the earlier proof could not be removed either ({}): its folder is not writable".format(
+                stuck.strerror or stuck)
+        say("flex: the executions proof cannot be written ({}); {}".format(unwritten.strerror or unwritten, left))
+        return True
 
 
 def _unfinished_proof(checked_at, account_id):
