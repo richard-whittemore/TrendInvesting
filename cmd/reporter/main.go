@@ -103,6 +103,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
 	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, and beside which the reader's costs.jsonl gives the summary its costs line, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
 	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed unit is paged once per failure episode if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a unit no longer failed is resolved")
+	resolveUnits := flags.String("resolve-units", "", "comma-separated units (ti-data.service) that systemctl show samples only to end their failure episode once a run has ended well: the reporter pages one once only when its OnFailure hook could not, never reminds or names it, and it never holds back the heartbeat; only ti-data.service is accepted, and not a unit also in -units")
 	selfUnit := flags.String("self-unit", "", "this reporter's own unit (ti-reporter@<instance>.service): its failure page is resolved by the next firing that finishes without a fault")
 	unitState := flags.String("unit-state", "", "the host's record of failed-unit pages, shared with the OnFailure hook (default: unit-failures.json beside -state)")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
@@ -132,6 +133,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	tradingUnits := splitUnits(*units)
 	if err := checkTradingUnits("-units", tradingUnits); err != nil {
+		return err
+	}
+	resolveOnly := splitUnits(*resolveUnits)
+	if err := checkResolveUnits(resolveOnly, tradingUnits); err != nil {
 		return err
 	}
 	if *selfUnit != "" {
@@ -174,8 +179,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		failures = append(failures, f.err)
 	}
 	withRedaction(senders, secretValues(getenv, *secretsFile))
-	// systemd is asked once, at the start of the firing, before anything is
-	// delivered: a unit that fails while the firing runs is paged by its
+	// systemd is asked once for the trading units, at the start of the firing,
+	// before anything is delivered (the data job is asked again, under the
+	// unit-failure record's lock, by unitStep): a unit that fails while the firing runs is paged by its
 	// hook, and its page is newer than this sample, so it is never resolved
 	// on the sample's word (ADR 0019, "Alerting").
 	sampledAt := now()
@@ -184,8 +190,8 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		failures = append(failures, unitsErr)
 	}
 	failedNow := map[string]bool{}
-	for unit, sample := range unitSamples {
-		failedNow[unit] = sample.failed
+	for _, unit := range tradingUnits {
+		failedNow[unit] = unitSamples[unit].failed
 	}
 	seen, sent, repeats, baselines, err := loadState(*statePath)
 	if err != nil {
@@ -371,9 +377,16 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// fails; this firing pages a failure episode the hook missed and resolves
 	// the page of a unit not failed at the sample. A systemctl that could not
 	// be run checked nothing, so no page is resolved on its word.
-	if unitsErr == nil && len(tradingUnits) > 0 {
-		if err := unitStep(unitStatePath, tradingUnits, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat); err != nil {
-			failures = append(failures, err)
+	if unitsErr == nil && len(tradingUnits)+len(resolveOnly) > 0 {
+		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat, func(unit string) (unitSample, error) {
+			samples, err := sampleUnitsFor(*systemctl, []string{unit}, "the trading units were checked; only the data job's resolve and backup page are skipped at this firing")
+			return samples[unit], err
+		})
+		if soft != nil {
+			_, _ = fmt.Fprintln(out, "reporter: the data job's page or resolve could not be completed and is retried at the next firing: "+soft.Error())
+		}
+		if hard != nil {
+			failures = append(failures, hard)
 		}
 	}
 	// The clock check comes after every incident alert is sent, so a slow or

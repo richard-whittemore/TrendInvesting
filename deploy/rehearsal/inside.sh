@@ -431,10 +431,10 @@ sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null 
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook paged again for the same failure"
 test "$(issues_opened)" = "$((opened + 1))" || fail "the failed-unit hook opened another issue for the same failure"
 test "$(comments_posted)" = "$hook_comments" || fail "the failed-unit hook commented on an issue again for the same failure"
-for unit in ti-engine@.service ti-adapter-boost.service ti-reporter@.service; do
+for unit in ti-engine@.service ti-adapter-boost.service ti-reporter@.service ti-data.service; do
   grep -qx 'OnFailure=ti-unit-failed@%n.service' "/etc/systemd/system/$unit" || fail "$unit does not hand its failure to the hook"
 done
-pass "the failed-unit hook runs as its unit runs it, as ti-trader, pages both channels once per failure episode and not again, and the three trading units name it in OnFailure="
+pass "the failed-unit hook runs as its unit runs it, as ti-trader, pages both channels once per failure episode and not again, and the engine, adapter, reporter and data job units name it in OnFailure="
 
 # The alerts repository not yet set up: the credential file with the token
 # empty, as secrets.env.example ships it, and a state file recorded as above.

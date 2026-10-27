@@ -7,10 +7,11 @@ import (
 	"time"
 )
 
-// KindUnitFailed is a trading unit (the engine, the adapter or the reporter)
-// that stopped and is failed: systemd never restarts the engine or the adapter
-// (ADR 0027, the restart model), so a stop waits for the owner, and the page
-// is how the owner learns of it within minutes (ADR 0019, "Alerting").
+// KindUnitFailed is a unit (the engine, the adapter, the reporter or the data
+// job) that stopped and is failed. systemd never restarts the engine or the
+// adapter (ADR 0027, the restart model), so a stop waits for the owner; the
+// data job is run again by its timer. The page is how the owner learns of it
+// within minutes (ADR 0019, "Alerting").
 const KindUnitFailed Kind = "unit-failed"
 
 // UnitFailedKey is the alert key of one failure episode of a unit: the unit
@@ -27,6 +28,7 @@ func UnitFailedKeyPrefix(unit string) string { return "unit-failed:" + unit + "/
 var UnitManualRows = []struct{ prefix, row string }{
 	{"ti-adapter-", `docs/manual/ibkr-adapter.md, "What can go wrong", the row "The adapter's unit failed"`},
 	{"ti-engine@", `docs/manual/engine.md, "While it runs", the row "The engine's unit failed"`},
+	{"ti-data.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
 }
 
 // UnitManualRow is the manual row for a failed unit; every other unit is
@@ -40,6 +42,30 @@ func UnitManualRow(unit string) string {
 	return `docs/manual/alerts-and-dashboard.md, "The reporter itself", the row "<host>: <unit> failed"`
 }
 
+func isDataJob(unit string) bool { return strings.HasPrefix(unit, "ti-data.") }
+
+// restartSentence says who starts the failed unit again, per unit. The rule
+// is the restart model (ADR 0027): systemd never restarts the engine or the
+// adapter, so a stop waits for the owner; the data job is the exception,
+// run again by ti-data.timer (ADR 0019, "Alerting").
+func restartSentence(unit string) string {
+	if isDataJob(unit) {
+		return "The data job is run again by its timer at the next firing; you need not start it unless you fixed its cause and want the session recorded sooner."
+	}
+	return "systemd does not restart the engine or the adapter: every stop is for you to read and every start is yours."
+}
+
+// episodeSentence says how often the owner is told and when the page ends,
+// per unit. The rule is each incident once (ADR 0019, "Alerting"); the data
+// job is the exception, never reminded, because its timer runs it again and
+// its incident ends when a run ends well.
+func episodeSentence(unit string) string {
+	if isDataJob(unit) {
+		return "You are told once for this failure; a run that fails again is the same failure and is not paged again, and the incident is resolved when a run ends well."
+	}
+	return "You are told once for this failure; a run that fails again before the unit is seen well is not paged again, only reminded at most once an hour, and the incident is resolved when the unit is seen well."
+}
+
 // UnitFailedAlert is the urgent page for a failed run of a unit: its name,
 // the reason (the failed run's own last line, or systemd's line about it,
 // already cleaned by UnitFailedReason) and the manual row to read. It carries
@@ -47,9 +73,7 @@ func UnitManualRow(unit string) string {
 // ntfy relay, leaves out the journal line, which is read on the server.
 func UnitFailedAlert(host, unit, invocation, reason string, at time.Time) Alert {
 	head := fmt.Sprintf("The unit %s is failed as of %s.", unit, at.UTC().Format(time.RFC3339))
-	tail := fmt.Sprintf("systemd does not restart the engine or the adapter: every stop is for you to read and every start is yours. Read %s, then `journalctl -u %s` on the server. "+
-		"You are told once for this failure; a run that fails again before the unit is seen well is not paged again, only reminded at most once an hour, and the incident is resolved when the unit is seen well.",
-		UnitManualRow(unit), unit)
+	tail := fmt.Sprintf("%s Read %s, then `journalctl -u %s` on the server. %s", restartSentence(unit), UnitManualRow(unit), unit, episodeSentence(unit))
 	return Alert{
 		Key: UnitFailedKey(unit, invocation), Kind: KindUnitFailed, Severity: Urgent, AccountID: host, At: at,
 		Title:      fmt.Sprintf("%s: %s failed", host, unit),
@@ -119,11 +143,23 @@ func WithFailedUnits(a Alert, inForce bool, failed []string) (Alert, bool) {
 	if len(failed) == 0 {
 		return a, inForce
 	}
-	rows := make([]string, len(failed))
-	for i, unit := range failed {
-		rows[i] = fmt.Sprintf("%s (read %s)", unit, UnitManualRow(unit))
+	var rows, data []string
+	for _, unit := range failed {
+		row := fmt.Sprintf("%s (read %s)", unit, UnitManualRow(unit))
+		if isDataJob(unit) {
+			data = append(data, row)
+			continue
+		}
+		rows = append(rows, row)
 	}
-	line := "Failed trading unit(s), which systemd does not restart: " + strings.Join(rows, "; ") + "."
+	var parts []string
+	if len(rows) > 0 {
+		parts = append(parts, "Failed trading unit(s), which systemd does not restart: "+strings.Join(rows, "; ")+".")
+	}
+	if len(data) > 0 {
+		parts = append(parts, "Failed data job, which its timer runs again: "+strings.Join(data, "; ")+".")
+	}
+	line := strings.Join(parts, " ")
 	if !inForce {
 		a.Severity = Urgent
 		a.Title = fmt.Sprintf("%s: state at reporter start: %s", a.AccountID, "Normal, a trading unit is failed")

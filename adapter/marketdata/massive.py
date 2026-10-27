@@ -25,7 +25,12 @@ log = logging.getLogger("marketdata")
 
 
 class MarketDataError(Exception):
-    """A request failed or returned something unusable. Never carries the key."""
+    """A request failed or returned something unusable. Never carries the key.
+    ``status`` is the HTTP status when Massive answered with an error one, else None."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 def keychain_key(service=KEYCHAIN_SERVICE):
@@ -122,7 +127,7 @@ class Client:
                     log.warning("429 from %s; waiting %ss", parts.path, self.retry_wait)
                     self._sleep(self.retry_wait)
                     continue
-                raise MarketDataError("HTTP {} from {}".format(e.code, parts.path)) from None
+                raise MarketDataError("HTTP {} from {}".format(e.code, parts.path), status=e.code) from None
             except (urllib.error.URLError, OSError, ValueError) as e:
                 raise MarketDataError("request to {} failed: {}".format(parts.path, type(e).__name__)) from None
         if not isinstance(body, dict) or body.get("status", "OK") not in OK_STATUSES:

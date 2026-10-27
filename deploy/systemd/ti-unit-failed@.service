@@ -1,6 +1,6 @@
 [Unit]
 Description=Page the owner that %i failed
-# Started by OnFailure= on the engine, the adapter and the reporter, with the
+# Started by OnFailure= on the engine, the adapter, the reporter and the data job, with the
 # failed unit's name as the instance (for the engine,
 # ti-unit-failed@ti-engine@boost.service.service, whose %i is
 # ti-engine@boost.service; the rehearsal starts it under systemd). systemd

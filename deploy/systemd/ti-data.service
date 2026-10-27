@@ -3,6 +3,12 @@ Description=Market-data step: record each day's settled session once and write t
 # Massive only: the step needs the network, not IB Gateway.
 After=network-online.target
 Wants=network-online.target
+# When this unit fails (a 403 that persists at the last morning firing, a
+# missing recording, a gap), ti-unit-failed@%n sends one urgent page through
+# the reporter's channels naming it, the failed run's last journal line and
+# the manual row to read (ADR 0019, "Alerting"; docs/manual/server.md, "A
+# failed unit"). The free plan's early 403 is a quiet exit 0, not a failure.
+OnFailure=ti-unit-failed@%n.service
 # No Condition: a missing /opt/trend-investing/bin/ti-data, or a run.env
 # naming a log that cannot be read, fails the unit with a message, so the
 # owner sees a failed unit, never a silent skip. A Boost engine not yet
@@ -40,7 +46,7 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # resume, the folder of the run that began it: docs/manual/market-data.md,
 # "A crash resume"). Settle
 # minutes: the close plus this long before a session is recorded; the timer
-# fires after it (ti-data.timer).
+# fires after it (ti-data.timer): the next morning, on the free plan.
 ExecStart=/opt/trend-investing/bin/ti-data --run-env /var/lib/trend-investing/engines/boost/run.env --data ${TI_DATA_DIR} --streams ${TI_DATA_DIR}/streams --config /etc/trend-investing/engines/boost.config --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --secrets-file %d/secrets --settle-minutes 60
 NoNewPrivileges=true
 PrivateTmp=true
