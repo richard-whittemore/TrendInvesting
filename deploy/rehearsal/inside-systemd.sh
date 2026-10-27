@@ -332,12 +332,12 @@ data_hook=ti-unit-failed@ti-data.service.service
 ondata=$(grep -x 'OnFailure=.*' /deploy/systemd/ti-data.service) || fail "the data job's unit names no OnFailure="
 cat >/etc/systemd/system/ti-data.service <<UNIT
 [Unit]
-Description=Stand-in data job (rehearsal): refuses as the real one can
+Description=Stand-in data job (rehearsal): fails as the real one can
 $ondata
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo "ti-data refused: MarketDataError: HTTP 403 for session 2026-10-23 marker-D" >&2; exit 1'
+ExecStart=/bin/sh -c 'echo "ti-data: HTTP 403 for session 2026-10-23, marker-D" >&2; exit 1'
 UNIT
 systemctl daemon-reload
 rm -f "$reports/unit-failures.json"
