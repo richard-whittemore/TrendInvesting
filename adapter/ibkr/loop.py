@@ -182,8 +182,9 @@ from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReadin
 from orders import (OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker,
                     agrees_with_account, collect_broker_orders, collect_settled_broker_orders, match_on_reconnect,
                     order_key)
-from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay, earlier_run,
-                   read_engine_log, released_client_order_ids, run_identity, run_logs)
+from relay import (LOG_INPUT, OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay,
+                   ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
+                   run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
 from account import NET_LIQUIDATION, TOTAL_CASH
@@ -318,6 +319,15 @@ def _event_time_readable(payload, field):
     except (AttributeError, ValueError):
         return False
     return at.tzinfo is not None
+
+
+def _recorded_at_or_after(envelope, moment):
+    """Whether a logged input's recorded time is at or after moment; True when it cannot be read (fail closed)."""
+    try:
+        at = datetime.fromisoformat(str(envelope["recorded_at"]).replace("Z", "+00:00"))
+        return at.tzinfo is None or at >= moment
+    except (KeyError, TypeError, ValueError):
+        return True
 
 
 def _stamp(at):
@@ -1167,9 +1177,22 @@ class AdapterLoop:
         return reasons, False
 
     def _journalled_fills_since(self, close):
-        """The fill IDs the engine's durable log or the outbox holds stamped at or after close."""
-        payloads = [i.payload for i in read_engine_log(self._engine_log_path).inputs if i.event_type == FILL_TYPE]
-        payloads += [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
+        """The fill IDs journalled stamped at or after close: in the outbox, this run's durable log, and the log of
+        every earlier run its Run approvals chain back to, as the previous close's book reads them
+        (book_basis.previous_close; relay.run_chain), so a fresh run hides no fill of the run before it.
+
+        The walk stops after the first earlier run with no input recorded at or after close: each run before it
+        ended earlier still. A chain that cannot be read is itself a reason (fail closed, AGENTS.md).
+        """
+        payloads = [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
+        try:
+            for n, (_, groups, _) in enumerate(run_chain(self._engine_log_path)):
+                inputs = [envelope for group in groups for _, kind, envelope in group if kind == LOG_INPUT]
+                payloads += [e["payload"] for e in inputs if e["type"] == FILL_TYPE]
+                if n > 0 and not any(_recorded_at_or_after(e, close) for e in inputs):
+                    break
+        except ResolveRefused as refused:
+            return ["the chain of runs' logs cannot be read, so their fills cannot be checked ({})".format(refused)]
         found = []
         for payload in payloads:
             ident = str(payload.get("fill_id", "a fill with no ID")) if isinstance(payload, dict) else "a fill"

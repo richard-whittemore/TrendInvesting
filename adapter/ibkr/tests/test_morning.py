@@ -35,10 +35,10 @@ tests_dir = Path(__file__).resolve().parent
 if str(tests_dir) not in sys.path:
     sys.path.insert(0, str(tests_dir))
 
-from engine_double import LoggedEngine, run_approval
+from engine_double import LoggedEngine, final_hash, run_approval
 from fake_tws import ACCOUNT, FakeTWS, contract, execution
 from test_connection import Clock, config
-from test_delivery import BAR, CLOSED, RUN, SPY_CON_ID, session_envelopes, write_stream
+from test_delivery import BAR, CLOSED, RUN, SPY_CON_ID, commit, session_envelopes, write_stream
 from test_loop import COMMISSION_WAIT, SUMMARY, Ids
 import flex
 from delivery import nyse_calendar
@@ -279,6 +279,29 @@ class MorningTests(unittest.TestCase):
         self.deliver(THURSDAY)
         why = self.assert_withheld("another account")
         self.assertNotIn("DU0000998", why)
+
+    def test_a_fill_an_earlier_run_journalled_after_the_close_withholds(self):
+        # The fills of every run the Run approvals chain back to count, as the previous close's book does
+        # (book_basis.previous_close): a fresh run started after the close does not hide its predecessor's fill.
+        self.proof(FRIDAY_MORNING)
+        payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.earlier.01.01",
+                   "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                   "filled_at": "2027-01-14T21:30:00Z"}
+        commit(self.engine, "fill:earlier", kind=FILL_TYPE, payload=payload, version=5)
+        fresh = RUN + "-2"
+        earlier_log = self.engine_log
+        self.engine_log = str(Path(self.dir.name) / (fresh + ".log"))
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, previous_log=RUN + ".log", previous_log_final_hash=final_hash(earlier_log)))
+        self.folder = self.streams / fresh
+        write_stream(self.folder, THURSDAY, session_envelopes([THURSDAY], run=fresh))
+        self.fake.positions = [(ACCOUNT, contract(), Decimal("148"), 312.5)]
+        self.fake.summary = [(a, t, "99597.75" if t == "TotalCashValue" else v, c) for a, t, v, c in SUMMARY]
+        loop = self.loop()
+        loop.start()
+        for _ in range(40):
+            loop.step()
+        self.assert_withheld("journal", "0001f4e8.earlier.01.01")
 
     def test_a_journalled_fill_with_no_zone_withholds(self):
         self.proof(FRIDAY_MORNING)

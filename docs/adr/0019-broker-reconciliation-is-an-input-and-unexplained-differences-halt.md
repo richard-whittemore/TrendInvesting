@@ -1095,8 +1095,11 @@ reading on the close's own date is checked as before, unchanged.
    already counts it).
 2. **IBKR's own list since that midnight shows none** at or after the close
    (condition 1's check of IBKR's list, unchanged).
-3. **The journal holds no fill stamped at or after the close** (the engine's
-   durable log and the adapter's outbox).
+3. **The journal holds no fill stamped at or after the close** (the
+   adapter's outbox, the engine's durable log, and the log of every earlier
+   run its Run approvals chain back to, as the previous close's book reads
+   them, so a fresh run started after the close hides no fill of the run
+   before it; a chain that cannot be read withholds).
 4. **The reading is before the next session's open** (09:30 New York on the
    next NYSE trading day), so the account has not traded since.
 

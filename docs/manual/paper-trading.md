@@ -329,7 +329,8 @@ checks for each, so when, at the moment of the read:
   later date before the next session's open, with the Flex reader's
   **executions proof** listing every execution of the account from the
   session's day up to the midnight that starts the reading's day and none at
-  or after the close, and no fill recorded at or after the close: the
+  or after the close, and no fill recorded at or after the close, in this
+  run or any earlier run its approvals name: the
   proof covers the close to midnight, IBKR's own list midnight to the read
   ([reconciliation](reconciliation.md), "The executions proof");
 - IBKR shows no open order for the account, from any client (working,
@@ -675,7 +676,7 @@ order. Still to come, and not needed for it:
   on the session's day or asked for too soon after midnight, one starting
   after the session, an execution at or after the close in it (an early
   close's too), one in IBKR's own list since midnight, a fill recorded after
-  the close or with a time that has no zone, an execution IBKR reported in
+  the close (an earlier run's included) or with a time that has no zone, an execution IBKR reported in
   a zone other than New York's, another account's proof, or a reading after
   the next open; Monday's delivery of Friday, the day after a holiday; and
   the wait for the proof until 9:00, a proof rewritten during the read
