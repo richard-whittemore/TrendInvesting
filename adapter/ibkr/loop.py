@@ -280,8 +280,8 @@ def gateway_zone_problem(text, what="IB Gateway's connection time"):
     and time, must be a New York zone name (NEW_YORK_ZONES), or an
     abbreviation or long name (NEW_YORK_ABBREVIATIONS) New York used at the
     time stated, at either reading of a local time repeated when daylight
-    saving time ends; anything else, or a text not of that shape, is a
-    problem.
+    saving time ends; a local time New York skipped when daylight saving
+    time began, anything else, or a text not of that shape, is a problem.
     """
     parts = text.split(None, 2) if isinstance(text, str) else []
     if len(parts) != 3:
@@ -293,6 +293,13 @@ def gateway_zone_problem(text, what="IB Gateway's connection time"):
         return ("{} {!r} does not state a date and time that can be read, so the zone it is in is not "
                 "trusted".format(what, text))
     zone = parts[2].strip()
+    if zone in NEW_YORK_ZONES or zone in NEW_YORK_ABBREVIATIONS:
+        # A wall-clock time New York skipped (the hour the clocks go forward) does not come back from UTC as
+        # itself: the text is no New York reading at all. The repeated autumn hour does, at its first reading.
+        aware = local.replace(tzinfo=nyse_calendar.NEW_YORK)
+        if aware.astimezone(timezone.utc).astimezone(nyse_calendar.NEW_YORK).replace(tzinfo=None) != local:
+            return ("{} {!r} is a time that did not happen in New York (the clocks went forward over it), so it "
+                    "is not a New York reading".format(what, text))
     if zone in NEW_YORK_ZONES:
         return ""
     if zone in NEW_YORK_ABBREVIATIONS:

@@ -320,17 +320,14 @@ refusal.
 not served on the evening of the session: asked at 17:05, 18:05 or 20:05 on
 the day, Massive answers "403 forbidden", and the same request succeeds the
 next morning (confirmed on the real server: a run at about 7 a.m. on
-2026-10-27 recorded the session). But the engine withheld that session
-(`stale-account-snapshot`): the adapter's account reading is taken the next
-morning, after the session's close, and the engine accepts only a reading as
-of the close. So until the Flex proof is in place, a session recorded the
-next morning is withheld and places no order, whichever hour the job runs
-(the free plan's evening firings could only ever 403, so mornings are no
-worse). The change that lets the engine accept the morning reading, when
-IBKR's Flex statement proves no execution after the close, is made
-separately; see the Flex reader in
-[reconciliation](reconciliation.md), "Deposits and withdrawals, read from
-IBKR".
+2026-10-27 recorded the session). The adapter's account reading is then
+taken the next morning, and it stands for the session's close only with the
+Flex reader's executions proof (your decision of 2026-10-27): IBKR's Trade
+Confirmation statement, read each weekday morning before the job, showing
+no execution from the close to midnight
+([reconciliation](reconciliation.md), "The executions proof"). Without the
+proof by 09:00 New York the session is withheld (`stale-account-snapshot`)
+and places no order.
 
 What the job does with that answer:
 
@@ -1022,11 +1019,13 @@ which writes the sessions again from its recordings, and start the adapter
   reports its balances in US dollars, then start the adapter again; the
   file is delivered then. This is not one of the refused-file cases: leave
   the file where it is.
-- **The adapter was not running at 17:05** and starts the next morning: it
-  delivers the file then, and an order the engine releases at that close is
-  for a session already past, so it is never sent (the adapter stops on it:
+- **The adapter was not running when the file was written** and starts
+  later that morning: it delivers the file then, behind a reading that
+  stands for the close only with the executions proof and only before the
+  next open. Started after 09:30 it is withheld, and an order released for
+  a day already past is never sent (the adapter stops on it:
   [paper trading](paper-trading.md), "What can go wrong"). Keep the adapter
-  running through the evening of a paper day.
+  running on a paper day.
 - **A fresh run with the old run's file still in the outbox** (you started a
   new `TI_RUN` before the old file was all sent): its snapshot and lines are
   dropped unsent together, in one write, with one log line, so a stop

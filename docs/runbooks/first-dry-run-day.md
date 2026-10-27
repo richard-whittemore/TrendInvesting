@@ -38,7 +38,7 @@ The plan, for a start on Saturday evening, 2026-10-24 (New York time):
 | Saturday evening | Steps 0 to 8 below; the warm-up in step 5 takes about an hour and a half |
 | Sunday 09:00 | IBC logs the Gateway in again from cold: **approve the phone prompt** ("Sunday, and the Gateway's cold restart") |
 | Monday 11:30 | Look at the dashboard: the run is up, no decision yet (step 8) |
-| Monday 16:00 close, 17:05 | The data job writes Monday's file; the adapter delivers it; the engine decides the session in dry-run ("Monday after the close") |
+| Monday 16:00 close; Tuesday 05:30 to 06:05 | The Flex reader writes its executions proof; the data job writes Monday's file; the adapter delivers it; the engine decides the session in dry-run ("Monday after the close") |
 
 ## 0. Check where the server stands
 
@@ -426,8 +426,9 @@ ActiveState=inactive
 ~ ti-reporter@boost\.timer +ti-reporter@boost\.service
 ```
 
-`ti-data.timer` fires Monday to Friday at 17:05, 18:05 and 20:05 New York time
-and never on a weekend. `ti-reporter@boost.timer` fires every 5 minutes, all
+`ti-data.timer` fires Monday to Friday at 06:05, 07:05 and 08:05 New York
+time, for the session before (Massive's free plan serves a session the next
+morning), and never on a weekend. `ti-reporter@boost.timer` fires every 5 minutes, all
 week. On Saturday and Sunday there is no new session, so the data job's
 weekend runs (if any, such as a catch-up after a reboot) find the last
 settled session, Friday's, already written, record nothing and succeed; the
@@ -728,17 +729,21 @@ and the adapter running through it:
 
 After a recovery, read the new run's name for `run-2026-10-24` in the two paths below.
 
-- 16:00 the market closes. The data job fires at 17:05 (and again at 18:05 and
-  20:05 if the first attempt fails; once the file exists they find it and
-  fetch nothing). It writes
+- 16:00 the market closes. Tuesday at 05:30 the Flex reader writes its
+  executions proof (`docs/manual/reconciliation.md`, "The executions proof";
+  it needs the Trade Confirmation query set up), and the data job fires at
+  06:05 (and again at 07:05 and 08:05 if the first attempt fails; once the
+  file exists they find it and fetch nothing). It writes
   `/var/lib/trend-investing/data/streams/boost/run-2026-10-24/boost-2026-10-26.jsonl`.
 - The adapter, still running, delivers that file to the engine behind a
-  reading of the account taken after the close, and the engine decides the
-  session `TI_AS_OF` named: in dry-run it journals what it would have done and
-  sends nothing. From about 17:10, `sudo grep -c
+  reading of the account taken that morning, which stands for Monday's close
+  with the proof, and the engine decides the session `TI_AS_OF` named: in
+  dry-run it journals what it would have done and sends nothing. Without the
+  proof by 09:00 the session is withheld (`stale-account-snapshot`) and the
+  page says which proof was missing. From about 06:10 Tuesday, `sudo grep -c
   '"type":"strategy.targets.decided"'
   /var/lib/trend-investing/engines/boost/run-2026-10-24.log` prints `1`
   and the dashboard's "targets the strategy decided" card shows the decision.
-- If the file is not there by 17:30: `sudo journalctl -u ti-data.service -n
-  20`, then `sudo systemctl start ti-data.service` once the cause (usually
-  Massive not having published Monday's bars yet) is gone.
+- If the file is not there by 08:30 Tuesday: `sudo journalctl -u
+  ti-data.service -n 20`, then `sudo systemctl start ti-data.service` once
+  the cause is gone.

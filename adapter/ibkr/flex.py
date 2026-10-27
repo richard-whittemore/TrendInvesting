@@ -134,8 +134,9 @@ The equity before a transfer (equity_before) is, in order:
   aside until the first close snapshot is committed.
 
 Both approximations assume the close snapshot was read after the transfer,
-as the post-close reading is (17:05 New York or later); a transfer IBKR
-times later that evening is taken as held by it. A close snapshot is one
+as the post-close reading is (the next morning, when the data job's file
+arrives, or that evening); a transfer IBKR times later that evening is taken
+as held by it. A close snapshot is one
 stamped as of its session's official close (snapshot.py: 4 p.m., 1 p.m. on
 an early close), found by the data job's NYSE calendar, the one the adapter
 stamps by (adapter/marketdata/nyse_calendar.py).

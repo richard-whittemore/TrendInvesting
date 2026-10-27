@@ -368,6 +368,18 @@ class MorningTests(unittest.TestCase):
                 self.assertEqual(gateway_zone_problem(text), "")
         self.assertNotEqual(gateway_zone_problem("20261101 02:30:00 EDT"), "", "after the repeated hour: EST only")
 
+    def test_a_time_new_york_skips_in_the_spring_withholds(self):
+        # 02:30 on 2026-03-08 never happened in New York: the clocks went from 02:00 EST to 03:00 EDT.
+        from loop import gateway_zone_problem
+        for zone in ("EST", "EDT", "Eastern Standard Time", "Eastern Daylight Time", "US/Eastern", "America/New_York"):
+            with self.subTest(zone=zone):
+                text = "20260308 02:30:00 " + zone
+                problem = gateway_zone_problem(text)
+                self.assertIn(text, problem)
+                self.assertIn("did not happen", problem)
+        self.assertEqual(gateway_zone_problem("20260308 03:30:00 EDT"), "", "the hour after the gap")
+        self.assertEqual(gateway_zone_problem("20260308 01:30:00 EST"), "", "the hour before it")
+
     def test_new_yorks_long_zone_name_in_force_is_new_york(self):
         self.proof(FRIDAY_MORNING)
         self.fake.tws_connection_time = "20270115 08:05:00 Eastern Standard Time"

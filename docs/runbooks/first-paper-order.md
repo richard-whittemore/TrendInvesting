@@ -328,18 +328,21 @@ Order of starting, each on the server, each an explicit step of yours:
    adapter refuses to start until the run's stream folder exists ("the
    run's stream folder ... does not exist"), and once started it delivers
    the warm-up to the engine behind one account reading, with the
-   start-of-run reconciliation. **Do this the evening before the first paper
-   day, or that morning**: the first day's reading must come after the
-   warm-up's, and a warm-up delivered after the first day's 17:05 file is
-   due withholds that day. From then on the timer writes each day's file at
-   17:05 and the adapter, left running, delivers it within seconds behind
-   one reading after the close, which stands for the account as of the
-   close when nothing is working at IBKR and nothing has executed since
-   (`docs/manual/paper-trading.md`, "A paper day"). Keep the adapter
-   running through the evening: a file delivered the next morning is read
-   on a later date than its close, so that session is withheld, and an
-   order released the evening before is for a session already past, which
-   is never sent.
+   start-of-run reconciliation. **Do this before the first paper day's file
+   is written**, which is the next morning from 06:05 New York: the first
+   day's reading must come after the warm-up's. From then on, each weekday
+   morning the Flex reader runs at 05:30 (again at 06:30 and 07:30) and
+   writes its executions proof, and the data job writes the previous
+   session's file at 06:05 (again at 07:05 and 08:05). The adapter, left
+   running, delivers each file within seconds behind one reading of the
+   account that morning. That reading stands for the account as of the
+   close when nothing is working at IBKR, the proof shows nothing executed
+   from the close to midnight, IBKR's own list shows nothing since, and
+   nothing is recorded after the close (`docs/manual/paper-trading.md`, "A
+   paper day"). Without the proof by 09:00 the session is withheld. Set up
+   the Trade Confirmation query first (`docs/manual/reconciliation.md`,
+   "What you set up once", step 4). An order the engine releases is sent
+   that morning, as a DAY order for that day.
    Neither is started or restarted by systemd on its own; every start is
    yours.
    **IBKR market data is not needed.** SPY's mark is the day's official
