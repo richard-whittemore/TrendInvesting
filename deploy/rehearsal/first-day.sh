@@ -377,7 +377,7 @@ for _ in $(seq 60); do
 done
 journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat | grep -q 'waits for the Flex reader' || fail "the morning delivery did not wait for the executions proof: $(journalctl -u ti-adapter-boost -n 8 --no-pager -o cat)"
 ! grep -q 'session-closed:2026-10-26' "$engines/run-2026-10-24.log" || fail "Monday's session was delivered before its executions proof"
-printf '%s\n' '{"checked_at":"2026-10-27T09:30:00Z","covered_until":"2026-10-27T04:00:00Z","executions":[],"fetched_at":"2026-10-27T09:30:00Z","from_date":"20261021","query":"trades","section":"TradeConfirms","state":"read","to_date":"20261027"}' >"$flexdir/executions.json"
+printf '%s\n' '{"account_id":"DUX1234567","checked_at":"2026-10-27T09:30:00Z","covered_until":"2026-10-27T04:00:00Z","executions":[],"fetched_at":"2026-10-27T09:30:00Z","from_date":"20261021","query":"trades","section":"TradeConfirms","state":"read","to_date":"20261027"}' >"$flexdir/executions.json"
 chown ti-trader:ti-trader "$flexdir/executions.json"
 chmod 0640 "$flexdir/executions.json"
 for _ in $(seq 120); do grep -q 'session-closed:2026-10-26' "$engines/run-2026-10-24.log" && break; sleep 1; done

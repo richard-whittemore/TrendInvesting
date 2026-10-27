@@ -632,7 +632,12 @@ execution is typically in a Trade Confirmation report within 5 to 10
 minutes). The morning reading stands for the close only when the proof
 reaches the midnight that starts the reading's day and lists nothing at or
 after the close ([paper trading](paper-trading.md), "A paper day"; ADR 0019,
-amended 2026-10-27).
+amended 2026-10-27). IBKR's own list starts at midnight in IB Gateway's
+time zone, which its unit sets to New York's (`TZ=America/New_York` in
+`ti-gateway.service`; do not change it): an execution IBKR reports in
+another zone means the list's midnight is not New York's, and the morning
+reading is then withheld, the page naming the zone. A fill recorded with a
+time that has no zone withholds it too.
 
 **Only a Trade Confirmation query can prove the evening.** An Activity
 statement (your cash query) is refreshed once a day, and IBKR's day for
@@ -643,29 +648,39 @@ next morning never reaches the midnight, and its Trades section, if you add
 one, cannot prove the evening: every session would be withheld. The proof
 comes from a separate **Trade Confirmation** Flex query (below, step 4),
 read with the same token in the same reading, right after the cash query.
-Without one (`TI_IBKR_FLEX_TRADES_QUERY_ID` empty) the reader writes the
-proof from the cash query's Trades section if it has one, or writes
-`"state": "none"`, and the cash reading still succeeds; sessions delivered
-the next morning are then withheld, each page saying why.
+Without one (`TI_IBKR_FLEX_TRADES_QUERY_ID` empty) the reader writes
+`"state": "none"` (a Trades section in the cash query is never used), and
+the cash reading still succeeds; sessions delivered the next morning are
+then withheld, each page saying why.
 
 | `executions.json` field | When | What it says |
 | --- | --- | --- |
-| `state` | always | `"read"`, `"none"` (no trades query and no Trades section) or `"set-aside"` |
+| `state` | always | `"read"`, `"none"` (no trades query named) or `"set-aside"` |
+| `account_id` | always | the account the statement was checked against; the adapter refuses a proof for any other |
 | `checked_at` | always | when the reading started (UTC) |
-| `query`, `section` | `read` | which query it came from (`trades` or `cash`) and its section (`TradeConfirms` or `Trades`) |
+| `query`, `section` | `read` | always `trades` and `TradeConfirms` |
 | `from_date`, `to_date` | `read` | the statement's first and last day (`yyyyMMdd`) |
 | `fetched_at` | `read` | when the reader asked IBKR for that statement |
 | `covered_until` | `read` | every execution up to this moment is listed |
-| `executions` | `read` | each execution's `id` and `at` (UTC); summary rows are left out |
+| `executions` | `read` | each execution's `id` and `at` (UTC) |
 | `reason`, `code` | `none`, `set-aside` | why, and IBKR's error code (`set-aside` only) |
 
 A trades query IBKR refuses, a statement with no Trade Confirmations
-section, an execution dated by day alone (keep the default date/time
-format, with the time) or one of another account sets the proof aside
-alone: the cash ledger and the costs are still written, the proof says
-`"set-aside"` with why, and the unit fails so you see it. The proof is
-rewritten whole at every reading, so a stale one is never left in place of
-a failed one. Whether IBKR's *Last N Calendar Days* period includes the day
+section, a summary row in it (the query must list executions, not
+summaries), any element in the section that is not a trade confirmation,
+an execution dated by day alone (keep the default date/time format, with
+the time) or one of another account sets the proof aside alone: the cash
+ledger and the costs are still written, the proof says `"set-aside"` with
+why, and the unit fails so you see it. Once a reading holds the reader's
+lock it rewrites the proof as `"set-aside"` ("a Flex reading began at ...
+and has not finished") before it asks IBKR for anything, and again, whole,
+when it ends. So a reading stopped part way (its unit's 80-minute limit, a
+reboot, a kill) leaves that set-aside proof, and the morning delivery
+waits for the next firing, then withholds. The one exception is a reading
+that cannot open its lock file (the folder missing or not writable): it
+stops with a Python error and leaves the earlier proof as it was. The
+adapter still checks that proof's account, period, fetch time and
+coverage, so an earlier proof covers only the days it was read for. Whether IBKR's *Last N Calendar Days* period includes the day
 it is run on is not in IBKR's documentation: after the first morning
 reading, `sudo cat /var/lib/trend-investing/flex/boost/executions.json`
 should show `to_date` as that day and `covered_until` as that day's

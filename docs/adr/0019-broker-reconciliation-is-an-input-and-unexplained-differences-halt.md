@@ -1150,13 +1150,47 @@ what the reading needs; for an Activity statement read the same morning it
 is the start of D, which fails. The proof is taken from a separate **Trade
 Confirmation Flex query** the owner sets up (`TI_IBKR_FLEX_TRADES_QUERY_ID`,
 read with the same Flex token, asked for in the same reading after the cash
-query); with none set, from the cash query's own Trades section, which,
-being an Activity statement, never covers the evening, so sessions are then
-withheld and the page says why. Whether IBKR's "Last N Calendar Days" period
+query). **Only a Trade Confirmation statement is a proof**: an Activity
+statement's Trades section is never taken, and with no trades query set the
+proof is "none", so sessions delivered the next morning are withheld and
+the page says why. Whether IBKR's "Last N Calendar Days" period
 of a Trade Confirmation query includes the day it is run on is not stated in
 IBKR's documentation; the rule fails closed if it does not (the statement
 then ends yesterday and covers only to yesterday's start), and the first
 live reading's proof (`to_date`, `covered_until`) shows which.
+
+**The proof is read strictly, and bound to the account.** The statement's
+TradeConfirms section must hold only TradeConfirm rows, each at an
+execution's or an order's level of detail, of this account, dated with its
+time, with nothing inside it; a summary row (it totals executions it does
+not list), any other element, a row dated by day alone or a missing section
+sets the proof aside, never an empty "read". The proof records the account
+its statement was checked against, and the adapter refuses a proof for any
+other account. It refuses a proof whose fields, period, fetch time or
+coverage are not as the reader writes them (its `covered_until` must be the
+one the rule above gives for its last day and fetch time). Once a reading
+holds the reader's lock it writes the proof set aside ("not finished")
+before it asks IBKR for anything, and rewrites it whole when it ends, so a
+reading stopped part way leaves a set-aside proof; only a reading that
+cannot open its lock leaves the earlier one, which the checks above still
+bound. A proof that fails in a way a later firing can clear (missing, set
+aside, not yet covering) is waited for until 09:00 whether it fails before
+the account is read or by the end of the read (a firing that rewrites it
+during the read).
+
+**Where IBKR's own list starts.** IBKR's TWS API returns, through IB
+Gateway, only the executions since midnight (ADR 0025 point 5), and gives
+each execution's time in the zone of the Gateway's login. The midnight is
+therefore the Gateway's: the deployment runs IB Gateway with
+`TZ=America/New_York` (`ti-gateway.service`, checked by a test), so it is
+New York's, the midnight the proof must reach. An explicit
+`ExecutionFilter` time cannot widen the list (a filter only narrows it), so
+the boundary is established by that setting and verified at run time: an
+execution IBKR reports in the account with its time in any zone other than
+New York's (`US/Eastern`, `America/New_York`, `EST5EDT`) means the list's
+midnight is not New York's, and the morning reading is withheld, the page
+naming the zone. A fill journalled with a time that has no zone, or one
+that cannot be read, cannot be placed against the close and withholds too.
 
 **When it runs.** The Flex reader moves from 21:30 to each weekday morning
 at 05:30, 06:30 and 07:30 New York, each before one of the data job's

@@ -1183,9 +1183,22 @@ def with_trades(xml, *rows):
                        b"      </CashTransactions>\n      <Trades>\n" + lines.encode() + b"      </Trades>\n")
 
 
+def confirms(*rows, extra=b""):
+    """trade_confirms.xml with its rows replaced by rows, each (ID, dateTime[, levelOfDetail[, account]]), and extra
+    (raw XML) added inside the TradeConfirms section."""
+    xml = fixture("trade_confirms.xml")
+    start, end = xml.index(b"        <TradeConfirm "), xml.index(b"      </TradeConfirms>")
+    lines = "".join('        <TradeConfirm accountId="{}" symbol="SPY" quantity="4" tradePrice="400.5" dateTime="{}" '
+                    'tradeID="{}" levelOfDetail="{}"/>\n'.format(row[3] if len(row) > 3 else ACCOUNT, row[1], row[0],
+                                                                row[2] if len(row) > 2 else "EXECUTION")
+                    for row in rows)
+    return xml[:start] + lines.encode() + extra + xml[end:]
+
+
 class ExecutionsTests(ReadOnceHarness):
-    """The executions proof (ADR 0019, amended 2026-10-27): every execution IBKR's Flex statement lists for the
-    account, and the moment up to which it lists them all, kept beside the ledger for the adapter's morning reading."""
+    """The executions proof (ADR 0019, amended 2026-10-27): every execution IBKR's Trade Confirmation statement lists
+    for the account, and the moment up to which it lists them all, kept beside the ledger for the adapter's morning
+    reading."""
 
     # 05:30 New York on the statement's last day, before the data job's first firing.
     MORNING = datetime(2027, 1, 15, 10, 30, tzinfo=timezone.utc)
@@ -1193,31 +1206,33 @@ class ExecutionsTests(ReadOnceHarness):
     def proof(self):
         return json.loads(Path(flex.executions_path(str(self.ledger))).read_text())
 
-    def read_trades(self, service, now=MORNING, trades_query="654321"):
+    def read_trades(self, *trades, now=MORNING, trades_query="654321", service=None):
+        """A reading of the cash query, then the trades query answered by trades (fixture names or bytes)."""
+        service = service or FakeFlex(statements=("statement.xml",) + (trades or ("trade_confirms.xml",)))
         return flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(self.ledger), get=service,
                               sleep=lambda s: None, now=lambda: now, err=self.out, trades_query_id=trades_query)
 
-    def test_the_cash_querys_trades_section_is_a_proof(self):
-        statement = with_trades(fixture("statement.xml"), ("700000301", "20270114;163000"),
-                                ("700000302", "20270114;101500"))
-        self.assertTrue(self.read(FakeFlex(statements=(statement,)), now=self.MORNING), self.out.getvalue())
+    def assert_proof_set_aside(self, *said):
+        proof = self.proof()
+        self.assertEqual(proof["state"], "set-aside")
+        for text in said:
+            self.assertIn(text, proof["reason"])
+        self.assertNotIn(TOKEN, json.dumps(proof))
+        return proof
+
+    def test_a_trades_query_is_read_beside_the_cash_query(self):
+        service = FakeFlex(statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(self.read_trades(service=service), self.out.getvalue())
+        asked = [params.get("q") for url, params in service.calls if url == flex.SEND_REQUEST_URL]
+        self.assertEqual(asked, [QUERY, "654321"])
         proof = self.proof()
         self.assertEqual((proof["state"], proof["query"], proof["section"], proof["from_date"], proof["to_date"]),
-                         ("read", "cash", "Trades", "20270112", "20270115"))
+                         ("read", "trades", "TradeConfirms", "20270109", "20270115"))
+        self.assertEqual(proof["account_id"], ACCOUNT, "the account the statement was checked against")
         self.assertEqual(proof["fetched_at"], "2027-01-15T10:30:00Z")
         # A statement lists every execution only up to the start of its last day (an execution late in an
         # evening can carry the next day's trade date), and no later than an hour before it was asked for.
         self.assertEqual(proof["covered_until"], "2027-01-15T05:00:00Z")
-        self.assertEqual(proof["executions"], [{"id": "700000301", "at": "2027-01-14T21:30:00Z"},
-                                               {"id": "700000302", "at": "2027-01-14T15:15:00Z"}])
-
-    def test_a_trades_query_is_read_beside_the_cash_query(self):
-        service = FakeFlex(statements=("statement.xml", "trade_confirms.xml"))
-        self.assertTrue(self.read_trades(service), self.out.getvalue())
-        asked = [params.get("q") for url, params in service.calls if url == flex.SEND_REQUEST_URL]
-        self.assertEqual(asked, [QUERY, "654321"])
-        proof = self.proof()
-        self.assertEqual((proof["query"], proof["section"], proof["to_date"]), ("trades", "TradeConfirms", "20270115"))
         self.assertEqual(proof["executions"], [{"id": "0001f4e8.0001.01.01", "at": "2027-01-14T15:15:00Z"},
                                                {"id": "700000201", "at": "2027-01-14T15:15:00Z"}],
                          "every row counts, an order's row too: a proof can only be stricter for it")
@@ -1226,14 +1241,30 @@ class ExecutionsTests(ReadOnceHarness):
     def test_a_proof_never_reaches_past_an_hour_before_it_was_asked_for(self):
         # IBKR: a new execution is typically in a newly generated Trade Confirmation report within 5 to 10 minutes.
         early = datetime(2027, 1, 15, 5, 30, tzinfo=timezone.utc)
-        self.assertTrue(self.read_trades(FakeFlex(statements=("statement.xml", "trade_confirms.xml")), now=early))
+        self.assertTrue(self.read_trades(now=early))
         self.assertEqual(self.proof()["covered_until"], "2027-01-15T04:30:00Z")
 
-    def test_no_trades_section_and_no_trades_query_is_no_proof_and_no_failure(self):
-        self.assertTrue(self.read(FakeFlex(), now=self.MORNING))
+    def test_the_cash_querys_trades_section_is_no_proof(self):
+        # An Activity statement is refreshed once a day and its securities day ends at IBKR's 8:20 p.m. cutoff, so
+        # only a Trade Confirmation statement is a proof (ADR 0019, amended 2026-10-27).
+        statement = with_trades(fixture("statement.xml"), ("700000302", "20270114;101500"))
+        self.assertTrue(self.read(FakeFlex(statements=(statement,)), now=self.MORNING), self.out.getvalue())
         proof = self.proof()
         self.assertEqual(proof["state"], "none")
-        self.assertIn("Trades", proof["reason"])
+        self.assertIn("TI_IBKR_FLEX_TRADES_QUERY_ID", proof["reason"])
+
+    def test_no_trades_query_is_no_proof_and_no_failure(self):
+        self.assertTrue(self.read(FakeFlex(), now=self.MORNING))
+        self.assertEqual(self.proof()["state"], "none")
+
+    def test_an_activity_statement_named_as_the_trades_query_is_set_aside(self):
+        statement = with_trades(fixture("statement.xml"), ("700000302", "20270114;101500"))
+        self.assertFalse(self.read_trades(statement))
+        self.assert_proof_set_aside("Trade Confirmations")
+
+    def test_a_trades_query_without_its_section_is_set_aside(self):
+        self.assertFalse(self.read_trades("statement.xml"))
+        self.assert_proof_set_aside("Trade Confirmations")
 
     def test_a_trades_query_set_aside_leaves_no_proof_and_the_cash_written(self):
         class Expired(FakeFlex):
@@ -1242,54 +1273,98 @@ class ExecutionsTests(ReadOnceHarness):
                     self.calls.append((url, dict(params)))
                     return fixture("send_expired.xml")
                 return super().__call__(url, params)
-        self.assertFalse(self.read_trades(Expired()))
-        proof = self.proof()
-        self.assertEqual(proof["state"], "set-aside")
-        self.assertIn("1012", proof["reason"])
-        self.assertNotIn(TOKEN, json.dumps(proof))
+        self.assertFalse(self.read_trades(service=Expired()))
+        self.assert_proof_set_aside("1012")
         self.assertEqual(len(self.records()), 2)
         self.assertEqual(self.status()["state"], "read")
 
-    def test_a_trades_query_without_trades_is_set_aside(self):
-        self.assertFalse(self.read_trades(FakeFlex(statements=("statement.xml", "statement.xml"))))
-        self.assertIn("Trade Confirmations", self.proof()["reason"])
-
     def test_an_execution_dated_by_day_alone_is_set_aside(self):
-        statement = with_trades(fixture("statement.xml"), ("700000303", "20270114"))
-        self.assertFalse(self.read(FakeFlex(statements=(statement,)), now=self.MORNING))
-        proof = self.proof()
-        self.assertEqual(proof["state"], "set-aside")
-        self.assertIn("700000303", proof["reason"])
+        self.assertFalse(self.read_trades(confirms(("700000303", "20270114"))))
+        self.assert_proof_set_aside("700000303")
 
     def test_an_execution_of_another_account_is_set_aside(self):
-        statement = with_trades(fixture("statement.xml"), ("700000304", "20270114;163000", "EXECUTION", "DU0000998"))
-        self.assertFalse(self.read(FakeFlex(statements=(statement,)), now=self.MORNING))
-        self.assertIn("another account", self.proof()["reason"])
+        self.assertFalse(self.read_trades(confirms(("700000304", "20270114;163000", "EXECUTION", "DU0000998"))))
+        self.assert_proof_set_aside("another account")
 
-    def test_summary_rows_are_not_executions(self):
-        statement = with_trades(fixture("statement.xml"), ("", "", "SYMBOL_SUMMARY"), ("700000305", "20270114;101500"))
-        self.assertTrue(self.read(FakeFlex(statements=(statement,)), now=self.MORNING), self.out.getvalue())
-        self.assertEqual([e["id"] for e in self.proof()["executions"]], ["700000305"])
+    def test_a_summary_row_sets_the_proof_aside(self):
+        # A summary totals executions it does not list: what it stands for cannot be checked.
+        for level in ("SUMMARY", "SYMBOL_SUMMARY", "ASSET_SUMMARY"):
+            with self.subTest(level=level):
+                self.assertFalse(self.read_trades(confirms(("700000305", "20270114;101500", level))))
+                self.assert_proof_set_aside(level)
+
+    def test_a_summary_only_section_sets_the_proof_aside(self):
+        self.assertFalse(self.read_trades(confirms(("", "", "SYMBOL_SUMMARY"))))
+        self.assert_proof_set_aside("SYMBOL_SUMMARY")
+
+    def test_an_unknown_element_in_the_section_sets_the_proof_aside(self):
+        extra = b'        <Execution accountId="DU0000001" dateTime="20270114;210000" tradeID="700000306"/>\n'
+        self.assertFalse(self.read_trades(confirms(extra=extra)))
+        self.assert_proof_set_aside("Execution")
+
+    def test_an_element_inside_a_row_sets_the_proof_aside(self):
+        xml = confirms(("700000307", "20270114;101500")).replace(
+            b'levelOfDetail="EXECUTION"/>', b'levelOfDetail="EXECUTION"><Leg tradeID="9"/></TradeConfirm>')
+        self.assertFalse(self.read_trades(xml))
+        self.assert_proof_set_aside("700000307")
+
+    def test_an_empty_section_is_a_proof_of_none(self):
+        self.assertTrue(self.read_trades(confirms()), self.out.getvalue())
+        self.assertEqual((self.proof()["state"], self.proof()["executions"]), ("read", []))
 
     def test_a_cash_reading_set_aside_still_writes_the_proof_state(self):
-        self.assertFalse(self.read_trades(FakeFlex(send="send_expired.xml")))
+        self.assertFalse(self.read_trades(service=FakeFlex(send="send_expired.xml")))
         self.assertEqual(self.proof()["state"], "set-aside")
 
+    def test_a_reading_sets_the_proof_aside_before_it_asks_ibkr(self):
+        # A reading stopped part way (its unit's timeout, a kill) leaves a proof set aside, never the last one.
+        seen = []
+
+        def get(url, params):
+            seen.append(self.proof())
+            return FakeFlex(statements=("statement.xml", "trade_confirms.xml"))(url, params)
+        self.read_trades(confirms())
+        self.assertEqual(self.proof()["state"], "read")
+        service = FakeFlex(statements=("statement.xml", "trade_confirms.xml"))
+
+        def watched(url, params):
+            seen.append(self.proof())
+            return service(url, params)
+        self.read_trades(service=watched)
+        self.assertEqual(seen[0]["state"], "set-aside")
+        self.assertIn("not finished", seen[0]["reason"])
+
+    def test_the_proof_reader_reads_what_the_reader_wrote(self):
+        self.read_trades(confirms(("700000301", "20270114;163000")))
+        proof = flex.read_executions(flex.executions_path(str(self.ledger)), ACCOUNT)
+        self.assertEqual(proof.covered_until, datetime(2027, 1, 15, 5, 0, tzinfo=timezone.utc))
+        self.assertEqual(proof.from_day, date(2027, 1, 9))
+        self.assertEqual(proof.executions, [("700000301", datetime(2027, 1, 14, 21, 30, tzinfo=timezone.utc))])
+
     def test_the_proof_reader_refuses_a_file_not_as_written(self):
+        self.read_trades(confirms())
         path = Path(flex.executions_path(str(self.ledger)))
-        for text in ("", "{}", '{"state": "read"}', "not json"):
+        good = json.loads(path.read_text())
+        bad = ["", "{}", '{"state": "read"}', "not json", '{"state": []}', '{"state": {"a": 1}}', "[]", "3",
+               json.dumps(dict(good, covered_until="2027-01-16T05:00:00Z")),
+               json.dumps(dict(good, fetched_at="2027-01-14T10:30:00Z")),
+               json.dumps(dict(good, from_date="20270116")),
+               json.dumps(dict(good, executions=[{"id": "x", "at": 3}])),
+               json.dumps(dict(good, executions=[["x", "2027-01-14T10:30:00Z"]])),
+               json.dumps(dict(good, account_id=None))]
+        for text in bad:
             with self.subTest(text=text):
                 path.write_text(text)
                 with self.assertRaises(flex.StatementRefused):
-                    flex.read_executions(str(path))
+                    flex.read_executions(str(path), ACCOUNT)
 
-    def test_the_proof_reader_reads_what_the_reader_wrote(self):
-        statement = with_trades(fixture("statement.xml"), ("700000301", "20270114;163000"))
-        self.read(FakeFlex(statements=(statement,)), now=self.MORNING)
-        proof = flex.read_executions(flex.executions_path(str(self.ledger)))
-        self.assertEqual(proof.covered_until, datetime(2027, 1, 15, 5, 0, tzinfo=timezone.utc))
-        self.assertEqual(proof.from_day, date(2027, 1, 12))
-        self.assertEqual(proof.executions, [("700000301", datetime(2027, 1, 14, 21, 30, tzinfo=timezone.utc))])
+    def test_the_proof_reader_refuses_another_accounts_proof_without_naming_either(self):
+        self.read_trades(confirms())
+        with self.assertRaises(flex.StatementRefused) as caught:
+            flex.read_executions(flex.executions_path(str(self.ledger)), "DU0000998")
+        self.assertIn("another account", str(caught.exception))
+        self.assertNotIn(ACCOUNT, str(caught.exception))
+        self.assertNotIn("DU0000998", str(caught.exception))
 
 
 class CommandTests(unittest.TestCase):

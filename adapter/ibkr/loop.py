@@ -255,6 +255,12 @@ CASH_DRIFT_BOUND = Decimal("0.01")
 # open, so a session decided is decided before the next one starts (ADR 0019,
 # amended 2026-10-27).
 PROOF_WAIT_UNTIL = clock_time(9, 0)
+# The zone names IB Gateway gives an execution's time when its login is on
+# New York time. IBKR's executions reach back only to midnight in that zone
+# (ADR 0025 point 5); ti-gateway.service sets TZ=America/New_York, and an
+# execution reported in any other zone shows the list's midnight is not New
+# York's, so a morning reading is withheld (ADR 0019, amended 2026-10-27).
+NEW_YORK_ZONES = frozenset(("US/Eastern", "America/New_York", "EST5EDT"))
 
 
 class ReconcileIncomplete(Exception):
@@ -408,6 +414,11 @@ class AdapterLoop:
         self._reconcile_cutoffs = 0
         # The close whose batch last logged that it waits for the executions proof (_awaits_proof).
         self._proof_waited = None
+        # Set by _morning_proof when the proof failed in a way a later firing of the Flex reader can clear,
+        # before PROOF_WAIT_UNTIL: the batch then waits rather than withhold (_post_close_reading).
+        self._proof_retryable = False
+        # The zones of every execution time IBKR reported in the account (_count_execution).
+        self._execution_zones = set()
         self.delivery = None if streams is None else Deliverer(
             streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._post_close_reading, new_id)
 
@@ -799,6 +810,8 @@ class AdapterLoop:
         if event.name == "exec_details" and len(event.args) == 3:
             if getattr(event.args[2], "acctNumber", None) == self.config.account_id:
                 self._account_executions.add(getattr(event.args[2], "execId", None))
+                text = getattr(event.args[2], "time", None)
+                self._execution_zones.add(text.split()[-1] if isinstance(text, str) and text.split() else "")
 
     def _activity(self):
         """A broker snapshot's cutoff watermark: the order reports recorded, and the executions seen.
@@ -899,6 +912,10 @@ class AdapterLoop:
                 continue
             judged = self._not_as_of_close(confirm, close, closes, broker)
             if judged is None:
+                return None
+            if self._proof_retryable:
+                log.info("ibkr broker snapshot waits: the Flex reader's executions proof changed during the read "
+                         "and does not hold now; it is read again until %s New York", PROOF_WAIT_UNTIL.strftime("%H:%M"))
                 return None
             why, valuation, drift, unexplained, unverified = judged
             stamp = None if why else close
@@ -1016,6 +1033,7 @@ class AdapterLoop:
         holds; when it does not (a clock behind), None: the batch waits.
         """
         reasons = []
+        self._proof_retryable = False
         read_ny, close_ny = reading.as_of.astimezone(nyse_calendar.NEW_YORK), close.astimezone(nyse_calendar.NEW_YORK)
         if not reading.as_of > close:
             reasons.append("it was read at {}, not after the close at {}".format(_stamp(reading.as_of), _stamp(close)))
@@ -1096,12 +1114,24 @@ class AdapterLoop:
                            "since the close".format(_stamp(reading.as_of),
                                                     " at " + _stamp(opens) if opens is not None else ""))
         midnight = datetime.combine(read_ny.date(), clock_time(0), nyse_calendar.NEW_YORK)
-        proof, _ = self._flex_proof(close, midnight)
+        proof, decisive = self._flex_proof(close, midnight)
         reasons.extend(later + why for why in proof)
+        # A proof a later firing of the Flex reader can clear is waited for until PROOF_WAIT_UNTIL, as before the
+        # read (_awaits_proof): one replaced while the account was read is read again, not withheld on.
+        now = self._now().astimezone(nyse_calendar.NEW_YORK)
+        self._proof_retryable = (bool(proof) and not decisive and self._cash_ledger is not None and now > close
+                                 and now.date() != day and now.time() < PROOF_WAIT_UNTIL)
+        foreign = sorted(z for z in self._execution_zones if z not in NEW_YORK_ZONES)
+        if foreign:
+            reasons.append("IBKR reported an execution in the account with its time in the zone {}, not New "
+                           "York's: IBKR's executions reach back only to midnight in IB Gateway's own zone, so the "
+                           "midnight its list starts at is not New York's and the executions proof cannot be joined "
+                           "to it; set IB Gateway to New York time (ti-gateway.service, TZ=America/New_York)".format(
+                               ", ".join(repr(z) for z in foreign)))
         fills = self._journalled_fills_since(close)
         if fills:
-            reasons.append("the journal records {} fill(s) stamped at or after the close: {}".format(
-                len(fills), ", ".join(fills)))
+            reasons.append("the journal records {} fill(s) stamped at or after the close, or with a time that cannot "
+                           "be compared with it: {}".format(len(fills), ", ".join(fills)))
         return reasons
 
     def _flex_proof(self, close, midnight):
@@ -1113,7 +1143,7 @@ class AdapterLoop:
             return ["no Flex ledger is configured (--cash-ledger), so no executions proof is read"], False
         path = flex.executions_path(self._cash_ledger)
         try:
-            proof = flex.read_executions(path)
+            proof = flex.read_executions(path, self.config.account_id)
         except flex.StatementRefused as refused:
             return [str(refused)], False
         if proof is None:
@@ -1142,14 +1172,17 @@ class AdapterLoop:
         payloads += [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
         found = []
         for payload in payloads:
+            ident = str(payload.get("fill_id", "a fill with no ID")) if isinstance(payload, dict) else "a fill"
             try:
                 at = datetime.fromisoformat(payload["filled_at"].replace("Z", "+00:00"))
             except (KeyError, AttributeError, TypeError, ValueError):
-                found.append(str(payload.get("fill_id", "a fill with no time")) if isinstance(payload, dict)
-                             else "a fill with no time")
+                found.append("{} (its time cannot be read)".format(ident))
                 continue
-            if at >= close and payload.get("fill_id") not in found:
-                found.append(str(payload.get("fill_id")))
+            if at.tzinfo is None:
+                # Fail closed (AGENTS.md): a time with no zone cannot be placed against the close.
+                found.append("{} (its time has no zone)".format(ident))
+            elif at >= close and ident not in found:
+                found.append(ident)
         return found
 
     def _awaits_proof(self, close):

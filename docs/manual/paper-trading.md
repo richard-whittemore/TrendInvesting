@@ -675,8 +675,11 @@ order. Still to come, and not needed for it:
   on the session's day or asked for too soon after midnight, one starting
   after the session, an execution at or after the close in it (an early
   close's too), one in IBKR's own list since midnight, a fill recorded after
-  the close, or a reading after the next open; Monday's delivery of Friday,
-  the day after a holiday; and the wait for the proof until 9:00.
+  the close or with a time that has no zone, an execution IBKR reported in
+  a zone other than New York's, another account's proof, or a reading after
+  the next open; Monday's delivery of Friday, the day after a holiday; and
+  the wait for the proof until 9:00, a proof rewritten during the read
+  included.
 - `adapter/ibkr/tests/test_post_close.py`, the reading after the close
   against the fake gateway and the stand-in engine: the account and broker
   snapshots as of the close with the read time beside it, then the bar,

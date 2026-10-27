@@ -114,19 +114,21 @@ class MorningTests(unittest.TestCase):
         self.now = when.astimezone(timezone.utc)
         self.fake.server_time = int(self.now.timestamp())
 
-    def proof(self, to_day, fetched=None, executions=(), from_day=date(2026, 12, 16), state="read"):
+    def proof(self, to_day, fetched=None, executions=(), from_day=date(2026, 12, 16), state="read", account=ACCOUNT):
         """The executions proof as the Flex reader writes it: a statement from from_day to to_day, asked for at
         fetched (05:30 New York on to_day by default), listing executions, each (ID, aware time)."""
         fetched = fetched or ny(to_day, 5, 30)
         if state == "read":
-            proof = {"state": "read", "checked_at": stamp(fetched), "fetched_at": stamp(fetched), "query": "trades",
+            proof = {"state": "read", "account_id": account, "checked_at": stamp(fetched), "fetched_at": stamp(fetched),
+                     "query": "trades",
                      "section": "TradeConfirms", "from_date": ymd(from_day), "to_date": ymd(to_day),
                      "covered_until": stamp(flex.covered_until(ymd(to_day), fetched.astimezone(timezone.utc))),
                      "executions": [{"id": i, "at": stamp(at)} for i, at in executions]}
         elif state == "none":
-            proof = {"state": "none", "checked_at": stamp(fetched), "reason": "no Trades section, synthetic"}
+            proof = {"state": "none", "account_id": account, "checked_at": stamp(fetched),
+                     "reason": "no Trades section, synthetic"}
         else:
-            proof = {"state": "set-aside", "checked_at": stamp(fetched), "code": "1012",
+            proof = {"state": "set-aside", "account_id": account, "checked_at": stamp(fetched), "code": "1012",
                      "reason": "the token has expired, synthetic"}
         Path(flex.executions_path(self.ledger)).write_text(json.dumps(proof, sort_keys=True) + "\n")
 
@@ -269,6 +271,71 @@ class MorningTests(unittest.TestCase):
         self.proof(FRIDAY_MORNING)
         self.deliver(THURSDAY)
         self.assert_withheld("open")
+
+    def test_another_accounts_proof_withholds(self):
+        # A proof stands only for the account its statement was checked against.
+        self.at(ny(FRIDAY_MORNING, 9, 0))
+        self.proof(FRIDAY_MORNING, account="DU0000998")
+        self.deliver(THURSDAY)
+        why = self.assert_withheld("another account")
+        self.assertNotIn("DU0000998", why)
+
+    def test_a_journalled_fill_with_no_zone_withholds(self):
+        self.proof(FRIDAY_MORNING)
+        loop = self.loop()
+        loop.start()
+        payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.nozone.01.01",
+                   "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                   "filled_at": "2027-01-14T21:30:00"}
+        loop.outbox.append({"id": "fill:nozone", "event_type": FILL_TYPE, "schema_version": 1,
+                            "event_time": "2027-01-14T21:30:00Z", "payload": payload})
+        self.assertIn("0001f4e8.nozone.01.01", " ".join(loop._journalled_fills_since(
+            nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc))))
+
+    def test_an_execution_reported_in_another_zone_withholds(self):
+        # IBKR's executions reach back to midnight in the zone of IB Gateway's login, set to New York by its unit;
+        # an execution reported in another zone shows the list's midnight is not New York's.
+        self.proof(FRIDAY_MORNING)
+        loop = self.loop()
+        loop.start()
+        ex = execution(exec_id="0005.zone.01.01", order_id=0, perm_id=7171, order_ref="", client_id=0,
+                       time="20270114 10:00:01 US/Pacific")
+        loop._count_execution(SimpleNamespace(name="exec_details", args=(-1, contract(), ex)))
+        self.deliver(THURSDAY, loop)
+        self.assert_withheld("US/Pacific", "New York")
+
+    def test_the_gateway_runs_on_new_york_time(self):
+        # IBKR's executions reach back only to midnight in IB Gateway's own zone: the unit sets it to New York's.
+        unit = (tests_dir.parents[2] / "deploy" / "systemd" / "ti-gateway.service").read_text()
+        self.assertRegex(unit, r"(?m)^Environment=TZ=America/New_York$")
+
+    def test_a_proof_replaced_during_the_read_is_waited_for_before_nine(self):
+        # The reader's next firing rewrites the proof set aside while it runs; one read before the adapter's account
+        # reading began and set aside by its end is waited for, not taken as a reason to withhold.
+        self.at(ny(FRIDAY_MORNING, 6, 35))
+        self.proof(FRIDAY_MORNING)
+        good = Path(flex.executions_path(self.ledger)).read_text()
+        loop = self.loop()
+        loop.start()
+        fake, test = self.fake, self
+
+        original = fake.req_positions
+        state = {"armed": True}
+
+        def replaced():
+            if state["armed"]:
+                state["armed"] = False
+                test.proof(FRIDAY_MORNING, state="set-aside")
+            original()
+        fake.req_positions = replaced
+        write_stream(self.folder, THURSDAY, day_envelopes(THURSDAY))
+        for _ in range(3):
+            loop.step()
+        self.assertEqual(self.sent(BROKER_SNAPSHOT_TYPE), [], "the batch waits for the proof")
+        Path(flex.executions_path(self.ledger)).write_text(good)
+        for _ in range(40):
+            loop.step()
+        self.assert_as_of_close(THURSDAY)
 
     # -- waiting for the proof -------------------------------------------------
     def test_the_delivery_waits_for_the_proof_until_nine(self):
