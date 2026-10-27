@@ -495,8 +495,8 @@ and fees have no fill, so they are always the ledger's.
   an early-close day such as the day after Thanksgiving: the session's
   official close, from the same NYSE calendar the adapter stamps its close
   snapshot by), that day's close snapshot, less the transfer (and any later
-  that evening): the snapshot is read after the data step (5:05 p.m. or
-  later), so it already holds the transfer. The record says so:
+  that evening): the snapshot is read after the data step (the next
+  morning, from 6:05 a.m.), so it already holds the transfer. The record says so:
   `"equity_before_basis": "same-day-snapshot-less-amount"`;
 - for a transfer **after you approved the first run but before its first
   close snapshot**, the first snapshot after it, less the transfer (and any
