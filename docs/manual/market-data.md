@@ -929,8 +929,7 @@ which writes the sessions again from its recordings, and start the adapter
   written down or sent. Once the link is back and matched, the adapter takes
   a fresh snapshot and hands the file over then.
 - **The reading cannot stand for the close**: it was read before the
-  close or on a later New York date than the close (the adapter was not
-  running that evening); IBKR shows an open order for the account from any
+  close, or read on a later New York date than the close without the Flex reader's executions proof reaching the midnight that starts the reading's day (no proof, one set aside, or a statement ending too early), with an execution at or after the close in that proof, a fill journalled at or after the close, or read at or after the next session's open ([reconciliation](reconciliation.md), "The executions proof"); IBKR shows an open order for the account from any
   client (working, pending or cancel-pending); IBKR's executions could not
   be read in full, or one is at or since the close; a holding has no
   official close in the file; IBKR's own net liquidation is not above zero;

@@ -73,7 +73,11 @@ before the close and each session's bars before its close (ADR 0019's
 snapshot rule; ADR 0021). The owner's decision of 2026-10-18 (ADR 0019,
 ADR 0025 point 5, ADR 0026 point 1, amended): the reading is the account
 as of the batch's last close when it is taken after that close on its own
-New York date, with no open order for the account at IBKR (in either
+New York date, or (the owner's decision of 2026-10-27, ADR 0019 amended
+that day) on a later date before the next open with the Flex reader's
+executions proof covering the close to the midnight IBKR's own list starts
+at and no fill journalled since the close (_morning_proof; until
+PROOF_WAIT_UNTIL the batch waits for that proof, _awaits_proof), with no open order for the account at IBKR (in either
 account read or the last open-order list), no execution in it at or since
 the close, every holding valued at an official close of the batch, IBKR's
 own net liquidation positive, and its holdings and cash those of the
@@ -169,12 +173,12 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time as clock_time, timezone
 from decimal import Decimal
 
 from connection import Connection, LinkChanged, NotConnected
-from delivery import (DELIVERED_SUFFIX, Deliverer, PostCloseReading, SnapshotRefused, market_open, nyse_calendar,
-                      run_name)
+from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReading, SnapshotRefused, market_open,
+                      nyse_calendar, run_name)
 from orders import (OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker,
                     agrees_with_account, collect_broker_orders, collect_settled_broker_orders, match_on_reconnect,
                     order_key)
@@ -244,6 +248,13 @@ MARK_SOURCE = "marketdata"
 # beyond it the reading is stamped at its read time (ADR 0019, amended
 # 2026-10-18; the engine checks the same bound, event.CashDriftBound).
 CASH_DRIFT_BOUND = Decimal("0.01")
+# Until this New York time on a later date than a batch's close, a batch whose
+# executions proof is not yet written or does not yet cover waits for the Flex
+# reader's next firing (05:30, 06:30 and 07:30; ti-flex@.timer) rather than
+# have its session withheld; at or after it, it is withheld. Before the 09:30
+# open, so a session decided is decided before the next one starts (ADR 0019,
+# amended 2026-10-27).
+PROOF_WAIT_UNTIL = clock_time(9, 0)
 
 
 class ReconcileIncomplete(Exception):
@@ -395,6 +406,8 @@ class AdapterLoop:
         # How many reconciles in a row the link was dropped during, since it
         # was last reconciled (reconcile, RECONCILE_CUTOFFS).
         self._reconcile_cutoffs = 0
+        # The close whose batch last logged that it waits for the executions proof (_awaits_proof).
+        self._proof_waited = None
         self.delivery = None if streams is None else Deliverer(
             streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._post_close_reading, new_id)
 
@@ -825,6 +838,8 @@ class AdapterLoop:
         snapshot is taken only from one complete reading whose holdings agree.
         Callers must not deliver anything when it raises SnapshotRefused.
         """
+        if self._awaits_proof(close):
+            return None
         unread = None
         summary = ""
         started = self._monotonic()
@@ -962,7 +977,11 @@ class AdapterLoop:
         - read after the close, on the session's own New York date: IBKR's
           executions reach back only to midnight (ADR 0025 point 5), so only
           then does its list cover every execution since the close (and the
-          next open is on a later date);
+          next open is on a later date); or on a later date with the morning
+          proof (_morning_proof; the owner's decision of 2026-10-27, ADR
+          0019 amended that day): before the next open, the Flex reader's
+          executions proof covering the close to the reading's midnight with
+          nothing in it at or after the close, and no fill journalled since;
         - no open order for the account, of any client (working, pending or
           cancel-pending, snapshot.OPEN_STATUS), in the account read and in
           the last open-order list IBKR returned (broker);
@@ -1001,9 +1020,7 @@ class AdapterLoop:
         if not reading.as_of > close:
             reasons.append("it was read at {}, not after the close at {}".format(_stamp(reading.as_of), _stamp(close)))
         elif read_ny.date() != close_ny.date():
-            reasons.append("it was read at {}, on a later New York date than the close at {}: IBKR's executions "
-                           "reach back only to midnight, so none since the close can be ruled out".format(
-                               _stamp(reading.as_of), _stamp(close)))
+            reasons.extend(self._morning_proof(reading, close))
         if reading.open_orders:
             reasons.append("IBKR shows {} open order(s) for the account (working, pending or cancel-pending): "
                            "{}".format(len(reading.open_orders),
@@ -1044,6 +1061,124 @@ class AdapterLoop:
                      "holds, as of %s", _stamp(reading.as_of), _stamp(last))
             return None
         return "; ".join(reasons), valuation, drift, unexplained, unverified
+
+    def _morning_proof(self, reading, close):
+        """Why a reading on a later New York date than close cannot stand for it: [] when every proof holds.
+
+        The owner's decision of 2026-10-27 (ADR 0019, amended 2026-10-27):
+        IBKR's executions reach back only to midnight (ADR 0025 point 5), so
+        a reading the next morning sees in IBKR's own list only those since
+        the midnight its New York day starts at. The span from the close to
+        that midnight is proven by the Flex reader's executions proof
+        (_flex_proof), and the rest by the journal and the reading itself:
+
+        - the reading is before the next session's open (by the NYSE
+          calendar), so the account has not traded since;
+        - the executions proof lists every execution from the session's day
+          up to that midnight, and none at or after the close;
+        - IBKR's own list shows none at or after the close (checked with the
+          other conditions, _not_as_of_close);
+        - the journal (the engine's durable log and the outbox) holds no fill
+          stamped at or after the close.
+        """
+        reasons = []
+        read_ny = reading.as_of.astimezone(nyse_calendar.NEW_YORK)
+        day = close.astimezone(nyse_calendar.NEW_YORK).date()
+        later = ("it was read at {}, on a later New York date than the close at {}: IBKR's executions reach back only "
+                 "to midnight, so those between the close and midnight are proven only by the Flex reader's "
+                 "executions proof, and ".format(_stamp(reading.as_of), _stamp(close)))
+        try:
+            opens = datetime.combine(nyse_calendar.sessions_after(day, 1)[0], SESSION_OPEN, nyse_calendar.NEW_YORK)
+        except nyse_calendar.OutOfRange:
+            opens = None
+        if opens is None or not reading.as_of < opens:
+            reasons.append("it was read at {}, not before the next session's open{}: the account may have traded "
+                           "since the close".format(_stamp(reading.as_of),
+                                                    " at " + _stamp(opens) if opens is not None else ""))
+        midnight = datetime.combine(read_ny.date(), clock_time(0), nyse_calendar.NEW_YORK)
+        proof, _ = self._flex_proof(close, midnight)
+        reasons.extend(later + why for why in proof)
+        fills = self._journalled_fills_since(close)
+        if fills:
+            reasons.append("the journal records {} fill(s) stamped at or after the close: {}".format(
+                len(fills), ", ".join(fills)))
+        return reasons
+
+    def _flex_proof(self, close, midnight):
+        """(reasons, decisive): why the Flex reader's executions proof does not show that nothing executed in the
+        account from close up to midnight ([] when it does), and whether it lists such an execution (a reason no later
+        reading of the proof can clear). See flex.py, step 5."""
+        day = close.astimezone(nyse_calendar.NEW_YORK).date()
+        if self._cash_ledger is None:
+            return ["no Flex ledger is configured (--cash-ledger), so no executions proof is read"], False
+        path = flex.executions_path(self._cash_ledger)
+        try:
+            proof = flex.read_executions(path)
+        except flex.StatementRefused as refused:
+            return [str(refused)], False
+        if proof is None:
+            return ["no executions proof is written ({}): the Flex reader (ti-flex@<instance>) has not read a "
+                    "statement with the account's executions (docs/manual/reconciliation.md, \"The executions "
+                    "proof\")".format(path)], False
+        if proof.state != flex.PROOF_READ:
+            return ["the executions proof is {}: {}".format(proof.state, proof.reason)], False
+        after = [i for i, at in proof.executions if at >= close]
+        if after:
+            return ["IBKR's Flex statement lists {} execution(s) in the account at or after the close: {}".format(
+                len(after), ", ".join(after))], True
+        reasons = []
+        if proof.from_day > day:
+            reasons.append("the executions proof starts on {}, after the session's day {}".format(
+                proof.from_day.isoformat(), day.isoformat()))
+        if proof.covered_until < midnight:
+            reasons.append("the executions proof lists every execution only up to {}, not up to {}, the midnight "
+                           "IBKR's own list starts at (a statement lists them up to the start of its last day, "
+                           "{})".format(_stamp(proof.covered_until), _stamp(midnight), proof.to_day.isoformat()))
+        return reasons, False
+
+    def _journalled_fills_since(self, close):
+        """The fill IDs the engine's durable log or the outbox holds stamped at or after close."""
+        payloads = [i.payload for i in read_engine_log(self._engine_log_path).inputs if i.event_type == FILL_TYPE]
+        payloads += [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
+        found = []
+        for payload in payloads:
+            try:
+                at = datetime.fromisoformat(payload["filled_at"].replace("Z", "+00:00"))
+            except (KeyError, AttributeError, TypeError, ValueError):
+                found.append(str(payload.get("fill_id", "a fill with no time")) if isinstance(payload, dict)
+                             else "a fill with no time")
+                continue
+            if at >= close and payload.get("fill_id") not in found:
+                found.append(str(payload.get("fill_id")))
+        return found
+
+    def _awaits_proof(self, close):
+        """Whether a batch for the session closing at close waits, unread, for the Flex reader's executions proof.
+
+        The owner's decision of 2026-10-27 (ADR 0019, amended 2026-10-27):
+        the reader runs each weekday morning before the data job, and again
+        an hour later; until PROOF_WAIT_UNTIL New York on a later date than
+        the close, a proof not yet written, set aside or not yet covering up
+        to that day's midnight is waited for rather than the session
+        withheld. One that lists an execution after the close, or none with
+        no Flex ledger configured, is decided at once.
+        """
+        if self._cash_ledger is None:
+            return False
+        now = self._now().astimezone(nyse_calendar.NEW_YORK)
+        if not now > close or now.date() == close.astimezone(nyse_calendar.NEW_YORK).date():
+            return False
+        if now.time() >= PROOF_WAIT_UNTIL:
+            return False
+        reasons, decisive = self._flex_proof(close, datetime.combine(now.date(), clock_time(0),
+                                                                     nyse_calendar.NEW_YORK))
+        if not reasons or decisive:
+            return False
+        if self._proof_waited != close:
+            self._proof_waited = close
+            log.info("ibkr broker snapshot waits for the Flex reader's executions proof until %s New York: %s",
+                     PROOF_WAIT_UNTIL.strftime("%H:%M"), "; ".join(reasons))
+        return True
 
     def _since_previous_close(self, reading, valuation, reasons):
         """(drift, unexplained, unverified) of reading against the previous close, adding to reasons what fails.

@@ -345,6 +345,9 @@ test "$(pushover_pages)" = "$before_pages" || fail "a Sunday firing paged"
 pass "Sunday's firing of the data job succeeds quietly: nothing to record, no page"
 
 # Monday 17:06: the data job's first evening firing writes Monday's file.
+# The adapter is stopped first: Monday's file is delivered the next morning,
+# below, as Massive's free plan makes it.
+systemctl stop ti-adapter-boost.service
 clock_at "2026-10-26 17:06"
 systemctl start ti-data.service
 test "$(systemctl show -p Result --value ti-data.service)" = success || fail "Monday's data job did not succeed: $(journalctl -u ti-data.service --no-pager -o cat | tail -n 3)"
@@ -354,6 +357,34 @@ grep -qxF "$monday" <<<"$(journalctl -u ti-data.service --no-pager -o cat | grep
 test "$(grouped)" -gt "$before_requests" || fail "Monday's firing fetched no session"
 test "$(pushover_pages)" = "$before_pages" || fail "Monday's firing paged"
 pass "Monday's 17:06 firing of the data job writes boost-2026-10-26.jsonl beside Friday's, and pages nothing"
+
+# Tuesday 07:10: the morning delivery of Monday's session (ADR 0019, amended
+# 2026-10-27). The reading is on a later New York date than the close, so it
+# stands for Monday's close only with the Flex reader's executions proof. A
+# stand-in for the reader's 05:30 reading writes it as flex.py writes one: a
+# Trade Confirmation statement ending Tuesday, asked for at 05:30, listing
+# no execution. Without it the adapter waits (until 09:00); with it, the
+# real adapter delivers Monday's file behind one reading stamped as of
+# Monday's close, and the engine decides the session.
+clock_at "2026-10-27 07:10"
+flexdir=/var/lib/trend-investing/flex/boost
+rm -f "$flexdir/executions.json"
+systemctl start ti-adapter-boost.service
+invocation=$(systemctl show -p InvocationID --value ti-adapter-boost)
+for _ in $(seq 60); do
+  journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat | grep -q 'waits for the Flex reader' && break
+  sleep 1
+done
+journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat | grep -q 'waits for the Flex reader' || fail "the morning delivery did not wait for the executions proof: $(journalctl -u ti-adapter-boost -n 8 --no-pager -o cat)"
+! grep -q 'session-closed:2026-10-26' "$engines/run-2026-10-24.log" || fail "Monday's session was delivered before its executions proof"
+printf '%s\n' '{"checked_at":"2026-10-27T09:30:00Z","covered_until":"2026-10-27T04:00:00Z","executions":[],"fetched_at":"2026-10-27T09:30:00Z","from_date":"20261021","query":"trades","section":"TradeConfirms","state":"read","to_date":"20261027"}' >"$flexdir/executions.json"
+chown ti-trader:ti-trader "$flexdir/executions.json"
+chmod 0640 "$flexdir/executions.json"
+for _ in $(seq 120); do grep -q 'session-closed:2026-10-26' "$engines/run-2026-10-24.log" && break; sleep 1; done
+grep -q 'session-closed:2026-10-26' "$engines/run-2026-10-24.log" || fail "the morning delivery of Monday's file did not reach the engine: $(journalctl -u ti-adapter-boost -n 8 --no-pager -o cat)"
+grep '"type":"account.broker.snapshot"' "$engines/run-2026-10-24.log" | grep '"as_of":"2026-10-26T20:00:00Z"' | grep -q '"as_of_close":true' || fail "Monday's morning reading was not stamped as of Monday's close: $(grep '"type":"account.broker.snapshot"' "$engines/run-2026-10-24.log" | tail -n 1 | grep -o '"not_as_of_close":"[^"]*"')"
+systemctl stop ti-adapter-boost.service
+pass "Tuesday 07:10: the adapter waits for the Flex reader's executions proof, then delivers Monday's file behind a morning reading stamped as of Monday's close"
 clock_at "2026-10-24 19:00"
 
 # --- Step 8: the dashboard, on loopback.

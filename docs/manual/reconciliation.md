@@ -230,7 +230,8 @@ From that one read it builds the records the engine reads:
 After a session's close, the account and broker snapshots are stamped as of
 that close when the reading can stand for it (your decision of 2026-10-18:
 nothing working at IBKR, no execution since the close, read on the close's
-own date), else at the read time ([paper trading](paper-trading.md), "A
+own date or, from your decision of 2026-10-27, the next morning with the
+Flex reader's executions proof, below), else at the read time ([paper trading](paper-trading.md), "A
 paper day"). The reconciliation always carries the read time, so it is
 never earlier than the book it is compared with.
 
@@ -604,11 +605,73 @@ needs only each transfer's amount and date, which are exact.
   ledger only from the account's own `flex/<instance>` folder.
 
 **When.** `ti-flex@<instance>.timer` (one per account: `ti-flex@boost`,
-`ti-flex@trad-ira`, `ti-flex@roth-ira`) runs it on weekdays at 9:30 p.m. New
-York time, after the close and the evening's data step. IBKR may add a day's
-transfer to the report only after its own end-of-day processing, so a
-transfer can appear one evening late; the query covers the last 30 days
-(below), so the next evening's reading writes it.
+`ti-flex@trad-ira`, `ti-flex@roth-ira`) runs it each weekday morning at
+5:30, 6:30 and 7:30 New York time, each before one of the data job's
+firings (6:05, 7:05, 8:05), because the morning delivery needs its
+executions proof (below). IBKR refreshes an Activity statement once a day,
+at close of business, so a morning reading holds the day before; IBKR may
+still add a day's transfer to the report only after its own end-of-day
+processing, so a transfer can appear a day late; the query covers the last
+30 days (below), so the next reading writes it. A later firing the same
+morning reads again and writes nothing twice.
+
+**The executions proof.** The adapter delivers a session's file the next
+morning (Massive's free plan serves a day's prices only then) and reads the
+account at that moment. IBKR's own list of executions, which the adapter
+asks for, reaches back only to midnight, so it cannot show a trade between
+the close and midnight (an after-hours trade, or one in IBKR's overnight
+session, which starts at 8 p.m.). The Flex reader closes that gap: every
+reading also writes
+`/var/lib/trend-investing/flex/<instance>/executions.json`, the
+**executions proof**, with every execution IBKR's statement lists for the
+account (its execution or trade ID and time), the statement's first and
+last day, when it was asked for, and `covered_until`, the moment up to
+which the statement lists every execution: the start of the statement's
+last day, and no later than an hour before it was asked for (IBKR: a new
+execution is typically in a Trade Confirmation report within 5 to 10
+minutes). The morning reading stands for the close only when the proof
+reaches the midnight that starts the reading's day and lists nothing at or
+after the close ([paper trading](paper-trading.md), "A paper day"; ADR 0019,
+amended 2026-10-27).
+
+**Only a Trade Confirmation query can prove the evening.** An Activity
+statement (your cash query) is refreshed once a day, and IBKR's day for
+securities closes at 8:20 p.m.: a trade after that, or in the overnight
+session (dated the next trade day), is in the next day's statement, which
+is ready only around the next midnight. So an Activity statement read the
+next morning never reaches the midnight, and its Trades section, if you add
+one, cannot prove the evening: every session would be withheld. The proof
+comes from a separate **Trade Confirmation** Flex query (below, step 4),
+read with the same token in the same reading, right after the cash query.
+Without one (`TI_IBKR_FLEX_TRADES_QUERY_ID` empty) the reader writes the
+proof from the cash query's Trades section if it has one, or writes
+`"state": "none"`, and the cash reading still succeeds; sessions delivered
+the next morning are then withheld, each page saying why.
+
+| `executions.json` field | When | What it says |
+| --- | --- | --- |
+| `state` | always | `"read"`, `"none"` (no trades query and no Trades section) or `"set-aside"` |
+| `checked_at` | always | when the reading started (UTC) |
+| `query`, `section` | `read` | which query it came from (`trades` or `cash`) and its section (`TradeConfirms` or `Trades`) |
+| `from_date`, `to_date` | `read` | the statement's first and last day (`yyyyMMdd`) |
+| `fetched_at` | `read` | when the reader asked IBKR for that statement |
+| `covered_until` | `read` | every execution up to this moment is listed |
+| `executions` | `read` | each execution's `id` and `at` (UTC); summary rows are left out |
+| `reason`, `code` | `none`, `set-aside` | why, and IBKR's error code (`set-aside` only) |
+
+A trades query IBKR refuses, a statement with no Trade Confirmations
+section, an execution dated by day alone (keep the default date/time
+format, with the time) or one of another account sets the proof aside
+alone: the cash ledger and the costs are still written, the proof says
+`"set-aside"` with why, and the unit fails so you see it. The proof is
+rewritten whole at every reading, so a stale one is never left in place of
+a failed one. Whether IBKR's *Last N Calendar Days* period includes the day
+it is run on is not in IBKR's documentation: after the first morning
+reading, `sudo cat /var/lib/trend-investing/flex/boost/executions.json`
+should show `to_date` as that day and `covered_until` as that day's
+midnight (05:00 or 04:00 UTC). If `to_date` is the day before, tell the
+developer: the adapter then withholds every session (it fails closed), and
+the query needs another period.
 
 **What you set up once, in IBKR's Client Portal.** These steps, menu names
 and formats are from IBKR's documentation, not yet verified against a live
@@ -637,7 +700,20 @@ developer.
    `TI_IBKR_FLEX_QUERY_ID=` (no quotes, no spaces). The token is a password
    to your account's reports: never paste it into a chat, an issue or a
    command line.
-4. For an IRA account, its number in its own file, the same shape as
+4. For the morning delivery's executions proof, a second query:
+   **Performance & Reports → Flex Queries → Trade Confirmation Flex Query →
+   +**. Give it a name, tick **Trade Confirmations** and, inside it, select
+   all fields (or at least Account ID, Symbol, Quantity, Date/Time, Trade
+   ID, Exec ID, Level of Detail). Set **Format** to XML, **Period** to *Last
+   N Calendar Days* with N = 7 (it must reach back past a long weekend to
+   the session it proves), and leave the date format (`yyyyMMdd`), the time
+   format (`HHmmss`) and the separator (`;`) at their defaults. Save it,
+   note its **Query ID**, and put it in the secrets file beside the others:
+   `sudo ti-secrets edit secrets.env`, the line
+   `TI_IBKR_FLEX_TRADES_QUERY_ID=`. The same Flex token reads it. Adding a
+   Trades section to the cash query instead does not work (above, "Only a
+   Trade Confirmation query can prove the evening").
+5. For an IRA account, its number in its own file, the same shape as
    `accounts/boost.env`: fill in `IBKR_ACCOUNT_TRAD_IRA=` with
    `sudo ti-secrets edit accounts/trad-ira.env`, or `IBKR_ACCOUNT_ROTH_IRA=`
    with `sudo ti-secrets edit accounts/roth-ira.env`. The provisioner creates
@@ -646,17 +722,18 @@ developer.
    ti-flex@trad-ira` shows the reader's message). Do not delete the file: a
    missing one fails the unit before the reader runs, with only systemd's
    "Failed to set up credentials".
-5. Turn the reader on (`docs/runbooks/lightsail-deployment.md`, "The Flex
+6. Turn the reader on (`docs/runbooks/lightsail-deployment.md`, "The Flex
    reader").
 
-**When it cannot read.** The reader *sets itself aside* for that evening:
+**When it cannot read.** The reader *sets itself aside* for that reading:
 it writes nothing to the ledger, records why in the status file beside the
 ledger (`cash-movements.jsonl.status.json`, `"state": "set-aside"`, with
 IBKR's error code when IBKR gave one), and its unit shows as failed
 (`systemctl --failed`, `journalctl -u ti-flex@<instance>`). Trading carries on.
 While it is set aside, a cash difference stays a pending cash read for at most
 two sessions and then degrades the account on cash (above, "A deposit or
-withdrawal you make"). The next evening it tries again, and a good reading
+withdrawal you make"), and the executions proof says `"set-aside"`, so the
+morning delivery withholds its session after 9:00. The next firing tries again, and a good reading
 puts the status back to `"read"`. The reporter does not page you about it yet (see "What is not
 built yet").
 
@@ -683,13 +760,13 @@ writing it:
 | `ambiguous` | `ambiguous-transfer` | the transaction IDs this reading set aside as ambiguous, the only ones `--resolve` accepts a new decision for; gone after the next good reading |
 
 A reading writes `"running"` before it asks IBKR for anything, so if it is
-stopped part way (its unit's 45-minute limit, a reboot, a kill), the file
-keeps saying `"running"` with that start time, never the previous evening's
-`"read"`. A `"running"` whose `checked_at` is more than 45 minutes old means
+stopped part way (its unit's 80-minute limit, a reboot, a kill), the file
+keeps saying `"running"` with that start time, never the previous reading's
+`"read"`. A `"running"` whose `checked_at` is more than 80 minutes old means
 the reading was stopped: `journalctl -u ti-flex@<instance>` says why, and
 the next firing reads again. A reading that stops before it writes `"running"` leaves the file as the last
 reading left it, possibly an older `"read"`, so for a failed unit whose status file says `"read"` or has no
-`checked_at` of tonight, read the journal, not the file. Every such stop is one of these, and
+`checked_at` of this morning, read the journal, not the file. Every such stop is one of these, and
 `journalctl -u ti-flex@<instance>` names it:
 
 - The unit never reached the reader: `run.env` missing or empty (the start step prints which file); the secrets
@@ -705,7 +782,7 @@ reading left it, possibly an older `"read"`, so for a failed unit whose status f
   the expected first failure of a new instance (fill it in).
 - The reader could not open its lock file (the flex directory missing or not writable): it stops with a Python error naming the path.
 - Another reading holds the lock: this one waits for it, and writes `"running"` only once it has the lock; if the
-  unit's 45-minute limit ends the wait first, the file keeps whatever it said.
+  unit's 80-minute limit ends the wait first, the file keeps whatever it said.
 
 A refusal that prints `refused:` is also the quick test: the status file was not touched. Every other set-aside,
 including each row below that names a status file, is written to it.
@@ -756,7 +833,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | A ledger record has a `note` that a later (or earlier) transfer in the same interval was written first; the status file's `out_of_order` is above 0 | Information only: the transfer reached IBKR's report a day late. It is written, with the right figure; the record written before it keeps an `equity_before` that leaves this transfer out, and is not rewritten | Nothing; keep it in mind when reading that record's `equity_before` |
 | The reader's log says "transfer N is dated by day alone on the first run's approval day" | Information only: the approval came before that day's close, so it is written as after the approval (above, "The first book"); counted in `date_only_on_approval_day` | Check the transfer was made after you read the book in IBKR; if it was before, tell the developer |
 | `ti-flex@<instance>` failed; the cash status file says `"state": "read"` but the costs status file (`costs.jsonl.status.json`) says `"set-aside"` or `"coverage-gap"`: **cost N is stated as … which is not a cost this reader can write**, **the costs status cannot be written** (in the unit's log), **the costs ledger ... line N is not a cost as this reader writes it** (or is not UTF-8 text, or does not end with a whole line), or the first costs reading **starts after the first run's approval day** | The costs alone are set aside: the deposits and withdrawals are still written and the cash status is "read", so the cash checks are unaffected. No new cost is written; the daily summary's costs line says "costs incomplete" | A cost restated to an amount that is not a number: check it in IBKR's activity statement. (A restatement, including one to zero, sets nothing aside; it is recorded, said in the unit's log and counted in the daily costs text.) A costs status that cannot be written: check the folder `/var/lib/trend-investing/flex/<instance>/` is writable by the unit and that `costs.jsonl.status.json` is a file, then `sudo systemctl start ti-flex@<instance>`. A damaged line: put it back from a backup or the server's snapshot; never edit the ledger by hand. A first reading that does not reach back: set the Flex query's period to a custom range from the approval day, `sudo systemctl start ti-flex@<instance>`, then set it back, as for the cash coverage gap above |
-| The status file says `"state": "running"` with a `checked_at` more than 45 minutes old | The reading was stopped part way (above, "The status file"); the ledger is as it was | Read `journalctl -u ti-flex@<instance>`; the next firing reads again |
+| The status file says `"state": "running"` with a `checked_at` more than 80 minutes old | The reading was stopped part way (above, "The status file"); the ledger is as it was | Read `journalctl -u ti-flex@<instance>`; the next firing reads again |
 | The status file's `unknown_types` is not `{}` | Information only: those rows are read but not classified, so not written | Tell the developer the type's name, so the reader can learn it |
 | The reader's log says "transfer N not written: ... before the first run's approval" | Information only: that transfer is already in the starting book you stated; the status file counts it (`in_first_book`) | Nothing |
 | A fill stamped in the same second as the morning read | It counts as after the read. If IBKR's figure includes it, the result is a difference and the account goes Degraded on that instrument: the safe side. | Check the fill at IBKR, then recover as for any difference. |

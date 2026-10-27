@@ -211,3 +211,18 @@ reconciliation record this point calls for, in this flow:
   times in a row, then the adapter stops for a person.
 
 A difference is classified as ADR 0019 sets out.
+
+## Amendment (2026-10-27, owner decision, "Flex"): the morning reading's executions proof
+
+To point 5 and to the amendment of 2026-10-18. With Massive's free plan a
+session's file arrives the next morning, so the adapter's reading after the
+close is taken on a later New York date than the close, where
+`reqExecutions` no longer reaches back to the close. Such a reading stands
+for the close when, besides ADR 0019's other conditions, it is before the
+next open, IBKR's Flex Web Service **Trade Confirmation** report (the
+durable record this point already names for an outage across midnight),
+read by the Flex reader that morning, lists every execution from the close
+up to the midnight `reqExecutions` starts at and none after the close, and
+no fill is journalled after the close. The rules, IBKR's documentation they
+rest on, and why an Activity statement cannot serve are in ADR 0019's
+amendment of 2026-10-27.

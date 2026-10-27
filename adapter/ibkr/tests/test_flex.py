@@ -223,7 +223,9 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn(TOKEN, str(caught.exception))
 
 
-class ReadOnceTests(unittest.TestCase):
+class ReadOnceHarness(unittest.TestCase):
+    """A first run's durable log, the ledger's folder, and a reading of a fake Flex Web Service."""
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -290,6 +292,8 @@ class ReadOnceTests(unittest.TestCase):
     def coverage(self):
         return json.loads(Path(str(self.ledger) + flex.COVERAGE_SUFFIX).read_text())
 
+
+class ReadOnceTests(ReadOnceHarness):
     def test_each_transfer_is_one_cash_movement_with_the_equity_before_it(self):
         self.assertTrue(self.read(FakeFlex()))
         self.assertEqual(self.records(), [
@@ -1169,6 +1173,125 @@ class ReadOnceTests(unittest.TestCase):
         self.assertEqual(self.status()["state"], "read")
 
 
+def with_trades(xml, *rows):
+    """An Activity statement with a Trades section of rows, each (ID, dateTime[, levelOfDetail[, account]])."""
+    lines = "".join('        <Trade accountId="{}" symbol="SPY" quantity="4" tradePrice="400.5" dateTime="{}" '
+                    'tradeID="{}" levelOfDetail="{}"/>\n'.format(row[3] if len(row) > 3 else ACCOUNT, row[1], row[0],
+                                                                row[2] if len(row) > 2 else "EXECUTION")
+                    for row in rows)
+    return xml.replace(b"      </CashTransactions>\n",
+                       b"      </CashTransactions>\n      <Trades>\n" + lines.encode() + b"      </Trades>\n")
+
+
+class ExecutionsTests(ReadOnceHarness):
+    """The executions proof (ADR 0019, amended 2026-10-27): every execution IBKR's Flex statement lists for the
+    account, and the moment up to which it lists them all, kept beside the ledger for the adapter's morning reading."""
+
+    # 05:30 New York on the statement's last day, before the data job's first firing.
+    MORNING = datetime(2027, 1, 15, 10, 30, tzinfo=timezone.utc)
+
+    def proof(self):
+        return json.loads(Path(flex.executions_path(str(self.ledger))).read_text())
+
+    def read_trades(self, service, now=MORNING, trades_query="654321"):
+        return flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(self.ledger), get=service,
+                              sleep=lambda s: None, now=lambda: now, err=self.out, trades_query_id=trades_query)
+
+    def test_the_cash_querys_trades_section_is_a_proof(self):
+        statement = with_trades(fixture("statement.xml"), ("700000301", "20270114;163000"),
+                                ("700000302", "20270114;101500"))
+        self.assertTrue(self.read(FakeFlex(statements=(statement,)), now=self.MORNING), self.out.getvalue())
+        proof = self.proof()
+        self.assertEqual((proof["state"], proof["query"], proof["section"], proof["from_date"], proof["to_date"]),
+                         ("read", "cash", "Trades", "20270112", "20270115"))
+        self.assertEqual(proof["fetched_at"], "2027-01-15T10:30:00Z")
+        # A statement lists every execution only up to the start of its last day (an execution late in an
+        # evening can carry the next day's trade date), and no later than an hour before it was asked for.
+        self.assertEqual(proof["covered_until"], "2027-01-15T05:00:00Z")
+        self.assertEqual(proof["executions"], [{"id": "700000301", "at": "2027-01-14T21:30:00Z"},
+                                               {"id": "700000302", "at": "2027-01-14T15:15:00Z"}])
+
+    def test_a_trades_query_is_read_beside_the_cash_query(self):
+        service = FakeFlex(statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(self.read_trades(service), self.out.getvalue())
+        asked = [params.get("q") for url, params in service.calls if url == flex.SEND_REQUEST_URL]
+        self.assertEqual(asked, [QUERY, "654321"])
+        proof = self.proof()
+        self.assertEqual((proof["query"], proof["section"], proof["to_date"]), ("trades", "TradeConfirms", "20270115"))
+        self.assertEqual(proof["executions"], [{"id": "0001f4e8.0001.01.01", "at": "2027-01-14T15:15:00Z"},
+                                               {"id": "700000201", "at": "2027-01-14T15:15:00Z"}],
+                         "every row counts, an order's row too: a proof can only be stricter for it")
+        self.assertEqual(len(self.records()), 2, "the cash ledger is written as before")
+
+    def test_a_proof_never_reaches_past_an_hour_before_it_was_asked_for(self):
+        # IBKR: a new execution is typically in a newly generated Trade Confirmation report within 5 to 10 minutes.
+        early = datetime(2027, 1, 15, 5, 30, tzinfo=timezone.utc)
+        self.assertTrue(self.read_trades(FakeFlex(statements=("statement.xml", "trade_confirms.xml")), now=early))
+        self.assertEqual(self.proof()["covered_until"], "2027-01-15T04:30:00Z")
+
+    def test_no_trades_section_and_no_trades_query_is_no_proof_and_no_failure(self):
+        self.assertTrue(self.read(FakeFlex(), now=self.MORNING))
+        proof = self.proof()
+        self.assertEqual(proof["state"], "none")
+        self.assertIn("Trades", proof["reason"])
+
+    def test_a_trades_query_set_aside_leaves_no_proof_and_the_cash_written(self):
+        class Expired(FakeFlex):
+            def __call__(self, url, params):
+                if url == flex.SEND_REQUEST_URL and params.get("q") == "654321":
+                    self.calls.append((url, dict(params)))
+                    return fixture("send_expired.xml")
+                return super().__call__(url, params)
+        self.assertFalse(self.read_trades(Expired()))
+        proof = self.proof()
+        self.assertEqual(proof["state"], "set-aside")
+        self.assertIn("1012", proof["reason"])
+        self.assertNotIn(TOKEN, json.dumps(proof))
+        self.assertEqual(len(self.records()), 2)
+        self.assertEqual(self.status()["state"], "read")
+
+    def test_a_trades_query_without_trades_is_set_aside(self):
+        self.assertFalse(self.read_trades(FakeFlex(statements=("statement.xml", "statement.xml"))))
+        self.assertIn("Trade Confirmations", self.proof()["reason"])
+
+    def test_an_execution_dated_by_day_alone_is_set_aside(self):
+        statement = with_trades(fixture("statement.xml"), ("700000303", "20270114"))
+        self.assertFalse(self.read(FakeFlex(statements=(statement,)), now=self.MORNING))
+        proof = self.proof()
+        self.assertEqual(proof["state"], "set-aside")
+        self.assertIn("700000303", proof["reason"])
+
+    def test_an_execution_of_another_account_is_set_aside(self):
+        statement = with_trades(fixture("statement.xml"), ("700000304", "20270114;163000", "EXECUTION", "DU0000998"))
+        self.assertFalse(self.read(FakeFlex(statements=(statement,)), now=self.MORNING))
+        self.assertIn("another account", self.proof()["reason"])
+
+    def test_summary_rows_are_not_executions(self):
+        statement = with_trades(fixture("statement.xml"), ("", "", "SYMBOL_SUMMARY"), ("700000305", "20270114;101500"))
+        self.assertTrue(self.read(FakeFlex(statements=(statement,)), now=self.MORNING), self.out.getvalue())
+        self.assertEqual([e["id"] for e in self.proof()["executions"]], ["700000305"])
+
+    def test_a_cash_reading_set_aside_still_writes_the_proof_state(self):
+        self.assertFalse(self.read_trades(FakeFlex(send="send_expired.xml")))
+        self.assertEqual(self.proof()["state"], "set-aside")
+
+    def test_the_proof_reader_refuses_a_file_not_as_written(self):
+        path = Path(flex.executions_path(str(self.ledger)))
+        for text in ("", "{}", '{"state": "read"}', "not json"):
+            with self.subTest(text=text):
+                path.write_text(text)
+                with self.assertRaises(flex.StatementRefused):
+                    flex.read_executions(str(path))
+
+    def test_the_proof_reader_reads_what_the_reader_wrote(self):
+        statement = with_trades(fixture("statement.xml"), ("700000301", "20270114;163000"))
+        self.read(FakeFlex(statements=(statement,)), now=self.MORNING)
+        proof = flex.read_executions(flex.executions_path(str(self.ledger)))
+        self.assertEqual(proof.covered_until, datetime(2027, 1, 15, 5, 0, tzinfo=timezone.utc))
+        self.assertEqual(proof.from_day, date(2027, 1, 12))
+        self.assertEqual(proof.executions, [("700000301", datetime(2027, 1, 14, 21, 30, tzinfo=timezone.utc))])
+
+
 class CommandTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1245,6 +1368,20 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(main(["flex", "--ledger", str(self.ledger)], err=err, flex_get=FakeFlex()), 1)
         self.assertIn("--secrets", err.getvalue())
 
+    def test_the_trades_query_id_is_read_when_its_line_is_filled_in(self):
+        self.secrets.write_text(self.secrets.read_text() + "TI_IBKR_FLEX_TRADES_QUERY_ID=654321\n")
+        service = FakeFlex(statements=("statement.xml", "trade_confirms.xml"))
+        code, said = self.run_command(service)
+        self.assertEqual(code, 0, said)
+        self.assertEqual([p.get("q") for u, p in service.calls if u == flex.SEND_REQUEST_URL], [QUERY, "654321"])
+
+    def test_an_empty_trades_query_line_asks_only_the_cash_query(self):
+        self.secrets.write_text(self.secrets.read_text() + "TI_IBKR_FLEX_TRADES_QUERY_ID=\n")
+        service = FakeFlex()
+        code, said = self.run_command(service)
+        self.assertEqual(code, 0, said)
+        self.assertEqual([p.get("q") for u, p in service.calls if u == flex.SEND_REQUEST_URL], [QUERY])
+
     def test_a_missing_token_is_refused_before_anything_is_asked(self):
         bare = self.dir / "bare"
         bare.write_text("TI_IBKR_FLEX_TOKEN=\nTI_IBKR_FLEX_QUERY_ID={}\n".format(QUERY))
@@ -1266,8 +1403,11 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse((repo / "deploy/systemd/ti-flex-boost.timer").exists())
         self.assertRegex(self.timer, r"(?m)^Unit=ti-flex@%i\.service$")
 
-    def test_the_timer_fires_after_the_close(self):
-        self.assertRegex(self.timer, r"(?m)^OnCalendar=Mon\.\.Fri 2[0-3]:[0-5][0-9] America/New_York$")
+    def test_the_timer_fires_each_weekday_morning_before_the_data_job(self):
+        # The executions proof the morning delivery needs (ADR 0019, amended 2026-10-27) is read before the data
+        # job's first firing at 06:05 New York, and again before each later one.
+        times = re.findall(r"(?m)^OnCalendar=Mon\.\.Fri ([0-9]{2}:[0-9]{2}) America/New_York$", self.timer)
+        self.assertEqual(times, ["05:30", "06:30", "07:30"])
         self.assertRegex(self.timer, r"(?m)^Persistent=true$")
 
     def test_the_service_reads_the_flex_secrets_and_the_instances_account_file(self):
@@ -1287,9 +1427,10 @@ class DeploymentTests(unittest.TestCase):
         self.assertRegex(self.service, r"(?m)^ReadOnlyPaths=/var/lib/trend-investing/engines/%i$")
 
     def test_the_unit_outlasts_the_readers_worst_case(self):
-        # SendRequest, then every GetStatement attempt, each to its request timeout, and the waits between them.
-        worst = (flex.REQUEST_TIMEOUT * (1 + flex.GENERATION_ATTEMPTS)
-                 + flex.GENERATION_WAIT * (flex.GENERATION_ATTEMPTS - 1))
+        # For each of the two queries, SendRequest, then every GetStatement attempt, each to its request timeout,
+        # and the waits between them.
+        worst = 2 * (flex.REQUEST_TIMEOUT * (1 + flex.GENERATION_ATTEMPTS)
+                     + flex.GENERATION_WAIT * (flex.GENERATION_ATTEMPTS - 1))
         minutes = int(re.search(r"(?m)^TimeoutStartSec=([0-9]+)min$", self.service).group(1))
         self.assertGreater(minutes * 60, worst)
 
@@ -1312,6 +1453,7 @@ class DeploymentTests(unittest.TestCase):
         example = (repo / "deploy/etc/secrets.env.example").read_text()
         self.assertRegex(example, r"(?m)^TI_IBKR_FLEX_TOKEN=$")
         self.assertRegex(example, r"(?m)^TI_IBKR_FLEX_QUERY_ID=$")
+        self.assertRegex(example, r"(?m)^TI_IBKR_FLEX_TRADES_QUERY_ID=$")
 
 
 if __name__ == "__main__":

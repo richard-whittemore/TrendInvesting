@@ -720,7 +720,9 @@ commands below are on `main` now **[NOW]**.
   adapter, a transfer, a split; the previous close may be the last run's,
   or the starting book you approved the first run with), the cash moved by
   more than 1% of net liquidation beyond those fills, the reading was on
-  a later date than the close (the adapter was not running that evening),
+  a later date than the close without the Flex reader's executions proof
+  (none by 9:00, one set aside, a statement that does not reach midnight,
+  or an execution after the close in it), or after the next open,
   or the engine already held a snapshot stamped at or after that close.
   Nothing was ordered; the target in force is unchanged.
 - **What to do:** check the account in IBKR for the order, trade, holding
@@ -729,8 +731,9 @@ commands below are on `main` now **[NOW]**.
   out of Normal: settle them as `docs/runbooks/reconciliation.md` says. A trade you placed by hand is reported again at the next
   start's reconciliation; settle it as `docs/runbooks/reconciliation.md`
   says. Otherwise nothing: the next session whose reading passes decides as
-  usual. Keep the adapter running through the evening so the reading is
-  taken on the close's own date.
+  usual. Keep the adapter running, and the Flex reader's Trade Confirmation
+  query set up, so the next morning's reading has its executions proof
+  (`docs/manual/reconciliation.md`, "The executions proof").
 
 ## The rules and their sources
 
