@@ -303,18 +303,82 @@ On the server, one job does all of the above for the Boost engine every
 weekday, with no one at the keyboard: `ti-data` (`adapter/marketdata/tidata.py`,
 installed as `/opt/trend-investing/bin/ti-data` and run by `ti-data.service`).
 
-**When it runs.** At 17:05, 18:05 and 20:05 New York time, Monday to
-Friday (`ti-data.timer`). The market closes at 4 p.m. (1 p.m. on an early
-close), and a session is not recorded until an hour after its close, so its
-prices are final; 17:05 is after that hour on every trading day, and a test
-checks every firing of the timer against the service's `--settle-minutes 60`
-for every session of 2026 and 2027. The 18:05 and 20:05 firings are retries:
-if 17:05 failed (Massive down, too many requests), the same evening tries
-again; once the day's file exists they find it and fetch nothing. On a
-holiday it finds the last session already written and does nothing. If the
-server was off, the run happens when it starts again, and catches up every
-session it missed in one file. A run that hangs is stopped after an hour
-(`TimeoutStartSec=1h`) and shows as failed, like any other refusal.
+**When it runs.** At 06:05, 07:05 and 08:05 New York time, Monday to
+Friday (`ti-data.timer`), each time for the previous session: Tuesday to
+Friday read the day before, Monday reads Friday, and the morning after a
+holiday reads the last session before it. The market closes at 4 p.m. (1 p.m.
+on an early close), and a session is not recorded until an hour after its
+close, so its prices are final; a test checks every firing of the timer
+against the service's `--settle-minutes 60` for every weekday of 2026 and
+2027. Once the day's file exists, the later firings find it and fetch
+nothing. If the server was off, the run happens when it starts again, and
+catches up every session it missed in one file. A run that hangs is stopped
+after an hour (`TimeoutStartSec=1h`) and shows as failed, like any other
+refusal.
+
+**The free plan's timing.** On Massive's free plan a session's prices are
+not served on the evening of the session: asked at 17:05, 18:05 or 20:05 on
+the day, Massive answers "403 forbidden", and the same request succeeds the
+next morning (confirmed on the real server: a run at about 7 a.m. on
+2026-10-27 recorded the session). But the engine withheld that session
+(`stale-account-snapshot`): the adapter's account reading is taken the next
+morning, after the session's close, and the engine accepts only a reading as
+of the close. So until the Flex proof is in place, a session recorded the
+next morning is withheld and places no order, whichever hour the job runs
+(the free plan's evening firings could only ever 403, so mornings are no
+worse). The change that lets the engine accept the morning reading, when
+IBKR's Flex statement proves no execution after the close, is made
+separately; see the Flex reader in
+[reconciliation](reconciliation.md), "Deposits and withdrawals, read from
+IBKR".
+
+What the job does with that answer:
+
+- A 403 for the latest settled session is "not available yet on this plan"
+  from the session's own day (so also on the evening of the session, after a
+  boot catch-up or a run you start by hand) until 08:00 New York on the next
+  trading day, including over a weekend or holiday. The job prints one line in the journal
+  (`ti-data: session 2026-10-23 is not available yet on this plan ...; the
+  next firing asks again`), writes nothing, exits cleanly and pages no one.
+  The next firing asks again.
+- A 403 that is still there at the 08:05 firing (or any run at or after 08:00
+  New York on the next trading day) is a failure: the unit shows failed and you are paged, because the
+  plan should have served the session by then (the plan lapsed, or the key is
+  wrong). Check the plan and the key at the Massive dashboard, then
+  `sudo systemctl start ti-data`. Started on the evening of the session after
+  the one that failed, that run fetches the missed session but then meets the
+  same quiet 403 for that day's session, so it writes no stream and exits
+  cleanly (which closes the incident). The next trading day's morning
+  firing (06:05; on a Friday evening, the following Monday's, since the timer
+  runs Monday to Friday and not at the weekend) writes one file holding both
+  sessions. The timer also fires on a market holiday; that firing is usually the
+  first after the session before it, so it fetches and writes that session
+  (or waits quietly on a 403, since the failure hour is on the next trading
+  day), and the next trading day's firing then finds that file and fetches
+  only what is still missing. To have the stream sooner, run `ti-data --session <date>` for the
+  last session once Massive serves it, which is the morning.
+- A 403 for any older session of a catch-up, for a session you ask for with
+  `--session` that is not the latest settled one, and any other error (401, 429,
+  500, a timeout), is a failure at every hour.
+
+The evening firings the job once had (17:05, 18:05, 20:05) are gone: on the
+free plan they could only fail, and a quiet failure is not worth having
+three times a day. If you move to a paid plan, the timer can be changed back
+to an evening time. On a paid plan the session is served in the evening, so
+what pages is any error other than a 403 (a 401, 429, 500 or timeout), a 403
+for an older session, or a 403 still there at or after 08:00 New York on the
+next trading day; a 403 on the session's own evening is a quiet wait, and an
+evening-only timer has no morning firing to ask again.
+
+**The upgrade option.** Massive's Starter plan serves a session's prices the
+same day after the close. It is your choice and costs money; nothing in the
+system needs it. With it, the job could run in the evening (edit
+`OnCalendar` in `ti-data.timer`, for example `Mon..Fri 17,18,20:05
+America/New_York`, which is after the 4 p.m. close plus the hour the job
+waits, then `sudo systemctl daemon-reload`; keep `America/New_York` or the
+times are the server's own, which may be earlier), the file would exist a few minutes after
+17:05, and the decision would not change: Boost still orders for the next
+open either way.
 
 **What it does, in order.**
 
@@ -683,7 +747,8 @@ The file is the engine's input for those sessions, and the Boost adapter
 `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/`, on every turn of
 its loop (about once a second) while its link to IB Gateway is up and
 matched. A new file is picked up within a second or two of the data job
-writing it, which on a normal day is a few minutes after 17:05 New York.
+writing it, which on a normal day is a few minutes after the 06:05 to 08:05 firing that
+records the previous session.
 If the adapter is not running then, it picks the file up when you next
 start it. If several files are waiting (the adapter was stopped for some
 days), it takes them all, oldest first.

@@ -344,11 +344,11 @@ test "$(grouped)" = "$before_requests" || fail "Sunday's data job fetched a sess
 test "$(pushover_pages)" = "$before_pages" || fail "a Sunday firing paged"
 pass "Sunday's firing of the data job succeeds quietly: nothing to record, no page"
 
-# Monday 17:06: the data job's first evening firing writes Monday's file.
-# The adapter is stopped first: Monday's file is delivered the next morning,
-# below, as Massive's free plan makes it.
+# Tuesday 07:06: the data job's morning firing writes Monday's file (the free
+# plan serves a session the next morning). The adapter is stopped first:
+# Monday's file is delivered behind its morning reading, below.
 systemctl stop ti-adapter-boost.service
-clock_at "2026-10-26 17:06"
+clock_at "2026-10-27 07:06"
 systemctl start ti-data.service
 test "$(systemctl show -p Result --value ti-data.service)" = success || fail "Monday's data job did not succeed: $(journalctl -u ti-data.service --no-pager -o cat | tail -n 3)"
 monday=/var/lib/trend-investing/data/streams/boost/run-2026-10-24/boost-2026-10-26.jsonl
@@ -356,7 +356,7 @@ test -s "$monday" || fail "Monday's firing wrote no file for 2026-10-26"
 grep -qxF "$monday" <<<"$(journalctl -u ti-data.service --no-pager -o cat | grep '^/var/lib' | tail -n 1)" || fail "Monday's firing did not print the file it wrote"
 test "$(grouped)" -gt "$before_requests" || fail "Monday's firing fetched no session"
 test "$(pushover_pages)" = "$before_pages" || fail "Monday's firing paged"
-pass "Monday's 17:06 firing of the data job writes boost-2026-10-26.jsonl beside Friday's, and pages nothing"
+pass "Tuesday's 07:06 firing of the data job writes boost-2026-10-26.jsonl beside Friday's, and pages nothing"
 
 # Tuesday 07:10: the morning delivery of Monday's session (ADR 0019, amended
 # 2026-10-27). The reading is on a later New York date than the close, so it

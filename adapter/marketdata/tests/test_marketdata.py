@@ -121,6 +121,17 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(len(opener.requests), 1)
         self.assertNotIn(KEY, str(cm.exception))
 
+    def test_a_http_error_carries_its_status_for_the_caller(self):
+        for code in (403, 500):
+            client, _, _ = make_client(code)
+            with self.assertRaises(massive.MarketDataError) as cm:
+                client.grouped(DAY)
+            self.assertEqual(cm.exception.status, code)
+        client, _, _ = make_client({"status": "ERROR", "error": "nope"})
+        with self.assertRaises(massive.MarketDataError) as cm:
+            client.grouped(DAY)
+        self.assertIsNone(cm.exception.status)
+
     def test_an_error_status_body_fails(self):
         client, _, _ = make_client({"status": "ERROR", "error": "nope"})
         with self.assertRaises(massive.MarketDataError):

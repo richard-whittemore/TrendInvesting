@@ -7,6 +7,8 @@ coverage.txt
 # A local `go build ./cmd/engine` at the root; `make engine` builds the
 # stamped binary under /bin/.
 /engine
+# A local `go build ./cmd/reporter` at the root (build with -o elsewhere).
+/reporter
 
 # Python
 __pycache__/

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,7 +49,8 @@ func newStandInSystemd(t *testing.T) standInSystemd {
 	d := "'" + s.dir + "'"
 	systemctl := "#!/bin/sh\necho \"$@\" >>" + d + "/systemctl-calls\nfor a; do unit=$a; done\n" +
 		"case $1 in show) ;; *) exit 2 ;; esac\n" +
-		"if grep -qx \"$unit\" " + d + "/failed; then echo ActiveState=failed; else echo ActiveState=active; fi\n" +
+		"if grep -qx \"$unit\" " + d + "/broken 2>/dev/null; then exit 1; fi\n" +
+		"if grep -qx \"$unit\" " + d + "/failed; then echo ActiveState=failed; elif grep -q \"^$unit=\" " + d + "/states; then grep \"^$unit=\" " + d + "/states | sed 's/^[^=]*=/ActiveState=/'; else echo ActiveState=active; fi\n" +
 		"echo InvocationID=$(cat " + d + "/invocation)\n"
 	journalctl := "#!/bin/sh\necho \"$@\" >>" + d + "/journalctl-calls\nf=unit-wide\nq=\n" +
 		"for a; do case $a in -q) q=1 ;; _SYSTEMD_INVOCATION_ID=*) f=own-${a#*=} ;; INVOCATION_ID=*) f=systemd-${a#*=} ;; esac; done\n" +
@@ -97,6 +99,16 @@ func (s standInSystemd) noisy() { _ = os.WriteFile(filepath.Join(s.dir, "noisy")
 
 func (s standInSystemd) fail(units ...string) {
 	_ = os.WriteFile(filepath.Join(s.dir, "failed"), []byte(strings.Join(units, "\n")+"\n"), 0o600)
+}
+
+// state sets unit's ActiveState when it is not failed (activating while a run is in flight, inactive once it ended well).
+func (s standInSystemd) state(unit, state string) {
+	_ = os.WriteFile(filepath.Join(s.dir, "states"), []byte(unit+"="+state+"\n"), 0o600)
+}
+
+// breaks makes `systemctl show` fail for unit, as a timeout would.
+func (s standInSystemd) breaks(unit string) {
+	_ = os.WriteFile(filepath.Join(s.dir, "broken"), []byte(unit+"\n"), 0o600)
 }
 func (s standInSystemd) calls() string {
 	raw, _ := os.ReadFile(filepath.Join(s.dir, "journalctl-calls"))
@@ -162,6 +174,25 @@ func TestTheHookPagesBothChannelsOnceWithTheUnitTheReasonAndTheManualRow(t *test
 	}
 }
 
+func TestTheHookPagesAFailedDataJobOnceWithItsManualRow(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	for i := 0; i < 2; i++ {
+		if err := notify(t, r, dir, systemd, twoChannels(), "ti-data.service"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, "ti-data.service"); n != 1 {
+			t.Errorf("%s took %d pages for the data job, want 1", host, n)
+		}
+		if got := strings.Join(r.to(host), "\n"); !strings.Contains(got, "The data job fails") {
+			t.Errorf("%s: the page does not give the data job's manual row:\n%s", host, got)
+		}
+	}
+}
+
 func TestTheHookPagesOncePerUnitUntilItIsResolved(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	systemd := newStandInSystemd(t)
@@ -207,6 +238,7 @@ type flakyRelay struct {
 	*relay
 	mu       sync.Mutex
 	failHost string
+	failBody string // when set, only a request whose body holds it is refused
 	healed   bool
 }
 
@@ -216,6 +248,11 @@ func (f *flakyRelay) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	down := req.URL.Host == f.failHost && !f.healed
 	f.mu.Unlock()
+	if down && f.failBody != "" {
+		raw, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(raw))
+		down = strings.Contains(string(raw), f.failBody)
+	}
 	if down {
 		_, _ = io.Copy(io.Discard, req.Body)
 		return &http.Response{StatusCode: http.StatusBadGateway, Status: "502 Bad Gateway", Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}, Request: req}, nil
@@ -982,7 +1019,7 @@ func TestAStaleSampleOfAFailedRunIsNotCountedTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	sampled := map[string]unitSample{unit: {failed: true, invocation: secondRun}}
-	if err := unitStep(path, []string{unit}, sampled, base.Add(60*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(60*time.Minute), time.Hour); err != nil {
+	if _, err := unitStep(path, []string{unit}, nil, sampled, base.Add(60*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(60*time.Minute), time.Hour, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, _, repeats, _, err := loadState(path)
@@ -1029,6 +1066,373 @@ func TestAUnitThatFailsOnceAndStaysFailedIsRemindedHourly(t *testing.T) {
 		}
 		if reminders != 3 {
 			t.Errorf("%s took %d reminders in 3 hours, want 3", host, reminders)
+		}
+	}
+}
+
+// The data job is paged once by the OnFailure hook and is not a unit the
+// reporter holds the heartbeat or the reminders for; the reporter samples it
+// only to end its episode once a run has ended well (ADR 0019, "Alerting").
+const dataJob = "ti-data.service"
+
+func TestAFailedDataJobIsNeitherRemindedNorPagedAgainByItsRetriesOrTheReporter(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	systemd.invoke(firstRun)
+	systemd.fail(dataJob)
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, firstRun), t0.Add(time.Hour), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	// The retry starts: activating, not well; the reporter fires meanwhile.
+	systemd.fail()
+	systemd.state(dataJob, "activating")
+	if err := firing(t, r, dir, systemd, t0.Add(2*time.Hour), "ti-adapter-boost.service", "-resolve-units", dataJob); err != nil {
+		t.Fatal(err)
+	}
+	// The retry fails too, two hours later.
+	second := "fedcba9876543210fedcba9876543210"
+	systemd.invoke(second)
+	systemd.fail(dataJob)
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, second), t0.Add(3*time.Hour), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := firing(t, r, dir, systemd, t0.Add(4*time.Hour), "ti-adapter-boost.service", "-resolve-units", dataJob); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, dataJob); n != 1 {
+			t.Errorf("%s took %d pages for the data job across a failed retry, want 1", host, n)
+		}
+		if got := strings.Join(r.to(host), "\n"); strings.Contains(got, "still failing") {
+			t.Errorf("%s was reminded of the data job:\n%s", host, got)
+		}
+	}
+	if n := count(r.to(pdHost), `"event_action":"resolve"`); n != 0 {
+		t.Errorf("an episode ended while the data job was failed or retrying: %d resolves", n)
+	}
+}
+
+func TestADataJobRunThatEndedWellEndsItsEpisodeAndTheNextFailureIsTold(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	systemd.invoke(firstRun)
+	systemd.fail(dataJob)
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, firstRun), t0.Add(time.Hour), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	systemd.fail()
+	systemd.state(dataJob, "inactive")
+	if err := firing(t, r, dir, systemd, t0.Add(2*time.Hour), "ti-adapter-boost.service", "-resolve-units", dataJob); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(r.to(pdHost), `"event_action":"resolve"`); n != 1 {
+		t.Errorf("PagerDuty resolves = %d, want 1 once the data job ended well", n)
+	}
+	next := "fedcba9876543210fedcba9876543210"
+	systemd.invoke(next)
+	systemd.fail(dataJob)
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, next), t0.Add(30*time.Hour), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, dataJob); n != 2 {
+			t.Errorf("%s took %d pages across two episodes, want 2", host, n)
+		}
+	}
+}
+
+func TestAFailedDataJobSampledByTheReporterIsNeverNamedAndLeavesTheHeartbeatAlone(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	systemd.fail(dataJob)
+	dir := t.TempDir()
+	const hb = "hc.private.test"
+	getenv := func(k string) string {
+		if k == "TI_HEARTBEAT_URL" {
+			return "https://" + hb + "/ping/uuid"
+		}
+		return twoChannels()(k)
+	}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty",
+		"-units", "ti-adapter-boost.service", "-resolve-units", dataJob, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+	if err := run(args, getenv, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r}); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := count(r.to(host), dataJob); n != 1 {
+			t.Errorf("%s: %d messages name the data job, want only its one page (no state-at-start line, no reminder)", host, n)
+		}
+	}
+	if n := len(r.to(hb)); n != 1 {
+		t.Errorf("the heartbeat was pinged %d times with only the data job failed, want 1", n)
+	}
+}
+
+func TestAFailedDataJobTheHookCouldNotDeliverIsPagedOnceByTheReporterAndNeverReminded(t *testing.T) {
+	flaky := &flakyRelay{relay: &relay{sent: map[string][]string{}}, failHost: ntfyHost}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	systemd.invoke(firstRun)
+	systemd.fail(dataJob)
+	if err := notifyAt(t, flaky, dir, systemd, monitored(dataJob, firstRun), t0.Add(time.Hour), dataJob); err == nil {
+		t.Fatal("the hook should fail while ntfy is down")
+	}
+	flaky.setFailing(false)
+	for i := 1; i <= 3; i++ {
+		if err := firing(t, flaky, dir, systemd, t0.Add(time.Hour+time.Duration(i)*70*time.Minute), "ti-adapter-boost.service", "-resolve-units", dataJob); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(flaky.relay, host, dataJob); n != 1 {
+			t.Errorf("%s took %d pages, want the one the reporter's retry delivered", host, n)
+		}
+		if strings.Contains(strings.Join(flaky.to(host), "\n"), "still failing") {
+			t.Errorf("%s was reminded of the data job", host)
+		}
+	}
+}
+
+func TestResolveUnitsAcceptsOnlyTheDataJobAndNoUnitAlsoInUnits(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"the engine":     {"-units", "ti-adapter-boost.service", "-resolve-units", "ti-engine@boost.service"},
+		"the adapter":    {"-resolve-units", "ti-adapter-boost.service"},
+		"the reporter":   {"-resolve-units", "ti-reporter@boost.service"},
+		"a unit in both": {"-units", dataJob, "-resolve-units", dataJob},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &relay{sent: map[string][]string{}}
+			systemd := newStandInSystemd(t)
+			dir := t.TempDir()
+			args := append([]string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy",
+				"-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}, extra...)
+			err := run(args, twoChannels(), func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r})
+			if err == nil || !strings.Contains(err.Error(), "-resolve-units") {
+				t.Errorf("err = %v, want a startup refusal naming -resolve-units", err)
+			}
+			if got := systemd.systemctlCalls(); got != "" {
+				t.Errorf("systemctl ran before the refusal: %s", got)
+			}
+		})
+	}
+}
+
+func TestADataJobSampleThatCannotBeTakenNeitherFailsTheFiringNorSkipsTheEnginesStep(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	systemd.fail("ti-adapter-boost.service")
+	systemd.breaks(dataJob)
+	dir := t.TempDir()
+	var out bytes.Buffer
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty",
+		"-units", "ti-adapter-boost.service", "-resolve-units", dataJob, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+	if err := run(args, twoChannels(), func() time.Time { return t0.Add(time.Hour) }, &out, &http.Client{Transport: r}); err != nil {
+		t.Fatalf("a data job sample that failed failed the firing: %v", err)
+	}
+	if n := pagesFor(r, ntfyHost, "ti-adapter-boost.service"); n != 1 {
+		t.Errorf("the adapter's backup page went %d times, want 1", n)
+	}
+	for _, want := range []string{dataJob, "trading units were checked", "data job's resolve and backup page are skipped"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the log line lacks %q: %q", want, out.String())
+		}
+	}
+}
+
+func TestADataJobPageThatCannotBeDeliveredIsLoggedRetriedAndNeverFailsTheFiringOrHoldsTheHeartbeat(t *testing.T) {
+	flaky := &flakyRelay{relay: &relay{sent: map[string][]string{}}, failHost: ntfyHost, failBody: dataJob}
+	systemd := newStandInSystemd(t)
+	systemd.fail(dataJob)
+	dir := t.TempDir()
+	const hb = "hc.private.test"
+	getenv := func(k string) string {
+		if k == "TI_HEARTBEAT_URL" {
+			return "https://" + hb + "/ping/uuid"
+		}
+		return twoChannels()(k)
+	}
+	fire := func(at time.Time, out *bytes.Buffer) error {
+		args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty",
+			"-units", "ti-adapter-boost.service", "-resolve-units", dataJob, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+		return run(args, getenv, func() time.Time { return at }, out, &http.Client{Transport: flaky})
+	}
+	var out bytes.Buffer
+	if err := fire(t0.Add(time.Hour), &out); err != nil {
+		t.Fatalf("an undeliverable data job page failed the firing: %v\n%s", err, out.String())
+	}
+	if n := len(flaky.to(hb)); n != 1 {
+		t.Errorf("the heartbeat was pinged %d times while the data job's page could not be delivered, want 1", n)
+	}
+	if !strings.Contains(out.String(), "retried at the next firing") {
+		t.Errorf("the failed delivery was not logged: %q", out.String())
+	}
+	flaky.setFailing(false)
+	if err := fire(t0.Add(2*time.Hour), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := pagesFor(flaky.relay, ntfyHost, dataJob); n != 1 {
+		t.Errorf("ntfy took %d pages after it healed, want the one retry", n)
+	}
+	if n := pagesFor(flaky.relay, pdHost, dataJob); n != 1 {
+		t.Errorf("PagerDuty took %d pages, want 1", n)
+	}
+}
+
+// currentIs is the data job's state asked of systemd under the lock.
+func currentIs(sample unitSample) func(string) (unitSample, error) {
+	return func(string) (unitSample, error) { return sample, nil }
+}
+
+func dataStep(t *testing.T, r http.RoundTripper, path string, systemd standInSystemd, at time.Time, now func(string) (unitSample, error), stale ...unitSample) (soft, hard error) {
+	t.Helper()
+	senders, setAside, err := buildSenders("ntfy,pagerduty", twoChannels(), &http.Client{Transport: r}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	samples := map[string]unitSample{}
+	if len(stale) > 0 {
+		samples[dataJob] = stale[0]
+	}
+	return unitStep(path, nil, []string{dataJob}, samples, time.Time{}, systemd.journalctl(), nil, senders, setAside, at, time.Hour, now)
+}
+
+func TestAStaleFailedDataJobSampleCannotPageOrResolveOnItsOwnWord(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unit-failures.json")
+	base := t0.Add(time.Hour)
+	second := "fedcba9876543210fedcba9876543210"
+	// No page was delivered by the hook; the sample taken at the start of the firing says failed, but the unit has since ended well, so asking systemd under the lock shows it well: nothing is paged.
+	if _, hard := dataStep(t, r, path, systemd, base, currentIs(unitSample{state: "inactive", invocation: second}), unitSample{failed: true, state: "failed", invocation: firstRun}); hard != nil {
+		t.Fatal(hard)
+	}
+	if n := pagesFor(r, ntfyHost, dataJob); n != 0 {
+		t.Errorf("a recovered data job was paged: %d", n)
+	}
+	// An episode is open; a retry fails after a recovery was sampled, and the unit under the lock is failed: the incident stays.
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, firstRun), base.Add(time.Minute), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, second), base.Add(2*time.Minute), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	if _, hard := dataStep(t, r, path, systemd, base.Add(3*time.Minute), currentIs(unitSample{failed: true, state: "failed", invocation: second}), unitSample{state: "inactive"}); hard != nil {
+		t.Fatal(hard)
+	}
+	if n := count(r.to(pdHost), `"event_action":"resolve"`); n != 0 {
+		t.Errorf("an incident of a still failed data job was resolved: %d", n)
+	}
+}
+
+func TestAResolvedDataJobRunNeverPagesAgainAndTheRecordIsBoundedAndSavedWithTheRemoval(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unit-failures.json")
+	base := t0.Add(time.Hour)
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, firstRun), base, dataJob); err != nil {
+		t.Fatal(err)
+	}
+	if _, hard := dataStep(t, r, path, systemd, base.Add(time.Hour), currentIs(unitSample{state: "inactive"})); hard != nil {
+		t.Fatal(hard)
+	}
+	seen, sent, _, _, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, kept := sent[handledKey(dataJob, firstRun)]; !kept {
+		t.Errorf("the saved record holds no handled run after the removal: %v", sent)
+	}
+	for k := range seen {
+		if strings.Contains(k, report.UnitFailedKey(dataJob, firstRun)) {
+			t.Errorf("the saved record still holds the removed episode: %s", k)
+		}
+	}
+	// The same failed run, sampled again after the resolve, is not paged or opened again.
+	if _, hard := dataStep(t, r, path, systemd, base.Add(2*time.Hour), currentIs(unitSample{failed: true, state: "failed", invocation: firstRun})); hard != nil {
+		t.Fatal(hard)
+	}
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, firstRun), base.Add(3*time.Hour), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	if n := pagesFor(r, ntfyHost, dataJob); n != 1 {
+		t.Errorf("a resolved failed run paged again: %d pages", n)
+	}
+	// A new run's failure after the recovery pages; the handled record stays bounded.
+	for i := 0; i < maxHandledRuns+4; i++ {
+		inv := fmt.Sprintf("%032x", 100+i)
+		if err := notifyAt(t, r, dir, systemd, monitored(dataJob, inv), base.Add(time.Duration(10+i)*time.Hour), dataJob); err != nil {
+			t.Fatal(err)
+		}
+		if _, hard := dataStep(t, r, path, systemd, base.Add(time.Duration(10+i)*time.Hour+time.Minute), currentIs(unitSample{state: "inactive"})); hard != nil {
+			t.Fatal(hard)
+		}
+	}
+	_, sent, _, _, _ = loadState(path)
+	handled := 0
+	for k := range sent {
+		if strings.HasPrefix(k, "handled|") {
+			handled++
+		}
+	}
+	if handled != maxHandledRuns {
+		t.Errorf("%d handled runs kept, want %d", handled, maxHandledRuns)
+	}
+	if n := pagesFor(r, ntfyHost, dataJob); n != 1+maxHandledRuns+4 {
+		t.Errorf("%d pages, want one for the first run and one for each of the %d new runs after it", n, maxHandledRuns+4)
+	}
+	if _, kept := sent[handledKey(dataJob, fmt.Sprintf("%032x", 100+maxHandledRuns+3))]; !kept {
+		t.Errorf("the newest handled run was evicted")
+	}
+	if _, kept := sent[handledKey(dataJob, fmt.Sprintf("%032x", 100))]; kept {
+		t.Errorf("the oldest handled run was kept")
+	}
+	// The bound is not permanent: an evicted run is paged again if the hook is redelivered.
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, fmt.Sprintf("%032x", 100)), base.Add(100*time.Hour), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	if n := pagesFor(r, ntfyHost, dataJob); n != 2+maxHandledRuns+4 {
+		t.Errorf("an evicted run did not page again: %d pages", n)
+	}
+}
+
+func TestOnlyAFailureToSaveTheRecordIsHardForTheDataJob(t *testing.T) {
+	persist, other := splitPersist(errors.Join(errors.New("ntfy: 502"), persistError{errors.New("disk full")}))
+	if persist == nil || !strings.Contains(persist.Error(), "disk full") || strings.Contains(persist.Error(), "502") {
+		t.Errorf("persist = %v", persist)
+	}
+	if other == nil || !strings.Contains(other.Error(), "502") || strings.Contains(other.Error(), "disk full") {
+		t.Errorf("other = %v", other)
+	}
+}
+
+func TestHandledRunEvictionBreaksTiesByInvocationAndPruneReceiptsLeavesTheRecordAlone(t *testing.T) {
+	at := t0.Add(time.Hour)
+	for round := 0; round < 20; round++ {
+		u := &unitState{seen: map[string]bool{}, sent: map[string]time.Time{}, repeats: map[string]int{}}
+		// 15 newer entries, then two older ones that share a time.
+		for i := 0; i < maxHandledRuns-1; i++ {
+			u.sent[handledKey(dataJob, fmt.Sprintf("%032x", 500+i))] = at.Add(time.Hour)
+		}
+		u.sent[handledKey(dataJob, fmt.Sprintf("%032x", 1))] = at
+		key := report.UnitFailedKey(dataJob, fmt.Sprintf("%032x", 2))
+		handleRuns(u, dataJob, key, fmt.Sprintf("%032x", 2), at)
+		_, lowKept := u.sent[handledKey(dataJob, fmt.Sprintf("%032x", 1))]
+		_, highKept := u.sent[handledKey(dataJob, fmt.Sprintf("%032x", 2))]
+		if lowKept == highKept {
+			t.Fatalf("round %d: exactly one of the tied entries should survive, kept low=%v high=%v", round, lowKept, highKept)
+		}
+		if !highKept {
+			t.Fatalf("round %d: the tie is not broken toward the greater invocation", round)
+		}
+		if pruneReceipts(u.seen, u.sent, u.repeats, at.Add(1000*time.Hour)) {
+			t.Fatal("pruneReceipts changed a record that holds no receipt")
+		}
+		if got := len(u.sent); got != maxHandledRuns {
+			t.Fatalf("pruneReceipts removed handled entries: %d left, want %d", got, maxHandledRuns)
 		}
 	}
 }
