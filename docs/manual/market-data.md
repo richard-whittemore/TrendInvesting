@@ -319,12 +319,18 @@ refusal.
 **The free plan's timing.** On Massive's free plan a session's prices are
 not served on the evening of the session: asked at 17:05, 18:05 or 20:05 on
 the day, Massive answers "403 forbidden", and the same request succeeds the
-next morning (confirmed on the real server: a run at about 7 a.m. the next
-morning recorded the session and the engine decided it before the open). So
-Boost reads a session's prices the next morning and still decides before the
-next open, which is what the backtest assumed: it decided each session on
-that session's close and traded at the next open. You see nothing different:
-the order for a session still goes in before 9:30 a.m.
+next morning (confirmed on the real server: a run at about 7 a.m. on
+2026-10-27 recorded the session). But the engine withheld that session
+(`stale-account-snapshot`): the adapter's account reading is taken the next
+morning, after the session's close, and the engine accepts only a reading as
+of the close. So until the Flex proof is in place, a session recorded the
+next morning is withheld and places no order, whichever hour the job runs
+(the free plan's evening firings could only ever 403, so mornings are no
+worse). The change that lets the engine accept the morning reading, when
+IBKR's Flex statement proves no execution after the close, is made
+separately; see the Flex reader in
+[reconciliation](reconciliation.md), "Deposits and withdrawals, read from
+IBKR".
 
 What the job does with that answer:
 
