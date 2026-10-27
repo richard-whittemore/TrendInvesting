@@ -328,17 +328,20 @@ the order for a session still goes in before 9:30 a.m.
 
 What the job does with that answer:
 
-- A 403 for the latest session at the 06:05 or 07:05 firing is "not
-  available yet on this plan". The job prints one line in the journal
+- A 403 for the latest settled session is "not available yet on this plan"
+  from the session's own day (so also on the evening of the session, after a
+  boot catch-up or a run you start by hand) until 08:00 New York on the next
+  trading day, including over a weekend or holiday. The job prints one line in the journal
   (`ti-data: session 2026-10-23 is not available yet on this plan ...; the
   next firing asks again`), writes nothing, exits cleanly and pages no one.
   The next firing asks again.
-- A 403 that is still there at the 08:05 firing (or any run at 08:00 or
-  later) is a failure: the unit shows failed and you are paged, because the
+- A 403 that is still there at the 08:05 firing (or any run at or after 08:00
+  New York on the next trading day) is a failure: the unit shows failed and you are paged, because the
   plan should have served the session by then (the plan lapsed, or the key is
   wrong). Check the plan and the key at the Massive dashboard, then
   `sudo systemctl start ti-data`.
-- A 403 for any older session of a catch-up, and any other error (401, 429,
+- A 403 for any older session of a catch-up, for a session you ask for with
+  `--session` that is not the latest settled one, and any other error (401, 429,
   500, a timeout), is a failure at every hour.
 
 The evening firings the job once had (17:05, 18:05, 20:05) are gone: on the
@@ -349,8 +352,10 @@ to an evening time, but a 403 in the evening is then a failure that pages.
 **The upgrade option.** Massive's Starter plan serves a session's prices the
 same day after the close. It is your choice and costs money; nothing in the
 system needs it. With it, the job could run in the evening (edit
-`OnCalendar` in `ti-data.timer`, for example `Mon..Fri 17,18,20:05`, then
-`sudo systemctl daemon-reload`), the file would exist a few minutes after
+`OnCalendar` in `ti-data.timer`, for example `Mon..Fri 17,18,20:05
+America/New_York`, which is after the 4 p.m. close plus the hour the job
+waits, then `sudo systemctl daemon-reload`; keep `America/New_York` or the
+times are the server's own, which may be earlier), the file would exist a few minutes after
 17:05, and the decision would not change: Boost still orders for the next
 open either way.
 

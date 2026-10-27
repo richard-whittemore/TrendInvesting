@@ -103,6 +103,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
 	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, and beside which the reader's costs.jsonl gives the summary its costs line, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
 	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed unit is paged once per failure episode if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a unit no longer failed is resolved")
+	resolveUnits := flags.String("resolve-units", "", "comma-separated units (ti-data.service) that systemctl show samples only to end their failure episode once a run has ended well: they are never paged, reminded or named by the reporter, and never hold back the heartbeat; the OnFailure hook pages them once")
 	selfUnit := flags.String("self-unit", "", "this reporter's own unit (ti-reporter@<instance>.service): its failure page is resolved by the next firing that finishes without a fault")
 	unitState := flags.String("unit-state", "", "the host's record of failed-unit pages, shared with the OnFailure hook (default: unit-failures.json beside -state)")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
@@ -132,6 +133,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	tradingUnits := splitUnits(*units)
 	if err := checkTradingUnits("-units", tradingUnits); err != nil {
+		return err
+	}
+	resolveOnly := splitUnits(*resolveUnits)
+	if err := checkTradingUnits("-resolve-units", resolveOnly); err != nil {
 		return err
 	}
 	if *selfUnit != "" {
@@ -179,13 +184,13 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// hook, and its page is newer than this sample, so it is never resolved
 	// on the sample's word (ADR 0019, "Alerting").
 	sampledAt := now()
-	unitSamples, unitsErr := sampleUnits(*systemctl, tradingUnits)
+	unitSamples, unitsErr := sampleUnits(*systemctl, append(append([]string{}, tradingUnits...), resolveOnly...))
 	if unitsErr != nil {
 		failures = append(failures, unitsErr)
 	}
 	failedNow := map[string]bool{}
-	for unit, sample := range unitSamples {
-		failedNow[unit] = sample.failed
+	for _, unit := range tradingUnits {
+		failedNow[unit] = unitSamples[unit].failed
 	}
 	seen, sent, repeats, baselines, err := loadState(*statePath)
 	if err != nil {
@@ -371,8 +376,8 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// fails; this firing pages a failure episode the hook missed and resolves
 	// the page of a unit not failed at the sample. A systemctl that could not
 	// be run checked nothing, so no page is resolved on its word.
-	if unitsErr == nil && len(tradingUnits) > 0 {
-		if err := unitStep(unitStatePath, tradingUnits, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat); err != nil {
+	if unitsErr == nil && len(tradingUnits)+len(resolveOnly) > 0 {
+		if err := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat); err != nil {
 			failures = append(failures, err)
 		}
 	}

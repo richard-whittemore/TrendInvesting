@@ -1008,12 +1008,43 @@ class NotAvailableYetTest(unittest.TestCase):
             self.assertIn("403", err)
             self.assertEqual(job.files(), files)
 
-    def test_a_403_in_the_evening_is_a_failure(self):
+    def test_a_403_on_the_sessions_own_evening_is_a_quiet_wait(self):
+        for when in (after_settle(D(2026, 3, 16)), morning(D(2026, 3, 16), 23, 30)):
+            with self.subTest(when=when), tempfile.TemporaryDirectory() as root:
+                job = self.warmed(root)
+                files = job.files()
+                status, out, err = self.run_with(job, Forbidden([D(2026, 3, 16)]), when)
+                self.assertEqual(status, 0, err)
+                self.assertIn("not available yet on this plan", err)
+                self.assertNotIn("refused", err)
+                self.assertEqual(job.files(), files)
+
+    def test_a_403_over_a_weekend_waits_until_the_next_trading_days_quiet_hour(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = Job(root)
+            self.assertEqual(job.main(after_settle(D(2026, 3, 12)), "--backfill-from", BASE.isoformat())[0], 0)
+            for when, code in ((morning(D(2026, 3, 14), 12), 0), (morning(D(2026, 3, 16), 7), 0),
+                               (morning(D(2026, 3, 16), 8), 1)):
+                with self.subTest(when=when):
+                    self.assertEqual(self.run_with(job, Forbidden([WARM]), when)[0], code)
+
+    def test_a_403_for_an_explicit_historical_session_is_a_failure_even_before_the_quiet_hour(self):
         with tempfile.TemporaryDirectory() as root:
             job = self.warmed(root)
-            status, _, err = self.run_with(job, Forbidden([D(2026, 3, 16)]), after_settle(D(2026, 3, 16)))
+            files = job.files()
+            job.client = Forbidden([D(2026, 3, 16)])
+            status, _, err = job.main(morning(D(2026, 3, 18), 7), "--session", "2026-03-16")
             self.assertEqual(status, 1)
             self.assertIn("ti-data refused", err)
+            self.assertEqual(job.files(), files)
+
+    def test_an_explicit_session_equal_to_the_latest_keeps_the_quiet_wait(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.warmed(root)
+            job.client = Forbidden([D(2026, 3, 17)])
+            status, _, err = job.main(morning(D(2026, 3, 18), 7), "--session", "2026-03-17")
+            self.assertEqual(status, 0, err)
+            self.assertIn("not available yet on this plan", err)
 
     def test_a_403_for_an_earlier_session_of_a_catch_up_is_a_failure(self):
         with tempfile.TemporaryDirectory() as root:

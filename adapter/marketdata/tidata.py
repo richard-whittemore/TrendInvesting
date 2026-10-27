@@ -138,11 +138,20 @@ class NotAvailableYet(Exception):
     written, and the next firing asks again."""
 
 
-# The free plan serves a session's grouped bars the next morning, so the
-# morning firings (ti-data.timer) before this hour treat a 403 for the latest
-# session as a wait; the last firing is after it, and a 403 then is a failure
-# that pages (ADR 0019, "Alerting"). TimerAgreementTest checks the two agree.
+# The free plan serves a session's grouped bars the next morning, so a 403 for
+# the latest settled session is a wait from the session's own day until this
+# hour on the next trading day (the morning firings of ti-data.timer before
+# it); at or after it, the last firing's 403 is a failure that pages (ADR
+# 0019, "Alerting"). Only the latest settled session is exempt: an explicitly
+# requested older one, or an older one of a catch-up, is a refusal.
+# TimerAgreementTest checks the timer and this hour agree.
 QUIET_BEFORE = dt.time(8, 0)
+
+
+def quiet_until(session):
+    """The New York time before which a 403 for ``session`` is a wait."""
+    following = nyse_calendar.sessions_after(session, 1)[0]
+    return dt.datetime.combine(following, QUIET_BEFORE, tzinfo=nyse_calendar.NEW_YORK)
 
 
 class _LatestSession:
@@ -561,13 +570,16 @@ def run(data, streams, config, engine_log, key, now, settle, session=None, backf
     if previous is None and len(span) < cfg.min_sessions:
         raise Refused("the history {}..{} holds {} sessions; the indicators need {}".format(
             first, session, len(span), cfg.min_sessions))
-    client = _LatestSession(client_factory(key), session)
+    latest = settled_session(now(), settle)
+    # Only the latest settled session is awaited quietly (None matches no day).
+    client = _LatestSession(client_factory(key), session if session == latest else None)
     try:
         history.backfill(client, data, session, len(span), now=now, settle=settle)
     except NotAvailableYet as e:
-        if now().astimezone(nyse_calendar.NEW_YORK).time() >= QUIET_BEFORE:
-            raise Refused("Massive still refuses session {} after {} New York, when the plan should serve it ({}); "
-                          "check the plan and the key".format(session, QUIET_BEFORE.strftime("%H:%M"), e)) from None
+        if now() >= quiet_until(session):
+            raise Refused("Massive still refuses session {} at or after {} New York on the next trading day, when "
+                          "the plan should serve it ({}); check the plan and the key".format(
+                              session, QUIET_BEFORE.strftime("%H:%M"), e)) from None
         raise NotAvailableYet("session {} is not available yet on this plan ({}); the next firing asks again"
                               .format(session, e)) from None
     start = cfg.warm_up_start + dt.timedelta(days=1)

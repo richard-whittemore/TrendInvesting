@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -225,12 +226,23 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 		// the same failure, so a reminder falls due even though no later run
 		// was named.
 		errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every))
+		if !remindsUnit(unit) {
+			return errors.Join(errs...)
+		}
 		return errors.Join(append(errs, remindRun(u, unit, episode, "", senders, at))...)
 	}
 	// A channel that has not yet taken the episode's page is sent it first.
 	errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every))
+	if !remindsUnit(unit) {
+		return errors.Join(errs...)
+	}
 	return errors.Join(append(errs, remindRun(u, unit, episode, run, senders, at))...)
 }
+
+// remindsUnit is whether a failed unit is reminded hourly: the data job is
+// not (its timer runs it again, and one page is the incident; its episode
+// ends when a run ends well).
+func remindsUnit(unit string) bool { return unit != "ti-data.service" }
 
 // unnamedRun is what a firing names a failed unit systemd gave no invocation
 // for.
@@ -426,6 +438,7 @@ func secretValues(getenv func(string) string, secretsFile string) []string {
 // it was failed, and its current invocation (the failed run's, when failed).
 type unitSample struct {
 	failed     bool
+	state      string // systemd's ActiveState
 	invocation string
 }
 
@@ -449,7 +462,7 @@ func sampleUnits(systemctl string, units []string) (map[string]unitSample, error
 			failures = append(failures, fmt.Errorf("reporter: systemctl show %s could not be run: the trading units were not checked", unit))
 			continue
 		}
-		samples[unit] = unitSample{failed: state == "failed", invocation: props["InvocationID"]}
+		samples[unit] = unitSample{failed: state == "failed", state: state, invocation: props["InvocationID"]}
 	}
 	return samples, errors.Join(failures...)
 }
@@ -474,11 +487,16 @@ func splitUnits(list string) []string {
 // answers at the start of the firing, sampledAt their time: an episode whose
 // page or latest failed run was recorded since then has a run newer than the
 // sample, so it is never ended on the sample's word. Both reporters and the hook share the record under a lock.
-func unitStep(path string, units []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) error {
+func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) error {
 	return withUnitState(path, at, func(u *unitState) error {
 		var failures []error
-		for _, unit := range units {
+		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
+			ownsPage := !slices.Contains(resolveOnly, unit)
+			if !ownsPage && sample.state != "inactive" && sample.state != "active" {
+				// Failed, or a retry in flight (activating): the failure is not over.
+				continue
+			}
 			if sample.failed {
 				if sample.invocation == "" {
 					sample.invocation = unnamedRun

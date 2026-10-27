@@ -148,3 +148,28 @@ func TestAReminderWithoutAKnownCountSaysNoCount(t *testing.T) {
 		t.Errorf("runs 2: the reminder lacks %q:\n%s", "2 failed runs", a.Body)
 	}
 }
+
+// TestTheDataJobsPageNeverSaysSystemdDoesNotRestartIt: the data job is run
+// again by its timer, so its page and a state-at-start line say that, while the
+// engine's and the adapter's still say a start is the owner's (ADR 0019,
+// "Alerting").
+func TestTheDataJobsPageNeverSaysSystemdDoesNotRestartIt(t *testing.T) {
+	at := time.Date(2026, 10, 22, 15, 4, 0, 0, time.UTC)
+	data := report.UnitFailedAlert("lightsail", "ti-data.service", "0123456789abcdef0123456789abcdef", "refused", at)
+	for _, text := range []string{data.Body, data.PublicBody} {
+		if strings.Contains(text, "does not restart") || strings.Contains(text, "every start is yours") {
+			t.Errorf("the data job's page says it is not restarted:\n%s", text)
+		}
+		if !strings.Contains(text, "timer") {
+			t.Errorf("the data job's page does not say its timer runs it again:\n%s", text)
+		}
+	}
+	engine := report.UnitFailedAlert("lightsail", "ti-engine@boost.service", "0123456789abcdef0123456789abcdef", "stopped", at)
+	if !strings.Contains(engine.Body, "systemd does not restart the engine or the adapter") {
+		t.Errorf("the engine's page lost its restart sentence:\n%s", engine.Body)
+	}
+	a, _ := report.WithFailedUnits(report.Alert{AccountID: "boost"}, false, []string{"ti-data.service", "ti-engine@boost.service"})
+	if strings.Contains(a.Body, "which systemd does not restart: ti-data") || !strings.Contains(a.Body, "timer") {
+		t.Errorf("the state-at-start line words the data job as not restarted:\n%s", a.Body)
+	}
+}
