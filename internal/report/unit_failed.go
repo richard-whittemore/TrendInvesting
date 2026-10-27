@@ -27,6 +27,7 @@ func UnitFailedKeyPrefix(unit string) string { return "unit-failed:" + unit + "/
 var UnitManualRows = []struct{ prefix, row string }{
 	{"ti-adapter-", `docs/manual/ibkr-adapter.md, "What can go wrong", the row "The adapter's unit failed"`},
 	{"ti-engine@", `docs/manual/engine.md, "While it runs", the row "The engine's unit failed"`},
+	{"ti-data.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
 }
 
 // UnitManualRow is the manual row for a failed unit; every other unit is

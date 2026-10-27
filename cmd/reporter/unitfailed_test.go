@@ -162,6 +162,25 @@ func TestTheHookPagesBothChannelsOnceWithTheUnitTheReasonAndTheManualRow(t *test
 	}
 }
 
+func TestTheHookPagesAFailedDataJobOnceWithItsManualRow(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	for i := 0; i < 2; i++ {
+		if err := notify(t, r, dir, systemd, twoChannels(), "ti-data.service"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, "ti-data.service"); n != 1 {
+			t.Errorf("%s took %d pages for the data job, want 1", host, n)
+		}
+		if got := strings.Join(r.to(host), "\n"); !strings.Contains(got, "The data job fails") {
+			t.Errorf("%s: the page does not give the data job's manual row:\n%s", host, got)
+		}
+	}
+}
+
 func TestTheHookPagesOncePerUnitUntilItIsResolved(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	systemd := newStandInSystemd(t)
