@@ -1550,7 +1550,8 @@ the reporter and the dashboard do the matching:
   the text says how many.
 
 **What may be missing, and how it is said.** IBKR's report lags: a posting of
-day D is in the statement read on the evening of the next session, so the
+day D is in the statement read the morning after it, or the morning after
+the next session at the latest, so the
 last two sessions' costs may not be there yet (the text says so, and says
 "costs recorded through <day>"). Until the Flex reader has written a costs
 ledger, the card shows the commissions on fills only and says "fees and

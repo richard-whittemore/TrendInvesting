@@ -341,15 +341,14 @@ Order of starting, each on the server, each an explicit step of yours:
    adapter refuses to start until the run's stream folder exists ("the
    run's stream folder ... does not exist"), and once started it delivers
    the warm-up to the engine behind one account reading, with the
-   start-of-run reconciliation. **Start the warm-up no later than 07:00 New
-   York on the morning after the first session you want decided** (better,
-   the evening before it): the warm-up takes about an hour and a half and
-   the adapter's delivery a minute or two more, and that session's reading
-   must be delivered with its executions proof before 09:00, after which
-   the session is withheld. A warm-up started after that session's close
-   includes the session itself, delivered behind the same morning reading;
-   one started before writes up to the session before, and the session's
-   own file follows at 06:05. From then on, each weekday
+   start-of-run reconciliation. **Run the warm-up on the day before the
+   first session you want decided (or earlier), after that morning's data
+   job has written the latest session's file (06:05, again at 07:05 and
+   08:05), and start the adapter as soon as it finishes** (about an hour and
+   a half). The warm-up writes up to the latest session Massive serves (on
+   the free plan, the one before today), so the first session you want
+   decided arrives in its own file the morning after it, from 06:05, and is
+   delivered behind that morning's reading. From then on, each weekday
    morning the Flex reader runs at 05:30 (again at 06:30 and 07:30) and
    writes its executions proof, and the data job writes the previous
    session's file at 06:05 (again at 07:05 and 08:05). The adapter, left
@@ -358,7 +357,10 @@ Order of starting, each on the server, each an explicit step of yours:
    close when nothing is working at IBKR, the proof shows nothing executed
    from the close to midnight, IBKR's own list shows nothing since, and
    nothing is recorded after the close (`docs/manual/paper-trading.md`, "A
-   paper day"). Without the proof by 09:00 the session is withheld. Set up
+   paper day"). If the proof is not there yet, the delivery waits for the
+   Flex reader's next firing until 09:00; after 09:00 a delivery without
+   the proof is withheld at once. A reading that has its proof still stands
+   for the close until the next session opens (09:30). Set up
    the Trade Confirmation query first (`docs/manual/reconciliation.md`,
    "What you set up once", step 4). An order the engine releases is sent
    that morning, as a DAY order for that day.

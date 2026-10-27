@@ -774,7 +774,11 @@ days), it takes them all, oldest first.
    open orders, read after both), no execution in the account at or since
    the close (IBKR's own list, asked for every client and read last; it
    reaches back only to midnight, which is why the date must be the
-   close's; a closing-auction fill stamped at the close itself counts),
+   close's, or, for the free plan's next-morning reading, why the Flex
+   reader's executions proof must cover the close to midnight (your
+   decision of 2026-10-27; [reconciliation](reconciliation.md), "The
+   executions proof"); a closing-auction fill stamped at the close itself
+   counts),
    every holding with an official close in the file, IBKR's own net
    liquidation at the read above zero, the holdings exactly the previous
    close's plus or minus the fills since, and the cash the previous close's

@@ -12,9 +12,11 @@ its outbox), and delivers the data job's market-data stream behind one
 account reading (`delivery.py`): the engine's `account.snapshot` (version 3)
 and the `account.broker.snapshot` (version 2), stamped as of the session's
 close when the reading stands for it (the owner's decision of 2026-10-18:
-read after the close on its own New York date, no order working or pending
-at IBKR, no execution since the close; else at the read time, with the
-reason), and `market.mark.recorded` (version 2) from the delivered bar's
+read after the close on its own New York date, or, from the owner's
+decision of 2026-10-27, the next morning before the open with the Flex
+reader's executions proof covering the close to midnight; no order working
+or pending at IBKR, no execution since the close; else at the read time,
+with the reason), and `market.mark.recorded` (version 2) from the delivered bar's
 official close, IBKR's last price beside it (the price band's comparison
 when set). A reading as of the close is also the previous close's holdings
 and cash adjusted by the fills since (cash within `CASH_DRIFT_BOUND`, 1%):

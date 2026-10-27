@@ -61,7 +61,7 @@ slipping into it:
 - **The reconciliation with each delivery** compares IBKR's holdings and cash
   with **the previous close's snapshot, plus the events the journal recorded
   since that close**. It is taken when the session's market data is
-  delivered (normally the evening after the close), from the same reading as
+  delivered (normally the morning after the close), from the same reading as
   the new snapshot, and goes ahead of it, so it covers the whole session as
   well as the night before. It catches a manual trade placed overnight, before the open
   or during the session, a dividend, split or fee posted overnight, IBKR
@@ -116,7 +116,7 @@ every event the journal recorded since:
 - **a deposit or withdrawal** the Flex reader recorded (below): the cash in
   or out, and nothing else. One dated before the book is already in it; so
   is one dated the evening of a close, after 4 p.m., since the close's
-  reading is taken after the close.
+  reading is taken after the close (the next morning).
 
 Anything else that changes a holding (a delisting, a merger, a symbol change)
 is not something the book can apply yet, so a reconciliation that meets one is
@@ -255,13 +255,14 @@ Two conservative choices, both of which can only make a sale smaller:
 
 ## Deposits and withdrawals, read from IBKR
 
-**In short: deposit any time; nothing to do.** The reader records it that
-evening, and the strategy invests it at the next decision after the reader has
-recorded it, usually the following evening (until then buys are sized
-without it). A deposit of more than 1% of the
-account's value (a typical IRA contribution is) also makes that evening's
-reading stamped at its read time, so the engine skips that evening's decision
-and you get that page too; that is expected, and it is still nothing to do. A
+**In short: deposit any time; nothing to do.** The reader records it the
+next weekday morning (from 5:30 a.m.) once IBKR's statement lists it,
+sometimes a day later, and the strategy invests it at the next decision after
+the reader has recorded it (until then buys are sized without it). A deposit
+of more than 1% of the account's value (a typical IRA contribution is), if
+the reader has not recorded it before the session's morning reading, makes
+that reading stamped at its read time, so the engine skips that session's
+decision and you get that page too; that is expected, and it is still nothing to do. A
 withdrawal is the same, except that buys wait until the reader has recorded it
 (sells and exits go on); the next decision then sizes from what is left. (Keep
 a withdrawal within the account's cash: IBKR refuses one larger, and the
@@ -510,9 +511,9 @@ and fees have no fill, so they are always the ledger's.
   first snapshot exists the reading is set aside (below), and the first
   reading after it writes the transfer.
 
-Both approximations take the close snapshot as read after the transfer; a
-transfer IBKR times later that evening than the reading is counted as held
-by it. What the records are for, the running record of money in and out,
+Both approximations take the close snapshot as read after the transfer, as
+the next morning's reading is; a transfer IBKR times later on the close's own
+day is counted as held by it. What the records are for, the running record of money in and out,
 needs only each transfer's amount and date, which are exact.
 
 - **Each transfer once.** The ledger is the record of what has been read: a
@@ -863,7 +864,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | `ti-flex@<instance>` failed; its status file says **the chain of runs ... ends without a first run's approval stating the starting book** | Refused: without the starting book's time the reader cannot tell a transfer in the first book from one after it | Tell the developer; check `run.env` names the account's current run |
 | `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement starts on D2, but the last reading covered up to D1** (and names the day the next statement must start on or before, the day after D1) | Nothing written, and the kept days not moved on: a transfer between D1 and D2 would otherwise be lost. Every later reading stops the same way until a statement reaches back | In Client Portal, set the Flex query's period to reach back to the day it names (a custom date range, or *Last 365 Calendar Days*), run `sudo systemctl start ti-flex@<instance>` and check it read; then set the period back to *Last 30 Calendar Days*. A transfer already in the ledger is never written twice |
 | `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement starts on D2, but no earlier reading is kept ... and the first run was approved on D1** | The first reading (or the first after the coverage file was lost) starts after the approval day, so a transfer between D1 and D2 would be in no statement. Nothing written, no coverage kept | In Client Portal, set the Flex query's period to a custom date range starting on D1 and ending today, run `sudo systemctl start ti-flex@<instance>` and check it read; then set the period back to *Last 30 Calendar Days*. If the coverage file was lost, put it back from the nightly backup once it exists, or until then from a Lightsail snapshot if you took one (see the server chapter, "Backups"); a custom period reaches back 365 days at most (IBKR's documentation, unverified), so if the approval day is further back than that, tell the developer. Turning the reader on no later than 29 days after the first run's approval day avoids this |
-| `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement ends on D1, but a current one ends on D2 or the session before** (the period was left as a custom range, or is not Last 30 Calendar Days) | Nothing written, the coverage file not moved on: transfers after D1 are in no statement, and every later reading would return the same window. D2 is the last NYSE session before the reading's New York day; a statement ending on D2, the session before it, or yesterday's date is read, so a weekend or a market holiday never trips it | In Client Portal, check the Flex query's period and set it back to *Last 30 Calendar Days*, run `sudo systemctl start ti-flex@<instance>` and check it read. If the period already is Last 30 Calendar Days (IBKR ended it earlier than expected after several closed days), the next evening's reading clears it; tell the developer if it repeats |
+| `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement ends on D1, but a current one ends on D2 or the session before** (the period was left as a custom range, or is not Last 30 Calendar Days) | Nothing written, the coverage file not moved on: transfers after D1 are in no statement, and every later reading would return the same window. D2 is the last NYSE session before the reading's New York day; a statement ending on D2, the session before it, or yesterday's date is read, so a weekend or a market holiday never trips it | In Client Portal, check the Flex query's period and set it back to *Last 30 Calendar Days*, run `sudo systemctl start ti-flex@<instance>` and check it read. If the period already is Last 30 Calendar Days (IBKR ended it earlier than expected after several closed days), the next reading clears it; tell the developer if it repeats |
 | `ti-flex@<instance>` failed; its status file says `"state": "ambiguous-transfer"`: **the first run was approved at T, after that session's close, and IBKR dates transfer N of AMOUNT by that day alone** | IBKR gives no time for the transfer, and you approved after the day's close, so the reader cannot tell whether the book you stated holds it. Nothing written, the account number never shown; every reading stops the same way until you decide. Trading is unaffected | Check in IBKR's activity when the transfer reached the account against when you read the book. Then record it, once: `sudo -u ti-trader env -C /opt/trend-investing/adapter /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr flex --ledger /var/lib/trend-investing/flex/<instance>/cash-movements.jsonl --resolve N=in-first-book` if the book you read already held it, or `--resolve N=after-approval` if it came after; then `sudo systemctl start ti-flex@<instance>` and check it read. The decision is kept in `cash-movements.jsonl.resolutions.json` and never changed (a second, different `--resolve` for the same transfer is refused). `--resolve` also refuses a transfer already in the ledger ("already journalled as ...") and any transfer the last reading did not name as ambiguous, saying what the reader is waiting on; and if a reading is running it waits up to 10 seconds, then says "a reading is running, try again in a few minutes" (try again once it has finished). Avoid it: move no money on the day you approve a first run |
 | `ti-flex@<instance>` failed; its status file says **the snapshot as of ... is in a year the NYSE calendar does not hold** (or the first run's approval is), or **the reading's day, D, is in a year the NYSE calendar does not hold** (D as `yyyymmdd`) | Refused rather than guess whether the snapshot is a session's close, or whether the statement is current. Nothing written. The snapshot case: from the first close snapshot past the calendar's last year (2030), every reading that has a new transfer is refused this way. The reading's-day case: the reader looks up the last session before its own day, so from 2 January 2031 every reading is refused this way, whether or not it has a new transfer. Until the calendar is extended; the market-data job stops at the same year | Tell the developer to extend `adapter/marketdata/nyse_calendar.py` (checked against NYSE's published holidays and early closes) and install the new build; the next reading then writes the transfers, none lost while they are within the query's window (or a custom-period reading reaches back) |
 | `ti-flex@<instance>` failed; its status file says **the resolutions file ... is not as this reader writes it** | Refused: your recorded decisions on ambiguous transfers are not known | Put the file back from a backup or the server's snapshot; never edit it by hand. Without one, record each decision again with `--resolve` (above) |
