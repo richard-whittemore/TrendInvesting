@@ -262,43 +262,48 @@ PROOF_WAIT_UNTIL = clock_time(9, 0)
 # execution reported in any other zone shows the list's midnight is not New
 # York's, so a morning reading is withheld (ADR 0019, amended 2026-10-27).
 NEW_YORK_ZONES = frozenset(("US/Eastern", "America/New_York", "EST5EDT"))
-# New York's abbreviations, each New York's only while it is in force there.
-NEW_YORK_ABBREVIATIONS = frozenset(("EST", "EDT"))
+# New York's abbreviations, and the long names IB Gateway may give for them, each New York's only while it is in
+# force there.
+NEW_YORK_ABBREVIATIONS = {"EST": "EST", "EDT": "EDT", "Eastern Standard Time": "EST",
+                          "Eastern Daylight Time": "EDT"}
 
 
-def gateway_zone_problem(text):
-    """Why IB Gateway's connection time text does not show it on New York time; "" when it does.
+def gateway_zone_problem(text, what="IB Gateway's connection time"):
+    """Why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", does not show it on New York time; "" when it
+    does. what names the text in the reason, which quotes it exactly as given.
 
     The TWS API gives a session's connection time (EClient.twsConnectionTime)
-    as IB Gateway states it at the handshake, "YYYYMMDD HH:MM:SS Zone", in
-    the Gateway's own zone, the zone its execution list's midnight is in
-    (ADR 0025 point 5). IBKR documents the call, not the format, so it is
-    read defensively (ADR 0019, amended 2026-10-27; AGENTS.md: fail closed):
-    a New York zone name (NEW_YORK_ZONES), or EST or EDT where New York
-    used that abbreviation at the time stated; anything else, or a text not
-    of that shape, is a problem.
+    and each execution's time in the Gateway's own zone, the zone its
+    execution list's midnight is in (ADR 0025 point 5). IBKR documents the
+    call, not the format, so it is read defensively (ADR 0019, amended
+    2026-10-27; AGENTS.md: fail closed): the zone, everything after the date
+    and time, must be a New York zone name (NEW_YORK_ZONES), or an
+    abbreviation or long name (NEW_YORK_ABBREVIATIONS) New York used at the
+    time stated, at either reading of a local time repeated when daylight
+    saving time ends; anything else, or a text not of that shape, is a
+    problem.
     """
-    parts = text.split() if isinstance(text, str) else []
+    parts = text.split(None, 2) if isinstance(text, str) else []
     if len(parts) != 3:
-        return ("IB Gateway's connection time {!r} is not 'YYYYMMDD HH:MM:SS Zone', so the zone its list of "
-                "executions starts its midnight in is not known".format(text))
+        return ("{} {!r} is not 'YYYYMMDD HH:MM:SS Zone', so the zone its list of executions starts its midnight "
+                "in is not known".format(what, text))
     try:
         local = datetime.strptime(parts[0] + " " + parts[1], "%Y%m%d %H:%M:%S")
     except ValueError:
-        return ("IB Gateway's connection time {!r} does not state a date and time that can be read, so the zone it "
-                "is in is not trusted".format(text))
-    zone = parts[2]
+        return ("{} {!r} does not state a date and time that can be read, so the zone it is in is not "
+                "trusted".format(what, text))
+    zone = parts[2].strip()
     if zone in NEW_YORK_ZONES:
         return ""
     if zone in NEW_YORK_ABBREVIATIONS:
-        if local.replace(tzinfo=nyse_calendar.NEW_YORK).tzname() == zone:
+        used = {local.replace(tzinfo=nyse_calendar.NEW_YORK, fold=fold).tzname() for fold in (0, 1)}
+        if NEW_YORK_ABBREVIATIONS[zone] in used:
             return ""
-        return ("IB Gateway's connection time {!r} is in {}, which is not the abbreviation New York uses at that "
-                "date: the Gateway is not on New York time".format(text, zone))
-    return ("IB Gateway's connection time {!r} is in the zone {!r}, not New York's: IBKR's executions reach back "
-            "only to midnight in the Gateway's own zone, so the midnight its list starts at is not New York's; set "
-            "IB Gateway to New York time (ti-gateway.service, TZ=America/New_York, and its login's time "
-            "zone)".format(text, zone))
+        return ("{} {!r} is in {}, which is not what New York uses at that date and time: the Gateway is not on New "
+                "York time".format(what, text, zone))
+    return ("{} {!r} is in the zone {!r}, not New York's: IBKR's executions reach back only to midnight in the "
+            "Gateway's own zone, so the midnight its list starts at is not New York's; set IB Gateway to New York "
+            "time (ti-gateway.service, TZ=America/New_York, and its login's time zone)".format(what, text, zone))
 
 
 class ReconcileIncomplete(Exception):
@@ -464,7 +469,7 @@ class AdapterLoop:
         # Set by _morning_proof when the proof failed in a way a later firing of the Flex reader can clear,
         # before PROOF_WAIT_UNTIL: the batch then waits rather than withhold (_post_close_reading).
         self._proof_retryable = False
-        # The zones of every execution time IBKR reported in the account on this connection
+        # Every execution time IBKR reported in the account on this connection, as it gave it
         # (_count_execution), and why IB Gateway's own zone, read at this connection's reconcile, is not New
         # York's ("" when it is): both are read afresh at every reconcile (gateway_zone_problem).
         self._execution_zones = set()
@@ -554,6 +559,8 @@ class AdapterLoop:
             self._gateway_zone = gateway_zone_problem(self._api.connection_time())
         except Exception as err:  # any failure to read it is a zone not known (fail closed)
             self._gateway_zone = "IB Gateway's connection time could not be read ({})".format(type(err).__name__)
+        if self._gateway_zone:
+            log.warning("ibkr %s; a morning reading on this connection is withheld", self._gateway_zone)
         try:
             self._reconcile()
         except (NotConnected, BrokerOrdersIncomplete, ReconcileIncomplete) as err:
@@ -871,8 +878,7 @@ class AdapterLoop:
         if event.name == "exec_details" and len(event.args) == 3:
             if getattr(event.args[2], "acctNumber", None) == self.config.account_id:
                 self._account_executions.add(getattr(event.args[2], "execId", None))
-                text = getattr(event.args[2], "time", None)
-                self._execution_zones.add(text.split()[-1] if isinstance(text, str) and text.split() else "")
+                self._execution_zones.add(getattr(event.args[2], "time", None))
 
     def _activity(self):
         """A broker snapshot's cutoff watermark: the order reports recorded, and the executions seen.
@@ -1184,13 +1190,11 @@ class AdapterLoop:
                                  and now.date() != day and now.time() < PROOF_WAIT_UNTIL)
         if self._gateway_zone:
             reasons.append(self._gateway_zone)
-        foreign = sorted(z for z in self._execution_zones if z not in NEW_YORK_ZONES)
-        if foreign:
-            reasons.append("IBKR reported an execution in the account with its time in the zone {}, not New "
-                           "York's: IBKR's executions reach back only to midnight in IB Gateway's own zone, so the "
-                           "midnight its list starts at is not New York's and the executions proof cannot be joined "
-                           "to it; set IB Gateway to New York time (ti-gateway.service, TZ=America/New_York)".format(
-                               ", ".join(repr(z) for z in foreign)))
+        # Each execution time is checked as the connection time is, quoted as IBKR gave it.
+        for text in sorted(self._execution_zones, key=repr):
+            problem = gateway_zone_problem(text, "IBKR's execution time")
+            if problem:
+                reasons.append(problem)
         fills = self._journalled_fills_since(close)
         if fills:
             reasons.append("the journal records {} fill(s) stamped at or after the close, or with a time that cannot "

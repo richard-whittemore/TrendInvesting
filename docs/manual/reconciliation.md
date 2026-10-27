@@ -637,9 +637,13 @@ time zone, which its unit sets to New York's (`TZ=America/New_York` in
 `ti-gateway.service`; do not change it, and keep the Gateway login's time
 zone New York's). The adapter checks it at every connect and reconnect,
 whether or not anything has executed: it reads the connection time the
-Gateway gives (for example `20261027 07:10:01 US/Eastern`, or `EST`/`EDT`),
-and an execution's time too. Any other zone, or a connection time it
-cannot read, withholds the morning reading, the page naming it; once the
+Gateway gives (for example `20261027 07:10:01 US/Eastern`; `EST`, `EDT`,
+`Eastern Standard Time` and `Eastern Daylight Time` stand only in their own
+season, either one in the hour repeated when the clocks go back), and every
+execution's time the same way. Any other zone, or a time it cannot read,
+withholds the morning reading, the page and `journalctl -u
+ti-adapter-boost` quoting the Gateway's text exactly as it gave it (send
+that to the developer if it is New York time in a form not listed here); once the
 Gateway is set right and the adapter reconnects, it is trusted again. A fill recorded with a
 time that has no zone withholds it too.
 

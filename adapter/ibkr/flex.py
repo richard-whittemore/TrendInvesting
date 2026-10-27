@@ -1102,7 +1102,12 @@ def _write_whole(path, text):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-    directory = os.open(os.path.dirname(os.path.abspath(path)), os.O_RDONLY)
+    _sync_directory(os.path.dirname(os.path.abspath(path)))
+
+
+def _sync_directory(folder):
+    """The folder's entries made durable: a file renamed into it or removed from it stays so after a crash."""
+    directory = os.open(folder, os.O_RDONLY)
     try:
         os.fsync(directory)
     finally:
@@ -1406,6 +1411,10 @@ def _write_proof(ledger_path, text, say):
         try:
             os.unlink(path)
             left = "the earlier proof is removed, so the morning delivery finds none"
+            try:
+                _sync_directory(os.path.dirname(path))
+            except OSError as unsynced:
+                left += ", but its removal may not survive a crash ({})".format(unsynced.strerror or unsynced)
         except FileNotFoundError:
             left = "no earlier proof is left"
         except OSError as stuck:

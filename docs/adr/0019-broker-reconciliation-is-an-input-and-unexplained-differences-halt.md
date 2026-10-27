@@ -1201,14 +1201,21 @@ an execution: at each reconcile (every connect and reconnect) the adapter
 reads the session's connection time IB Gateway gave at the handshake (TWS
 API `EClient.twsConnectionTime`, "YYYYMMDD HH:MM:SS Zone" in the Gateway's
 own zone; IBKR documents the call but not the format, so it is read
-defensively). It stands only when its zone is a New York zone name
-(`US/Eastern`, `America/New_York`, `EST5EDT`) or the abbreviation New York
-used at the time stated (`EST` in winter, `EDT` in summer); a time missing,
+defensively). Its zone, everything after the date and the time, stands
+only when it is a New York zone name (`US/Eastern`, `America/New_York`,
+`EST5EDT`), or an abbreviation or long name (`EST` or `Eastern Standard
+Time`, `EDT` or `Eastern Daylight Time`) that New York used at the date and
+time stated, at either reading of the local hour repeated when daylight
+saving time ends; the date and time must themselves read. A time missing,
 not of that shape, or in any other zone withholds the morning reading, the
-page naming it. Every execution IBKR reports on the connection is checked
-the same way (an execution time in another zone withholds). Both are read
-afresh at each reconcile, so a Gateway set right and reconnected is trusted
-again without restarting the adapter. A fill journalled with a time that has no zone, or one
+page and the adapter's journal quoting the Gateway's text exactly as it
+gave it. Every execution time IBKR reports in the account on the
+connection gets exactly the same check (the same shape, the same date and
+time reading, the same zones, season-checked the same way), quoted as IBKR
+gave it, and one that fails withholds too. Both the connection time and
+the execution times seen are read afresh at each reconcile, so a Gateway
+set right and reconnected is trusted again without restarting the
+adapter. A fill journalled with a time that has no zone, or one
 that cannot be read, cannot be placed against the close and withholds too.
 
 **When it runs.** The Flex reader moves from 21:30 to each weekday morning

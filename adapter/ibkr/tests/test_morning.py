@@ -359,6 +359,47 @@ class MorningTests(unittest.TestCase):
         self.deliver(THURSDAY)
         self.assert_withheld("EDT")
 
+    def test_either_abbreviation_stands_in_the_hour_repeated_when_daylight_saving_ends(self):
+        # 01:30 on 2026-11-01 happens twice in New York: first in EDT, then in EST.
+        from loop import gateway_zone_problem
+        for text in ("20261101 01:30:00 EST", "20261101 01:30:00 EDT", "20261101 01:30:00 Eastern Standard Time",
+                     "20261101 01:30:00 Eastern Daylight Time"):
+            with self.subTest(text=text):
+                self.assertEqual(gateway_zone_problem(text), "")
+        self.assertNotEqual(gateway_zone_problem("20261101 02:30:00 EDT"), "", "after the repeated hour: EST only")
+
+    def test_new_yorks_long_zone_name_in_force_is_new_york(self):
+        self.proof(FRIDAY_MORNING)
+        self.fake.tws_connection_time = "20270115 08:05:00 Eastern Standard Time"
+        self.deliver(THURSDAY)
+        self.assert_as_of_close(THURSDAY)
+
+    def test_the_long_zone_name_not_in_force_withholds_showing_the_raw_text(self):
+        self.proof(FRIDAY_MORNING)
+        raw = "20270115 08:05:00 Eastern Daylight Time"
+        self.fake.tws_connection_time = raw
+        with self.assertLogs("ibkr", "INFO") as logs:
+            self.deliver(THURSDAY)
+        self.assertIn(raw, self.assert_withheld("IB Gateway's connection time"))
+        self.assertIn(raw, "\n".join(logs.output), "the journal shows the Gateway's text as it gave it")
+
+    def test_an_execution_time_is_checked_as_the_connection_time_is(self):
+        # An execution's time in New York's abbreviation in force stands; one in EDT in January does not.
+        for zone, stands in (("EST", True), ("EDT", False)):
+            with self.subTest(zone=zone):
+                self.setUp()
+                self.proof(FRIDAY_MORNING)
+                loop = self.loop()
+                loop.start()
+                ex = execution(exec_id="0006.abbr.01.01", order_id=0, perm_id=7272, order_ref="", client_id=0,
+                               time="20270114 10:00:01 " + zone)
+                loop._count_execution(SimpleNamespace(name="exec_details", args=(-1, contract(), ex)))
+                self.deliver(THURSDAY, loop)
+                if stands:
+                    self.assert_as_of_close(THURSDAY)
+                else:
+                    self.assert_withheld("IBKR's execution time", "20270114 10:00:01 EDT")
+
     def test_a_corrected_gateway_is_trusted_again_after_a_reconnect(self):
         # The zone, and every execution zone seen, belong to one connection: a reconnect reads them afresh.
         self.proof(FRIDAY_MORNING)

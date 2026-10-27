@@ -1343,6 +1343,26 @@ class ExecutionsTests(ReadOnceHarness):
         self.assertFalse(Path(flex.executions_path(str(self.ledger))).exists(), "no earlier proof is left standing")
         self.assertIn("executions proof", self.out.getvalue())
 
+    def test_the_earlier_proofs_removal_is_made_durable(self):
+        self.read_trades(confirms())
+        Path(flex.executions_path(str(self.ledger)) + ".tmp").mkdir()
+        events = []
+        real_unlink, real_sync = flex.os.unlink, flex._sync_directory
+
+        def unlink(path):
+            events.append(("unlink", Path(path).name))
+            real_unlink(path)
+
+        def sync(path):
+            events.append(("sync", path))
+            real_sync(path)
+        with unittest.mock.patch.object(flex.os, "unlink", unlink), \
+                unittest.mock.patch.object(flex, "_sync_directory", sync):
+            self.read_trades()
+        first = events.index(("unlink", flex.EXECUTIONS_NAME))
+        self.assertIn(("sync", str(self.dir)), events[first + 1:first + 2],
+                      "the folder is synced right after the earlier proof is removed")
+
     def test_the_proof_is_set_aside_before_the_status_says_running(self):
         order = []
         real = flex._write_whole
