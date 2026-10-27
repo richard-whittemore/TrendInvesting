@@ -460,6 +460,11 @@ type unitSample struct {
 // be run, or does not answer, is an error, never "none failed": an unchecked
 // unit is not a healthy one.
 func sampleUnits(systemctl string, units []string) (map[string]unitSample, error) {
+	return sampleUnitsFor(systemctl, units, "the trading units were not checked")
+}
+
+// sampleUnitsFor is sampleUnits with the consequence its error names.
+func sampleUnitsFor(systemctl string, units []string, consequence string) (map[string]unitSample, error) {
 	samples := map[string]unitSample{}
 	var failures []error
 	for _, unit := range units {
@@ -472,7 +477,7 @@ func sampleUnits(systemctl string, units []string) (map[string]unitSample, error
 		}
 		state, answered := props["ActiveState"]
 		if err != nil || !answered {
-			failures = append(failures, fmt.Errorf("reporter: systemctl show %s could not be run: the trading units were not checked", unit))
+			failures = append(failures, fmt.Errorf("reporter: systemctl show %s could not be run: %s", unit, consequence))
 			continue
 		}
 		samples[unit] = unitSample{failed: state == "failed", state: state, invocation: props["InvocationID"]}
@@ -482,10 +487,11 @@ func sampleUnits(systemctl string, units []string) (map[string]unitSample, error
 
 // checkResolveUnits refuses, at startup, a -resolve-units name that is not a
 // unit the reporter may only resolve (today the data job alone: remindsUnit
-// is false) or that -units also names: a unit on this list is never held
-// against the heartbeat, so listing a trading unit there would silence its
-// backup page (ADR 0019, "Alerting": a fault that persists is not left
-// silent).
+// is false) or that -units also names. A -resolve-units unit is left out of
+// the heartbeat's hold and the state-at-start page, and its delivery errors
+// are soft, so a trading unit listed there would lose both (ADR 0019,
+// "Alerting": a fault that persists is not left silent); the two lists stay
+// disjoint so a unit has one treatment.
 func checkResolveUnits(resolveOnly, monitored []string) error {
 	if err := checkTradingUnits("-resolve-units", resolveOnly); err != nil {
 		return err
@@ -521,38 +527,62 @@ func splitUnits(list string) []string {
 // answers at the start of the firing, sampledAt their time: an episode whose
 // page or latest failed run was recorded since then has a run newer than the
 // sample, so it is never ended on the sample's word. Both reporters and the hook share the record under a lock.
-func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) error {
-	return withUnitState(path, at, func(u *unitState) error {
-		var failures []error
+func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) (soft, hard error) {
+	var softErrs, hardErrs []error
+	err := withUnitState(path, at, func(u *unitState) error {
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
 			resolves := slices.Contains(resolveOnly, unit)
+			// The data job's delivery and resolve errors are soft: logged and
+			// retried at the next firing, never a fault of the reporter.
+			fail := func(err error) {
+				if err == nil {
+					return
+				}
+				if resolves {
+					softErrs = append(softErrs, err)
+				} else {
+					hardErrs = append(hardErrs, err)
+				}
+			}
 			if resolves && !sample.failed && sample.state != "inactive" && sample.state != "active" {
 				// A retry in flight (activating) or an unsampled unit: the failure is not over.
 				continue
 			}
 			if sample.failed {
+				// A failed sample older than the unit's recorded recovery never
+				// opens an episode again (ADR 0019, "Alerting": each incident once).
+				if resolves && sampledAt.Before(u.sent[recoveredSampleKey(unit)]) {
+					continue
+				}
 				if sample.invocation == "" {
 					sample.invocation = unnamedRun
 				}
-				if err := failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every); err != nil {
-					failures = append(failures, err)
-				}
+				fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
 				continue
 			}
+			resolved := false
 			for invocation, recorded := range unitRecords(u, unit) {
 				key := report.UnitFailedKey(unit, invocation)
 				if !recorded.Before(sampledAt) || !latestRun(u, key).Before(sampledAt) {
 					continue
 				}
-				if err := resolveKey(u, key, senders, setAside, at); err != nil {
-					failures = append(failures, err)
-				}
+				resolved = true
+				fail(resolveKey(u, key, senders, setAside, at))
+			}
+			if resolves && resolved && sampledAt.After(u.sent[recoveredSampleKey(unit)]) {
+				u.sent[recoveredSampleKey(unit)] = sampledAt
+				fail(u.record())
 			}
 		}
-		return errors.Join(failures...)
+		return nil
 	})
+	return errors.Join(softErrs...), errors.Join(append(hardErrs, err)...)
 }
+
+// recoveredSampleKey is where the time of the sample that last proved a
+// resolve-only unit well is kept, so an older failed sample is refused.
+func recoveredSampleKey(unit string) string { return channelKey("recovered-sample", "unit:"+unit) }
 
 // unitRecords are the failed runs of unit that some channel took, each with
 // the latest time a channel took it.

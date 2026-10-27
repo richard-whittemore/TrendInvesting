@@ -824,19 +824,21 @@ stop, not after two sessions of silence.
   hook and never reminded: a retry that fails again is the same failure, with
   no second page. If the hook could not deliver its page (a channel was down),
   the reporter's next firing sends it once; it never reminds. The reporter
-  does not name the data job in a state-at-start page or hold back the
-  outside heartbeat for it (only the engine or the adapter being failed
-  does), so a data job failure never silences the heartbeat that would tell
-  you the server itself went down. The page ends when the reporter's firing
+  does not name the data job in a state-at-start page. The data job being
+  failed never holds back the outside heartbeat (only the engine or the
+  adapter being failed does), and a page the reporter cannot deliver for it
+  is written to the journal and tried again at the next firing without failing
+  the firing, so a data job failure never silences the heartbeat that would
+  tell you the server itself went down. The page ends when the reporter's firing
   sees the data job inactive: after a later run ends well (a retry still
   running does not end it), and also after a reboot or `systemctl
   reset-failed ti-data`, which clear the failed state without any run. A run
   that fails after that pages again. Until then no further page comes, so
   after you fix the cause, `sudo systemctl start ti-data` and wait for it to
-  finish: that run ending well is what closes the incident. Started in the
+  finish: that run ending well is what closes the incident. Started on an
   evening it is a quiet wait that writes no stream (market data chapter,
-  "The free plan's timing"): the session is recorded at the next morning's
-  firing.
+  "The free plan's timing"): the next trading day's morning firing records
+  the session, or you run `ti-data --session <date>` once Massive serves it.
 - The reason is the failed run's own last journal line. A run that wrote
   nothing (a start systemd refused, such as a missing `run.env`) is explained
   by systemd's own line about that run, such as "Failed to load environment

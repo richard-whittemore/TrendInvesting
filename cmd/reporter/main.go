@@ -192,9 +192,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// skips its resolve, and fails neither the firing nor the trading units'
 	// step (ADR 0019, "Alerting").
 	if len(resolveOnly) > 0 {
-		resolveSamples, resolveErr := sampleUnits(*systemctl, resolveOnly)
+		resolveSamples, resolveErr := sampleUnitsFor(*systemctl, resolveOnly, "the trading units were checked; only the data job's resolve and backup page are skipped at this firing")
 		if resolveErr != nil {
-			_, _ = fmt.Fprintln(out, "reporter: "+resolveErr.Error()+" (the data job's page is not resolved at this firing)")
+			_, _ = fmt.Fprintln(out, resolveErr.Error())
 		}
 		for unit, sample := range resolveSamples {
 			unitSamples[unit] = sample
@@ -389,8 +389,12 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// the page of a unit not failed at the sample. A systemctl that could not
 	// be run checked nothing, so no page is resolved on its word.
 	if unitsErr == nil && len(tradingUnits)+len(resolveOnly) > 0 {
-		if err := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat); err != nil {
-			failures = append(failures, err)
+		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat)
+		if soft != nil {
+			_, _ = fmt.Fprintln(out, "reporter: the data job's page or resolve could not be completed and is retried at the next firing: "+soft.Error())
+		}
+		if hard != nil {
+			failures = append(failures, hard)
 		}
 	}
 	// The clock check comes after every incident alert is sent, so a slow or

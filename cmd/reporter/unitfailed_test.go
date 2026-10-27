@@ -237,6 +237,7 @@ type flakyRelay struct {
 	*relay
 	mu       sync.Mutex
 	failHost string
+	failBody string // when set, only a request whose body holds it is refused
 	healed   bool
 }
 
@@ -246,6 +247,11 @@ func (f *flakyRelay) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	down := req.URL.Host == f.failHost && !f.healed
 	f.mu.Unlock()
+	if down && f.failBody != "" {
+		raw, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(raw))
+		down = strings.Contains(string(raw), f.failBody)
+	}
 	if down {
 		_, _ = io.Copy(io.Discard, req.Body)
 		return &http.Response{StatusCode: http.StatusBadGateway, Status: "502 Bad Gateway", Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}, Request: req}, nil
@@ -1012,7 +1018,7 @@ func TestAStaleSampleOfAFailedRunIsNotCountedTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	sampled := map[string]unitSample{unit: {failed: true, invocation: secondRun}}
-	if err := unitStep(path, []string{unit}, nil, sampled, base.Add(60*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(60*time.Minute), time.Hour); err != nil {
+	if _, err := unitStep(path, []string{unit}, nil, sampled, base.Add(60*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(60*time.Minute), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	_, _, repeats, _, err := loadState(path)
@@ -1207,7 +1213,7 @@ func TestARecoverySampleOlderThanALaterDataJobFailureDoesNotResolveIt(t *testing
 		t.Fatal(err)
 	}
 	sampled := map[string]unitSample{dataJob: {state: "inactive"}}
-	if err := unitStep(path, nil, []string{dataJob}, sampled, base.Add(10*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(12*time.Minute), time.Hour); err != nil {
+	if _, err := unitStep(path, nil, []string{dataJob}, sampled, base.Add(10*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(12*time.Minute), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if n := count(r.to(pdHost), `"event_action":"resolve"`); n != 0 {
@@ -1254,7 +1260,81 @@ func TestADataJobSampleThatCannotBeTakenNeitherFailsTheFiringNorSkipsTheEnginesS
 	if n := pagesFor(r, ntfyHost, "ti-adapter-boost.service"); n != 1 {
 		t.Errorf("the adapter's backup page went %d times, want 1", n)
 	}
-	if !strings.Contains(out.String(), dataJob) {
-		t.Errorf("the failed sample was not logged: %q", out.String())
+	for _, want := range []string{dataJob, "trading units were checked", "data job's resolve and backup page are skipped"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the log line lacks %q: %q", want, out.String())
+		}
+	}
+}
+
+func TestAnOlderFailedDataJobSampleNeverReopensARecoveredIncident(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unit-failures.json")
+	base := t0.Add(time.Hour)
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, firstRun), base, dataJob); err != nil {
+		t.Fatal(err)
+	}
+	senders, setAside, err := buildSenders("ntfy,pagerduty", twoChannels(), &http.Client{Transport: r}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := func(sample unitSample, sampledAt time.Time) {
+		t.Helper()
+		if _, err := unitStep(path, nil, []string{dataJob}, map[string]unitSample{dataJob: sample}, sampledAt, systemd.journalctl(), nil, senders, setAside, sampledAt.Add(time.Minute), time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	step(unitSample{state: "inactive"}, base.Add(20*time.Minute))
+	// A reporter that sampled the failed run before the recovery now takes the lock.
+	step(unitSample{failed: true, state: "failed", invocation: firstRun}, base.Add(10*time.Minute))
+	if n := pagesFor(r, ntfyHost, dataJob); n != 1 {
+		t.Errorf("an older failed sample reopened the recovered incident: %d pages", n)
+	}
+	// A failed sample taken after the recovery is a new failure the hook missed.
+	second := "fedcba9876543210fedcba9876543210"
+	step(unitSample{failed: true, state: "failed", invocation: second}, base.Add(40*time.Minute))
+	if n := pagesFor(r, ntfyHost, dataJob); n != 2 {
+		t.Errorf("a newer failure after the recovery was not paged: %d pages", n)
+	}
+}
+
+func TestADataJobPageThatCannotBeDeliveredIsLoggedRetriedAndNeverFailsTheFiringOrHoldsTheHeartbeat(t *testing.T) {
+	flaky := &flakyRelay{relay: &relay{sent: map[string][]string{}}, failHost: ntfyHost, failBody: dataJob}
+	systemd := newStandInSystemd(t)
+	systemd.fail(dataJob)
+	dir := t.TempDir()
+	const hb = "hc.private.test"
+	getenv := func(k string) string {
+		if k == "TI_HEARTBEAT_URL" {
+			return "https://" + hb + "/ping/uuid"
+		}
+		return twoChannels()(k)
+	}
+	fire := func(at time.Time, out *bytes.Buffer) error {
+		args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty",
+			"-units", "ti-adapter-boost.service", "-resolve-units", dataJob, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+		return run(args, getenv, func() time.Time { return at }, out, &http.Client{Transport: flaky})
+	}
+	var out bytes.Buffer
+	if err := fire(t0.Add(time.Hour), &out); err != nil {
+		t.Fatalf("an undeliverable data job page failed the firing: %v\n%s", err, out.String())
+	}
+	if n := len(flaky.to(hb)); n != 1 {
+		t.Errorf("the heartbeat was pinged %d times while the data job's page could not be delivered, want 1", n)
+	}
+	if !strings.Contains(out.String(), "retried at the next firing") {
+		t.Errorf("the failed delivery was not logged: %q", out.String())
+	}
+	flaky.setFailing(false)
+	if err := fire(t0.Add(2*time.Hour), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := pagesFor(flaky.relay, ntfyHost, dataJob); n != 1 {
+		t.Errorf("ntfy took %d pages after it healed, want the one retry", n)
+	}
+	if n := pagesFor(flaky.relay, pdHost, dataJob); n != 1 {
+		t.Errorf("PagerDuty took %d pages, want 1", n)
 	}
 }

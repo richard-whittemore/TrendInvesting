@@ -1038,6 +1038,34 @@ class NotAvailableYetTest(unittest.TestCase):
             self.assertIn("ti-data refused", err)
             self.assertEqual(job.files(), files)
 
+    def test_a_start_on_the_evening_after_a_failure_leaves_the_failed_session_to_the_next_morning_firing(self):
+        # Session 03-16 was missed and the owner starts the job on the evening of 03-17: the
+        # latest session 03-17 is a quiet 403, so no stream is written; the next
+        # morning's firing writes one file that holds both sessions.
+        with tempfile.TemporaryDirectory() as root:
+            job = self.warmed(root)
+            status, out, err = self.run_with(job, Forbidden([D(2026, 3, 17)]), after_settle(D(2026, 3, 17)))
+            self.assertEqual(status, 0, err)
+            self.assertFalse((job.stream_dir() / "boost-2026-03-16.jsonl").exists())
+            self.assertFalse((job.stream_dir() / "boost-2026-03-17.jsonl").exists())
+            job.client = FakeMassive()
+            status, out, err = job.main(morning(D(2026, 3, 18), 6))
+            self.assertEqual(status, 0, err)
+            written = (job.stream_dir() / "boost-2026-03-17.jsonl").read_text()
+            self.assertIn("2026-03-16", written)
+            self.assertIn("2026-03-17", written)
+
+    def test_a_friday_evening_start_is_recorded_by_mondays_morning_firing(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = Job(root)
+            self.assertEqual(job.main(after_settle(D(2026, 3, 12)), "--backfill-from", BASE.isoformat())[0], 0)
+            self.assertEqual(self.run_with(job, Forbidden([D(2026, 3, 13)]), after_settle(D(2026, 3, 13)))[0], 0)
+            self.assertFalse((job.stream_dir() / "boost-2026-03-13.jsonl").exists())
+            job.client = FakeMassive()
+            status, _, err = job.main(morning(D(2026, 3, 16), 6))
+            self.assertEqual(status, 0, err)
+            self.assertTrue((job.stream_dir() / "boost-2026-03-13.jsonl").exists())
+
     def test_an_explicit_session_equal_to_the_latest_keeps_the_quiet_wait(self):
         with tempfile.TemporaryDirectory() as root:
             job = self.warmed(root)

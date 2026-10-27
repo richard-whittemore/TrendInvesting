@@ -345,10 +345,14 @@ What the job does with that answer:
   New York on the next trading day) is a failure: the unit shows failed and you are paged, because the
   plan should have served the session by then (the plan lapsed, or the key is
   wrong). Check the plan and the key at the Massive dashboard, then
-  `sudo systemctl start ti-data`. Started in the evening, that run is a quiet
-  wait for the same day's session, writes no stream and exits cleanly
-  (closing the incident): the failed session is recorded at the next morning's
-  firing, or with `ti-data --session <date>` once Massive serves it.
+  `sudo systemctl start ti-data`. Started on the evening of the session after
+  the one that failed, that run fetches the missed session but then meets the
+  same quiet 403 for that day's session, so it writes no stream and exits
+  cleanly (which closes the incident). The next trading day's morning
+  firing (06:05; on a Friday evening, the following Monday's, since the timer
+  does not run at the weekend or on a holiday) writes one file holding both
+  sessions. To have the stream sooner, run `ti-data --session <date>` for the
+  last session once Massive serves it, which is the morning.
 - A 403 for any older session of a catch-up, for a session you ask for with
   `--session` that is not the latest settled one, and any other error (401, 429,
   500, a timeout), is a failure at every hour.
