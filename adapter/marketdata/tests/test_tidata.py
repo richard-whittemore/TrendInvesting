@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from marketdata import nyse_calendar, record, tidata
+from marketdata import massive, nyse_calendar, record, tidata
 
 D = dt.date
 UTC = dt.timezone.utc
@@ -337,30 +337,45 @@ class SettleTest(unittest.TestCase):
 
 
 class TimerAgreementTest(unittest.TestCase):
-    """The timer fires after every weekday session has settled, by the unit's own --settle-minutes."""
+    """The timer fires on weekday mornings, each reading the previous session, by the unit's own --settle-minutes."""
 
-    def test_the_timer_fires_after_each_session_settles(self):
+    def firings(self):
         timer = (REPO / "deploy/systemd/ti-data.timer").read_text()
-        service = (REPO / "deploy/systemd/ti-data.service").read_text()
-        # systemd's calendar form: a list of hours, one minute (17,18,20:05).
         when = re.search(r"^OnCalendar=Mon\.\.Fri ([0-9,]+):(\d\d) America/New_York$", timer, re.M)
         self.assertIsNotNone(when, "the timer must fire Mon..Fri at New York times")
         self.assertRegex(timer, r"(?m)^Persistent=true$")
+        return timer, [(int(h), int(when.group(2))) for h in when.group(1).split(",")]
+
+    def test_each_morning_firing_reads_the_previous_session(self):
+        service = (REPO / "deploy/systemd/ti-data.service").read_text()
+        _, times = self.firings()
         minutes = re.search(r"--settle-minutes (\d+)", service)
         self.assertIsNotNone(minutes, "ExecStart must pass --settle-minutes")
         settle = dt.timedelta(minutes=int(minutes.group(1)))
-        times = [(int(h), int(when.group(2))) for h in when.group(1).split(",")]
         for hour, minute in times:
-            for day in nyse_calendar.sessions(D(2026, 1, 1), D(2027, 12, 31)):
-                fire = dt.datetime(day.year, day.month, day.day, hour, minute, tzinfo=nyse_calendar.NEW_YORK)
-                self.assertEqual(tidata.settled_session(fire, settle), day, (day, hour, minute))
+            day = D(2026, 1, 1)
+            while day <= D(2027, 12, 31):
+                if day.weekday() < 5:   # Monday morning reads Friday, a day after a holiday reads the day before it
+                    fire = dt.datetime(day.year, day.month, day.day, hour, minute, tzinfo=nyse_calendar.NEW_YORK)
+                    previous = day - dt.timedelta(days=1)
+                    while not nyse_calendar.is_trading_day(previous):
+                        previous -= dt.timedelta(days=1)
+                    self.assertEqual(tidata.settled_session(fire, settle), previous, (day, hour, minute))
+                day += dt.timedelta(days=1)
 
-    def test_the_timer_fires_three_times_an_evening(self):
-        # A firing that fails (a Massive outage, a 429 streak) is retried the
-        # same evening; a later firing after a success finds the file and
-        # fetches nothing.
-        timer = (REPO / "deploy/systemd/ti-data.timer").read_text()
-        self.assertRegex(timer, r"(?m)^OnCalendar=Mon\.\.Fri 17,18,20:05 America/New_York$")
+    def test_the_timer_fires_three_mornings_before_the_open_and_not_in_the_evening(self):
+        # The free plan serves a session's prices the next morning; the later
+        # firings retry after a 403 or an outage, and the last one is the one
+        # that pages (ADR 0019, "Alerting").
+        timer, times = self.firings()
+        self.assertRegex(timer, r"(?m)^OnCalendar=Mon\.\.Fri 6,7,8:05 America/New_York$")
+        for hour, minute in times:
+            self.assertLess((hour, minute), (9, 30), "the decision must come before the open")
+
+    def test_only_the_last_morning_firing_is_after_the_quiet_hour(self):
+        _, times = self.firings()
+        quiet = (tidata.QUIET_BEFORE.hour, tidata.QUIET_BEFORE.minute)
+        self.assertEqual([t < quiet for t in times], [True] * (len(times) - 1) + [False])
 
 
 class UnitTest(unittest.TestCase):
@@ -389,6 +404,9 @@ class UnitTest(unittest.TestCase):
         self.assertRegex(self.service, r"(?m)^EnvironmentFile=-/var/lib/trend-investing/engines/boost/run\.env$")
         self.assertNotRegex(self.service, r"(?m)^ExecStartPre=")
         self.assertRegex(self.service, r"(?m)^ExecStart=\S*ti-data --run-env /var/lib/trend-investing/engines/boost/run\.env ")
+
+    def test_a_failed_run_pages_through_the_unit_failed_hook(self):
+        self.assertRegex(self.service, r"(?m)^OnFailure=ti-unit-failed@%n\.service$")
 
     def test_the_unit_holds_no_ib_gateway_client_id(self):
         self.assertNotIn("TI_ADAPTER_CLIENT_ID", self.service)
@@ -925,6 +943,102 @@ class ReverifyTest(unittest.TestCase):
             self.assertIn("the engine's durable log", err)
             self.assertEqual(job.made, 0)
             self.assertFalse(job.data.exists())
+
+
+def morning(day, hour, minute=5):
+    return dt.datetime(day.year, day.month, day.day, hour, minute, tzinfo=nyse_calendar.NEW_YORK)
+
+
+class Forbidden(FakeMassive):
+    """Massive's free plan: a grouped answer for ``days`` is HTTP ``status`` (403 until the next morning)."""
+
+    def __init__(self, days, status=403):
+        super().__init__()
+        self.days, self.status = set(days), status
+
+    def grouped(self, day):
+        if day in self.days:
+            self.calls.append(("grouped", day))
+            raise massive.MarketDataError("HTTP {} from /v2/aggs/grouped/locale/us/market/stocks/{}".format(
+                self.status, day), status=self.status)
+        return super().grouped(day)
+
+
+class NotAvailableYetTest(unittest.TestCase):
+    """The free plan's 403 for the latest session is a quiet wait until the last morning firing, then a failure."""
+
+    def warmed(self, root):
+        return DailyTest().warmed(root)
+
+    def run_with(self, job, client, now):
+        job.client = client
+        return job.main(now)
+
+    def test_a_403_for_the_latest_session_before_the_quiet_hour_exits_zero_with_one_line_and_writes_nothing(self):
+        for hour in (6, 7):
+            with self.subTest(hour=hour), tempfile.TemporaryDirectory() as root:
+                job = self.warmed(root)
+                files = job.files()
+                status, out, err = self.run_with(job, Forbidden([D(2026, 3, 16)]), morning(D(2026, 3, 17), hour))
+                self.assertEqual(status, 0, err)
+                self.assertEqual(out, "")
+                self.assertIn("not available yet on this plan", err)
+                self.assertIn("2026-03-16", err)
+                self.assertEqual(len([l for l in err.splitlines() if "not available" in l]), 1)
+                self.assertNotIn("refused", err)
+                self.assertEqual(job.files(), files)
+
+    def test_the_next_firing_after_the_403_records_the_session(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.warmed(root)
+            self.assertEqual(self.run_with(job, Forbidden([D(2026, 3, 16)]), morning(D(2026, 3, 17), 6))[0], 0)
+            job.client = FakeMassive()
+            status, out, err = job.main(morning(D(2026, 3, 17), 7))
+            self.assertEqual(status, 0, err)
+            self.assertTrue((job.stream_dir() / "boost-2026-03-16.jsonl").exists())
+
+    def test_a_403_that_persists_at_the_last_morning_firing_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.warmed(root)
+            files = job.files()
+            status, out, err = self.run_with(job, Forbidden([D(2026, 3, 16)]), morning(D(2026, 3, 17), 8))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused", err)
+            self.assertIn("2026-03-16", err)
+            self.assertIn("403", err)
+            self.assertEqual(job.files(), files)
+
+    def test_a_403_in_the_evening_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.warmed(root)
+            status, _, err = self.run_with(job, Forbidden([D(2026, 3, 16)]), after_settle(D(2026, 3, 16)))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused", err)
+
+    def test_a_403_for_an_earlier_session_of_a_catch_up_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.warmed(root)
+            status, _, err = self.run_with(job, Forbidden([D(2026, 3, 16)]), morning(D(2026, 3, 18), 7))
+            self.assertEqual(status, 1)
+            self.assertIn("ti-data refused", err)
+            self.assertFalse((job.stream_dir() / "boost-2026-03-17.jsonl").exists())
+
+    def test_other_statuses_before_the_quiet_hour_are_still_failures(self):
+        for code in (401, 429, 500):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as root:
+                job = self.warmed(root)
+                status, _, err = self.run_with(job, Forbidden([D(2026, 3, 16)], code), morning(D(2026, 3, 17), 7))
+                self.assertEqual(status, 1)
+                self.assertIn("ti-data refused", err)
+
+    def test_monday_morning_waits_quietly_for_fridays_session(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = Job(root)
+            self.assertEqual(job.main(after_settle(D(2026, 3, 12)), "--backfill-from", BASE.isoformat())[0], 0)
+            status, out, err = self.run_with(job, Forbidden([WARM]), morning(D(2026, 3, 16), 6))
+            self.assertEqual(status, 0, err)
+            self.assertIn("2026-03-13", err)
+            self.assertIn("not available yet on this plan", err)
 
 
 class KeyScrubTest(unittest.TestCase):

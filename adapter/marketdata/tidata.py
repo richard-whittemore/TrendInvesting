@@ -133,6 +133,37 @@ class Refused(Exception):
     """The job refused to run; nothing was written for this session."""
 
 
+class NotAvailableYet(Exception):
+    """Massive's plan does not serve the latest session's bars yet; nothing was
+    written, and the next firing asks again."""
+
+
+# The free plan serves a session's grouped bars the next morning, so the
+# morning firings (ti-data.timer) before this hour treat a 403 for the latest
+# session as a wait; the last firing is after it, and a 403 then is a failure
+# that pages (ADR 0019, "Alerting"). TimerAgreementTest checks the two agree.
+QUIET_BEFORE = dt.time(8, 0)
+
+
+class _LatestSession:
+    """Wraps the Massive client: a 403 for the grouped bars of ``session`` alone
+    is NotAvailableYet; every other error passes through unchanged."""
+
+    def __init__(self, client, session):
+        self._client, self._session = client, session
+
+    def grouped(self, day):
+        try:
+            return self._client.grouped(day)
+        except massive.MarketDataError as e:
+            if e.status == 403 and day == self._session:
+                raise NotAvailableYet(str(e)) from None
+            raise
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
 def settled_session(now, settle):
     """The latest NYSE trading day whose close plus ``settle`` is at or before ``now``."""
     day = now.astimezone(nyse_calendar.NEW_YORK).date()
@@ -530,8 +561,15 @@ def run(data, streams, config, engine_log, key, now, settle, session=None, backf
     if previous is None and len(span) < cfg.min_sessions:
         raise Refused("the history {}..{} holds {} sessions; the indicators need {}".format(
             first, session, len(span), cfg.min_sessions))
-    client = client_factory(key)
-    history.backfill(client, data, session, len(span), now=now, settle=settle)
+    client = _LatestSession(client_factory(key), session)
+    try:
+        history.backfill(client, data, session, len(span), now=now, settle=settle)
+    except NotAvailableYet as e:
+        if now().astimezone(nyse_calendar.NEW_YORK).time() >= QUIET_BEFORE:
+            raise Refused("Massive still refuses session {} after {} New York, when the plan should serve it ({}); "
+                          "check the plan and the key".format(session, QUIET_BEFORE.strftime("%H:%M"), e)) from None
+        raise NotAvailableYet("session {} is not available yet on this plan ({}); the next firing asks again"
+                              .format(session, e)) from None
     start = cfg.warm_up_start + dt.timedelta(days=1)
     window = min(_actions_reach(data, start) + dt.timedelta(days=1), session - ACTION_OVERLAP)
     try:
@@ -671,6 +709,9 @@ def main(argv, now=steps._now, client_factory=massive.Client):
         path = run(args.data, args.streams, args.config, args.engine_log, key, now,
                    dt.timedelta(minutes=args.settle_minutes), session=args.session,
                    backfill_from=args.backfill_from, client_factory=client_factory)
+    except NotAvailableYet as e:
+        print("ti-data: " + (str(e).replace(key, KEY_MASK) if key else str(e)), file=sys.stderr)
+        return 0
     except Exception as e:   # every refusal, including MissingData, Gap, NotSettled and NotDurable
         text = "{}: {}".format(type(e).__name__, e)
         if key:

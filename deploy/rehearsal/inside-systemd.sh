@@ -324,6 +324,44 @@ test "$(sed -n 5p "$reports/hook-instances" | cut -d' ' -f1)" = "$engine" || fai
 test "$(wc -l <"$probe/posts")" = "$pages" || fail "the hook started again for the same failed run paged again"
 pass "systemctl start $hook runs with %i = $engine and pages nothing new for a run already paged"
 
+# The data job's failure pages like the engine's: a stand-in ti-data.service
+# that refuses, carrying the real unit's OnFailure= line, so a 403 that
+# persists past the last morning firing (a refusal, exit 1) reaches the hook.
+# The real unit is put back afterwards.
+data_hook=ti-unit-failed@ti-data.service.service
+ondata=$(grep -x 'OnFailure=.*' /deploy/systemd/ti-data.service) || fail "the data job's unit names no OnFailure="
+cat >/etc/systemd/system/ti-data.service <<UNIT
+[Unit]
+Description=Stand-in data job (rehearsal): refuses as the real one can
+$ondata
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo "ti-data refused: MarketDataError: HTTP 403 for session 2026-10-23 marker-D" >&2; exit 1'
+UNIT
+systemctl daemon-reload
+rm -f "$reports/unit-failures.json"
+before=$(instances)
+data_pushover=$(pushover_pages)
+systemctl start ti-data.service 2>/dev/null && fail "the stand-in data job did not fail"
+for _ in $(seq 150); do
+  if test "$(instances)" -gt "$before" && test "$(systemctl show -p ActiveState --value "$data_hook")" != activating; then break; fi
+  sleep 0.1
+done
+test "$(instances)" -gt "$before" || fail "systemd did not start $data_hook when ti-data failed"
+data_run=$(systemctl show -p InvocationID --value ti-data.service)
+test "$(tail -n 1 "$reports/hook-instances")" = "ti-data.service $data_run" ||
+  fail "the data job's hook was given '$(tail -n 1 "$reports/hook-instances")', want 'ti-data.service $data_run'"
+test "$(systemctl show -p Result --value "$data_hook")" = success || fail "$data_hook did not succeed"
+test "$(pushover_pages)" = "$((data_pushover + 1))" || fail "the failed data job did not page Pushover once"
+decoded_bodies | grep -q 'ti-data.service failed' || fail "the page does not name ti-data.service"
+decoded_bodies | grep -q 'marker-D' || fail "the page's reason is not the failed data job's own line"
+systemctl reset-failed ti-data.service
+cp /deploy/systemd/ti-data.service /etc/systemd/system/ti-data.service
+rm -f "$reports/unit-failures.json"
+systemctl daemon-reload
+pass "a failing data job starts $data_hook with %i = ti-data.service and the failed run's invocation, and it pages with the run's own line"
+
 # A start refused while the unit is already failed: systemd 255 does not
 # start OnFailure= for it, so only the reporter's firing, which keys by the
 # new invocation, can page it.

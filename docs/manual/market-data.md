@@ -303,18 +303,56 @@ On the server, one job does all of the above for the Boost engine every
 weekday, with no one at the keyboard: `ti-data` (`adapter/marketdata/tidata.py`,
 installed as `/opt/trend-investing/bin/ti-data` and run by `ti-data.service`).
 
-**When it runs.** At 17:05, 18:05 and 20:05 New York time, Monday to
-Friday (`ti-data.timer`). The market closes at 4 p.m. (1 p.m. on an early
-close), and a session is not recorded until an hour after its close, so its
-prices are final; 17:05 is after that hour on every trading day, and a test
-checks every firing of the timer against the service's `--settle-minutes 60`
-for every session of 2026 and 2027. The 18:05 and 20:05 firings are retries:
-if 17:05 failed (Massive down, too many requests), the same evening tries
-again; once the day's file exists they find it and fetch nothing. On a
-holiday it finds the last session already written and does nothing. If the
-server was off, the run happens when it starts again, and catches up every
-session it missed in one file. A run that hangs is stopped after an hour
-(`TimeoutStartSec=1h`) and shows as failed, like any other refusal.
+**When it runs.** At 06:05, 07:05 and 08:05 New York time, Monday to
+Friday (`ti-data.timer`), each time for the previous session: Tuesday to
+Friday read the day before, Monday reads Friday, and the morning after a
+holiday reads the last session before it. The market closes at 4 p.m. (1 p.m.
+on an early close), and a session is not recorded until an hour after its
+close, so its prices are final; a test checks every firing of the timer
+against the service's `--settle-minutes 60` for every weekday of 2026 and
+2027. Once the day's file exists, the later firings find it and fetch
+nothing. If the server was off, the run happens when it starts again, and
+catches up every session it missed in one file. A run that hangs is stopped
+after an hour (`TimeoutStartSec=1h`) and shows as failed, like any other
+refusal.
+
+**The free plan's timing.** On Massive's free plan a session's prices are
+not served on the evening of the session: asked at 17:05, 18:05 or 20:05 on
+the day, Massive answers "403 forbidden", and the same request succeeds the
+next morning (confirmed on the real server: a run at about 7 a.m. the next
+morning recorded the session and the engine decided it before the open). So
+Boost reads a session's prices the next morning and still decides before the
+next open, which is what the backtest assumed: it decided each session on
+that session's close and traded at the next open. You see nothing different:
+the order for a session still goes in before 9:30 a.m.
+
+What the job does with that answer:
+
+- A 403 for the latest session at the 06:05 or 07:05 firing is "not
+  available yet on this plan". The job prints one line in the journal
+  (`ti-data: session 2026-10-23 is not available yet on this plan ...; the
+  next firing asks again`), writes nothing, exits cleanly and pages no one.
+  The next firing asks again.
+- A 403 that is still there at the 08:05 firing (or any run at 08:00 or
+  later) is a failure: the unit shows failed and you are paged, because the
+  plan should have served the session by then (the plan lapsed, or the key is
+  wrong). Check the plan and the key at the Massive dashboard, then
+  `sudo systemctl start ti-data`.
+- A 403 for any older session of a catch-up, and any other error (401, 429,
+  500, a timeout), is a failure at every hour.
+
+The evening firings the job once had (17:05, 18:05, 20:05) are gone: on the
+free plan they could only fail, and a quiet failure is not worth having
+three times a day. If you move to a paid plan, the timer can be changed back
+to an evening time, but a 403 in the evening is then a failure that pages.
+
+**The upgrade option.** Massive's Starter plan serves a session's prices the
+same day after the close. It is your choice and costs money; nothing in the
+system needs it. With it, the job could run in the evening (edit
+`OnCalendar` in `ti-data.timer`, for example `Mon..Fri 17,18,20:05`, then
+`sudo systemctl daemon-reload`), the file would exist a few minutes after
+17:05, and the decision would not change: Boost still orders for the next
+open either way.
 
 **What it does, in order.**
 
@@ -683,7 +721,8 @@ The file is the engine's input for those sessions, and the Boost adapter
 `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/`, on every turn of
 its loop (about once a second) while its link to IB Gateway is up and
 matched. A new file is picked up within a second or two of the data job
-writing it, which on a normal day is a few minutes after 17:05 New York.
+writing it, which on a normal day is a few minutes after the 06:05 to 08:05 firing that
+records the previous session.
 If the adapter is not running then, it picks the file up when you next
 start it. If several files are waiting (the adapter was stopped for some
 days), it takes them all, oldest first.

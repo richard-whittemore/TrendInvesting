@@ -1,16 +1,20 @@
 [Unit]
-Description=Run the market-data step after the US close on weekdays
+Description=Run the market-data step on weekday mornings, for the previous session
 
 [Timer]
-# 17:05, 18:05 and 20:05 New York (systemd's form: 17,18,20:05), each
-# after the close (4 p.m.) plus the 60 settle minutes the service passes
-# ti-data (--settle-minutes), so the day's session has settled when it runs;
-# adapter/marketdata/tests/test_tidata.py checks every firing against every
-# session. The later firings retry the same evening after a failure (a
-# Massive outage, a 429 streak); once the day's file exists they find it and
-# fetch nothing. Persistent: a run missed while the server was down runs at
-# boot, and catches up every session since the last stream.
-OnCalendar=Mon..Fri 17,18,20:05 America/New_York
+# 06:05, 07:05 and 08:05 New York on weekdays (systemd's form: 6,7,8:05).
+# Massive's free plan serves a session's grouped bars only the next morning
+# (a 403 before then), so each firing records the previous session: Tuesday
+# to Friday read the day before, Monday reads Friday, and the morning after a
+# holiday reads the session before it (adapter/marketdata/tests/test_tidata.py
+# checks every firing against every session). All three are before the 9:30
+# open, so the Boost engine still decides the session before the next open. A
+# 403 at the first two firings is a quiet wait; one that persists at the last
+# is a failure that pages (ti-data.service; docs/manual/market-data.md, "The
+# free plan's timing"). Once the session's file exists a later firing finds it
+# and fetches nothing. Persistent: a run missed while the server was down runs
+# at boot, and catches up every session since the last stream.
+OnCalendar=Mon..Fri 6,7,8:05 America/New_York
 Persistent=true
 Unit=ti-data.service
 
