@@ -332,9 +332,14 @@ The same steps are rehearsed in a container by `deploy/rehearse.sh`, and in
   `TestAClearanceMustNameTheRebalanceTheApprovalStated`,
   `TestAMomentumRunReadsOnlyAnIRAApproval`, `TestBoostRefusesAnIRAApproval`,
   `TestAFreshIRARunResumesTheIncidentItsApprovalCarries`,
+  `TestAMomentumRunRecordsTheApprovalItAccepted`,
   `TestRulesVersionDeclaresTheIRAApproval`; in `internal/restart`:
   `TestTheRebalanceInProgressIsReadFromTheLog`,
-  `TestTheEngineRefusesAnApprovalOfAnotherRebalance`; in `internal/event`:
+  `TestTheEngineRefusesAnApprovalOfAnotherRebalance`,
+  `TestRecoveryReadsTheApprovalTheRunAccepted`,
+  `TestRecoveryReadsRecordsNotTheRunningBuildsRules`,
+  `TestAnAcceptanceThatCannotBeReadBackIsRefused`; in `internal/event`:
+  `TestARunRecordsTheApprovalItAccepted`,
   `TestAnIRAApprovalStatesTheRebalanceInProgress`,
   `TestDecodeAnIRAApprovalRequiresTheRebalanceKey`; in `cmd/operator`:
   `TestAnIRAApprovalStatesTheRebalanceInProgress`; provisioning:

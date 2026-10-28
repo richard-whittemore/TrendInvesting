@@ -285,8 +285,14 @@ import (
 //     exactly its orders (ADR 0026, point 5; ADR 0027, amended 2026-10-17).
 //     Boost refuses an approval stating an IRA's momentum state (approval
 //     schema version 6). A journal holding a momentum approval decides
-//     differently under 1.25.0.
-const RulesVersion = "1.26.0"
+//     differently under 1.25.0. It was never released: 1.27.0 superseded it
+//     before any build carried it, so no journal carries it.
+//   - 1.27.0 is 1.26.0 with a momentum run recording, as a decision, the
+//     approval it accepted and the rebalance it carries in
+//     (strategy.run.approval-accepted; ADR 0027, note of 2026-10-28): the
+//     fact a restart reads the carried rebalance from, never recomputing it.
+//     A refused approval records nothing. Boost records none.
+const RulesVersion = "1.27.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

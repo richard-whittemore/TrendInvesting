@@ -275,6 +275,16 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 		if entries, stateLog, err = stateBefore(opts, latest); err != nil {
 			return nil, err
 		}
+		// No earlier run holds more: latest is an account's first start cut
+		// short before its approval was recorded. In a mode that reaches an
+		// account, that start is resumed with its first run's approval, which
+		// states the book the owner checked; an approval with no book would
+		// start the account from a book nobody checked (ADR 0019 and ADR
+		// 0027, amended 2026-10-18).
+		if stateLog == latest && reachesAccount(opts.mode) && approval.StartingBook == nil {
+			return nil, fmt.Errorf("engine: %s is this account's first start, cut short before its approval was recorded, and no earlier run holds more, so a -mode %s run after it would start from a book nobody checked: resume %s with -resume and the first run's approval (`operator approve -first-run`), or state the starting book in this approval (-positions, -cash, -currency) (ADR 0027, the restart model)",
+				latest, opts.mode, latest)
+		}
 	}
 	// The state in force a fresh run cannot recompute: Boost's latch, or an
 	// IRA's rebalance in progress (ADR 0026, point 5).

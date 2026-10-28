@@ -194,3 +194,55 @@ func TestAFreshIRARunAfterAStartCutShortReadsThatLogsConfiguration(t *testing.T)
 		t.Fatalf("a fresh IRA run after a start cut short: %v", err)
 	}
 }
+
+// TestAPaperFirstStartCutShortIsResumedNotApprovedWithoutABook: a paper
+// account's first run that crashed before its approval was recorded holds
+// its configuration alone, and no earlier run holds more. A fresh run
+// approved by hand after it, with no starting book, would start the account
+// from a book nobody checked (ADR 0019 and ADR 0027, amended 2026-10-18), so
+// it is refused, naming -resume with the first run's approval; one stating
+// the starting book starts, and a dry-run needs none.
+func TestAPaperFirstStartCutShortIsResumedNotApprovedWithoutABook(t *testing.T) {
+	dir := t.TempDir()
+	path, _ := paperIRA(t)
+	asOf := time.Date(2025, time.January, 2, 21, 0, 0, 0, time.UTC)
+	comp, err := compose(path, "test-build", asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(filepath.Join(dir, "cut.log"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := journal.CreateLog(durableLogSink(file), logHeader(comp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: comp.configEnvelope}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	recovery := recoverFile(t, filepath.Join(dir, "cut.log"))
+	approval := event.OperatorRunApprovedPayload{
+		AccountID: "DUIRA", PreviousLog: "cut.log", PreviousLogFinalHash: recovery.FinalRecordHash,
+		ApprovedBy: "owner", ApprovedAt: time.Date(2025, time.January, 3, 13, 0, 0, 0, time.UTC), Momentum: &event.MomentumStateInForce{},
+	}
+	fresh := func(name string, a event.OperatorRunApprovedPayload) options {
+		opts := momentumOptions(t, dir)
+		opts.mode, opts.configPath, opts.asOf = modePaper, path, "2025-01-03T21:00:00Z"
+		opts.logPath, opts.outPath = filepath.Join(dir, name+".log"), filepath.Join(dir, name+".journal")
+		opts.approvalPath = writeJSON(t, name+".json", a)
+		return opts
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err = run(ctx, fresh("no-book", approval), io.Discard)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "-resume") || !strings.Contains(err.Error(), "starting book") {
+		t.Fatalf("a hand-written approval with no book after a paper first start cut short: %v, want a refusal naming -resume", err)
+	}
+	withBook := approval
+	withBook.StartingBook = &event.StartingBook{Positions: []event.AccountPosition{}, TotalCash: 10000, Currency: "USD"}
+	if err := startEngine(t, fresh("with-book", withBook))(); err != nil {
+		t.Fatalf("an approval stating the starting book: %v", err)
+	}
+}

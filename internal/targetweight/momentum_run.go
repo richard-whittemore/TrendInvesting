@@ -248,7 +248,7 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		// back to 98% (ADR 0026, points 3 and 4).
 		return nil, r.h.applyKillSwitch(in)
 	case event.OperatorRunApprovedEventType:
-		return nil, r.applyApproval(in)
+		return r.applyApproval(in)
 	case event.RebalanceClearedEventType:
 		return nil, r.applyCleared(in)
 	case event.BrokerSnapshotEventType:
@@ -826,40 +826,6 @@ func (r *momentumRun) applyCleared(in event.Envelope) error {
 	return nil
 }
 
-// RebalanceInProgress returns the rebalance whose orders are not all
-// terminal, as this run reads it, or nil when none is: the state a fresh
-// run's approval must state (ADR 0026, point 5: "Every planned, released and
-// sent order, and the IRA phase (sells sent, buys pending)"). It is the
-// rebalance an approval carried in until the owner clears it, else the
-// decision whose orders are working: every order not terminal belongs to
-// the rebalance in progress, since a new rebalance is planned only once
-// every order is terminal (withhold). Its phase is sells-working while a
-// sell is working, its buys never planned (they are planned once every sell
-// is terminal), else buys-working. Boost holds no rebalance, so a Boost
-// run's is nil.
-func (h *Handler) RebalanceInProgress() *event.RebalanceInProgress {
-	r := h.momentum
-	switch {
-	case r == nil:
-		return nil
-	case r.carried != nil:
-		c := *r.carried
-		c.ClientOrderIDs = slices.Clone(c.ClientOrderIDs)
-		return &c
-	}
-	working := r.orders.Working()
-	if len(working) == 0 || r.rebalance == nil {
-		return nil
-	}
-	phase := event.RebalancePhaseBuysWorking
-	for _, id := range working {
-		if o, _ := r.orders.Order(id); o.Released.Side == event.OrderSideSell {
-			phase = event.RebalancePhaseSellsWorking
-		}
-	}
-	return &event.RebalanceInProgress{DecisionID: r.rebalance.decisionID, DecisionTime: r.rebalance.session, Phase: phase, ClientOrderIDs: working}
-}
-
 // applyApproval starts a fresh IRA run from the owner's approval (ADR 0027,
 // amended 2026-10-17): the incident in force puts the gate in its Degraded
 // or Halted state and scope before any market input (ADR 0019, amended
@@ -869,24 +835,33 @@ func (h *Handler) RebalanceInProgress() *event.RebalanceInProgress {
 // momentum state: one stating Boost's latch says nothing of a rebalance in
 // progress, so it is refused, never read as none. An IRA has no sale back to
 // 98%, so an incident's sale is never restored (event's momentumErrors
-// refuses one stated attempted).
-func (r *momentumRun) applyApproval(in event.Envelope) error {
+// refuses one stated attempted). Accepting it records
+// strategy.run.approval-accepted, the record a restart reads the carried
+// rebalance from.
+func (r *momentumRun) applyApproval(in event.Envelope) ([]event.Envelope, error) {
 	h := r.h
 	p, err := h.decodeApproval(in)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if p.Momentum == nil {
-		return fmt.Errorf("targetweight: approval %s is Boost-shaped (it states Boost's latch and no momentum state), so it says nothing of a rebalance in progress: an IRA run is approved with the rebalance its earlier run ended with in progress, or none (ADR 0026, point 5)", in.ID)
+		return nil, fmt.Errorf("targetweight: approval %s is Boost-shaped (it states Boost's latch and no momentum state), so it says nothing of a rebalance in progress: an IRA run is approved with the rebalance its earlier run ended with in progress, or none (ADR 0026, point 5)", in.ID)
 	}
 	if incident := p.IncidentInForce; incident != nil {
 		if err := h.gate.RestoreIncidentState(incident.IncidentID, incident.State, incident.ScopeInstrumentIDs, incident.ScopeCashComponents); err != nil {
-			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
+			return nil, fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
 		}
 	}
 	h.approved = true
 	r.carried = p.Momentum.RebalanceInProgress
-	return nil
+	// The fact a restart reads back: which approval this run accepted and the
+	// rebalance it carries (event.RunApprovalAcceptedEventType). Only an
+	// accepted approval records one.
+	b := &emissions{h: h, in: in, at: in.EventTime}
+	b.add("run-approval-accepted:"+in.ID, event.RunApprovalAcceptedEventType, event.RunApprovalAcceptedSchemaVersion, event.RunApprovalAcceptedPayload{
+		AccountID: p.AccountID, ApprovalID: in.ID, ApprovalSequence: in.Sequence, RebalanceInProgress: r.carried,
+	})
+	return b.result()
 }
 
 // cash is the cash the D5 rule funds buys from (ADR 0026, point 2, "Budget").

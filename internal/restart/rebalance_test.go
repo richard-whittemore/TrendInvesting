@@ -281,15 +281,12 @@ func TestTheLogsOwnAccountDecides(t *testing.T) {
 	if _, err := restart.RebalanceAtEnd([]journal.Entry{bad}, "run-1.log"); err == nil || !strings.Contains(err.Error(), "configuration:bad") {
 		t.Errorf("a configuration input that cannot be decoded: %v", err)
 	}
-	invalid := recorded(t, journal.KindInput, "configuration:invalid", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion,
-		map[string]string{"strategy_id": event.TargetWeightStrategyMomentum, "account_id": iraLogAccount})
-	if _, err := restart.RebalanceAtEnd([]journal.Entry{invalid}, "run-1.log"); err == nil || !strings.Contains(err.Error(), "cannot be read back") {
-		t.Errorf("a configuration the handler refuses: %v", err)
+	unnamed := recorded(t, journal.KindInput, "configuration:unnamed", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion,
+		map[string]string{"strategy_id": event.TargetWeightStrategyMomentum})
+	if _, err := restart.RebalanceAtEnd([]journal.Entry{unnamed}, "run-1.log"); err == nil || !strings.Contains(err.Error(), "cannot be read back") {
+		t.Errorf("a configuration that names no account: %v", err)
 	}
-	if _, err := restart.ReadEndState([]journal.Entry{invalid}, iraLogAccount, "run-1.log"); err == nil {
-		t.Error("ReadEndState read a log whose configuration cannot be read back")
-	}
-	if err := restart.CheckRebalanceInProgress([]journal.Entry{invalid}, event.OperatorRunApprovedPayload{AccountID: iraLogAccount, Momentum: &event.MomentumStateInForce{}}, "run-1.log"); err == nil {
+	if err := restart.CheckRebalanceInProgress([]journal.Entry{unnamed}, event.OperatorRunApprovedPayload{AccountID: iraLogAccount, Momentum: &event.MomentumStateInForce{}}, "run-1.log"); err == nil {
 		t.Error("CheckRebalanceInProgress read a log whose configuration cannot be read back")
 	}
 }
@@ -308,5 +305,60 @@ func TestABoostLogRefusesAnIRAApprovalAndAnIRAApprovalStartsNoLatch(t *testing.T
 	end, err := restart.ReadEndState([]journal.Entry{approval}, iraLogAccount, "run-1.log")
 	if err != nil || end.Latched || end.Momentum {
 		t.Errorf("a log holding only an IRA approval: %+v, %v", end, err)
+	}
+}
+
+// recordedLog is a momentum log built from records alone, as recovery reads
+// it: the configuration input naming the account, then entries.
+func recordedLog(t *testing.T, entries ...journal.Entry) []journal.Entry {
+	t.Helper()
+	cfg := recorded(t, journal.KindInput, "configuration:x", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion,
+		map[string]string{"strategy_id": event.TargetWeightStrategyMomentum, "account_id": iraLogAccount})
+	return append([]journal.Entry{cfg}, entries...)
+}
+
+func releasedRecord(t *testing.T, id, tag, side string) journal.Entry {
+	o := event.OrderReleasedPayload{AccountID: iraLogAccount, PlanID: "order-planned:" + id, Tag: tag, ClientOrderID: id, InstrumentID: "AAA",
+		Side: side, Quantity: 10, LimitPrice: 50, Mode: event.TradingModePaper, Send: true}
+	return recorded(t, journal.KindDecision, "risk-order-released:"+id, event.OrderReleasedEventType, o.SchemaVersion(), o)
+}
+
+func decidedRecord(t *testing.T, id string) journal.Entry {
+	return recorded(t, journal.KindDecision, id, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, event.TargetsDecidedPayload{
+		AccountID: iraLogAccount, StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: time.Date(2025, time.January, 31, 21, 0, 0, 0, time.UTC), Outcome: event.TargetsOutcomeDecided})
+}
+
+// TestRecoveryReadsTheRecordedOrders: the phase, a fill that completes an
+// order, and every record recovery must read and cannot, which refuses
+// rather than reading as no rebalance in progress.
+func TestRecoveryReadsTheRecordedOrders(t *testing.T) {
+	sells := recordedLog(t, decidedRecord(t, janDecision), releasedRecord(t, "DUIRA-1", janDecision, event.OrderSideSell), releasedRecord(t, "DUIRA-2", janDecision, event.OrderSideSell))
+	got, err := restart.RebalanceAtEnd(sells, "run-1.log")
+	if err != nil || got == nil || got.Phase != event.RebalancePhaseSellsWorking || strings.Join(got.ClientOrderIDs, ",") != "DUIRA-1,DUIRA-2" {
+		t.Fatalf("sells working: %s, %v", describeRebalance(got), err)
+	}
+	fill := recorded(t, journal.KindInput, "fill:DUIRA-1", event.FillEventType, event.FillTargetWeightVersion, event.TargetWeightFillPayload{
+		AccountID: iraLogAccount, ClientOrderID: "DUIRA-1", FillID: "fill:DUIRA-1", InstrumentID: "AAA", Side: event.OrderSideSell, Quantity: 10, Price: 50,
+		FilledAt: time.Date(2025, time.February, 3, 15, 0, 0, 0, time.UTC)})
+	got, err = restart.RebalanceAtEnd(append(sells, fill), "run-1.log")
+	if err != nil || got == nil || strings.Join(got.ClientOrderIDs, ",") != "DUIRA-2" {
+		t.Fatalf("one sell filled: %s, %v", describeRebalance(got), err)
+	}
+	bad := func(kind, eventType string, version uint32) journal.Entry {
+		return recorded(t, kind, "bad:"+eventType, eventType, version, "not an object")
+	}
+	for name, entries := range map[string][]journal.Entry{
+		"decision":  recordedLog(t, bad(journal.KindDecision, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion)),
+		"release":   recordedLog(t, bad(journal.KindDecision, event.OrderReleasedEventType, 3)),
+		"synthetic": recordedLog(t, bad(journal.KindDecision, event.OrderLifecycleEventType, 3)),
+		"two":       recordedLog(t, decidedRecord(t, janDecision), releasedRecord(t, "DUIRA-1", janDecision, event.OrderSideSell), releasedRecord(t, "DUIRA-2", "targets-decided:DUIRA:2025-02-28T21:00:00Z", event.OrderSideSell)),
+		"undecided": recordedLog(t, releasedRecord(t, "DUIRA-1", janDecision, event.OrderSideSell)),
+	} {
+		if _, err := restart.RebalanceAtEnd(entries, "run-1.log"); err == nil || !strings.Contains(err.Error(), "cannot be read back") {
+			t.Errorf("%s: %v, want a refusal saying it cannot be read back", name, err)
+		}
+		if _, err := restart.ReadEndState(entries, iraLogAccount, "run-1.log"); err == nil {
+			t.Errorf("%s: ReadEndState read the log", name)
+		}
 	}
 }

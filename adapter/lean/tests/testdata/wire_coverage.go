@@ -138,13 +138,14 @@ var notYetCrossed = map[string]string{
 	"risk.sale.withheld":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	// cmd/engine delivers the owner's approval itself, from -approval,
 	// before the socket opens; no adapter sends or receives it.
-	"operator.run.approved":      "cmd/engine's approval input (-approval), not an adapter",
-	"operator.rebalance.cleared": "recorded by the operator tool (cmd/operator) into cmd/engine's operator inbox (-operator), never by LEAN",
-	"market.universe.snapshot":   "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
-	"market.session.calendar":    "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
-	"market.close.history":       "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
-	"market.session.retracted":   "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
-	"strategy.order.skipped":     "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"operator.run.approved":          "cmd/engine's approval input (-approval), not an adapter",
+	"strategy.run.approval-accepted": "a momentum run's record of the approval it accepted, emitted before the engine's socket opens and read back by cmd/engine's restart check, never by LEAN",
+	"operator.rebalance.cleared":     "recorded by the operator tool (cmd/operator) into cmd/engine's operator inbox (-operator), never by LEAN",
+	"market.universe.snapshot":       "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.session.calendar":        "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.close.history":           "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
+	"market.session.retracted":       "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
+	"strategy.order.skipped":         "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	// ADR 0019's reconciliation belongs to the live path too: the IBKR
 	// adapter records the observation, the target-weight engines classify
 	// it, and the owner's acknowledgement is an operator input.

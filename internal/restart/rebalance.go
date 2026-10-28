@@ -1,14 +1,13 @@
 package restart
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
-	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 // IsMomentumLog reports whether entries were recorded by a momentum run:
@@ -29,38 +28,60 @@ func IsMomentumLog(entries []journal.Entry) bool {
 	return false
 }
 
-// logConfiguration returns a log's target-weight configuration input and
-// its payload, refusing a log with none or one that cannot be decoded.
-func logConfiguration(entries []journal.Entry, logName string) (event.Envelope, event.TargetWeightConfigurationPayload, error) {
+// logAccount returns the account a log's configuration input names,
+// refusing a log with none or one whose account cannot be read back. Only
+// the account is read, so the reading does not depend on the running build
+// accepting the rest of the configuration.
+func logAccount(entries []journal.Entry, logName string) (string, error) {
 	for _, entry := range entries {
 		env := entry.Envelope
 		if entry.Kind != journal.KindInput || env.Type != event.TargetWeightConfigurationEventType {
 			continue
 		}
-		var cfg event.TargetWeightConfigurationPayload
-		if err := json.Unmarshal(env.Payload, &cfg); err != nil {
-			return env, cfg, fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+		var cfg struct {
+			AccountID string `json:"account_id"`
 		}
-		return env, cfg, nil
+		if err := json.Unmarshal(env.Payload, &cfg); err != nil {
+			return "", cannotReadBack(logName, fmt.Errorf("decode its configuration input %s: %w", env.ID, err))
+		}
+		if cfg.AccountID == "" {
+			return "", cannotReadBack(logName, fmt.Errorf("its configuration input %s names no account", env.ID))
+		}
+		return cfg.AccountID, nil
 	}
-	return event.Envelope{}, event.TargetWeightConfigurationPayload{}, fmt.Errorf("engine: %s holds no target-weight configuration input, so the account whose rebalance it records is not known", logName)
+	return "", cannotReadBack(logName, errors.New("it holds no target-weight configuration input"))
 }
 
-// RebalanceAtEnd returns the rebalance a momentum log ends with in
-// progress, or nil when none is (ADR 0026, point 5: "Every planned,
-// released and sent order, and the IRA phase (sells sent, buys pending)").
-// It is read by the run's own rule, never restated here: every input the
-// log records is applied, in order, to a fresh target-weight handler built
-// from the log's configuration input, its first session decided at that
-// input's time (cmd/engine's compose), and the handler then says what is
-// in progress (targetweight.Handler.RebalanceInProgress). The log commits an
-// input the run refused as well as one it read, with no mark of which, and
-// a refusal changes no state, so an input the handler refuses here is one
-// the run refused: an approval the run refused, wherever it stands, changes
-// nothing, and the approval it accepted, wherever that stands, carries its
-// rebalance until a clearance the run read ends it. Like a resume (ADR
-// 0027, section 6), this reads the log under the running build's rules. A
-// log whose configuration the handler refuses is refused, naming logName.
+// cannotReadBack is RebalanceAtEnd's refusal of a log it cannot read: fail
+// closed, never no rebalance in progress (AGENTS.md).
+func cannotReadBack(logName string, err error) error {
+	return fmt.Errorf("engine: the rebalance in progress of %s cannot be read back: %w", logName, err)
+}
+
+// RebalanceAtEnd returns the rebalance a momentum log ends with in progress,
+// for the account its configuration input names, or nil when none is (ADR
+// 0026, point 5: "Every planned, released and sent order, and the IRA phase
+// (sells sent, buys pending)"). It reads only what the log records, so it
+// is the same under any build (ADR 0027 refuses to recompute a run under
+// another build's rules):
+//
+//   - the rebalance the run carried in is the one its last
+//     strategy.run.approval-accepted decision states: the run records one
+//     only for the approval it accepted, so an approval input it refused,
+//     wherever it stands, counts for nothing (the log commits a refused
+//     input with no mark of the refusal);
+//   - the orders are the run's own risk.order.released decisions and its
+//     dry-run synthetic reports, and the venue's lifecycle reports and
+//     fills, the retirements and the owner's clearances it was sent, read by
+//     the rule the momentum run applies and the reporter reads the log by
+//     (event.OrderReports), so a report or clearance the run refused is not
+//     taken as read here either;
+//   - a carried rebalance, whose orders the run never released, stays in
+//     progress until a clearance names it and exactly its orders, as the run
+//     reads one (momentumRun.applyCleared).
+//
+// A record it must read and cannot decode or validate refuses, naming
+// logName: "cannot be read back", never nil.
 func RebalanceAtEnd(entries []journal.Entry, logName string) (*event.RebalanceInProgress, error) {
 	r, _, err := rebalanceOfAccount(entries, logName)
 	return r, err
@@ -69,25 +90,115 @@ func RebalanceAtEnd(entries []journal.Entry, logName string) (*event.RebalanceIn
 // rebalanceOfAccount is RebalanceAtEnd, with the account the log's
 // configuration names.
 func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.RebalanceInProgress, string, error) {
-	env, cfg, err := logConfiguration(entries, logName)
+	accountID, err := logAccount(entries, logName)
 	if err != nil {
 		return nil, "", err
 	}
-	version := env.StrategyVersion
-	if version == "" {
-		version = logName
-	}
-	h, err := targetweight.New(version, cfg, targetweight.Options{DecideFrom: env.EventTime})
-	if err != nil {
-		return nil, "", fmt.Errorf("engine: the configuration of %s cannot be read back: %w", logName, err)
+	reports := event.NewOrderReports()
+	decided := map[string]event.TargetsDecidedPayload{}
+	var carried *event.RebalanceInProgress
+	decode := func(env event.Envelope, into interface{ Validate() error }) error {
+		if err := json.Unmarshal(env.Payload, into); err != nil {
+			return cannotReadBack(logName, fmt.Errorf("decode %s: %w", env.ID, err))
+		}
+		return nil
 	}
 	for _, entry := range entries {
-		if entry.Kind == journal.KindInput {
-			// A refused input is one the run refused too: it changed nothing.
-			_, _ = h.Apply(context.Background(), entry.Envelope)
+		env := entry.Envelope
+		if entry.Kind == journal.KindDecision {
+			switch env.Type {
+			case event.RunApprovalAcceptedEventType:
+				p, err := event.DecodeRunApprovalAccepted(env.Payload, env.SchemaVersion)
+				if err != nil {
+					return nil, "", cannotReadBack(logName, fmt.Errorf("%s: %w", env.ID, err))
+				}
+				if p.AccountID != accountID {
+					return nil, "", cannotReadBack(logName, fmt.Errorf("%s accepts an approval for account %q, but the log is %q's", env.ID, p.AccountID, accountID))
+				}
+				carried = p.RebalanceInProgress
+			case event.TargetsDecidedEventType:
+				var p event.TargetsDecidedPayload
+				if err := decode(env, &p); err != nil {
+					return nil, "", err
+				}
+				decided[env.ID] = p
+			case event.OrderReleasedEventType:
+				var p event.OrderReleasedPayload
+				if err := decode(env, &p); err != nil {
+					return nil, "", err
+				}
+				if p.AccountID == accountID {
+					reports.Release(p)
+				}
+			case event.OrderLifecycleEventType:
+				// A dry-run's synthetic report on an order it never sent.
+				var p event.LimitOrderLifecyclePayload
+				if err := decode(env, &p); err != nil {
+					return nil, "", err
+				}
+				_, _ = reports.Lifecycle(p)
+			}
+			continue
+		}
+		// The venue's reports, retirements and clearances the run was sent;
+		// one the run refused is refused by the same rule here and read as
+		// nothing.
+		switch env.Type {
+		case event.OrderLifecycleEventType:
+			var p event.LimitOrderLifecyclePayload
+			if json.Unmarshal(env.Payload, &p) == nil && env.SchemaVersion == event.OrderLifecycleLimitVersion && p.ValidateSchema(env.SchemaVersion) == nil && p.AccountID == accountID {
+				_, _ = reports.Lifecycle(p)
+			}
+		case event.FillEventType:
+			var p event.TargetWeightFillPayload
+			if json.Unmarshal(env.Payload, &p) == nil && env.SchemaVersion == event.FillTargetWeightVersion && p.Validate() == nil && p.AccountID == accountID {
+				_, _, _ = reports.Fill(p)
+			}
+		case event.OrderRetiredEventType:
+			var p event.OrderRetiredPayload
+			if json.Unmarshal(env.Payload, &p) == nil && env.SchemaVersion == event.OrderRetiredSchemaVersion && p.Validate() == nil && p.AccountID == accountID {
+				_, _ = reports.Retire(p)
+			}
+		case event.RebalanceClearedEventType:
+			var p event.RebalanceClearedPayload
+			if json.Unmarshal(env.Payload, &p) != nil || env.SchemaVersion != event.RebalanceClearedSchemaVersion || p.Validate() != nil || p.AccountID != accountID {
+				continue
+			}
+			if carried != nil {
+				if p.DecisionID == carried.DecisionID && slices.Equal(p.ClientOrderIDs, carried.ClientOrderIDs) {
+					carried = nil
+				}
+				continue
+			}
+			_ = reports.Clear(p)
 		}
 	}
-	return h.RebalanceInProgress(), cfg.AccountID, nil
+	if carried != nil {
+		return carried, accountID, nil
+	}
+	working := reports.Working()
+	if len(working) == 0 {
+		return nil, accountID, nil
+	}
+	// Every order not terminal is the rebalance in progress's: a momentum
+	// run plans a new rebalance only once every order is terminal.
+	first, _ := reports.Order(working[0])
+	tag := first.Released.Tag
+	phase := event.RebalancePhaseBuysWorking
+	for _, id := range working {
+		o, _ := reports.Order(id)
+		if o.Released.Tag != tag {
+			return nil, "", cannotReadBack(logName, fmt.Errorf("it ends with orders of two rebalances not terminal, %s and %s, which a momentum run never leaves", tag, o.Released.Tag))
+		}
+		if o.Released.Side == event.OrderSideSell {
+			phase = event.RebalancePhaseSellsWorking
+		}
+	}
+	decision, ok := decided[tag]
+	if !ok {
+		return nil, "", cannotReadBack(logName, fmt.Errorf("it holds orders of %s not terminal but not that decision", tag))
+	}
+	return &event.RebalanceInProgress{DecisionID: tag, DecisionTime: decision.DecisionTime, Phase: phase, ClientOrderIDs: working}, accountID, nil
 }
 
 // CheckRebalanceInProgress refuses an IRA approval whose rebalance in

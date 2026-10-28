@@ -1,6 +1,7 @@
 package targetweight_test
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -191,39 +192,40 @@ func TestTheHandlerReadsAnApprovalByTheDecodersRule(t *testing.T) {
 	mustRefuse(t, b, bs.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "no-book", sessionEnd(0), json.RawMessage(raw)), "starting_book")
 }
 
-// TestTheRunStatesItsRebalanceInProgress: the run itself says which
-// rebalance is in progress, the state a fresh run's approval must state
-// (ADR 0026, point 5): January's sells working when the venue never
-// reports on them (their buys never planned), the rebalance an approval
-// carried in until it is cleared, and none for Boost or once every order is
-// terminal.
-func TestTheRunStatesItsRebalanceInProgress(t *testing.T) {
-	opts := dryRun(event.TradingModePaper)
-	opts.stopAfter = "2025-01-31"
-	r := simulateMomentum(t, opts)
-	got := r.handler.RebalanceInProgress()
-	var sells []string
-	for _, o := range released(t, r.decisions) {
-		sells = append(sells, o.ClientOrderID)
-		if o.Side != event.OrderSideSell {
-			t.Fatalf("setup: January released a buy, %s, before its sells finished", o.ClientOrderID)
-		}
+// TestAMomentumRunRecordsTheApprovalItAccepted: accepting the owner's
+// approval, a momentum run records it as a decision naming that approval and
+// the rebalance it carries in (ADR 0026, point 5; ADR 0027, note of
+// 2026-10-28), so a restart reads the fact from the log; a refused approval
+// records nothing.
+func TestAMomentumRunRecordsTheApprovalItAccepted(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{approval: iraApproval(december()), stopAfter: "2025-01-03"})
+	var recorded []event.Envelope
+	for _, e := range r.entries {
+		recorded = append(recorded, e.Envelope)
 	}
-	if got == nil || got.DecisionID != januaryDecision || got.Phase != event.RebalancePhaseSellsWorking ||
-		!got.DecisionTime.Equal(closeOf("2025-01-31")) || !equalStrings(got.ClientOrderIDs, sells) {
-		t.Fatalf("in progress %+v, want January's sells %v working", got, sells)
+	accepted := ofType(recorded, event.RunApprovalAcceptedEventType)
+	if len(accepted) != 1 || accepted[0].SchemaVersion != event.RunApprovalAcceptedSchemaVersion || accepted[0].CausationID != "operator-run-approved" {
+		t.Fatalf("recorded %+v, want one acceptance caused by the approval", accepted)
+	}
+	p, err := event.DecodeRunApprovalAccepted(accepted[0].Payload, accepted[0].SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.AccountID != iraAccount || p.ApprovalID != "operator-run-approved" || p.ApprovalSequence != 2 || p.RebalanceInProgress == nil || p.RebalanceInProgress.DecisionID != decemberDecision {
+		t.Fatalf("recorded %+v, want the approval at sequence 2 carrying December", p)
 	}
 
-	held := simulateMomentum(t, momentumOptions{approval: iraApproval(december()), stopAfter: "2025-01-06"})
-	if got := held.handler.RebalanceInProgress(); got == nil || got.DecisionID != decemberDecision || !equalStrings(got.ClientOrderIDs, december().ClientOrderIDs) {
-		t.Fatalf("in progress %+v, want December's carried rebalance", got)
+	cfg := momentumConfiguration()
+	start := closeOf("2025-01-02").Add(-12 * time.Hour)
+	h, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: closeOf("2025-01-02")})
+	if err != nil {
+		t.Fatal(err)
 	}
-	done := simulateMomentum(t, momentumOptions{stopAfter: "2025-02-03"})
-	if got := done.handler.RebalanceInProgress(); got != nil {
-		t.Fatalf("in progress %+v, want none once the venue filled every order", got)
-	}
-	b, _ := configured(t)
-	if got := b.RebalanceInProgress(); got != nil {
-		t.Fatalf("Boost's rebalance in progress %+v, want none", got)
+	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
+	mustApply(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
+	other := *iraApproval(nil)
+	other.AccountID = "DUOTHER"
+	if out, err := h.Apply(context.Background(), s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "other", start, other)); err == nil || len(out) != 0 {
+		t.Fatalf("a refused approval: %v, %d decisions, want a refusal recording nothing", err, len(out))
 	}
 }

@@ -55,7 +55,7 @@ are what this build runs):
 
 | What | Version |
 | --- | --- |
-| Target-weight rules (Boost and momentum), `RulesVersion` | 1.26.0 |
+| Target-weight rules (Boost and momentum), `RulesVersion` | 1.27.0 |
 | IBKR broker snapshot (`account.broker.snapshot`) and mark (`market.mark.recorded`) the adapter writes | 2 |
 | Target-weight configuration schema | 7 |
 | Decision record (`strategy.targets.decided`) | 6 |

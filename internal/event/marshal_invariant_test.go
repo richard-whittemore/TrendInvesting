@@ -49,7 +49,7 @@ func marshalPayloads() []validatedPayload {
 		validTargetsDecidedSaleWorking(), validTargetsDecidedWatching(), validTargetsWithheld(), validOrderPlanned(),
 		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
 		validKillSwitch(), validBrokerSnapshot(), postCloseSnapshot(), readTimeSnapshot(), evidencedMark(), validMarginAlarm(), validSaleWithheld(), validSaleOrder(),
-		validOperatorRunApprovedSettled(), validOperatorRunApproved(), validOperatorRunApprovedInIncident(), iraApprovalMidRebalance(), validRebalanceCleared(), validRetired(),
+		validOperatorRunApprovedSettled(), validOperatorRunApproved(), validOperatorRunApprovedInIncident(), iraApprovalMidRebalance(), validRunApprovalAccepted(), validRebalanceCleared(), validRetired(),
 		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
 		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
 		validLimitOrderLifecycle(), validTargetWeightFill(), validOrderSkipped(),
@@ -159,7 +159,7 @@ func payloadLeaves(t *testing.T, v reflect.Value, path string, visit func(string
 			defer v.Set(reflect.Zero(v.Type()))
 		}
 		payloadLeaves(t, v.Elem(), path, visit)
-	case reflect.String, reflect.Int, reflect.Int64, reflect.Bool, reflect.Float64:
+	case reflect.String, reflect.Int, reflect.Int64, reflect.Uint64, reflect.Bool, reflect.Float64:
 		visit(path, v)
 	default:
 		t.Fatalf("%s: add property generation for %s", path, v.Type())
@@ -391,6 +391,8 @@ func marshalBoundaries(t *testing.T, v reflect.Value) []any {
 		return []any{math.MinInt, -1, 0, 1, math.MaxInt}
 	case reflect.Int64:
 		return []any{int64(math.MinInt64), int64(-1), int64(0), int64(1), int64(math.MaxInt64)}
+	case reflect.Uint64:
+		return []any{uint64(0), uint64(1), uint64(math.MaxUint64)}
 	case reflect.Bool:
 		return []any{false, true}
 	default:
@@ -417,6 +419,8 @@ func marshalGeneratedValue(t *testing.T, v reflect.Value, bits uint64, year int1
 		return int(bits)
 	case reflect.Int64:
 		return int64(bits)
+	case reflect.Uint64:
+		return bits
 	case reflect.Bool:
 		return bits%2 == 0
 	default:
