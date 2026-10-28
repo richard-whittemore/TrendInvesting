@@ -236,6 +236,21 @@ func writeDurable(path string, data []byte) error {
 	return syncFile(dir)
 }
 
+// drainReader reads the pipe; once IBC has ended each read waits at most d, set
+// before the read, so a read is not cut off by time spent forwarding earlier lines.
+type drainReader struct {
+	f        *os.File
+	d        time.Duration
+	draining *atomic.Bool
+}
+
+func (r drainReader) Read(p []byte) (int, error) {
+	if r.draining.Load() {
+		_ = r.f.SetReadDeadline(time.Now().Add(r.d))
+	}
+	return r.f.Read(p)
+}
+
 // journal is where this program and IBC's output are written: every write has
 // a bound, so a journal that takes nothing cannot hold the starter, and a write
 // that errs, or is short, or misses the bound is reported to the caller.
@@ -348,7 +363,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		err := r.Run()
 		if renderFailed.Load() {
 			// What the renderer said cannot be journalled: stop before IBC starts.
-			say("the journal is not taking the config renderer's output; not starting IBC, so the unit starts again")
+			say("cannot start IBC: the journal is not taking the config renderer's output, so the unit starts again; no attempt was counted")
 			return exitRetry
 		}
 		if err != nil {
@@ -374,7 +389,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		return stopped("%s is unreadable or malformed (%v), so the number of login attempts is unknown; not starting IBC so the IBKR login cannot be locked. Check the paper login on the IBKR website, then delete %s and start the unit", cfg.StateFile, err, cfg.StateFile)
 	}
 	if n >= cfg.Max {
-		return stopped("%d login attempts within the last %d hours without an accepted login; not starting IBC so the IBKR login cannot be locked. Check the paper login on the IBKR website, then delete %s and start the unit", n, int(cfg.Window/time.Hour), cfg.StateFile)
+		return stopped("%d login attempts within the last %d hours without an accepted login (a start that failed counts too); not starting IBC so the IBKR login cannot be locked. Check the paper login on the IBKR website, and the cause of any failed start, then delete %s and start the unit", n, int(cfg.Window/time.Hour), cfg.StateFile)
 	}
 	attempt := func(existing []byte) []byte {
 		return append(existing, []byte(strconv.FormatInt(cfg.Now().Unix(), 10)+"\n")...)
@@ -412,19 +427,23 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		once.Do(func() { close(stopCh) })
 	}
 
-	// progress is when the reader last finished a line; the drain below waits on
-	// it, not on one fixed time, so many buffered lines through a slow (not
-	// stuck) journal are all delivered.
+	// progress is how long after origin the reader last finished a line (the
+	// monotonic clock, so a correction of the wall clock changes nothing); the
+	// drain below waits on it, so lines the reader already holds, written
+	// through a slow (not stuck) journal, are delivered.
+	origin := time.Now()
 	var progress atomic.Int64
-	progress.Store(time.Now().UnixNano())
+	var draining atomic.Bool
+	mark := func() { progress.Store(int64(time.Since(origin))) }
+	mark()
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
-		br := bufio.NewReaderSize(pr, maxLine)
+		br := bufio.NewReaderSize(drainReader{pr, cfg.DrainDeadline, &draining}, maxLine)
 		seen, relogin := false, false
 		for {
 			line, err := br.ReadSlice('\n')
-			progress.Store(time.Now().UnixNano())
+			mark()
 			if errors.Is(err, bufio.ErrBufferFull) {
 				// A line this long is no log line; nothing can be trusted to
 				// watch for the refusal in it.
@@ -454,7 +473,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 					case cerr != nil:
 						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": the login count cannot be kept (%v); stopping IBC and not retrying", cerr)})
 					case count >= cfg.Max:
-						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": %d of %d login attempts within the window were refused or never completed; stopping IBC and not retrying", count, cfg.Max)})
+						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": %d of %d login attempts within the window, the last refused (a start that failed counts too); stopping IBC and not retrying", count, cfg.Max)})
 					default:
 						stop(verdict{exitRetry, fmt.Sprintf("IBC reports a refused login (attempt %d of %d within the window); stopping IBC so the unit starts it again", count, cfg.Max)})
 					}
@@ -463,7 +482,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 				if werr == nil && !strings.HasSuffix(text, "\n") {
 					werr = out.write("\n")
 				}
-				progress.Store(time.Now().UnixNano())
+				mark()
 				if werr != nil {
 					// The bound on attempts does not depend on the journal, so a
 					// journal that fails is a restartable stop, which heals.
@@ -522,22 +541,31 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// Everything IBC wrote is read: the pipe's buffered data first, then an end
-	// at EOF, or at the deadline when an orphan of IBC still holds the pipe. The
-	// reader may still be writing buffered lines to the journal, each bounded by
-	// SinkTimeout, so the wait runs out only when the reader has made no
-	// progress for DrainDeadline + SinkTimeout + 2 s. That is restartable (75):
-	// every exec was counted before it started, so what a reader that never
-	// finished may have missed cannot lift the bound.
+	// After IBC ends its output is read on, each read bounded by DrainDeadline of
+	// waiting (the deadline is set before every read, so time spent writing
+	// buffered lines to the journal does not use it up): what the reader holds
+	// is delivered, each line bounded by SinkTimeout, and output an orphan of IBC
+	// writes later than DrainDeadline after the last read is not read. Two bounds end the wait with 75 (restartable: every exec
+	// was counted before it started, so a reader that never finished cannot lift
+	// the bound): no progress for DrainDeadline + SinkTimeout + 2 s, and a total
+	// of 2 x SinkTimeout + DrainDeadline since IBC ended.
+	drainStart := time.Now()
+	mark()
+	draining.Store(true)
 	_ = pr.SetReadDeadline(time.Now().Add(cfg.DrainDeadline))
 	idle := cfg.DrainDeadline + cfg.SinkTimeout + 2*time.Second
+	total := 2*cfg.SinkTimeout + cfg.DrainDeadline
 drain:
 	for {
 		select {
 		case <-readerDone:
 			break drain
 		case <-time.After(250 * time.Millisecond):
-			if time.Since(time.Unix(0, progress.Load())) > idle {
+			switch {
+			case time.Since(drainStart) > total:
+				stop(verdict{exitRetry, "the output reader did not finish within the drain's total bound; the refusal may be unseen, so stopping and starting again (the attempt is already counted)"})
+				break drain
+			case time.Since(origin)-time.Duration(progress.Load()) > idle:
 				stop(verdict{exitRetry, "the output reader made no progress after IBC ended; the refusal may be unseen, so stopping and starting again (the attempt is already counted)"})
 				break drain
 			}

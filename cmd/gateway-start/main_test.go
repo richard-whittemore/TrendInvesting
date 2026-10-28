@@ -418,7 +418,7 @@ func TestEveryExitThatLeavesTheUnitDownSaysCannotStartIBC(t *testing.T) {
 	}
 }
 
-// A journal that stops draining fails the run closed (the count is already
+// A journal that stops draining stops IBC and asks for a restart (75; the count is already
 // on disk): nothing is queued, nothing is dropped.
 func TestAStuckJournalStopsIBCAndAsksForARestartWithTheCountOnDisk(t *testing.T) {
 	r := newRig(t)
@@ -562,20 +562,85 @@ func TestAJournalWriteThatErrsOrIsShortStopsIBCAndAsksForARestart(t *testing.T) 
 // A journal that is slow (each write inside the sink bound) when IBC exits,
 // with several lines still buffered, does not turn a restartable exit into a
 // permanent stop: the drain is bounded by progress, not by one fixed time.
-type slowWriter2 struct{ delay time.Duration }
+type slowWriter2 struct {
+	delay time.Duration
+	mu    *sync.Mutex
+	lines *int
+}
 
 func (w slowWriter2) Write(p []byte) (int, error) {
 	time.Sleep(w.delay)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	*w.lines += strings.Count(string(p), "\n")
 	return len(p), nil
 }
 
 func TestASlowJournalWithManyBufferedLinesAtExitDoesNotTurnARestartIntoAStop(t *testing.T) {
 	r := newRig(t)
 	c := r.cfg(`echo "IBC: one"; echo "IBC: two"; echo "IBC: three"; echo "IBC: four"; exit 3`)
-	c.DrainDeadline, c.SinkTimeout = time.Second, 4*time.Second
-	// Four writes of 3 s each: 12 s, past the old bound of 1 + 4 + 2 = 7 s.
-	if code := run(c, slowWriter2{3 * time.Second}, &bytes.Buffer{}); code != 3 {
+	c.DrainDeadline, c.SinkTimeout = time.Second, 10*time.Second
+	var mu sync.Mutex
+	lines := 0
+	// Four writes of 3 s each: 12 s, past the old bound of 1 + 2 s and inside the sink bound each.
+	if code := run(c, slowWriter2{3 * time.Second, &mu, &lines}, &bytes.Buffer{}); code != 3 {
 		t.Fatalf("exit %d, want IBC's own 3", code)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if lines != 4 {
+		t.Fatalf("%d lines reached the journal, want all 4", lines)
+	}
+}
+
+// A quiet IBC (hours between lines) whose orphan writes a line after it exits
+// is read for DrainDeadline: the idle clock starts when the drain does.
+func TestAQuietRunsDrainStartsItsOwnClockAndReadsAnOrphansLateLine(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`echo "IBC: hi"; sleep 8; (sleep 1; echo "IBC: late") & exit 3`)
+	c.DrainDeadline, c.SinkTimeout = 3*time.Second, time.Second
+	w := &recordingJournal{}
+	if code := run(c, w, &bytes.Buffer{}); code != 3 {
+		t.Fatalf("exit %d, want IBC's own 3", code)
+	}
+	if !strings.Contains(w.text(), "IBC: late") {
+		t.Fatalf("the orphan's late line was not read: %q", w.text())
+	}
+}
+
+type recordingJournal struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *recordingJournal) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *recordingJournal) text() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// The drain has a total cap: a journal slow on every line cannot keep the
+// starter alive for the length of the buffer times the sink bound.
+func TestTheDrainHasATotalCapAndAsksForARestartWhenItIsReached(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`i=0; while [ $i -lt 40 ]; do echo "IBC: line $i"; i=$((i+1)); done; exit 3`)
+	c.DrainDeadline, c.SinkTimeout = time.Second, 3*time.Second
+	var mu sync.Mutex
+	lines := 0
+	start := time.Now()
+	// The first line is slow enough that the rest are buffered when IBC exits.
+	code := run(c, slowWriter2{2 * time.Second, &mu, &lines}, &bytes.Buffer{})
+	if code != 75 {
+		t.Fatalf("exit %d, want 75 when the cap is reached", code)
+	}
+	if time.Since(start) > 25*time.Second {
+		t.Fatalf("took %s, want a total cap of about 2 x sink bound + drain", time.Since(start))
 	}
 }
 
@@ -588,8 +653,13 @@ func TestARendererWhoseOutputCannotBeJournalledIsARestartableFailureAndIBCDoesNo
 	c.SinkTimeout = time.Second
 	b := blockedWriter{release: make(chan struct{})}
 	defer close(b.release)
-	if code := run(c, b, b); code != 75 || r.launches() != 0 {
+	var errw bytes.Buffer
+	if code := run(c, b, &errw); code != 75 || r.launches() != 0 {
 		t.Fatalf("exit %d with %d launches, want 75 and none", code, r.launches())
+	}
+	// The health check keys on this phrase to read the Gateway as not logged in.
+	if !strings.Contains(errw.String(), "gateway-start: cannot start IBC:") {
+		t.Fatalf("the message lacks 'cannot start IBC:': %q", errw.String())
 	}
 }
 

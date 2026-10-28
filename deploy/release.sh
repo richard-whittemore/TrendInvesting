@@ -411,6 +411,13 @@ restart_dashboard_verified() {
   done
 }
 
+# flush PATH: forces a file or directory to disk. Where `sync` takes a path
+# (GNU coreutils) its error is the answer; where it does not (the Mac), every
+# file system is flushed.
+flush() {
+  if sync --help 2>&1 | grep -q 'FILE'; then sync "$1"; else sync; fi
+}
+
 # put_back NAME: re-check the kept build NAME against its checksums and put it
 # back; says so loudly if it cannot.
 put_back() {
@@ -530,7 +537,8 @@ if test "$mode" = release; then
     # Copied to a name of its own and renamed into place, so a copy that was
     # cut short is never mistaken for the original.
     rm -f "$releases/$cur/.starter-installed.tmp"
-    if ! cp -p "$bin/ti-gateway-start" "$releases/$cur/.starter-installed.tmp" || ! mv -f "$releases/$cur/.starter-installed.tmp" "$releases/$cur/.starter-installed"; then
+    if ! cp -p "$bin/ti-gateway-start" "$releases/$cur/.starter-installed.tmp" || ! flush "$releases/$cur/.starter-installed.tmp" \
+      || ! mv -f "$releases/$cur/.starter-installed.tmp" "$releases/$cur/.starter-installed" || ! flush "$releases/$cur"; then
       die "could not keep the installed ti-gateway-start with $cur; nothing installed"
     fi
   fi
