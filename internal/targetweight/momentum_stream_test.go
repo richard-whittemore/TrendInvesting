@@ -258,8 +258,9 @@ type momentumOptions struct {
 
 type momentumResult struct {
 	run
-	venue  []event.Envelope // the venue reports fed
-	stream *stream
+	handler *targetweight.Handler
+	venue   []event.Envelope // the venue reports fed
+	stream  *stream
 }
 
 // simulateMomentum feeds the synthetic run through a journal Recorder
@@ -284,7 +285,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	}
 	rec := journal.NewRecorder(handler)
 	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
-	res := momentumResult{run: run{recorder: rec, hash: s.hash}, stream: s}
+	res := momentumResult{run: run{recorder: rec, hash: s.hash}, handler: handler, stream: s}
 	acct := &ira{account: cfg.AccountID, settled: 10000, held: map[string]int64{}}
 	for id, q := range opts.held {
 		acct.held[id] = q

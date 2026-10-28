@@ -448,7 +448,7 @@ wrote <file>: start the fresh run with -approval <file> (docs/runbooks/durable-l
 
 For an IRA (the log is a momentum run's), the approval states no latch: it
 states the rebalance the log ends with in progress, read from the log's
-orders by the rule the engine itself reads them by, or that none is
+orders by replaying the log through the engine's own rules, or that none is
 (`operator.run.approved` schema version 6; ADR 0026, point 5). A restart
 mid-rebalance sends nothing for that decision time until you clear it, so a
 log that ends mid-rebalance prints the rebalance, its phase (`sells-working`:

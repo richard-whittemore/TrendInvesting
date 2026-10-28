@@ -190,3 +190,40 @@ func TestTheHandlerReadsAnApprovalByTheDecodersRule(t *testing.T) {
 	raw := `{"account_id":"joint","previous_log":"run-1.log","previous_log_final_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","incident_id":"","approved_by":"owner","approved_at":"2025-01-02T14:00:00Z","boost":{"latched":true},"incident_in_force":null}`
 	mustRefuse(t, b, bs.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "no-book", sessionEnd(0), json.RawMessage(raw)), "starting_book")
 }
+
+// TestTheRunStatesItsRebalanceInProgress: the run itself says which
+// rebalance is in progress, the state a fresh run's approval must state
+// (ADR 0026, point 5): January's sells working when the venue never
+// reports on them (their buys never planned), the rebalance an approval
+// carried in until it is cleared, and none for Boost or once every order is
+// terminal.
+func TestTheRunStatesItsRebalanceInProgress(t *testing.T) {
+	opts := dryRun(event.TradingModePaper)
+	opts.stopAfter = "2025-01-31"
+	r := simulateMomentum(t, opts)
+	got := r.handler.RebalanceInProgress()
+	var sells []string
+	for _, o := range released(t, r.decisions) {
+		sells = append(sells, o.ClientOrderID)
+		if o.Side != event.OrderSideSell {
+			t.Fatalf("setup: January released a buy, %s, before its sells finished", o.ClientOrderID)
+		}
+	}
+	if got == nil || got.DecisionID != januaryDecision || got.Phase != event.RebalancePhaseSellsWorking ||
+		!got.DecisionTime.Equal(closeOf("2025-01-31")) || !equalStrings(got.ClientOrderIDs, sells) {
+		t.Fatalf("in progress %+v, want January's sells %v working", got, sells)
+	}
+
+	held := simulateMomentum(t, momentumOptions{approval: iraApproval(december()), stopAfter: "2025-01-06"})
+	if got := held.handler.RebalanceInProgress(); got == nil || got.DecisionID != decemberDecision || !equalStrings(got.ClientOrderIDs, december().ClientOrderIDs) {
+		t.Fatalf("in progress %+v, want December's carried rebalance", got)
+	}
+	done := simulateMomentum(t, momentumOptions{stopAfter: "2025-02-03"})
+	if got := done.handler.RebalanceInProgress(); got != nil {
+		t.Fatalf("in progress %+v, want none once the venue filled every order", got)
+	}
+	b, _ := configured(t)
+	if got := b.RebalanceInProgress(); got != nil {
+		t.Fatalf("Boost's rebalance in progress %+v, want none", got)
+	}
+}

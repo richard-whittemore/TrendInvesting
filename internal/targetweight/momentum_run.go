@@ -826,6 +826,40 @@ func (r *momentumRun) applyCleared(in event.Envelope) error {
 	return nil
 }
 
+// RebalanceInProgress returns the rebalance whose orders are not all
+// terminal, as this run reads it, or nil when none is: the state a fresh
+// run's approval must state (ADR 0026, point 5: "Every planned, released and
+// sent order, and the IRA phase (sells sent, buys pending)"). It is the
+// rebalance an approval carried in until the owner clears it, else the
+// decision whose orders are working: every order not terminal belongs to
+// the rebalance in progress, since a new rebalance is planned only once
+// every order is terminal (withhold). Its phase is sells-working while a
+// sell is working, its buys never planned (they are planned once every sell
+// is terminal), else buys-working. Boost holds no rebalance, so a Boost
+// run's is nil.
+func (h *Handler) RebalanceInProgress() *event.RebalanceInProgress {
+	r := h.momentum
+	switch {
+	case r == nil:
+		return nil
+	case r.carried != nil:
+		c := *r.carried
+		c.ClientOrderIDs = slices.Clone(c.ClientOrderIDs)
+		return &c
+	}
+	working := r.orders.Working()
+	if len(working) == 0 || r.rebalance == nil {
+		return nil
+	}
+	phase := event.RebalancePhaseBuysWorking
+	for _, id := range working {
+		if o, _ := r.orders.Order(id); o.Released.Side == event.OrderSideSell {
+			phase = event.RebalancePhaseSellsWorking
+		}
+	}
+	return &event.RebalanceInProgress{DecisionID: r.rebalance.decisionID, DecisionTime: r.rebalance.session, Phase: phase, ClientOrderIDs: working}
+}
+
 // applyApproval starts a fresh IRA run from the owner's approval (ADR 0027,
 // amended 2026-10-17): the incident in force puts the gate in its Degraded
 // or Halted state and scope before any market input (ADR 0019, amended

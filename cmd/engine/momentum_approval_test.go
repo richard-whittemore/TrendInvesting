@@ -165,3 +165,32 @@ func TestAMomentumFirstRunRefusesABoostShapedApproval(t *testing.T) {
 		t.Fatalf("a Boost first run with an IRA approval: %v", err)
 	}
 }
+
+// TestAFreshIRARunAfterAStartCutShortReadsThatLogsConfiguration: the latest
+// log holds nothing past its configuration and no earlier run holds more,
+// so the state the approval is checked against is that log's own: it holds
+// the configuration, and so no rebalance in progress, as Boost's check reads
+// no latch from it (ADR 0026, point 5; ADR 0027, the restart model).
+func TestAFreshIRARunAfterAStartCutShortReadsThatLogsConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	opts := momentumOptions(t, dir)
+	opts.logPath, opts.outPath = filepath.Join(dir, "cut.log"), filepath.Join(dir, "cut.journal")
+	if err := startEngine(t, opts)(); err != nil {
+		t.Fatalf("the start cut short: %v", err)
+	}
+	recovery := recoverFile(t, opts.logPath)
+	if len(recovery.Entries) != 1 {
+		t.Fatalf("setup: the cut-short start holds %d records, want its configuration alone", len(recovery.Entries))
+	}
+	fresh := momentumOptions(t, dir)
+	fresh.asOf = "2025-01-03T21:00:00Z"
+	fresh.logPath, fresh.outPath = filepath.Join(dir, "fresh.log"), filepath.Join(dir, "fresh.journal")
+	fresh.approvalPath = writeJSON(t, "approval.json", event.OperatorRunApprovedPayload{
+		AccountID: fixtureAccount, PreviousLog: "cut.log", PreviousLogFinalHash: recovery.FinalRecordHash,
+		ApprovedBy: "owner", ApprovedAt: time.Date(2025, time.January, 3, 13, 0, 0, 0, time.UTC),
+		Momentum: &event.MomentumStateInForce{},
+	})
+	if err := startEngine(t, fresh)(); err != nil {
+		t.Fatalf("a fresh IRA run after a start cut short: %v", err)
+	}
+}

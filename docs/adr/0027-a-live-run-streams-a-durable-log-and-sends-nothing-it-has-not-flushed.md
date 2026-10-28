@@ -468,11 +468,16 @@ owner clears it. So:
   states one strategy's state, never both. Versions 1 to 5 stay readable and
   state no momentum state.
 - **The engine checks it** against the approved log before it starts, by
-  the rule the momentum run and the reporter read orders by
-  (`event.OrderReports`), with a rebalance the log's own approval carried in
-  and not yet cleared still in progress: an approval stating none where one
-  is, or one the log does not hold, is refused, and so is a Boost-shaped
-  approval for a momentum configuration, or an IRA one for Boost.
+  the run's own rule: every input the log records is applied, in order, to
+  a fresh target-weight handler built from the log's configuration, which
+  then states the rebalance in progress. The log commits a refused input
+  with no mark of the refusal, and a refusal changes nothing, so an approval
+  the run refused never counts and the one it accepted, wherever it stands,
+  carries its rebalance until a clearance the run read ends it. An approval
+  stating none where one is, or one the log does not hold, is refused, and
+  so is a Boost-shaped approval for a momentum configuration, or an IRA one
+  for Boost. When the approved log is a start cut short and no earlier run
+  holds more, its own configuration is the state: no rebalance in progress.
 - **The fresh run holds**: it withholds every decision as
   `rebalance-in-progress`, planning nothing, until the owner's
   `operator.rebalance.cleared` names that rebalance and exactly its orders;

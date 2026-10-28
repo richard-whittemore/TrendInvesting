@@ -318,8 +318,11 @@ func checkApprovalFor(opts options, comp composition, approval event.OperatorRun
 // stateBefore returns the entries and name of the latest run older than
 // named, a log holding nothing past its configuration, that holds more: the
 // run whose state is still in force, since a log holding only its
-// configuration decided nothing and records no state. It returns no entries
-// when there is none, as for a first run.
+// configuration decided nothing and records no state. When there is none,
+// as for a first run, it returns named's own entries: its configuration,
+// which records no state either (no latch, no incident, no rebalance in
+// progress), and which a momentum log's state is read under
+// (restart.RebalanceAtEnd).
 func stateBefore(opts options, named string) ([]journal.Entry, string, error) {
 	found, err := runsByAge(opts)
 	if err != nil {
@@ -343,7 +346,11 @@ func stateBefore(opts options, named string) ([]journal.Entry, string, error) {
 			return recovery.Entries, logs[i], nil
 		}
 	}
-	return nil, named, nil
+	recovery, err := recoverLogFile(prefix + named)
+	if err != nil {
+		return nil, "", err
+	}
+	return recovery.Entries, named, nil
 }
 
 // checkResumesLatest refuses a -resume that names a log other than the

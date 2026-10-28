@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -14,6 +17,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/operator"
 	"github.com/richard-whittemore/TrendInvesting/internal/restart"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 const at = "2026-10-17T14:30:05Z"
@@ -887,53 +891,79 @@ func TestTheAdaptersSettlementLineIsOneTheApprovalReads(t *testing.T) {
 	}
 }
 
-// momentumLog writes a momentum run's durable log at path: its
-// configuration, then one session close that decided and released a sell
-// no venue has reported on, so the log ends mid-rebalance.
-func momentumLog(t *testing.T, path string) journal.Recovery {
+// momentumLog writes a paper IRA's durable log at path, recorded by the
+// real momentum handler over cmd/engine's synthetic month (invented prices
+// only) with no venue reporting on its orders, so the log ends with the
+// month's buys working; it returns the orders released.
+func momentumLog(t *testing.T, path string) []string {
 	t.Helper()
+	raw, err := os.ReadFile("../engine/testdata/momentum-dry-run.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg event.TargetWeightConfigurationPayload
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Mode, cfg.AccountID = event.TradingModePaper, "DUIRA"
+	asOf := time.Date(2025, time.January, 2, 21, 0, 0, 0, time.UTC)
+	const version = "momentum/1.26.0/test"
+	h, err := targetweight.New(version, cfg, targetweight.Options{DecideFrom: asOf})
+	if err != nil {
+		t.Fatal(err)
+	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = file.Close() }()
-	log, err := journal.CreateLog(file, journal.NewLogHeader("sha256:cfg", "momentum/1.26.0/test"))
+	log, err := journal.CreateLog(file, journal.NewLogHeader(h.ConfigurationHash(), version))
 	if err != nil {
 		t.Fatal(err)
 	}
-	when := time.Date(2026, time.October, 30, 20, 0, 0, 0, time.UTC)
-	stamp := func(id, eventType string, version uint32, sequence uint64, payload any) event.Envelope {
-		raw := encoded(t, payload)
-		return event.Envelope{ID: id, Type: eventType, SchemaVersion: version, EnvelopeVersion: event.CurrentEnvelopeVersion,
-			EventTime: when, RecordedAt: when, Sequence: sequence, Source: "test", StrategyVersion: "momentum/1.26.0/test",
-			ConfigurationHash: "sha256:cfg", PayloadHash: event.HashPayload(raw), Payload: raw}
+	recorder := journal.NewDurableRecorder(h, log, 1<<20)
+	var sequence uint64
+	apply := func(id, eventType string, schema uint32, at time.Time, payload json.RawMessage) {
+		sequence++
+		if _, err := recorder.Apply(context.Background(), event.Envelope{ID: id, Type: eventType, SchemaVersion: schema, EnvelopeVersion: event.CurrentEnvelopeVersion,
+			EventTime: at, RecordedAt: at, Sequence: sequence, Source: "test", StrategyVersion: version, ConfigurationHash: h.ConfigurationHash(),
+			PayloadHash: event.HashPayload(payload), Payload: payload}); err != nil {
+			t.Fatalf("apply %s: %v", id, err)
+		}
 	}
-	decision := "targets-decided:DUIRA:2026-10-30T20:00:00Z"
-	sell := event.OrderReleasedPayload{AccountID: "DUIRA", PlanID: "order-planned:DUIRA-1", Tag: decision, ClientOrderID: "DUIRA-1", InstrumentID: "AAA",
-		Side: event.OrderSideSell, Quantity: 10, LimitPrice: 50, Mode: event.TradingModePaper, Send: true}
-	if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: stamp("configuration", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, 1,
-		map[string]string{"strategy_id": event.TargetWeightStrategyMomentum, "account_id": "DUIRA"})}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := log.Append([]journal.Entry{
-		{Kind: journal.KindInput, Envelope: stamp("session:1", event.SessionClosedEventType, 1, 2, map[string]string{"x": "y"})},
-		{Kind: journal.KindDecision, Envelope: stamp(decision, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, 1,
-			event.TargetsDecidedPayload{AccountID: "DUIRA", StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: when, Outcome: event.TargetsOutcomeDecided})},
-		{Kind: journal.KindDecision, Envelope: stamp("risk-order-released:DUIRA-1", event.OrderReleasedEventType, sell.SchemaVersion(), 2, sell)},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	_ = file.Close()
-	reread, err := os.Open(path)
+	apply("configuration:"+h.ConfigurationHash(), event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, asOf, encoded(t, cfg))
+	month, err := os.ReadFile("../engine/testdata/momentum-month.jsonl")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = reread.Close() }()
-	recovery, err := journal.RecoverLog(reread)
-	if err != nil {
-		t.Fatal(err)
+	for _, line := range bytes.Split(bytes.TrimSpace(month), []byte("\n")) {
+		var in struct {
+			Type          string          `json:"type"`
+			SchemaVersion uint32          `json:"schema_version"`
+			ID            string          `json:"id"`
+			EventTime     time.Time       `json:"event_time"`
+			Payload       json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(line, &in); err != nil {
+			t.Fatal(err)
+		}
+		apply(in.ID, in.Type, in.SchemaVersion, in.EventTime, bytes.ReplaceAll(in.Payload, []byte(`"account_id":"trad-ira"`), []byte(`"account_id":"DUIRA"`)))
 	}
-	return recovery
+	var orders []string
+	for _, e := range recorder.Entries() {
+		if e.Kind == journal.KindDecision && e.Envelope.Type == event.OrderReleasedEventType {
+			var p event.OrderReleasedPayload
+			if err := json.Unmarshal(e.Envelope.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			orders = append(orders, p.ClientOrderID)
+		}
+	}
+	if len(orders) == 0 {
+		t.Fatal("setup: the month released no order")
+	}
+	sort.Strings(orders)
+	return orders
 }
 
 // TestAnIRAApprovalStatesTheRebalanceInProgress: from a momentum run's log
@@ -943,7 +973,7 @@ func momentumLog(t *testing.T, path string) journal.Recovery {
 func TestAnIRAApprovalStatesTheRebalanceInProgress(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "run-1.log")
-	momentumLog(t, logPath)
+	orders := momentumLog(t, logPath)
 	path := filepath.Join(dir, "approval.json")
 	out, err := invoke(t, "approve", "-log", logPath, "-account", "DUIRA", "-by", "owner", "-out", path, "-at", at)
 	if err != nil {
@@ -957,12 +987,13 @@ func TestAnIRAApprovalStatesTheRebalanceInProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the engine would refuse the approval: %v", err)
 	}
+	const decision = "targets-decided:DUIRA:2025-01-31T21:00:00Z"
 	r := p.Momentum
-	if p.Boost.Latched != nil || r == nil || r.RebalanceInProgress == nil || r.RebalanceInProgress.Phase != event.RebalancePhaseSellsWorking ||
-		strings.Join(r.RebalanceInProgress.ClientOrderIDs, ",") != "DUIRA-1" {
+	if p.Boost.Latched != nil || r == nil || r.RebalanceInProgress == nil || r.RebalanceInProgress.Phase != event.RebalancePhaseBuysWorking ||
+		r.RebalanceInProgress.DecisionID != decision || strings.Join(r.RebalanceInProgress.ClientOrderIDs, ",") != strings.Join(orders, ",") {
 		t.Fatalf("approval %s", raw)
 	}
-	for _, want := range []string{"mid-rebalance", "targets-decided:DUIRA:2026-10-30T20:00:00Z", "DUIRA-1", "operator rebalance-cleared", "-orders DUIRA-1"} {
+	for _, want := range []string{"mid-rebalance", decision, orders[0], "operator rebalance-cleared", "-orders " + strings.Join(orders, ",")} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printed %q, want it to say %q", out, want)
 		}
