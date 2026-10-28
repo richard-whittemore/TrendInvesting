@@ -13,8 +13,12 @@ configuration hash and strategy version read from the engine's durable log
 header (ADR 0027), the next sequence of the engine's one input stream (2 after
 the configuration, 3 after an approval; cmd/engine/engine.go, "Wire contract"),
 and the configuration's account in place of the month's placeholder, "trad-ira".
+It feeds only a dry-run (AGENTS.md rule 5): invented prices and cash
+recorded in a paper or live run would become that account's facts, so it
+refuses, before it connects, a configuration whose mode is not dry-run, and a
+log whose own configuration input is not dry-run or names another account.
 It never connects to IBKR, and it prints no account number: only each decision's
-type and outcome (ADR 0028; Boost lesson L12). It stops at the first input the
+type and outcome (ADR 0028; docs/live-trading/lessons-2026-10.md L12). It stops at the first input the
 engine refuses, naming it.
 """
 import argparse
@@ -24,6 +28,19 @@ import socket
 import sys
 
 PLACEHOLDER = "trad-ira"
+DRY_RUN = "dry-run"
+CONFIGURATION = "strategy.target-weight.configuration"
+
+
+def read_log(log_path):
+    """The durable log's header and the payload of its configuration input, None when it holds none."""
+    with open(log_path) as f:
+        header = json.loads(f.readline())
+        for line in f:
+            record = json.loads(line).get("record")
+            if record and record.get("kind") == "input" and record["envelope"].get("type") == CONFIGURATION:
+                return header, record["envelope"].get("payload")
+    return header, None
 
 
 def stamp(line, header, account, sequence):
@@ -53,10 +70,18 @@ def describe(decision):
 
 def feed(socket_path, log_path, config_path, month_path, first_sequence=2):
     """Send every line of the month to the engine at socket_path; return the decision log's lines."""
-    with open(log_path) as f:
-        header = json.loads(f.readline())
     with open(config_path) as f:
-        account = json.load(f)["account_id"]
+        config = json.load(f)
+    account = config.get("account_id", "")
+    if config.get("mode") != DRY_RUN:
+        raise SystemExit("feed-month: {} is not a dry-run configuration: the synthetic month is fed only to a dry-run "
+                         "engine".format(config_path))
+    header, logged = read_log(log_path)
+    if logged is None or logged.get("mode") != DRY_RUN:
+        raise SystemExit("feed-month: {} is not a dry-run run's log: the synthetic month is fed only to a dry-run "
+                         "engine".format(log_path))
+    if logged.get("account_id") != account:
+        raise SystemExit("feed-month: {} is not the run of the account {} names".format(log_path, config_path))
     sock = socket.socket(socket.AF_UNIX)
     sock.settimeout(30)
     sock.connect(socket_path)

@@ -34,7 +34,7 @@ var identifierPatterns = []*regexp.Regexp{
 // paperAccount is an IBKR paper account number with letters after DU
 // (DUX1234567), as adapter/ibkr/masking.py reads it: DU and five to nine
 // capitals and digits, at least one a digit (accountWithDigit), so a word
-// such as DURATION is left alone (Boost lesson L12: the IRAs' paper account
+// such as DURATION is left alone (docs/live-trading/lessons-2026-10.md L12: the IRAs' paper account
 // numbers never reach a public place).
 var paperAccount = regexp.MustCompile(`\bDU[A-Z0-9]{5,9}\b`)
 

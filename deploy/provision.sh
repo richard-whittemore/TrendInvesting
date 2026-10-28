@@ -577,7 +577,7 @@ require_native_programs() {
 # the server and never in the repository, and is hashed into its engine's run
 # (ADR 0016), so it is installed only when DEST has none: an existing one is
 # kept byte for byte, and the shipped one is installed beside it as
-# <name>.config.example, to compare (Boost lesson L7: an earlier provisioner
+# <name>.config.example, to compare (docs/live-trading/lessons-2026-10.md L7: an earlier provisioner
 # copied the shipped configuration over the server's, resetting Boost's
 # account to the placeholder).
 install_engine_settings() {

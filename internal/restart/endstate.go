@@ -88,8 +88,13 @@ func ReadEndState(entries []journal.Entry, accountID, logName string, settlement
 	var end EndState
 	var err error
 	if end.Momentum = IsMomentumLog(entries); end.Momentum {
-		if end.Rebalance, err = RebalanceAtEnd(entries, accountID, logName); err != nil {
+		var account string
+		end.Rebalance, account, err = rebalanceOfAccount(entries, logName)
+		switch {
+		case err != nil:
 			return EndState{}, err
+		case account != accountID:
+			return EndState{}, fmt.Errorf("engine: %s is the run of %q, not of %q", logName, account, accountID)
 		}
 	} else if end.Latched, _, _, err = latchAtEnd(entries, logName); err != nil {
 		return EndState{}, err

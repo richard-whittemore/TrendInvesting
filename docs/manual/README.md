@@ -142,4 +142,6 @@ are what this build runs):
      servers.
 
 The plan these chapters build towards is `docs/live-trading/plan.md`; the
-decisions are the ADRs in `docs/adr/`.
+decisions are the ADRs in `docs/adr/`. The lessons the Boost dry run taught,
+which the momentum slices build in, are in
+[`docs/live-trading/lessons-2026-10.md`](../live-trading/lessons-2026-10.md).

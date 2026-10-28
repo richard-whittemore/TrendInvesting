@@ -914,15 +914,24 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 // decodeApproval reads the owner's approval, refusing one that does not
 // come once, straight after the configuration, or that is for another
 // configuration or account, before either strategy reads its state in
-// force. Versions 2 to 6 are read (ADR 0015); version 1 could not state an
+// force. Versions 2 to 6 are read (ADR 0015), by
+// event.DecodeRecordedOperatorRunApproved; version 1 could not state an
 // incident's cash scope.
 func (h *Handler) decodeApproval(in event.Envelope) (event.OperatorRunApprovedPayload, error) {
 	if h.approved || h.prelude {
 		return event.OperatorRunApprovedPayload{}, errors.New("targetweight: an approval comes once, straight after the configuration and before any other input")
 	}
-	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, 3, 4, 5, event.OperatorRunApprovedSchemaVersion})
+	versions := []uint32{2, 3, 4, 5, event.OperatorRunApprovedSchemaVersion}
+	if !slices.Contains(versions, in.SchemaVersion) {
+		return event.OperatorRunApprovedPayload{}, fmt.Errorf("targetweight: %s schema version %d is not one of the versions %v this build reads (ADR 0015)", in.Type, in.SchemaVersion, versions)
+	}
+	// Read by the approval's own decoder, the rule the engine checked the
+	// file by, so a key left out (a momentum state with no
+	// rebalance_in_progress) is refused here too, never read as its zero
+	// value (ADR 0026, point 5; ADR 0027, note of 2026-10-28).
+	p, err := event.DecodeRecordedOperatorRunApproved(in.Payload, in.SchemaVersion)
 	if err != nil {
-		return event.OperatorRunApprovedPayload{}, err
+		return event.OperatorRunApprovedPayload{}, fmt.Errorf("targetweight: %s %s is invalid: %w", in.Type, in.ID, err)
 	}
 	if in.ConfigurationHash != h.hash {
 		return event.OperatorRunApprovedPayload{}, fmt.Errorf("targetweight: approval %s belongs to another configuration", in.ID)

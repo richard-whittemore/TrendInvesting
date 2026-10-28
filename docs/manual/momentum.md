@@ -278,7 +278,10 @@ the checkout, once the build with this slice is installed (`sudo ti-release
    `2025-01-31T21:00:00Z strategy.targets.decided withheld histories-missing`:
    the month's decision is recorded withheld, since the real rule wants 200
    SPY closes and the 500 ranked stocks' histories a month does not hold,
-   and nothing is planned or sent. It prints no account number.
+   and nothing is planned or sent. It prints no account number, and it
+   refuses, before connecting, a configuration or a log that is not
+   dry-run, or a log of another account: invented prices must never become
+   a paper or live account's facts.
 6. `sudo systemctl stop ti-engine@trad-ira`, then `sudo journalctl -u
    ti-engine@trad-ira -n 3` shows `wrote .../demo-<today>.journal`: the run
    stopped cleanly. `sudo grep -c '"withheld_reason":"histories-missing"'

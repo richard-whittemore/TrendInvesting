@@ -48,14 +48,22 @@ class StandIn(threading.Thread):
 
 class FeedMonthTest(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(dir="/tmp")
+        # The review gate names its run's own socket folder (docs/development.md, "Ending processes").
+        self.dir = tempfile.mkdtemp(dir=os.environ.get("TI_TEST_SOCKET_DIR") or "/tmp")
         self.socket = os.path.join(self.dir, "engine.sock")
-        self.log = os.path.join(self.dir, "run.log")
-        with open(self.log, "w") as f:
-            f.write(json.dumps({"log_version": 1, "configuration_hash": "sha256:cfg", "strategy_version": "momentum/1.26.0+x"}) + "\n")
+        self.write_run("dry-run")
+
+    def write_run(self, mode, logged_mode=None, logged_account="DUTEST0001"):
+        """The engine's configuration file and its durable log: the header, then the configuration input."""
         self.config = os.path.join(self.dir, "trad-ira.config")
         with open(self.config, "w") as f:
-            json.dump({"strategy_id": "momentum", "account_id": "DUTEST0001"}, f)
+            json.dump({"strategy_id": "momentum", "account_id": "DUTEST0001", "mode": mode}, f)
+        self.log = os.path.join(self.dir, "run.log")
+        configuration = {"strategy_id": "momentum", "account_id": logged_account, "mode": logged_mode or mode}
+        with open(self.log, "w") as f:
+            f.write(json.dumps({"log_version": 1, "configuration_hash": "sha256:cfg", "strategy_version": "momentum/1.26.0+x"}) + "\n")
+            f.write(json.dumps({"record": {"sequence": 1, "kind": "input", "envelope": {
+                "id": "configuration:sha256:cfg", "type": "strategy.target-weight.configuration", "payload": configuration}}}) + "\n")
 
     def tearDown(self):
         for name in os.listdir(self.dir):
@@ -81,6 +89,20 @@ class FeedMonthTest(unittest.TestCase):
         self.assertTrue(snapshots and all(s["payload"]["account_id"] == "DUTEST0001" for s in snapshots))
         self.assertIn("withheld histories-missing", "\n".join(lines))
         self.assertTrue(all("DUTEST0001" not in line for line in lines), "the account is never printed")
+
+    def test_only_a_dry_run_is_fed(self):
+        # Invented prices and cash recorded in a paper or live run would be its account's facts (AGENTS.md rule 5),
+        # so the feed refuses before it connects: the configuration and the log's own configuration must both say
+        # dry-run and name the same account.
+        for mode, logged, account, want in (("paper", None, "DUTEST0001", "dry-run"), ("live", None, "DUTEST0001", "dry-run"),
+                                            ("dry-run", "paper", "DUTEST0001", "dry-run"), (None, None, "DUTEST0001", "dry-run"),
+                                            ("dry-run", None, "DUOTHER0001", "not the run")):
+            with self.subTest(mode=mode, logged=logged, account=account):
+                self.write_run(mode, logged, account)
+                with self.assertRaises(SystemExit) as stop:
+                    feed_month.feed(self.socket, self.log, self.config, MONTH, first_sequence=2)
+                self.assertIn(want, str(stop.exception))
+                self.assertNotIn("DUTEST0001", str(stop.exception))
 
     def test_a_refused_input_stops_the_feed_naming_it(self):
         server = socket.socket(socket.AF_UNIX)

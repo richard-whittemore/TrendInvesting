@@ -63,8 +63,8 @@ pass "the clock step passes on this host's clock and refuses a skewed one"
 # given none) and must not touch the owner's encrypted files.
 # The owner names the IRA's account in its configuration on the server, as
 # the runbook does (a rehearsal ID, never a real one); the second pass must
-# keep that edit byte for byte and put the shipped file beside it (Boost
-# lesson L7).
+# keep that edit byte for byte and put the shipped file beside it (docs/live-trading/lessons-2026-10.md
+# L7).
 secret_sums() { sha256sum /etc/trend-investing/*.gpg /etc/trend-investing/accounts/*.gpg; }
 ira_config=/etc/trend-investing/engines/trad-ira.config
 grep -q '"account_id": "trad-ira"' "$ira_config" || fail "the first pass did not install the shipped trad-ira.config"

@@ -1,6 +1,7 @@
 package targetweight_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -164,4 +165,28 @@ func TestAFreshIRARunResumesTheIncidentItsApprovalCarries(t *testing.T) {
 	if n := len(ofType(r.decisions, event.OrderRefusedEventType)); n == 0 {
 		t.Fatal("a Halted IRA refused nothing: the incident was not restored")
 	}
+}
+
+// TestTheHandlerReadsAnApprovalByTheDecodersRule: the handler reads an
+// approval as the approval's own decoder does (DecodeRecordedOperatorRunApproved),
+// so a momentum state that does not state its rebalance key, `{}`, is
+// refused rather than read as no rebalance in progress (ADR 0026, point 5;
+// ADR 0027, note of 2026-10-28), and so is a key left out of a Boost one.
+func TestTheHandlerReadsAnApprovalByTheDecodersRule(t *testing.T) {
+	cfg := momentumConfiguration()
+	start := closeOf("2025-01-02").Add(-12 * time.Hour)
+	h, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: closeOf("2025-01-02")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
+	h.AwaitApproval()
+	mustApply(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
+	base := `"account_id":"` + iraAccount + `","previous_log":"run-1.log","previous_log_final_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","incident_id":"","approved_by":"owner","approved_at":"2025-01-02T14:00:00Z","starting_book":null,"incident_in_force":null,"boost":null`
+	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "empty", start, json.RawMessage(`{`+base+`,"momentum":{}}`)), "rebalance_in_progress")
+	mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "stated", start, json.RawMessage(`{`+base+`,"momentum":{"rebalance_in_progress":null}}`)))
+
+	b, bs := configured(t)
+	raw := `{"account_id":"joint","previous_log":"run-1.log","previous_log_final_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","incident_id":"","approved_by":"owner","approved_at":"2025-01-02T14:00:00Z","boost":{"latched":true},"incident_in_force":null}`
+	mustRefuse(t, b, bs.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "no-book", sessionEnd(0), json.RawMessage(raw)), "starting_book")
 }

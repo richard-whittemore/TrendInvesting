@@ -737,8 +737,11 @@ the owner's decision of 2026-10-22 (ADR 0026, point 2, "Boost", amended
 
 ## Not built yet
 
-- The momentum engines in the running program: only Boost is composed, so a
-  rebalance clearance has nothing to act on yet.
+- An IRA engine fed by real data: the Traditional IRA's engine runs in
+  dry-run on a synthetic month only, since no daily job writes the IRAs'
+  stream and no adapter feeds an IRA engine ([momentum](momentum.md),
+  "Where this stands"). A rebalance clearance acts on an IRA run today,
+  including a rebalance a fresh run's approval carried in.
 - Acknowledgements in `journal-query operator`: use the `.delivered` marker
   in the engine's notes folder.
 - A day-trade counter for the margin account (counted by hand for now: see

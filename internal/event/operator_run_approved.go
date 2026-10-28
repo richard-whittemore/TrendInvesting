@@ -394,14 +394,15 @@ func (p OperatorRunApprovedPayload) firstRunErrors() []error {
 }
 
 // ValidateSchema checks p under the schema version it was recorded at (ADR
-// 0015), then validates it. Version 1 could not state an incident's cash
-// scope, so a payload naming one is refused under it; version 2 holds it
-// (that the key was stated, null included, is checked where the raw JSON is
-// read, in DecodeRecordedOperatorRunApproved); versions 1 and 2 cannot state
-// a starting book, which version 3 may (ADR 0027, amended 2026-10-18);
-// versions 1 to 3 cannot state an incident's retired sale attempts, which
-// version 4 may; versions 1 to 4 cannot carry an incident's settlements of
-// never-sent sales, which version 5 may; any other version is refused.
+// 0015), then validates it. Each version holds every field of the ones
+// before it: version 1 could not state an incident's cash scope, so a
+// payload naming one is refused under it; version 2 holds it (that the key
+// was stated, null included, is checked where the raw JSON is read, in
+// DecodeRecordedOperatorRunApproved); version 3 adds a starting book (ADR
+// 0027, amended 2026-10-18), version 4 an incident's retired sale attempts,
+// version 5 its settlements of never-sent sales, and version 6 an IRA's
+// momentum state (ADR 0027, note of 2026-10-28), each refused under an
+// earlier version; any other version is refused.
 func (p OperatorRunApprovedPayload) ValidateSchema(version uint32) error {
 	if version < 1 || version > OperatorRunApprovedSchemaVersion {
 		return fmt.Errorf("the approval's schema version %d is not one this build reads (1 to %d; ADR 0015)", version, OperatorRunApprovedSchemaVersion)
@@ -510,13 +511,16 @@ func DecodeOperatorRunApproved(raw []byte) (OperatorRunApprovedPayload, error) {
 // DecodeRecordedOperatorRunApproved decodes and validates an approval
 // recorded at schemaVersion, as DecodeOperatorRunApproved does: version 1
 // could not state an incident's cash scope, so it is read with none and may
-// not name one; versions 2 to 4 must state it; versions 3 and 4 must also
+// not name one; versions 2 to 6 must state it; versions 3 to 6 must also
 // state the starting_book key, null when the approval states no book, and a
 // book it states must state its positions, total_cash and currency, none
-// null, while versions 1 and 2 may not state the key; only versions 4 and 5
-// may state an incident's sale_retired_attempts, and only version 5 its
-// sale_settlements, each of which may be left out as none (ValidateSchema);
-// any other version is refused (ADR 0015).
+// null, while versions 1 and 2 may not state the key; versions 4 to 6 may
+// state an incident's sale_retired_attempts, versions 5 and 6 its
+// sale_settlements, each of which may be left out as none; only version 6
+// may state the momentum key, an IRA approval's, which must state its
+// rebalance_in_progress, null when none, and every key of a rebalance it
+// states (checkMomentumKeys; ValidateSchema); any other version is refused
+// (ADR 0015).
 func DecodeRecordedOperatorRunApproved(raw []byte, schemaVersion uint32) (OperatorRunApprovedPayload, error) {
 	if schemaVersion < 1 || schemaVersion > OperatorRunApprovedSchemaVersion {
 		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval's schema version %d is not one this build reads (1 to %d; ADR 0015)", schemaVersion, OperatorRunApprovedSchemaVersion)

@@ -338,7 +338,7 @@ func TestIdentifiersTakesOutWhatNamesTheAccountButKeepsFigures(t *testing.T) {
 // TestRedactionCoversPaperAccountsWithLetters: an IBKR paper account
 // number can carry letters after DU (DUX1234567), as the adapter's masking
 // already reads it (adapter/ibkr/masking.py), so the IRAs' paper accounts
-// never reach a public place either (Boost lesson L12); a word of capitals
+// never reach a public place either (docs/live-trading/lessons-2026-10.md L12); a word of capitals
 // with no digit, such as USD or UTILITIES, is not one. The whole number
 // goes, so none of its letters is left beside a redacted figure.
 func TestRedactionCoversPaperAccountsWithLetters(t *testing.T) {

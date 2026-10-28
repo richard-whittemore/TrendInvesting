@@ -27,21 +27,63 @@ func IsMomentumLog(entries []journal.Entry) bool {
 	return false
 }
 
-// RebalanceAtEnd returns the rebalance a momentum log, recorded for
-// accountID, ends with in progress, or nil when none is (ADR 0026, point 5:
-// "Every planned, released and sent order, and the IRA phase (sells sent,
-// buys pending)"). The orders are read by the rule the momentum run applies
-// and the reporter reads the log by (event.OrderReports), so a report or
-// clearance the run refused is not taken as read here either: the log
-// commits a refused input as well as a read one. Released orders and a
-// dry-run's synthetic reports are the run's own decisions; the venue's
-// lifecycle reports and fills, retirements and the owner's clearances are
-// its inputs. A rebalance the log's own approval carried in from an earlier
-// run, which the run released none of, stays in progress until a clearance
-// names it and exactly its orders, as the run reads one
-// (momentumRun.applyCleared). A record that is evidence of an order and
-// cannot be decoded refuses, naming it in logName.
-func RebalanceAtEnd(entries []journal.Entry, accountID, logName string) (*event.RebalanceInProgress, error) {
+// logConfiguration returns the account a log's configuration input names
+// and the configuration hash it was recorded under, refusing a log with no
+// target-weight configuration input.
+func logConfiguration(entries []journal.Entry, logName string) (account, hash string, err error) {
+	for _, entry := range entries {
+		env := entry.Envelope
+		if entry.Kind != journal.KindInput || env.Type != event.TargetWeightConfigurationEventType {
+			continue
+		}
+		var cfg struct {
+			AccountID string `json:"account_id"`
+		}
+		if err := json.Unmarshal(env.Payload, &cfg); err != nil {
+			return "", "", fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+		}
+		return cfg.AccountID, env.ConfigurationHash, nil
+	}
+	return "", "", fmt.Errorf("engine: %s holds no target-weight configuration input, so the account whose rebalance it records is not known", logName)
+}
+
+// RebalanceAtEnd returns the rebalance a momentum log ends with in
+// progress, for the account its own configuration input names, or nil when
+// none is (ADR 0026, point 5: "Every planned, released and sent order, and
+// the IRA phase (sells sent, buys pending)"). The orders are read by the
+// rule the momentum run applies and the reporter reads the log by
+// (event.OrderReports), so a report or clearance the run refused is not
+// taken as read here either: the log commits a refused input as well as a
+// read one. Released orders and a dry-run's synthetic reports are the run's
+// own decisions; the venue's lifecycle reports and fills, retirements and
+// the owner's clearances are its inputs. A rebalance the log's own approval
+// carried in from an earlier run, which the run released none of, stays in
+// progress until a clearance names it and exactly its orders, as the run
+// reads one (momentumRun.applyCleared). The run reads an approval only as
+// its second input, straight after the configuration, for its own
+// configuration (Handler's decodeApproval), so any other approval in the
+// log is one it refused and changes nothing here. A record that is evidence
+// of an order and cannot be decoded refuses, naming it in logName.
+func RebalanceAtEnd(entries []journal.Entry, logName string) (*event.RebalanceInProgress, error) {
+	r, _, err := rebalanceOfAccount(entries, logName)
+	return r, err
+}
+
+// rebalanceOfAccount is RebalanceAtEnd, with the account the log's
+// configuration names.
+func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.RebalanceInProgress, string, error) {
+	accountID, configHash, err := logConfiguration(entries, logName)
+	if err != nil {
+		return nil, "", err
+	}
+	r, err := rebalanceAtEnd(entries, accountID, configHash, logName)
+	return r, accountID, err
+}
+
+// rebalanceAtEnd reads the rebalance in progress of accountID's log,
+// recorded under configHash.
+func rebalanceAtEnd(entries []journal.Entry, accountID, configHash, logName string) (*event.RebalanceInProgress, error) {
+	inputs := 0
 	reports := event.NewOrderReports()
 	decided := map[string]event.TargetsDecidedPayload{}
 	var carried *event.RebalanceInProgress
@@ -79,13 +121,17 @@ func RebalanceAtEnd(entries []journal.Entry, accountID, logName string) (*event.
 			}
 			continue
 		}
+		inputs++
 		switch env.Type {
 		case event.OperatorRunApprovedEventType:
+			if inputs != 2 || env.ConfigurationHash != configHash {
+				continue // refused by the run: not straight after its configuration, or another's
+			}
 			p, err := event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion)
 			if err != nil {
 				return nil, fmt.Errorf("engine: %s in %s: %w", env.ID, logName, err)
 			}
-			if p.Momentum != nil {
+			if p.Momentum != nil && p.AccountID == accountID {
 				carried = p.Momentum.RebalanceInProgress
 			}
 		case event.OrderLifecycleEventType:
@@ -156,9 +202,12 @@ func CheckRebalanceInProgress(entries []journal.Entry, approval event.OperatorRu
 	if approval.Momentum == nil {
 		return fmt.Errorf("engine: %s is a momentum run's, but the approval is Boost-shaped: it states Boost's latch and no rebalance in progress; approve it with `operator approve -log %s`, which states the rebalance in progress or none (ADR 0026, point 5)", logName, logName)
 	}
-	want, err := RebalanceAtEnd(entries, approval.AccountID, logName)
-	if err != nil {
+	want, account, err := rebalanceOfAccount(entries, logName)
+	switch {
+	case err != nil:
 		return err
+	case approval.AccountID != account:
+		return fmt.Errorf("engine: the approval is for account %q, but %s is the run of %q", approval.AccountID, logName, account)
 	}
 	stated := approval.Momentum.RebalanceInProgress
 	switch {

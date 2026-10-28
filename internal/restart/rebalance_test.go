@@ -163,13 +163,13 @@ func TestARetiredOrderEndsAndAnotherAccountsClearanceDoesNot(t *testing.T) {
 		AccountID: iraLogAccount, ClientOrderID: sell.ClientOrderID, InstrumentID: sell.InstrumentID, Side: sell.Side, Quantity: sell.Quantity, LimitPrice: sell.LimitPrice,
 		Reason: event.OrderRetiredSessionOver, Detail: "the session was over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: time.Date(2025, time.February, 4, 13, 30, 0, 0, time.UTC),
 	})
-	got, err := restart.RebalanceAtEnd([]journal.Entry{momentumConfigEntry(t), janDecided(t), releaseEntry(t, sell), retired}, iraLogAccount, "run-1.log")
+	got, err := restart.RebalanceAtEnd([]journal.Entry{momentumConfigEntry(t), janDecided(t), releaseEntry(t, sell), retired}, "run-1.log")
 	if err != nil || got != nil {
 		t.Fatalf("a retired sell: %s, %v, want none in progress", describeRebalance(got), err)
 	}
 	foreign := clearanceEntry(t, janDecision, "DUIRA-1")
 	foreign.Envelope.Payload = []byte(strings.Replace(string(foreign.Envelope.Payload), iraLogAccount, "OTHER", 1))
-	got, err = restart.RebalanceAtEnd([]journal.Entry{momentumConfigEntry(t), janDecided(t), releaseEntry(t, sell), foreign}, iraLogAccount, "run-1.log")
+	got, err = restart.RebalanceAtEnd([]journal.Entry{momentumConfigEntry(t), janDecided(t), releaseEntry(t, sell), foreign}, "run-1.log")
 	if err != nil || got == nil {
 		t.Fatalf("another account's clearance: %s, %v, want the rebalance still in progress", describeRebalance(got), err)
 	}
@@ -197,7 +197,7 @@ func TestALogTheRuleCannotReadIsRefused(t *testing.T) {
 		"two":       {[]journal.Entry{momentumConfigEntry(t), janDecided(t), releaseEntry(t, sell), releaseEntry(t, other)}, "two rebalances"},
 		"undecided": {[]journal.Entry{momentumConfigEntry(t), releaseEntry(t, sell)}, "not that decision"},
 	} {
-		if _, err := restart.RebalanceAtEnd(c.entries, iraLogAccount, "run-1.log"); err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "run-1.log") {
+		if _, err := restart.RebalanceAtEnd(c.entries, "run-1.log"); err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "run-1.log") {
 			t.Errorf("%s: %v, want a refusal naming %q in run-1.log", name, err, c.want)
 		}
 		if _, err := restart.ReadEndState(c.entries, iraLogAccount, "run-1.log"); err == nil {
@@ -222,5 +222,52 @@ func TestABoostLogRefusesAnIRAApprovalAndAnIRAApprovalStartsNoLatch(t *testing.T
 	end, err := restart.ReadEndState([]journal.Entry{carriedApprovalEntry(t, nil)}, iraLogAccount, "run-1.log")
 	if err != nil || end.Latched || end.Momentum {
 		t.Errorf("a log holding only an IRA approval: %+v, %v", end, err)
+	}
+}
+
+// TestARefusedApprovalNeverLiftsACarriedRebalance: the log commits an input
+// the run refused as well as one it read, and the run reads an approval only
+// as its second input, straight after the configuration (Handler's
+// decodeApproval). A later approval stating none, which the run refused,
+// therefore leaves the carried rebalance in force: only a clearance ends it
+// (ADR 0026, point 5).
+func TestARefusedApprovalNeverLiftsACarriedRebalance(t *testing.T) {
+	earlier := &event.RebalanceInProgress{DecisionID: "targets-decided:DUIRA:2024-12-31T21:00:00Z", DecisionTime: time.Date(2024, time.December, 31, 21, 0, 0, 0, time.UTC),
+		Phase: event.RebalancePhaseSellsWorking, ClientOrderIDs: []string{"DUIRA-0"}}
+	refused := carriedApprovalEntry(t, nil)
+	refused.Envelope.ID = "operator-run-approved:refused"
+	entries := []journal.Entry{momentumConfigEntry(t), carriedApprovalEntry(t, earlier), janDecided(t), refused}
+	got, err := restart.RebalanceAtEnd(entries, "run-1.log")
+	if err != nil || describeRebalance(got) != describeRebalance(earlier) {
+		t.Fatalf("after a refused second approval: %s, %v, want %s still in progress", describeRebalance(got), err, describeRebalance(earlier))
+	}
+	// An approval for another configuration is one the run refused too.
+	foreign := carriedApprovalEntry(t, earlier)
+	foreign.Envelope.ConfigurationHash = "sha256:other"
+	if got, err := restart.RebalanceAtEnd([]journal.Entry{momentumConfigEntry(t), foreign}, "run-1.log"); err != nil || got != nil {
+		t.Fatalf("an approval of another configuration: %s, %v, want it not read", describeRebalance(got), err)
+	}
+}
+
+// TestTheLogsOwnAccountDecides: the rebalance is read for the account the
+// log's configuration names, so a log recorded for another account is never
+// read as one with no rebalance in progress; an approval for another account
+// than the log's is refused.
+func TestTheLogsOwnAccountDecides(t *testing.T) {
+	sell := releasedOrder("DUIRA-1", event.OrderSideSell, 10)
+	mid := []journal.Entry{momentumConfigEntry(t), janDecided(t), releaseEntry(t, sell)}
+	approval := event.OperatorRunApprovedPayload{AccountID: "DUOTHER", Momentum: &event.MomentumStateInForce{}}
+	if err := restart.CheckRebalanceInProgress(mid, approval, "run-1.log"); err == nil || !strings.Contains(err.Error(), "DUOTHER") {
+		t.Errorf("an approval for another account: %v", err)
+	}
+	if _, err := restart.RebalanceAtEnd([]journal.Entry{janDecided(t), releaseEntry(t, sell)}, "run-1.log"); err == nil || !strings.Contains(err.Error(), "configuration") {
+		t.Errorf("a log with no configuration input: %v", err)
+	}
+	badConfig := recorded(t, journal.KindInput, "configuration:bad", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "not an object")
+	if _, err := restart.RebalanceAtEnd([]journal.Entry{badConfig}, "run-1.log"); err == nil || !strings.Contains(err.Error(), "configuration:bad") {
+		t.Errorf("a configuration input that cannot be decoded: %v", err)
+	}
+	if _, err := restart.ReadEndState(mid, "DUOTHER", "run-1.log"); err == nil || !strings.Contains(err.Error(), "DUOTHER") {
+		t.Errorf("operator approve for another account than the log's: %v", err)
 	}
 }

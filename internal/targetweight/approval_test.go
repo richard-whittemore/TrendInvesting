@@ -229,7 +229,11 @@ func TestAFirstRunsApprovalAndAnEarlierVersionApply(t *testing.T) {
 	h, s := configured(t)
 	mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "first", at, first))
 	earlier, es := configured(t)
-	mustApply(t, earlier, es.envelope(t, event.OperatorRunApprovedEventType, 2, "v2", at, approval(true)))
+	// A version 2 approval as an earlier build wrote it: no starting_book key.
+	v2 := map[string]any{"account_id": "joint", "previous_log": "run-1.log",
+		"previous_log_final_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"incident_id":             "", "approved_by": "owner", "approved_at": at, "boost": map[string]any{"latched": true}, "incident_in_force": nil}
+	mustApply(t, earlier, es.envelope(t, event.OperatorRunApprovedEventType, 2, "v2", at, v2))
 	stated, ss := configured(t)
-	mustRefuse(t, stated, ss.envelope(t, event.OperatorRunApprovedEventType, 2, "v2-book", at, first), "starting book")
+	mustRefuse(t, stated, ss.envelope(t, event.OperatorRunApprovedEventType, 2, "v2-book", at, first), "starting_book")
 }
