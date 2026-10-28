@@ -482,8 +482,11 @@ owner clears it. So:
   orders the run released, and the venue's reports, retirements and
   clearances on them, read by the rule the momentum run and the reporter
   read orders by (`event.OrderReports`). A record it cannot decode or
-  validate refuses the approval ("cannot be read back"), never reads as no
-  rebalance in progress. An approval stating none where one is, or one the
+  validate, or holds at a schema version the build does not read, refuses
+  the approval ("cannot be read back"), never reads as no rebalance in
+  progress; so does a log whose run refused the approval it was given and
+  accepted none, since the rebalance that approval named was never carried
+  and the state in force is the run's before it. An approval stating none where one is, or one the
   log does not hold, is refused, and so is a Boost-shaped approval for a
   momentum configuration, or an IRA one for Boost. When the approved log is
   a start cut short and no earlier run holds more, its own configuration is

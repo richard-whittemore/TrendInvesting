@@ -52,6 +52,24 @@ func logAccount(entries []journal.Entry, logName string) (string, error) {
 	return "", cannotReadBack(logName, errors.New("it holds no target-weight configuration input"))
 }
 
+// readRecord decodes a decision record recovery reads, refusing one at a
+// schema version this build does not read, or one that does not decode or
+// validate at its version (ADR 0015), so a null or empty record is never
+// read as one that names nothing.
+func readRecord[T interface{ ValidateSchema(uint32) error }](env event.Envelope, versions []uint32, logName string) (T, error) {
+	var p T
+	if !slices.Contains(versions, env.SchemaVersion) {
+		return p, cannotReadBack(logName, fmt.Errorf("%s %s is at schema version %d, not one of %v this build reads", env.Type, env.ID, env.SchemaVersion, versions))
+	}
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		return p, cannotReadBack(logName, fmt.Errorf("decode %s: %w", env.ID, err))
+	}
+	if err := p.ValidateSchema(env.SchemaVersion); err != nil {
+		return p, cannotReadBack(logName, fmt.Errorf("%s: %w", env.ID, err))
+	}
+	return p, nil
+}
+
 // cannotReadBack is RebalanceAtEnd's refusal of a log it cannot read: fail
 // closed, never no rebalance in progress (AGENTS.md).
 func cannotReadBack(logName string, err error) error {
@@ -97,12 +115,9 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 	reports := event.NewOrderReports()
 	decided := map[string]event.TargetsDecidedPayload{}
 	var carried *event.RebalanceInProgress
-	decode := func(env event.Envelope, into interface{ Validate() error }) error {
-		if err := json.Unmarshal(env.Payload, into); err != nil {
-			return cannotReadBack(logName, fmt.Errorf("decode %s: %w", env.ID, err))
-		}
-		return nil
-	}
+	// refused names an approval input the run was given while it had
+	// accepted none, which therefore refused it; "" when there is none.
+	refused, accepted := "", false
 	for _, entry := range entries {
 		env := entry.Envelope
 		if entry.Kind == journal.KindDecision {
@@ -115,16 +130,16 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 				if p.AccountID != accountID {
 					return nil, "", cannotReadBack(logName, fmt.Errorf("%s accepts an approval for account %q, but the log is %q's", env.ID, p.AccountID, accountID))
 				}
-				carried = p.RebalanceInProgress
+				carried, accepted, refused = p.RebalanceInProgress, true, ""
 			case event.TargetsDecidedEventType:
-				var p event.TargetsDecidedPayload
-				if err := decode(env, &p); err != nil {
+				p, err := readRecord[event.TargetsDecidedPayload](env, event.TargetsDecidedVersions(), logName)
+				if err != nil {
 					return nil, "", err
 				}
 				decided[env.ID] = p
 			case event.OrderReleasedEventType:
-				var p event.OrderReleasedPayload
-				if err := decode(env, &p); err != nil {
+				p, err := readRecord[event.OrderReleasedPayload](env, event.OrderReleasedVersions(), logName)
+				if err != nil {
 					return nil, "", err
 				}
 				if p.AccountID == accountID {
@@ -132,13 +147,23 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 				}
 			case event.OrderLifecycleEventType:
 				// A dry-run's synthetic report on an order it never sent.
-				var p event.LimitOrderLifecyclePayload
-				if err := decode(env, &p); err != nil {
+				p, err := readRecord[event.LimitOrderLifecyclePayload](env, []uint32{event.OrderLifecycleSyntheticVersion}, logName)
+				if err != nil {
 					return nil, "", err
 				}
 				_, _ = reports.Lifecycle(p)
 			}
 			continue
+		}
+		if env.Type == event.OperatorRunApprovedEventType && !accepted {
+			// Its own group records no acceptance unless the next record
+			// is one; an acceptance clears it (above).
+			var p struct {
+				AccountID string `json:"account_id"`
+			}
+			if json.Unmarshal(env.Payload, &p) != nil || p.AccountID == accountID {
+				refused = env.ID
+			}
 		}
 		// The venue's reports, retirements and clearances the run was sent;
 		// one the run refused is refused by the same rule here and read as
@@ -172,6 +197,12 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 			}
 			_ = reports.Clear(p)
 		}
+	}
+	if refused != "" {
+		// The run refused the only approval it was given: the rebalance that
+		// approval named is not known to be carried, nor to be ended, so the
+		// earlier run's state is still in force (ADR 0026, point 5).
+		return nil, "", cannotReadBack(logName, fmt.Errorf("its run refused its approval %s and accepted none, so the state in force is the run's before it: move %s, unchanged, into the quarantine folder and approve the run before it (docs/runbooks/durable-log.md, \"An unrecoverable log\")", refused, logName))
 	}
 	if carried != nil {
 		return carried, accountID, nil

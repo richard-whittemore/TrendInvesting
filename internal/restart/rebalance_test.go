@@ -239,9 +239,9 @@ func TestTheEngineRefusesAnApprovalOfAnotherRebalance(t *testing.T) {
 
 // TestARefusedApprovalNeverLiftsACarriedRebalance: the log commits an input
 // the run refused as well as one it read. An approval after the accepted
-// one, which the run refused (an approval comes once), and one for another
-// configuration change nothing: only a clearance ends a carried rebalance
-// (ADR 0026, point 5).
+// one, which the run refused (an approval comes once), changes nothing:
+// only a clearance ends a carried rebalance (ADR 0026, point 5). A log whose
+// only approval was refused: TestARefusedApprovalWithNoAcceptanceIsNotReadAsNone.
 func TestARefusedApprovalNeverLiftsACarriedRebalance(t *testing.T) {
 	run, _ := newHandlerRun(t)
 	run.approve("approval", run.hash, december())
@@ -252,11 +252,6 @@ func TestARefusedApprovalNeverLiftsACarriedRebalance(t *testing.T) {
 	got, err := restart.RebalanceAtEnd(run.recorder.Entries(), "run-1.log")
 	if err != nil || describeRebalance(got) != describeRebalance(december()) {
 		t.Fatalf("after a refused second approval: %s, %v, want %s still in progress", describeRebalance(got), err, describeRebalance(december()))
-	}
-	foreign, _ := newHandlerRun(t)
-	foreign.approve("approval", "sha256:other", december())
-	if got, err := restart.RebalanceAtEnd(foreign.recorder.Entries(), "run-1.log"); err != nil || got != nil {
-		t.Fatalf("an approval of another configuration: %s, %v, want it not read", describeRebalance(got), err)
 	}
 }
 
@@ -319,13 +314,24 @@ func recordedLog(t *testing.T, entries ...journal.Entry) []journal.Entry {
 
 func releasedRecord(t *testing.T, id, tag, side string) journal.Entry {
 	o := event.OrderReleasedPayload{AccountID: iraLogAccount, PlanID: "order-planned:" + id, Tag: tag, ClientOrderID: id, InstrumentID: "AAA",
-		Side: side, Quantity: 10, LimitPrice: 50, Mode: event.TradingModePaper, Send: true}
+		Side: side, Quantity: 10, LimitPrice: 50, Mode: event.TradingModePaper, Send: true,
+		Figures: event.RiskFigures{NetLiquidation: 10000, ReferencePrice: 50, OrdersInDecision: 1}}
 	return recorded(t, journal.KindDecision, "risk-order-released:"+id, event.OrderReleasedEventType, o.SchemaVersion(), o)
 }
 
+// decidedRecord is January's strategy.targets.decided as the real momentum
+// handler records it over the synthetic month; id must be janDecision.
 func decidedRecord(t *testing.T, id string) journal.Entry {
-	return recorded(t, journal.KindDecision, id, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, event.TargetsDecidedPayload{
-		AccountID: iraLogAccount, StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: time.Date(2025, time.January, 31, 21, 0, 0, 0, time.UTC), Outcome: event.TargetsOutcomeDecided})
+	t.Helper()
+	run, _ := newHandlerRun(t)
+	run.month()
+	for _, e := range run.recorder.Entries() {
+		if e.Kind == journal.KindDecision && e.Envelope.ID == id {
+			return e
+		}
+	}
+	t.Fatalf("setup: the month recorded no decision %s", id)
+	return journal.Entry{}
 }
 
 // TestRecoveryReadsTheRecordedOrders: the phase, a fill that completes an
@@ -360,5 +366,50 @@ func TestRecoveryReadsTheRecordedOrders(t *testing.T) {
 		if _, err := restart.ReadEndState(entries, iraLogAccount, "run-1.log"); err == nil {
 			t.Errorf("%s: ReadEndState read the log", name)
 		}
+	}
+}
+
+// TestARecordIsReadOnlyAtAVersionAndShapeThisBuildReads: a decision record
+// recovery reads is checked against the schema versions this build reads
+// and validated (ADR 0015), so a null payload or an unknown version refuses
+// ("cannot be read back"), never reads as an empty record that is skipped.
+func TestARecordIsReadOnlyAtAVersionAndShapeThisBuildReads(t *testing.T) {
+	release := releasedRecord(t, "DUIRA-1", janDecision, event.OrderSideSell)
+	null := release
+	null.Envelope.Payload = json.RawMessage(`null`)
+	unknown := release
+	unknown.Envelope.SchemaVersion = 99
+	decidedNull := decidedRecord(t, janDecision)
+	decidedNull.Envelope.Payload = json.RawMessage(`null`)
+	synthetic := recorded(t, journal.KindDecision, "synthetic-lifecycle:DUIRA-1", event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, event.LimitOrderLifecyclePayload{
+		AccountID: iraLogAccount, ClientOrderID: "DUIRA-1", InstrumentID: "AAA", Side: event.OrderSideSell, Status: event.OrderLifecycleStatusCanceled,
+		Quantity: 10, LimitPrice: 50, OccurredAt: time.Date(2025, time.January, 31, 21, 0, 0, 0, time.UTC), Synthetic: true})
+	for name, entries := range map[string][]journal.Entry{
+		"a release with a null payload":           recordedLog(t, decidedRecord(t, janDecision), null),
+		"a release at an unknown version":         recordedLog(t, decidedRecord(t, janDecision), unknown),
+		"a decision with a null payload":          recordedLog(t, decidedNull),
+		"a synthetic report at a venue's version": recordedLog(t, decidedRecord(t, janDecision), release, synthetic),
+	} {
+		if _, err := restart.RebalanceAtEnd(entries, "run-1.log"); err == nil || !strings.Contains(err.Error(), "cannot be read back") {
+			t.Errorf("%s: %v, want a refusal saying it cannot be read back", name, err)
+		}
+	}
+}
+
+// TestARefusedApprovalWithNoAcceptanceIsNotReadAsNone: a log whose run
+// refused the only approval it was given recorded no acceptance, so the
+// rebalance that approval named is not known to be carried, nor to be
+// ended: the earlier run's state is still in force, and the log is refused
+// rather than read as no rebalance in progress (ADR 0026, point 5). A
+// refused approval after an accepted one changes nothing
+// (TestARefusedApprovalNeverLiftsACarriedRebalance).
+func TestARefusedApprovalWithNoAcceptanceIsNotReadAsNone(t *testing.T) {
+	run, _ := newHandlerRun(t)
+	run.approve("approval:other-configuration", "sha256:other", december())
+	if run.errs["approval:other-configuration"] == nil {
+		t.Fatal("setup: the approval was not refused")
+	}
+	if _, err := restart.RebalanceAtEnd(run.recorder.Entries(), "run-1.log"); err == nil || !strings.Contains(err.Error(), "cannot be read back") || !strings.Contains(err.Error(), "approval:other-configuration") {
+		t.Fatalf("a log whose only approval was refused: %v, want a refusal naming it", err)
 	}
 }
