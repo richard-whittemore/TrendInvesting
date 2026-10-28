@@ -300,7 +300,8 @@ class ForwardingTests(unittest.TestCase):
     def test_a_connection_time_that_is_not_ascii_text_is_none(self):
         # Fail closed (AGENTS.md): bytes that are not plain text, or no time at
         # all, give None, which the zone check refuses.
-        for raw in (b"20261028 02:02:05 \xff\xfeEST", b"20261028 02:02:05 \xc3\xa9", None, 20261028):
+        for raw in (b"20261028 02:02:05 \xff\xfeEST", b"20261028 02:02:05 \xc3\xa9", "20261028 02:02:05 \u00e9",
+                    None, 20261028):
             with self.subTest(raw=raw):
                 _EClient.conn_time = raw
                 client, _ = self.build(False)

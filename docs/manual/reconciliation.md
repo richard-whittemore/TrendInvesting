@@ -673,10 +673,10 @@ ti-adapter-boost` quoting the Gateway's text exactly as it gave it (send
 that to the developer if it is New York time in a form not listed here); once the
 Gateway is set right and the adapter reconnects, it is trusted again. IBKR's
 Python library hands the connection time over as raw bytes rather than
-text; the adapter turns them into text first, and only plain ASCII
-characters are accepted. If the message quotes the connection time as
-`None`, the adapter had no session or could not read the Gateway's time as
-plain text; that is a fault to send to the developer, not a Gateway
+text; the adapter turns them into text first. Whether it arrives as bytes
+or as text, a time with any character outside plain ASCII is refused. If
+the message quotes the connection time as `None`, the adapter had no
+session or the Gateway's time was not plain ASCII text; that is a fault to send to the developer, not a Gateway
 setting to change. A fill recorded with a
 time that has no zone withholds it too.
 

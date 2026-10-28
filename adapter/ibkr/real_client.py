@@ -495,9 +495,9 @@ class IbapiClient(TWSApi):
         ibapi's handshake reads the time with comm.read_fields, which splits
         the socket's bytes, so it keeps bytes, not text; they are decoded here,
         strictly as ASCII, the only place the adapter reads EClient state
-        rather than a decoded EWrapper callback. Bytes that are not ASCII, or
-        any other value, give None, which loop.gateway_zone_problem refuses
-        (AGENTS.md: fail closed).
+        rather than a decoded EWrapper callback. Bytes or text that are not
+        ASCII, or any other value, give None, which
+        loop.gateway_zone_problem refuses (AGENTS.md: fail closed).
         """
         client = self._client
         if client is None or not client.isConnected():
@@ -508,7 +508,7 @@ class IbapiClient(TWSApi):
                 return text.decode("ascii")
             except UnicodeDecodeError:
                 return None
-        return text if isinstance(text, str) else None
+        return text if isinstance(text, str) and text.isascii() else None
 
     def can_place_orders(self):
         """Whether this client may place orders: the sending switch, the paper gate's last check (AGENTS.md rule 5).
