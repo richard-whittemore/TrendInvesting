@@ -218,6 +218,10 @@ step_base() {
     ensure_user ti-trader /var/lib/trend-investing
     ensure_operator_user
   fi
+  # The reporter reads the Gateway's start-failure marker by its name
+  # (/var/lib/ti-gateway/last-start-failure, world-readable): the directory
+  # can be entered but not listed. Everything else in it keeps its own mode.
+  chmod 0711 /var/lib/ti-gateway
 
   log "automatic security updates"
   install -m 0644 /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'CONF'
