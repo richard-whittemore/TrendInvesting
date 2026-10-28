@@ -151,19 +151,38 @@ def order_key(client_id, order_id, perm_id):
         "order with client_id {} has neither an orderId nor a permId".format(client_id))
 
 
+# New York's zone, and the names IB Gateway gives its time in when its login is on New York time: a zone name, or
+# an Eastern label (an abbreviation or its long name). IBKR's label does not follow daylight saving time (IB Gateway
+# 10.50 on TZ=America/New_York gave "EST" at 09:49:19 EDT on 2026-10-28), so every one of them is read on New York's
+# clock and none is taken to say which season it is; that the Gateway's clock is New York's is checked at every
+# connect instead (loop.gateway_clock_problem; ADR 0019, amended 2026-10-28).
+NEW_YORK = ZoneInfo("America/New_York")
+NEW_YORK_ZONES = frozenset(("US/Eastern", "America/New_York", "EST5EDT"))
+EASTERN_LABELS = frozenset(("EST", "EDT", "Eastern Standard Time", "Eastern Daylight Time"))
+
+
 def parse_execution_time(text):
     """Read IBKR's execution time ("YYYYMMDD HH:MM:SS Zone") as a UTC datetime.
 
     A time without a zone is refused: it is in whatever zone the Gateway's
-    login is set to, which the record alone cannot say.
+    login is set to, which the record alone cannot say. A New York zone name
+    or an Eastern label (NEW_YORK_ZONES, EASTERN_LABELS) is read on New
+    York's clock whatever the label's season; the earlier reading of the
+    hour repeated when daylight saving time ends is taken, as zoneinfo does
+    (no session trades then: Sunday 01:00 to 02:00). Any other zone is read
+    as named, and the morning reading withholds on it (loop.gateway_zone_problem).
     """
-    parts = text.split()
+    parts = text.split(None, 2) if isinstance(text, str) else []
     if len(parts) != 3:
         raise ValueError("execution time {!r} is not 'YYYYMMDD HH:MM:SS Zone'".format(text))
-    try:
-        zone = ZoneInfo(parts[2])
-    except (ZoneInfoNotFoundError, ValueError):
-        raise ValueError("execution time {!r} names an unknown zone".format(text)) from None
+    name = parts[2].strip()
+    if name in NEW_YORK_ZONES or name in EASTERN_LABELS:
+        zone = NEW_YORK
+    else:
+        try:
+            zone = ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("execution time {!r} names an unknown zone".format(text)) from None
     local = datetime.strptime(parts[0] + " " + parts[1], "%Y%m%d %H:%M:%S")
     return local.replace(tzinfo=zone).astimezone(timezone.utc)
 

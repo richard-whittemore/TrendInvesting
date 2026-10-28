@@ -149,6 +149,13 @@ class Connection:
         self.inbox = Inbox()
         self.connected = False
         self.needs_reconciliation = True
+        # The adapter's own wall-clock time when the current link's handshake
+        # completed (IBKR's first valid order ID), None before one does: IB
+        # Gateway's connection time is checked against it, not against a
+        # later reconcile's clock, since a link Gateway restores (1101/1102)
+        # keeps its handshake (loop.gateway_clock_problem; ADR 0019, amended
+        # 2026-10-28).
+        self.connected_at = None
         # The reason the link was last reported down (disconnected, or
         # Gateway losing IBKR's servers), for a stop that names why the
         # link kept going; None again once a connect succeeds.
@@ -534,6 +541,7 @@ class Connection:
         # never be read as part of this one.
         self.inbox = Inbox()
         self._pending.clear()
+        self.connected_at = None
         self.managed_accounts = frozenset()
         self._probe_sent_at = None
         self._last_probe_at = None
@@ -566,6 +574,7 @@ class Connection:
                 self._abandon()
                 raise ConnectFailed("no handshake within connect_timeout")
             if event.name == "next_valid_id":
+                self.connected_at = self._wall_clock()
                 self.next_order_id = event.args[0]
                 self._take_volunteered_list()
                 self.connected = True

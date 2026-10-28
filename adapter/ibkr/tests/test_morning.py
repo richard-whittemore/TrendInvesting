@@ -337,6 +337,15 @@ class MorningTests(unittest.TestCase):
         self.deliver(THURSDAY)
         self.assert_withheld("US/Pacific", "New York")
 
+    def test_ibkrs_est_label_in_summer_time_on_new_yorks_clock_is_new_york(self):
+        # IB Gateway 10.50 on TZ=America/New_York labelled 09:49:19 EDT "EST" (2026-10-28): IBKR's short label does not
+        # follow daylight saving time, so the clock, not the label's season, shows the Gateway is on New York time.
+        self.at(datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc))
+        self.fake.tws_connection_time = "20261028 09:49:19 EST"
+        loop = self.loop()
+        loop.start()
+        self.assertEqual(loop._gateway_zone, "")
+
     def test_a_connection_time_that_cannot_be_read_withholds(self):
         self.proof(FRIDAY_MORNING)
         for text in (None, "", "20270115", "20270115 08:05:00", "20270115 08:05:00 Mars/Olympus"):
@@ -353,21 +362,101 @@ class MorningTests(unittest.TestCase):
         self.deliver(THURSDAY)
         self.assert_as_of_close(THURSDAY)
 
-    def test_the_abbreviation_not_in_force_is_not_new_york(self):
-        # EDT in January is no New York zone: a Gateway on a fixed offset, or another place's abbreviation.
+    def test_the_eastern_label_out_of_season_with_new_yorks_clock_is_new_york(self):
+        # IBKR's short label does not follow daylight saving time (ADR 0019, amended 2026-10-28): EDT in January on a
+        # clock that reads New York's time is New York's.
         self.proof(FRIDAY_MORNING)
         self.fake.tws_connection_time = "20270115 08:05:00 EDT"
         self.deliver(THURSDAY)
-        self.assert_withheld("EDT")
+        self.assert_as_of_close(THURSDAY)
 
-    def test_either_abbreviation_stands_in_the_hour_repeated_when_daylight_saving_ends(self):
-        # 01:30 on 2026-11-01 happens twice in New York: first in EDT, then in EST.
+    def test_a_gateway_on_fixed_eastern_standard_time_in_summer_withholds(self):
+        # A clock on EST all year reads 08:49:19 at 09:49:19 New York (EDT): an hour behind.
+        self.at(datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc))
+        self.fake.tws_connection_time = "20261028 08:49:19 EST"
+        loop = self.loop()
+        with self.assertLogs("ibkr", "INFO") as logs:
+            loop.start()
+        self.assertIn("20261028 08:49:19 EST", loop._gateway_zone)
+        self.assertIn("60 minutes 3 seconds behind", loop._gateway_zone)
+        self.assertIn("not on New York time", loop._gateway_zone)
+        self.assertIn("20261028 08:49:19 EST", "\n".join(logs.output))
+
+    def test_a_gateway_clock_far_from_the_adapters_withholds(self):
+        self.proof(FRIDAY_MORNING)
+        self.fake.tws_connection_time = "20270115 05:05:00 EST"
+        self.deliver(THURSDAY)
+        self.assert_withheld("IB Gateway's connection time '20270115 05:05:00 EST'", "180 minutes behind")
+
+    def test_the_clock_is_compared_at_the_handshake_not_at_a_later_reconcile(self):
+        # A link restored by IB Gateway (1101/1102) is reconciled again with no new handshake: its connection time is
+        # the first one's, so it is compared with the adapter's clock when that link connected.
+        self.at(datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc))
+        self.fake.tws_connection_time = "20261028 09:49:19 EST"
+        loop = self.loop()
+        loop.start()
+        self.at(datetime(2026, 10, 28, 15, 49, 22, tzinfo=timezone.utc))
+        loop.reconcile()
+        self.assertEqual(loop._gateway_zone, "")
+
+    def test_the_connection_time_is_compared_with_the_adapters_clock_within_the_tolerance(self):
+        from loop import GATEWAY_CLOCK_TOLERANCE, gateway_clock_problem
+        from datetime import timedelta
+        self.assertEqual(GATEWAY_CLOCK_TOLERANCE, timedelta(minutes=5))
+        at = datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc)
+        for text in ("20261028 09:49:19 EST", "20261028 09:49:19 EDT", "20261028 09:49:19 US/Eastern",
+                     "20261028 09:49:19 America/New_York", "20261028 09:49:19 EST5EDT",
+                     "20261028 09:49:19 Eastern Standard Time", "20261028 09:49:19 Eastern Daylight Time",
+                     "20261028 09:44:23 EST", "20261028 09:54:21 EST"):
+            with self.subTest(text=text):
+                self.assertEqual(gateway_clock_problem(text, at), "")
+        for text, off in (("20261028 08:49:19 EST", "60 minutes 3 seconds behind"),
+                          ("20261028 09:44:21 EST", "5 minutes 1 seconds behind"),
+                          ("20261028 09:54:23 EDT", "5 minutes 1 seconds ahead of"),
+                          ("20261028 06:49:19 US/Eastern", "180 minutes 3 seconds behind")):
+            with self.subTest(text=text):
+                problem = gateway_clock_problem(text, at)
+                self.assertIn(text, problem)
+                self.assertIn(off, problem)
+        winter = datetime(2027, 1, 15, 13, 5, tzinfo=timezone.utc)
+        for zone in ("EST", "EDT", "US/Eastern"):
+            with self.subTest(winter=zone):
+                self.assertEqual(gateway_clock_problem("20270115 08:05:00 " + zone, winter), "")
+        problem = gateway_clock_problem("20270115 09:05:00 EDT", winter)
+        self.assertIn("60 minutes ahead", problem)
+
+    def test_the_clock_picks_the_reading_of_the_repeated_autumn_hour(self):
+        # 01:30 on 2026-11-01 happens twice in New York, at 05:30 and at 06:30 UTC: the reading near the adapter's
+        # clock is the one taken, whatever the label, and neither near it withholds.
+        from loop import gateway_clock_problem
+        for utc_hour in (5, 6):
+            at = datetime(2026, 11, 1, utc_hour, 30, 3, tzinfo=timezone.utc)
+            for zone in ("EST", "EDT", "US/Eastern", "Eastern Daylight Time"):
+                with self.subTest(utc_hour=utc_hour, zone=zone):
+                    self.assertEqual(gateway_clock_problem("20261101 01:30:00 " + zone, at), "")
+        problem = gateway_clock_problem("20261101 01:30:00 EST", datetime(2026, 11, 1, 7, 30, tzinfo=timezone.utc))
+        self.assertIn("60 minutes behind", problem)
+
+    def test_a_connection_with_no_handshake_time_withholds(self):
+        from loop import gateway_clock_problem
+        problem = gateway_clock_problem("20261028 09:49:19 EST", None)
+        self.assertIn("20261028 09:49:19 EST", problem)
+        self.assertIn("the adapter's clock at the handshake", problem)
+
+    def test_the_connection_time_in_another_zone_is_refused_before_its_clock(self):
+        from loop import gateway_clock_problem
+        at = datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc)
+        self.assertIn("US/Pacific", gateway_clock_problem("20261028 06:49:19 US/Pacific", at))
+        self.assertIn("did not happen", gateway_clock_problem("20260308 02:30:00 EST",
+                                                              datetime(2026, 3, 8, 7, 30, tzinfo=timezone.utc)))
+
+    def test_either_label_stands_in_the_hour_repeated_when_daylight_saving_ends(self):
+        # 01:30 on 2026-11-01 happens twice in New York: an execution's time there is New York's whatever its label.
         from loop import gateway_zone_problem
         for text in ("20261101 01:30:00 EST", "20261101 01:30:00 EDT", "20261101 01:30:00 Eastern Standard Time",
-                     "20261101 01:30:00 Eastern Daylight Time"):
+                     "20261101 01:30:00 Eastern Daylight Time", "20261101 02:30:00 EDT"):
             with self.subTest(text=text):
                 self.assertEqual(gateway_zone_problem(text), "")
-        self.assertNotEqual(gateway_zone_problem("20261101 02:30:00 EDT"), "", "after the repeated hour: EST only")
 
     def test_a_time_new_york_skips_in_the_spring_withholds(self):
         # 02:30 on 2026-03-08 never happened in New York: the clocks went from 02:00 EST to 03:00 EDT.
@@ -382,11 +471,14 @@ class MorningTests(unittest.TestCase):
         self.assertEqual(gateway_zone_problem("20260308 01:30:00 EST"), "", "the hour before it")
 
     def test_a_time_at_the_edge_of_the_calendar_withholds_and_never_raises(self):
-        from loop import gateway_zone_problem
+        from loop import gateway_clock_problem, gateway_zone_problem
+        at = datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc)
         for text in ("99991231 23:59:59 US/Eastern", "99991231 23:59:59 EST", "00010101 00:00:00 EDT"):
             with self.subTest(text=text):
                 problem = gateway_zone_problem(text)
-                self.assertIn(text, problem)
+                if text.startswith("9999"):
+                    self.assertIn(text, problem, "a time whose UTC instant is past the calendar's end")
+                self.assertIn(text, gateway_clock_problem(text, at))
 
     def test_new_yorks_long_zone_name_in_force_is_new_york(self):
         self.proof(FRIDAY_MORNING)
@@ -394,31 +486,34 @@ class MorningTests(unittest.TestCase):
         self.deliver(THURSDAY)
         self.assert_as_of_close(THURSDAY)
 
-    def test_the_long_zone_name_not_in_force_withholds_showing_the_raw_text(self):
+    def test_a_long_zone_name_off_new_yorks_clock_withholds_showing_the_raw_text(self):
         self.proof(FRIDAY_MORNING)
-        raw = "20270115 08:05:00 Eastern Daylight Time"
+        raw = "20270115 09:05:00 Eastern Daylight Time"
         self.fake.tws_connection_time = raw
         with self.assertLogs("ibkr", "INFO") as logs:
             self.deliver(THURSDAY)
-        self.assertIn(raw, self.assert_withheld("IB Gateway's connection time"))
+        self.assertIn(raw, self.assert_withheld("IB Gateway's connection time", "60 minutes ahead"))
         self.assertIn(raw, "\n".join(logs.output), "the journal shows the Gateway's text as it gave it")
 
     def test_an_execution_time_is_checked_as_the_connection_time_is(self):
-        # An execution's time in New York's abbreviation in force stands; one in EDT in January does not.
-        for zone, stands in (("EST", True), ("EDT", False)):
-            with self.subTest(zone=zone):
+        # An execution's time under either Eastern label, or a New York zone name, stands whatever the season; one in
+        # another zone, or skipped by New York's clocks, does not.
+        for time, stands in (("20270114 10:00:01 EST", True), ("20270114 10:00:01 EDT", True),
+                             ("20270114 10:00:01 Eastern Daylight Time", True), ("20270114 10:00:01 CST", False),
+                             ("20260308 02:30:00 EDT", False)):
+            with self.subTest(time=time):
                 self.setUp()
                 self.proof(FRIDAY_MORNING)
                 loop = self.loop()
                 loop.start()
                 ex = execution(exec_id="0006.abbr.01.01", order_id=0, perm_id=7272, order_ref="", client_id=0,
-                               time="20270114 10:00:01 " + zone)
+                               time=time)
                 loop._count_execution(SimpleNamespace(name="exec_details", args=(-1, contract(), ex)))
                 self.deliver(THURSDAY, loop)
                 if stands:
                     self.assert_as_of_close(THURSDAY)
                 else:
-                    self.assert_withheld("IBKR's execution time", "20270114 10:00:01 EDT")
+                    self.assert_withheld("IBKR's execution time", time)
 
     def test_a_corrected_gateway_is_trusted_again_after_a_reconnect(self):
         # The zone, and every execution zone seen, belong to one connection: a reconnect reads them afresh.
@@ -429,7 +524,7 @@ class MorningTests(unittest.TestCase):
         ex = execution(exec_id="0005.zone.01.01", order_id=0, perm_id=7171, order_ref="", client_id=0,
                        time="20270114 10:00:01 US/Pacific")
         loop._count_execution(SimpleNamespace(name="exec_details", args=(-1, contract(), ex)))
-        self.fake.tws_connection_time = "20270115 08:00:00 US/Eastern"
+        self.fake.tws_connection_time = "20270115 08:05:00 US/Eastern"
         self.fake.drop()
         for _ in range(10):
             loop.step()

@@ -7,6 +7,7 @@ figure here is invented; none is a real price or account.
 """
 import sys
 from collections import deque
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ if adapter_dir not in sys.path:
     sys.path.insert(0, adapter_dir)
 
 from connection import ConnectFailed
+from orders import NEW_YORK
 from tws import TWSApi
 
 ACCOUNT = "DU0000001"
@@ -23,6 +25,8 @@ OTHER_ACCOUNT = "DU0000002"
 # IBKR's statuses of an order that has ended.
 ENDED = ("Cancelled", "ApiCancelled", "Inactive")
 SERVER_TIME = 1_800_000_000
+# tws_connection_time's default: the fake's server time, on New York's clock.
+GATEWAY_CLOCK = object()
 # IBKR's refusal of an account summary while two are still counted as active
 # ("Message Codes": 322, error processing request).
 SUMMARY_LIMIT_CODE = 322
@@ -80,8 +84,9 @@ class FakeTWS(TWSApi):
         self.connect_timeouts = []
         self.next_order_id = 7
         self.server_time = SERVER_TIME
-        # IB Gateway's connection time for each session (TWS API twsConnectionTime), in the Gateway's zone.
-        self.tws_connection_time = "20261016 09:30:00 US/Eastern"
+        # IB Gateway's connection time for each session (TWS API twsConnectionTime), in the Gateway's zone:
+        # GATEWAY_CLOCK gives the fake's server time on New York's clock, as a Gateway set right does.
+        self.tws_connection_time = GATEWAY_CLOCK
         self.answer_current_time = True
         self.positions = []
         self.summary = []
@@ -439,7 +444,11 @@ class FakeTWS(TWSApi):
 
     def connection_time(self):
         """The session's connection time as IB Gateway gives it (tws_connection_time; New York's zone unless set)."""
-        return self.tws_connection_time if self.connected else None
+        if not self.connected:
+            return None
+        if self.tws_connection_time is GATEWAY_CLOCK:
+            return datetime.fromtimestamp(self.server_time, NEW_YORK).strftime("%Y%m%d %H:%M:%S US/Eastern")
+        return self.tws_connection_time
 
     def place_order(self, order_id, contract_, order_):
         self.calls.append(("place_order", order_id))

@@ -664,13 +664,25 @@ time zone, which its unit sets to New York's (`TZ=America/New_York` in
 `ti-gateway.service`; do not change it, and keep the Gateway login's time
 zone New York's). The adapter checks it at every connect and reconnect,
 whether or not anything has executed: it reads the connection time the
-Gateway gives (for example `20261027 07:10:01 US/Eastern`; `EST`, `EDT`,
-`Eastern Standard Time` and `Eastern Daylight Time` stand only in their own
-season, either one in the hour repeated when the clocks go back), and every
-execution's time the same way. Any other zone, or a time it cannot read,
-withholds the morning reading, the page and `journalctl -u
-ti-adapter-boost` quoting the Gateway's text exactly as it gave it (send
-that to the developer if it is New York time in a form not listed here); once the
+Gateway gives (for example `20261027 07:10:01 US/Eastern`, or `20261028
+09:49:19 EST`). Its zone must be a New York name (`US/Eastern`,
+`America/New_York`, `EST5EDT`) or an Eastern label (`EST`, `EDT`, `Eastern
+Standard Time`, `Eastern Daylight Time`). IBKR's label does not follow
+daylight saving time (on 2026-10-28 a Gateway on New York time said `EST`
+in summer time), so the label is not taken to say the season: instead the
+time it states, read on New York's clock, must be within 5 minutes of the
+adapter's own clock when it connected. A Gateway on a fixed `EST` all year
+is an hour off in summer, and one in another zone is hours off; either
+withholds the morning reading, and the message says how far off it was and
+which way (for example `60 minutes 3 seconds behind`). In the hour repeated
+when the clocks go back, the reading that matches the adapter's clock is
+taken. Every execution's time must be in one of the same zones (the
+clocks are not compared: an execution can be hours old), and is read on
+New York's clock whatever its label. Any other zone, a time New York skipped
+when the clocks went forward, or a time it cannot read, withholds the
+morning reading, the page and `journalctl -u ti-adapter-boost` quoting the
+Gateway's text exactly as it gave it (send that to the developer if it is
+New York time in a form not listed here); once the
 Gateway is set right and the adapter reconnects, it is trusted again. IBKR's
 Python library hands the connection time over as raw bytes rather than
 text; the adapter turns them into text first. Whether it arrives as bytes

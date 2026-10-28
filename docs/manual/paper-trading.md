@@ -682,7 +682,8 @@ order. Still to come, and not needed for it:
   after the session, an execution at or after the close in it (an early
   close's too), one in IBKR's own list since midnight, a fill recorded after
   the close (an earlier run's included) or with a time that has no zone, IB Gateway's connection time or an
-  execution IBKR reported in a zone other than New York's (or a connection
+  execution IBKR reported in a zone other than New York's, a connection time
+  whose clock is more than 5 minutes off the adapter's (or a connection
   time it cannot read; a reconnect to a Gateway set right is trusted
   again), a fill two runs back found past an empty run, another account's proof, or a reading after
   the next open; Monday's delivery of Friday, the day after a holiday; and

@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4, and an ended run's never-sent sale is settled for the fresh run's approval; amended 2026-10-27 by the owner ("Flex"): the morning reading stands for the close with the Flex executions proof)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4, and an ended run's never-sent sale is settled for the fresh run's approval; amended 2026-10-27 by the owner ("Flex"): the morning reading stands for the close with the Flex executions proof; noted 2026-10-28: IBKR's Eastern label does not follow daylight saving time, so IB Gateway's clock is checked against the adapter's instead)
 - Date: 2026-09-17
 
 ## In plain English
@@ -1275,3 +1275,41 @@ executions proof; `ti-flex@.timer`: the morning firings), and one secret,
 `TI_IBKR_FLEX_TRADES_QUERY_ID`. The engine, its schemas and its rules are
 unchanged: a snapshot stamped as of the close is the one the engine already
 reads, and a withheld one is stamped as before. No RulesVersion change.
+
+**Note (2026-10-28): IBKR's Eastern label does not follow daylight saving
+time, so the Gateway's clock is checked instead.** On 2026-10-28 (New York
+on EDT until 2026-11-01), IB Gateway 10.50 running with
+`TZ=America/New_York`, reached through ibapi 10.51.01, gave the connection
+time `20261028 09:49:19 EST` to an adapter that connected at 09:49:22 New
+York time: the wall clock was New York's, the label was not. The season
+check on the label described above ("an abbreviation or long name ... that
+New York used at the date and time stated") therefore withheld every
+morning reading in summer time, and an execution time labelled `EST` in
+summer was read an hour late (`EST` is a fixed UTC-5 zone; `EDT` names no
+zone at all and was refused). The intent is unchanged (fail closed unless
+the Gateway's clock is New York time); the evidence is now the clock, not
+the label:
+
+- A connection or execution time's zone stands when it is a New York zone
+  name (`US/Eastern`, `America/New_York`, `EST5EDT`) or an Eastern label
+  (`EST`, `EDT`, `Eastern Standard Time`, `Eastern Daylight Time`), and its
+  date and time are read on New York's clock (`America/New_York`) whatever
+  the label; a local time New York skipped when the clocks went forward, a
+  time not of the shape, or any other zone, withholds as before.
+- The connection time, read so, must be within 5 minutes of the adapter's
+  own (NTP-synced) clock when the link's handshake completed (the time is
+  recorded at the handshake, so a link Gateway restores with no new
+  handshake is held to the same moment). A Gateway on a fixed `EST` all year
+  is an hour off in summer, and a Gateway in another zone labelled `EST` is
+  hours off: both withhold, the reason saying how far off and which way. In
+  the hour repeated when daylight saving time ends, the reading within the
+  tolerance is taken; with neither within it, the reading is withheld.
+- An execution time is not compared with the clock (it may be hours old):
+  the connection time's check is what shows the Gateway's clock, and so its
+  executions' times, are New York's. Its UTC reading takes the earlier
+  reading of the repeated autumn hour (no session trades then, Sunday 01:00
+  to 02:00 New York).
+
+What changes where: the IBKR adapter only (`loop.py`, `orders.py`,
+`connection.py`). The engine, its schemas and its rules are unchanged; no
+RulesVersion change.

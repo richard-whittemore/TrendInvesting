@@ -173,15 +173,15 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, time as clock_time, timezone
+from datetime import datetime, time as clock_time, timedelta, timezone
 from decimal import Decimal
 
 from connection import Connection, LinkChanged, NotConnected
 from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReading, SnapshotRefused, market_open,
                       nyse_calendar, run_name)
-from orders import (OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker,
-                    agrees_with_account, collect_broker_orders, collect_settled_broker_orders, match_on_reconnect,
-                    order_key)
+from orders import (EASTERN_LABELS, NEW_YORK, NEW_YORK_ZONES, OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete,
+                    OpenOrdersUnsettled, OrderTracker, agrees_with_account, collect_broker_orders,
+                    collect_settled_broker_orders, match_on_reconnect, order_key)
 from relay import (LOG_INPUT, OUTBOX_SUFFIX, RUN_APPROVED, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
                    Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
                    run_logs)
@@ -256,67 +256,97 @@ CASH_DRIFT_BOUND = Decimal("0.01")
 # open, so a session decided is decided before the next one starts (ADR 0019,
 # amended 2026-10-27).
 PROOF_WAIT_UNTIL = clock_time(9, 0)
-# The zone names IB Gateway gives an execution's time when its login is on
-# New York time. IBKR's executions reach back only to midnight in that zone
-# (ADR 0025 point 5); ti-gateway.service sets TZ=America/New_York, and an
-# execution reported in any other zone shows the list's midnight is not New
-# York's, so a morning reading is withheld (ADR 0019, amended 2026-10-27).
-NEW_YORK_ZONES = frozenset(("US/Eastern", "America/New_York", "EST5EDT"))
-# New York's abbreviations, and the long names IB Gateway may give for them, each New York's only while it is in
-# force there.
-NEW_YORK_ABBREVIATIONS = {"EST": "EST", "EDT": "EDT", "Eastern Standard Time": "EST",
-                          "Eastern Daylight Time": "EDT"}
+# IBKR's executions reach back only to midnight in IB Gateway's own zone (ADR 0025 point 5);
+# ti-gateway.service sets TZ=America/New_York, and a connection or execution time in any zone but New York's
+# (orders.NEW_YORK_ZONES, orders.EASTERN_LABELS) shows the list's midnight is not New York's, so a morning reading is
+# withheld (ADR 0019, amended 2026-10-27). IBKR's Eastern label does not follow daylight saving time, so it says
+# nothing of the season: the Gateway's clock is shown to be New York's by its connection time, read on New York's
+# clock, falling within GATEWAY_CLOCK_TOLERANCE of the adapter's own clock (NTP-synced) when the link connected (ADR
+# 0019, amended 2026-10-28). A Gateway on fixed EST in summer is an hour off; another zone labelled EST is hours off.
+GATEWAY_CLOCK_TOLERANCE = timedelta(minutes=5)
+_SET_NEW_YORK = ("set IB Gateway to New York time (ti-gateway.service, TZ=America/New_York, and its login's time "
+                 "zone)")
 
 
-def gateway_zone_problem(text, what="IB Gateway's connection time"):
-    """Why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", does not show it on New York time; "" when it
-    does. what names the text in the reason, which quotes it exactly as given.
+def _new_york_readings(text, what):
+    """(problem, readings): why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", is not a New York reading
+    ("" when it is), and when it is, the instants (UTC) it can stand for on New York's clock: two in the hour repeated
+    when daylight saving time ends, one otherwise. what names the text in the reason, which quotes it as given.
 
-    The TWS API gives a session's connection time (EClient.twsConnectionTime)
-    and each execution's time in the Gateway's own zone, the zone its
-    execution list's midnight is in (ADR 0025 point 5). IBKR documents the
-    call, not the format, so it is read defensively (ADR 0019, amended
-    2026-10-27; AGENTS.md: fail closed): the zone, everything after the date
-    and time, must be a New York zone name (NEW_YORK_ZONES), or an
-    abbreviation or long name (NEW_YORK_ABBREVIATIONS) New York used at the
-    time stated, at either reading of a local time repeated when daylight
-    saving time ends; a local time New York skipped when daylight saving
-    time began, anything else, or a text not of that shape, is a problem.
+    IBKR documents the call, not the format, so it is read defensively (ADR 0019, amended 2026-10-27; AGENTS.md: fail
+    closed): the zone, everything after the date and time, must be a New York zone name or an Eastern label, the label
+    taken on New York's clock whatever its season (ADR 0019, amended 2026-10-28); a local time New York skipped when
+    daylight saving time began, any other zone, or a text not of that shape, is a problem.
     """
     parts = text.split(None, 2) if isinstance(text, str) else []
     if len(parts) != 3:
         return ("{} {!r} is not 'YYYYMMDD HH:MM:SS Zone', so the zone its list of executions starts its midnight "
-                "in is not known".format(what, text))
+                "in is not known".format(what, text)), ()
     try:
         local = datetime.strptime(parts[0] + " " + parts[1], "%Y%m%d %H:%M:%S")
     except ValueError:
         return ("{} {!r} does not state a date and time that can be read, so the zone it is in is not "
-                "trusted".format(what, text))
+                "trusted".format(what, text)), ()
     zone = parts[2].strip()
-    if zone in NEW_YORK_ZONES or zone in NEW_YORK_ABBREVIATIONS:
+    if zone not in NEW_YORK_ZONES and zone not in EASTERN_LABELS:
+        return ("{} {!r} is in the zone {!r}, not New York's: IBKR's executions reach back only to midnight in the "
+                "Gateway's own zone, so the midnight its list starts at is not New York's; {}".format(
+                    what, text, zone, _SET_NEW_YORK)), ()
+    try:
+        readings = tuple(sorted({local.replace(tzinfo=NEW_YORK, fold=fold).astimezone(timezone.utc)
+                                 for fold in (0, 1)}))
         # A wall-clock time New York skipped (the hour the clocks go forward) does not come back from UTC as
-        # itself: the text is no New York reading at all. The repeated autumn hour does, at its first reading.
-        aware = local.replace(tzinfo=nyse_calendar.NEW_YORK)
-        try:
-            back = aware.astimezone(timezone.utc).astimezone(nyse_calendar.NEW_YORK).replace(tzinfo=None)
-            used = {local.replace(tzinfo=nyse_calendar.NEW_YORK, fold=fold).tzname() for fold in (0, 1)}
-        except (OverflowError, ValueError, OSError) as err:
-            # Fail closed (AGENTS.md): a time the calendar cannot place is no New York reading.
-            return ("{} {!r} cannot be placed in New York's calendar ({}), so it is not a New York "
-                    "reading".format(what, text, type(err).__name__))
-        if back != local:
-            return ("{} {!r} is a time that did not happen in New York (the clocks went forward over it), so it "
-                    "is not a New York reading".format(what, text))
-    if zone in NEW_YORK_ZONES:
+        # itself: the text is no New York reading at all. The repeated autumn hour does, at either reading.
+        back = readings[0].astimezone(NEW_YORK).replace(tzinfo=None)
+    except (OverflowError, ValueError, OSError) as err:
+        # Fail closed (AGENTS.md): a time the calendar cannot place is no New York reading.
+        return ("{} {!r} cannot be placed in New York's calendar ({}), so it is not a New York "
+                "reading".format(what, text, type(err).__name__)), ()
+    if back != local:
+        return ("{} {!r} is a time that did not happen in New York (the clocks went forward over it), so it "
+                "is not a New York reading".format(what, text)), ()
+    return "", readings
+
+
+def gateway_zone_problem(text, what="IBKR's execution time"):
+    """Why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", is not a New York reading; "" when it is.
+
+    The zone check alone (_new_york_readings), for each execution's time: an execution may be hours old, so its
+    time cannot be held against the adapter's clock; the connection time's clock check (gateway_clock_problem) is
+    what shows the Gateway's clock, and so its executions' times, are New York's.
+    """
+    return _new_york_readings(text, what)[0]
+
+
+def _span(delta):
+    seconds = int(abs(delta).total_seconds())
+    minutes, seconds = divmod(seconds, 60)
+    return "{} minutes".format(minutes) + (" {} seconds".format(seconds) if seconds else "")
+
+
+def gateway_clock_problem(text, connected_at, what="IB Gateway's connection time"):
+    """Why text, the session's connection time IB Gateway gave at the handshake (TWS API EClient.twsConnectionTime,
+    "YYYYMMDD HH:MM:SS Zone" in the Gateway's own zone), does not show its clock on New York time; "" when it does.
+
+    It must be a New York reading (_new_york_readings), and one of the instants it can stand for must be within
+    GATEWAY_CLOCK_TOLERANCE of connected_at, the adapter's own clock when the link connected (Connection.connected_at;
+    ADR 0019, amended 2026-10-28): that one is taken, so the clock settles the hour repeated when daylight saving
+    time ends, and with none so near, or no connected_at, it is a problem quoting the text as given.
+    """
+    problem, readings = _new_york_readings(text, what)
+    if problem:
+        return problem
+    if connected_at is None:
+        return ("{} {!r} cannot be compared with the adapter's clock at the handshake (none was recorded), so the "
+                "Gateway's clock is not known to be on New York time".format(what, text))
+    off = min((at - connected_at for at in readings), key=abs)
+    if abs(off) <= GATEWAY_CLOCK_TOLERANCE:
         return ""
-    if zone in NEW_YORK_ABBREVIATIONS:
-        if NEW_YORK_ABBREVIATIONS[zone] in used:
-            return ""
-        return ("{} {!r} is in {}, which is not what New York uses at that date and time: the Gateway is not on New "
-                "York time".format(what, text, zone))
-    return ("{} {!r} is in the zone {!r}, not New York's: IBKR's executions reach back only to midnight in the "
-            "Gateway's own zone, so the midnight its list starts at is not New York's; set IB Gateway to New York "
-            "time (ti-gateway.service, TZ=America/New_York, and its login's time zone)".format(what, text, zone))
+    return ("{} {!r}, read on New York's clock, is {} {} the adapter's clock when it connected ({}), more than the "
+            "{} allowed: the Gateway is not on New York time; {}".format(
+                what, text, _span(off), "ahead of" if off > timedelta(0) else "behind",
+                connected_at.astimezone(NEW_YORK).strftime("%Y-%m-%d %H:%M:%S %Z"),
+                _span(GATEWAY_CLOCK_TOLERANCE), _SET_NEW_YORK))
 
 
 class ReconcileIncomplete(Exception):
@@ -484,7 +514,8 @@ class AdapterLoop:
         self._proof_retryable = False
         # Every execution time IBKR reported in the account on this connection, as it gave it
         # (_count_execution), and why IB Gateway's own zone, read at this connection's reconcile, is not New
-        # York's ("" when it is): both are read afresh at every reconcile (gateway_zone_problem).
+        # York's ("" when it is): both are read afresh at every reconcile (gateway_zone_problem,
+        # gateway_clock_problem).
         self._execution_zones = set()
         self._gateway_zone = "IB Gateway's connection time has not been read yet (no reconcile has run)"
         self.delivery = None if streams is None else Deliverer(
@@ -563,13 +594,14 @@ class AdapterLoop:
 
         Each reconcile starts this connection's evidence of IB Gateway's zone
         afresh: the zones of the executions it reports, and its connection
-        time's zone (gateway_zone_problem), so a Gateway set right and
+        time's zone and clock against the adapter's own when the link
+        connected (gateway_clock_problem), so a Gateway set right and
         reconnected is trusted again without a restart (ADR 0019, amended
-        2026-10-27).
+        2026-10-27 and 2026-10-28).
         """
         self._execution_zones = set()
         try:
-            self._gateway_zone = gateway_zone_problem(self._api.connection_time())
+            self._gateway_zone = gateway_clock_problem(self._api.connection_time(), self.conn.connected_at)
         except Exception as err:  # any failure to read it is a zone not known (fail closed)
             self._gateway_zone = "IB Gateway's connection time could not be read ({})".format(type(err).__name__)
         if self._gateway_zone:

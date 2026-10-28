@@ -363,6 +363,24 @@ class OrderStatusTests(unittest.TestCase):
                 parse_execution_time(bad)
 
 
+    def test_an_eastern_label_is_read_as_new_york_time_whatever_its_season(self):
+        # IBKR's short label does not follow daylight saving time (IB Gateway 10.50 on TZ=America/New_York gave
+        # "EST" at 09:49:19 EDT on 2026-10-28): EST, EDT and their long names are read on New York's clock, the
+        # Gateway's being checked as New York's at every connect (ADR 0019, amended 2026-10-28).
+        for text, utc in (("20261028 09:49:19 EST", datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc)),
+                          ("20261028 09:49:19 EDT", datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc)),
+                          ("20261028 09:49:19 Eastern Standard Time",
+                           datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc)),
+                          ("20270114 10:00:01 EDT", datetime(2027, 1, 14, 15, 0, 1, tzinfo=timezone.utc)),
+                          ("20270114 10:00:01 Eastern Daylight Time",
+                           datetime(2027, 1, 14, 15, 0, 1, tzinfo=timezone.utc)),
+                          ("20270114 10:00:01 EST", datetime(2027, 1, 14, 15, 0, 1, tzinfo=timezone.utc)),
+                          ("20261028 09:49:19 US/Eastern", datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc)),
+                          ("20261028 09:49:19 EST5EDT", datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc))):
+            with self.subTest(text=text):
+                self.assertEqual(parse_execution_time(text), utc)
+
+
 class RequestIdTests(unittest.TestCase):
     def test_an_error_on_a_request_is_never_read_as_an_orders_rejection(self):
         # IBKR answers a request's error under its request ID and an order's
