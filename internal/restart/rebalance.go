@@ -70,6 +70,30 @@ func readRecord[T interface{ ValidateSchema(uint32) error }](env event.Envelope,
 	return p, nil
 }
 
+// logStrategy returns the strategy a log's configuration input names,
+// refusing a log with no configuration input, or one that does not decode or
+// names none, as damaged ("cannot be read back"), never as another
+// strategy's.
+func logStrategy(entries []journal.Entry, logName string) (string, error) {
+	for _, entry := range entries {
+		env := entry.Envelope
+		if entry.Kind != journal.KindInput || env.Type != event.TargetWeightConfigurationEventType {
+			continue
+		}
+		var kind struct {
+			StrategyID string `json:"strategy_id"`
+		}
+		if err := json.Unmarshal(env.Payload, &kind); err != nil {
+			return "", cannotReadBack(logName, fmt.Errorf("decode its configuration input %s: %w", env.ID, err))
+		}
+		if kind.StrategyID == "" {
+			return "", cannotReadBack(logName, fmt.Errorf("its configuration input %s names no strategy", env.ID))
+		}
+		return kind.StrategyID, nil
+	}
+	return "", cannotReadBack(logName, errors.New("it holds no target-weight configuration input"))
+}
+
 // cannotReadBack is RebalanceAtEnd's refusal of a log it cannot read: fail
 // closed, never no rebalance in progress (AGENTS.md).
 func cannotReadBack(logName string, err error) error {
@@ -253,8 +277,12 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 // no momentum state, is refused for a momentum log. logName names the
 // approved log in a refusal.
 func CheckRebalanceInProgress(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
-	if !IsMomentumLog(entries) {
-		return fmt.Errorf("engine: %s is not a momentum run's log: its configuration names another strategy, so it is not this IRA's run; set it aside, unchanged, if it does not belong in this folder (docs/runbooks/durable-log.md, \"An unrecoverable log\")", logName)
+	strategy, err := logStrategy(entries, logName)
+	if err != nil {
+		return err
+	}
+	if strategy != event.TargetWeightStrategyMomentum {
+		return fmt.Errorf("engine: %s is not a momentum run's log: its configuration names strategy %q, so it is not this IRA's run; set it aside, unchanged, if it does not belong in this folder (docs/runbooks/durable-log.md, \"An unrecoverable log\")", logName, strategy)
 	}
 	if approval.Momentum == nil {
 		return fmt.Errorf("engine: %s is a momentum run's, but the approval is Boost-shaped: it states Boost's latch and no rebalance in progress; approve it with `operator approve -log %s`, which states the rebalance in progress or none (ADR 0026, point 5)", logName, logName)

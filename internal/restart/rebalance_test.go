@@ -476,3 +476,25 @@ func TestABoostLogIsNotReadAsAnIRAs(t *testing.T) {
 		t.Errorf("a Boost log: %v, want a refusal saying it is not a momentum run's", err)
 	}
 }
+
+// TestADamagedConfigurationIsNotReadAsAnotherStrategy: a log whose
+// configuration input is missing, does not decode, or names no strategy is
+// damaged, so it refuses "cannot be read back" as before; only one whose
+// configuration reads and names another strategy is not a momentum run's.
+func TestADamagedConfigurationIsNotReadAsAnotherStrategy(t *testing.T) {
+	approval := event.OperatorRunApprovedPayload{AccountID: iraLogAccount, Momentum: &event.MomentumStateInForce{}}
+	corrupt := recorded(t, journal.KindInput, "configuration:corrupt", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "not an object")
+	unnamed := recorded(t, journal.KindInput, "configuration:unnamed", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion,
+		map[string]string{"account_id": iraLogAccount})
+	for name, entries := range map[string][]journal.Entry{
+		"a corrupt configuration":     {corrupt},
+		"a configuration naming none": {unnamed},
+		"no configuration input": {recorded(t, journal.KindInput, "session:x", event.SessionClosedEventType, event.SessionClosedSchemaVersion,
+			map[string]string{"period_end": "2025-01-02T21:00:00Z"})},
+	} {
+		err := restart.CheckRebalanceInProgress(entries, approval, "run-1.log")
+		if err == nil || !strings.Contains(err.Error(), "cannot be read back") || strings.Contains(err.Error(), "not a momentum run's") {
+			t.Errorf("%s: %v, want a refusal saying it cannot be read back", name, err)
+		}
+	}
+}
