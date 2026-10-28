@@ -141,4 +141,8 @@ deploy-test:
 	./deploy/rehearsal/test-ibc-modes.sh
 	./deploy/rehearsal/test-adapter-venv.sh
 
+# make check runs the momentum memory-budget test on its two-year fixture;
+# a plain adapter-test runs the fourteen-month one (adapter/marketdata/tests/
+# test_memory.py), which checks the same bound in about half the time.
+check: export TI_MOMENTUM_MEMORY_FULL = 1
 check: deps lint coverage vuln build adapter-test research-test deploy-test

@@ -198,7 +198,8 @@ whether its session is a decision session, which stocks the engine will rank
 from it, and how many sessions of closes each history must cover. It uses
 the engine's own code for all three. `encode` starts it once per universe
 session, with that one session's snapshot (about 500 starts for a two-year
-warm-up, a few seconds in all; one start for a daily firing). The engine then ranks the snapshot again
+warm-up, a few seconds in all; one start for a daily firing), and stops one
+that has not answered within 60 seconds. The engine then ranks the snapshot again
 itself and refuses the stream if the histories name any other set of stocks,
 so a mistaken or stale ranker cannot slip a different universe in.
 
@@ -210,38 +211,65 @@ recording gets no histories, and the engine withholds that month's decision
 
 **Memory the compact stream needs.** The IRA's rule ranks the whole market
 every session, so unlike Boost this step cannot simply ignore the other
-stocks. It never needs all of them at once, though: it reads the recordings
-one session at a time, three times over. The first read checks every
-recording and notes, per stock, only the few figures that decide which
-sessions a stock is left out of for bad data (its bad days, its first close,
-and its close on the session before each of its dividends). The second
-builds each session's snapshot and asks the ranker about that one session.
-The third writes the stream as it goes, never holding the whole file, and
-keeps only the closes of the stocks ranked at a decision whose 260-session
-window covers that day, dropping them once the last decision that needs
-them is written. So the peak is one session's recordings and snapshot plus
-the ranked stocks' windows (about 500 stocks x 260 closes, a little more in
-a year when the ranked set changes, since a stock ranked at any decision
-still to come keeps its closes), not every stock of every session. The
-stream is byte for byte the one the step wrote before it read this way.
+stocks. It never needs all of them at once, though: it lists the recordings
+once, then reads them one session at a time, three times over. The first
+read checks every recording and notes, per stock, only the few figures that
+decide which sessions a stock is left out of for bad data (its bad days, its
+first close, and its close on the session before each of its dividends). The
+second builds each session's snapshot and asks the ranker about that one
+session. The third writes the stream as it goes, never holding the whole
+file, and keeps only the closes of the stocks ranked at a decision whose
+260-session window covers that day, 8 bytes a close, dropping them once the
+last decision that needs them is written. The stream is byte for byte the
+one the step wrote before it read this way (a recorded fixture in the tests
+pins it).
+
+Every read uses the listing taken at the start: a recording written while
+the step runs (the daily universe step finishing late, say) is left for the
+next run, and one that disappears or is replaced while the step runs
+refuses the stream ("... disappeared during the encode" or "... changed
+during the encode"); run the encode again.
 
 The budget is **64 MiB of Python memory** (the tracemalloc peak, the measure
-the Boost figures above use), for the warm-up and the daily firing alike.
-It is tested with made-up recordings of 2,000 listed stocks in each of 502
-sessions (2025-01-02 to 2026-12-31), quarterly dividends and some splits,
-and 500 stocks ranked: the warm-up peaks at about 18 MB and the daily firing
-at about 19 MB (about 55 MB for the whole process), where reading every
-session at once peaked at about 2.3 GB and 1.15 GB. What moves it: about
-4 MB more per extra 1,000 stocks listed in a session (one session is held),
-about 1.5 MB per extra 100 stocks ranked, and from the history's length only
-its split and dividend rows (one year peaks at about 16 MB, two at about 19).
-At the real market's size, measured once on made-up sessions of 10,000
-instruments over the same two years, the warm-up peaks at about 45 MB of
-Python memory and about 100 MB for the whole process (the daily firing about
-50 MB and 106 MB). Both the test's ~19 MB and the real size's 49.6 MB are
-under the one 64 MiB budget, and it stays far inside the 2 GB server,
-beside the Gateway, three engines and their adapters; the whole server's
-total is measured on the server before the IRAs go live.
+the Boost figures above use), for the warm-up and the daily firing alike,
+and it holds at the real market's size. The test's made-up recordings hold
+2,000 listed stocks in each session, with quarterly dividends, some splits
+and 500 stocks ranked; `make check` runs them over two years (502 sessions,
+2025-01-02 to 2026-12-31) and a plain `make adapter-test` over fourteen
+months (291 sessions) in about half the time. Over two years the warm-up
+peaks at about 13 MB and the daily firing at about 13 MB, where reading
+every session at once peaked at about 2.3 GB and 1.15 GB; the test also
+holds the fixture under 32 MiB, so a regression that doubles the peak fails
+before the real size would pass 64 MiB. Measured once on made-up sessions
+of 10,000 instruments over the same two years, the warm-up and the daily
+firing each peak at about 43 MB of Python memory, and about 90 MB and 96 MB
+for the whole process: both the test's ~13 MB and the real size's ~43 MB
+are under the one budget, and far inside
+the 2 GB server beside the Gateway, three engines and their adapters; the
+whole server's total is measured on the server before the IRAs go live.
+
+What moves the peak, at the sizes measured:
+
+- one session is held, so about 4 MB per extra 1,000 stocks listed in a
+  session;
+- the ranked stocks' windows, 8 bytes a close: about 1 MB for 500 stocks
+  x 260 sessions. A stock ranked at any decision whose window has started keeps its closes,
+  so a year in which the ranked set changes completely every month holds
+  about thirteen months' sets at once, 8 bytes a close: about 13 MB for
+  6,500 stocks, still inside the budget;
+- the length of the history, through what is kept for every session: the
+  named instruments' bars (SPY, IEF, SHY and the holdings, a few per
+  session) and their adjustment figures, a date and a few figures per
+  session for the ranking (which sessions decide, and when each universe
+  was fetched), and the span's split and dividend rows. Fourteen months
+  peak at about 11 MB, two years at about 13;
+- bad data: each stock keeps the reason for its first 3 malformed bars and
+  counts the rest as runs of sessions with one shared reason, so a feed
+  broken for many stocks every session adds a few entries per stock, not
+  one per stock per session (the exclusion lines then name the first 3 bad
+  bars and the runs after them). A stock that alternates between good and
+  bad bars day by day costs one entry per bad stretch.
+
 
 ### A session the exchange cancels
 
@@ -1165,8 +1193,13 @@ exits with status 1 and a message on stderr, for the scheduler to alert on.
 - **A boost stream asks for more than one instrument.** Refused.
 - **The ranker fails, cannot be run, or answers something that does not fit
   the request** (another session, a stock not in the snapshot, a stock named
-  twice, stocks for a session that is not a decision session, no window).
-  Refused, naming the session.
+  twice, stocks for a session that is not a decision session, no window),
+  or does not answer within 60 seconds. Refused, naming the session
+  ("universe 2026-11-30: the ranker refused: ...").
+- **A bar or sector recording disappears or is replaced while `encode`
+  runs.** Refused ("... disappeared during the encode", "... changed during
+  the encode"); nothing is written. Encode again once the recordings are
+  settled. A recording that only appears meanwhile is not read.
 - **A cancelled session has price recordings.** Refused: either the day
   traded or the retraction is wrong; find out which before encoding again.
 - **A retraction for a day that is not a session by the rules, without a
@@ -1205,9 +1238,16 @@ exits with status 1 and a message on stderr, for the scheduler to alert on.
   a count per session showing no input is written per listed stock, each
   history against the closes the full stream's bars carry, bad data, every
   refusal, the CLI, the ranker asked one session at a time, and the streamed
-  file byte for byte the stream `encode` returns), `test_memory.py`
+  file byte for byte the stream `encode` returns, a recorded fixture whose
+  stream must have the bytes the encoder wrote before it read one session
+  at a time, with a stock ranked, dropped and ranked again keeping its whole
+  window, recordings changed while it runs, an overflowing adjusted close,
+  and a ranker that refuses or hangs), `test_memory.py`
   (`MomentumMemoryBudgetTest`: the momentum warm-up and daily firing inside
-  the 64 MiB budget on two years of 2,000-stock sessions), and with the real Go ranker the Go validators and
+  the 64 MiB budget, and the fixture inside 32 MiB, on 2,000-stock sessions,
+  every history its whole window; `MomentumStressMemoryTest`: bad bars for
+  half the market every session, and a ranked set that changes completely
+  every month, each adding under 1 MiB), and with the real Go ranker the Go validators and
   `tests/testdata/decision_equivalence.go`, which feeds the full and the
   compact stream of the same recordings through two fresh momentum engines
   and requires identical decisions. The engine side is in the momentum

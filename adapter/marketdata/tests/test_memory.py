@@ -7,6 +7,7 @@ ranked names' windows of closes (MomentumMemoryBudgetTest). Synthetic data
 only; no network."""
 import datetime as dt
 import json
+import os
 import subprocess
 import tempfile
 import tracemalloc
@@ -14,7 +15,7 @@ import unittest
 from pathlib import Path
 
 from marketdata import __main__ as cli
-from marketdata import nyse_calendar, record, sectors
+from marketdata import encode, nyse_calendar, record, sectors
 from marketdata.tests.test_sectors import iwv_csv, screener
 from marketdata.tests.test_tidata import BASE, RUN, Job, after_settle, spy
 
@@ -107,7 +108,12 @@ class MemoryBudgetTest(unittest.TestCase):
 MOMENTUM_INSTRUMENTS = 2000   # listed stocks in each session (the real day lists ~5,000)
 RANKED = 500                  # the configured universe size
 WINDOW = 260                  # closes kept per ranked name (the Go ranker's window)
-MOMENTUM_BASE, MOMENTUM_LAST = dt.date(2025, 1, 2), dt.date(2026, 12, 31)   # two years: 502 sessions
+# Two years (502 sessions) when TI_MOMENTUM_MEMORY_FULL=1, as make check sets;
+# otherwise fourteen months (291 sessions), still longer than the window, so
+# the ordinary unit run checks the same bound in about half the time.
+FULL = os.environ.get("TI_MOMENTUM_MEMORY_FULL") == "1"
+MOMENTUM_BASE = dt.date(2025, 1, 2) if FULL else dt.date(2025, 11, 3)
+MOMENTUM_LAST = dt.date(2026, 12, 31)
 NAMED = ("IEF", "SHY", "SPY")
 # The stated budget (tracemalloc peak in bytes, the measure the Boost tests
 # use; docs/manual/market-data.md states it): one session's recordings and
@@ -115,10 +121,13 @@ NAMED = ("IEF", "SHY", "SPY")
 # cover the session (about RANKED x WINDOW floats, more where the ranked set
 # churns), small per-ticker figures, and the span's split and dividend rows.
 # It does not grow with the history beyond those rows. One budget holds at
-# the real market's size: this 2,000-name fixture peaks at ~19 MB and a
-# one-off run on 10,000 names measured 49.6 MB, both under it. Every
+# the real market's size: this 2,000-name fixture peaks at ~13 MB and a
+# one-off run on 10,000 names measured ~43 MB, both under it. Every
 # instrument of every session held at once, as before, peaked at ~2.3 GB here.
 MOMENTUM_BUDGET = 64 * 1024 * 1024
+# The fixture's own ceiling, so a regression that would push the real size past
+# MOMENTUM_BUDGET (a peak twice the fixture's) fails here first.
+FIXTURE_BUDGET = 32 * 1024 * 1024
 
 
 def momentum_bar(ticker, n, i):
@@ -201,23 +210,35 @@ class MomentumMemoryBudgetTest(unittest.TestCase):
         return status, peak
 
     def histories(self, out):
+        """{decision session: histories}; every name trades every session
+        with good data, so each history holds exactly the window's sessions:
+        all WINDOW of them once the recordings reach back that far."""
         counts = {}
         with open(out) as f:
             for line in f:
                 if '"type":"market.close.history"' in line:
                     e = json.loads(line)
-                    counts[e["payload"]["session"]] = counts.get(e["payload"]["session"], 0) + 1
-                    self.assertLessEqual(len(e["payload"]["closes"]), WINDOW)
+                    day = dt.date.fromisoformat(e["payload"]["session"])
+                    counts[day.isoformat()] = counts.get(day.isoformat(), 0) + 1
+                    window = [d.isoformat() for d in self.days if d <= day][-WINDOW:]
+                    self.assertEqual([c["session"] for c in e["payload"]["closes"]], window, e["payload"]["instrument_id"])
         return counts
+
+    def decisions(self):
+        return [d.isoformat() for d, n in zip(self.days, self.days[1:] + [dt.date(2027, 1, 4)]) if d.month != n.month]
+
+    def check_peak(self, name, peak):
+        print("momentum {} peak {:.1f} MB".format(name, peak / 1e6))
+        self.assertLess(peak, MOMENTUM_BUDGET, "momentum {} peak {:.1f} MB".format(name, peak / 1e6))
+        self.assertLess(peak, FIXTURE_BUDGET, "momentum {} peak {:.1f} MB".format(name, peak / 1e6))
 
     def test_the_momentum_warm_up_stays_inside_the_budget(self):
         out = Path(self.tmp.name) / "warm-up.jsonl"
         status, peak = self.encode(MOMENTUM_BASE, out)
-        print("momentum warm-up peak {:.1f} MB".format(peak / 1e6))
         self.assertEqual(status, 0)
-        self.assertLess(peak, MOMENTUM_BUDGET, "momentum warm-up peak {:.1f} MB".format(peak / 1e6))
+        self.check_peak("warm-up", peak)
         counts = self.histories(out)
-        self.assertGreaterEqual(len(counts), 23)    # a decision at each month's end
+        self.assertEqual(sorted(counts), self.decisions())   # a decision at each month's end
         self.assertEqual(set(counts.values()), {RANKED})
 
     def test_the_momentum_daily_firing_stays_inside_the_budget(self):
@@ -225,10 +246,95 @@ class MomentumMemoryBudgetTest(unittest.TestCase):
         # reach back a full window, adjusted from the warm-up's base.
         out = Path(self.tmp.name) / "daily.jsonl"
         status, peak = self.encode(MOMENTUM_LAST, out)
-        print("momentum daily peak {:.1f} MB".format(peak / 1e6))
         self.assertEqual(status, 0)
-        self.assertLess(peak, MOMENTUM_BUDGET, "momentum daily peak {:.1f} MB".format(peak / 1e6))
+        self.check_peak("daily", peak)
         self.assertEqual(self.histories(out), {MOMENTUM_LAST.isoformat(): RANKED})
+
+
+def record_stress_history(directory, days, names, broken=()):
+    """Universe recordings of ``names`` for ``days``; each name in ``broken``
+    has a negative volume, a malformed bar, every session."""
+    tickers = [{"ticker": t, "type": "CS", "market": "stocks"} for t in names]
+    last_sectors = None
+    for i, day in enumerate(days):
+        bars = [{"T": t, "o": 100.0, "h": 103.0, "l": 99.0, "c": 100.0 + (i % 200) * 0.01, "v": 5000000,
+                 "vw": 100.0, "n": 50, "t": 0} for t in NAMED]
+        bars += [dict(momentum_bar(t, n, i), v=-1 if t in broken else 1000 + n) for n, t in enumerate(names)]
+        record.write(directory, {"kind": "universe", "source": "massive", "session": day.isoformat(),
+                                 "fetched_at": stamp(day), "adjusted": False, "ticker_type": "CS",
+                                 "bars": bars, "tickers": tickers})
+        if last_sectors is None or (day - last_sectors).days >= 5:
+            last_sectors = day
+            record.write(directory, {"kind": "sectors-iwv", "source": sectors.IWV_SOURCE, "session": day.isoformat(),
+                                     "fetched_at": stamp(day), "url": sectors.IWV_URL, "as_of": "Jan 2, 2026",
+                                     "body": iwv_csv((names[0], "Information Technology", "Equity"))})
+            record.write(directory, {"kind": "sectors-nasdaq", "source": sectors.NASDAQ_SOURCE,
+                                     "session": day.isoformat(), "fetched_at": stamp(day), "url": sectors.NASDAQ_URL,
+                                     "rows": json.loads(screener((names[0], "Finance")))["data"]["rows"]})
+    for kind in ("dividends", "splits"):
+        record.write(directory, {"kind": kind, "source": "massive", "session": days[-1].isoformat(),
+                                 "from": days[0].isoformat(), "fetched_at": stamp(days[-1]), "rows": []})
+
+
+def scripted(sets):
+    """A ranker that names sets[k % len(sets)] at the k-th decision session."""
+    seen = []
+
+    def rank(requests):
+        out = []
+        for r in requests:
+            session, nxt = r["universe"]["session"], r["next_session"]
+            decision = session[:7] != nxt[:7]
+            if decision:
+                seen.append(session)
+            out.append({"session": session, "decision_session": decision, "window": WINDOW,
+                        "members": list(sets[(len(seen) - 1) % len(sets)]) if decision else []})
+        return out
+    return rank
+
+
+class MomentumStressMemoryTest(unittest.TestCase):
+    """Two shapes the healthy fixture does not reach: a feed with bad bars
+    for many stocks every session, and ranked sets that change completely
+    every month. Neither may grow memory by a stored item per stock per
+    session (docs/live-trading/lessons-2026-10.md L1). Synthetic data only."""
+
+    NAMES = ["S{:04d}".format(n) for n in range(900)]
+    DAYS = nyse_calendar.sessions(dt.date(2026, 1, 2), dt.date(2026, 8, 31))   # 166 sessions, 8 decisions
+
+    def peak(self, broken=(), sets=None, excluded=None):
+        with tempfile.TemporaryDirectory() as d:
+            record_stress_history(d, self.DAYS, self.NAMES, broken)
+            ranker = scripted(sets or [self.NAMES[:110]])
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                envelopes = encode.iter_encode(d, self.DAYS[0], self.DAYS[-1], encode.Identity("h", "v", "r"),
+                                               required=list(NAMED), ranker=ranker, excluded=excluded)
+                encode.write_stream(os.path.join(d, "out.jsonl"), envelopes)
+                return tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+
+    def test_bad_bars_for_many_stocks_every_session_add_no_memory_per_session(self):
+        broken, excluded = self.NAMES[450:], {}
+        healthy, spoiled = self.peak(), self.peak(broken=broken, excluded=excluded)
+        print("bad-bar peak {:.2f} MB, healthy {:.2f} MB".format(spoiled / 1e6, healthy / 1e6))
+        self.assertLess(spoiled - healthy, 1024 * 1024)
+        self.assertEqual(sorted(excluded), sorted(broken))
+        for ticker in broken:   # the first reasons are kept, the rest are one run
+            runs = excluded[ticker]
+            self.assertLessEqual(len(runs), encode.REASONS_KEPT + 1, ticker)
+            self.assertEqual(sum(r.sessions for r in runs), len(self.DAYS), ticker)
+
+    def test_ranked_sets_that_change_every_month_keep_compact_windows(self):
+        sets = [self.NAMES[110 * k:110 * (k + 1)] for k in range(8)]   # disjoint: each name ranked once
+        steady, rotating = self.peak(), self.peak(sets=sets)
+        print("rotating-set peak {:.2f} MB, steady {:.2f} MB".format(rotating / 1e6, steady / 1e6))
+        # About 64,000 more closes held (each set from the base to its
+        # decision): about 0.5 MB as 8-byte closes, several times that as one
+        # Python object per close.
+        self.assertLess(rotating - steady, 1024 * 1024)
 
 
 if __name__ == "__main__":
