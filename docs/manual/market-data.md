@@ -225,7 +225,7 @@ a year when the ranked set changes, since a stock ranked at any decision
 still to come keeps its closes), not every stock of every session. The
 stream is byte for byte the one the step wrote before it read this way.
 
-The budget is **32 MiB of Python memory** (the tracemalloc peak, the measure
+The budget is **64 MiB of Python memory** (the tracemalloc peak, the measure
 the Boost figures above use), for the warm-up and the daily firing alike.
 It is tested with made-up recordings of 2,000 listed stocks in each of 502
 sessions (2025-01-02 to 2026-12-31), quarterly dividends and some splits,
@@ -238,7 +238,8 @@ its split and dividend rows (one year peaks at about 16 MB, two at about 19).
 At the real market's size, measured once on made-up sessions of 10,000
 instruments over the same two years, the warm-up peaks at about 45 MB of
 Python memory and about 100 MB for the whole process (the daily firing about
-50 MB and 106 MB), so it stays far inside the 2 GB server,
+50 MB and 106 MB). Both the test's ~19 MB and the real size's 49.6 MB are
+under the one 64 MiB budget, and it stays far inside the 2 GB server,
 beside the Gateway, three engines and their adapters; the whole server's
 total is measured on the server before the IRAs go live.
 
@@ -1206,7 +1207,7 @@ exits with status 1 and a message on stderr, for the scheduler to alert on.
   refusal, the CLI, the ranker asked one session at a time, and the streamed
   file byte for byte the stream `encode` returns), `test_memory.py`
   (`MomentumMemoryBudgetTest`: the momentum warm-up and daily firing inside
-  the 32 MiB budget on two years of 2,000-stock sessions), and with the real Go ranker the Go validators and
+  the 64 MiB budget on two years of 2,000-stock sessions), and with the real Go ranker the Go validators and
   `tests/testdata/decision_equivalence.go`, which feeds the full and the
   compact stream of the same recordings through two fresh momentum engines
   and requires identical decisions. The engine side is in the momentum

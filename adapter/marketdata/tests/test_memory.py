@@ -114,9 +114,11 @@ NAMED = ("IEF", "SHY", "SPY")
 # snapshot, the closes of the names ranked at the decisions whose windows
 # cover the session (about RANKED x WINDOW floats, more where the ranked set
 # churns), small per-ticker figures, and the span's split and dividend rows.
-# It does not grow with the history beyond those rows. Every instrument of
-# every session held at once, as before, peaked at ~2.3 GB at this size.
-MOMENTUM_BUDGET = 32 * 1024 * 1024
+# It does not grow with the history beyond those rows. One budget holds at
+# the real market's size: this 2,000-name fixture peaks at ~19 MB and a
+# one-off run on 10,000 names measured 49.6 MB, both under it. Every
+# instrument of every session held at once, as before, peaked at ~2.3 GB here.
+MOMENTUM_BUDGET = 64 * 1024 * 1024
 
 
 def momentum_bar(ticker, n, i):
