@@ -84,6 +84,7 @@ type config struct {
 	DrainDeadline time.Duration  // how long output is read after the child ends
 	SinkTimeout   time.Duration  // how long one write to the journal may take before the run fails closed
 	Now           func() time.Time
+	MarkerFile    string   // written when IBC cannot be started, for the health check, even when the journal takes nothing
 	Warnings      []string // settings that were invalid, reported through the same bounded journal writes
 }
 
@@ -133,6 +134,7 @@ func configFromEnv(getenv func(string) string) (c config, warn []string) {
 	c = config{
 		Render:        []string{pick("TI_GATEWAY_RENDER", defaultRender)},
 		StateFile:     pick("TI_GATEWAY_STATE_FILE", defaultState),
+		MarkerFile:    pick("TI_GATEWAY_MARKER_FILE", filepath.Join(filepath.Dir(pick("TI_GATEWAY_STATE_FILE", defaultState)), "last-start-failure")),
 		Max:           intIn("TI_GATEWAY_LOGIN_MAX_FAILURES", 1, 9, defaultMax),
 		StopDeadline:  time.Duration(intIn("TI_GATEWAY_STOP_DEADLINE", 1, maxStopDeadline, int(defaultStop/time.Second))) * time.Second,
 		DrainDeadline: defaultDrain,
@@ -204,9 +206,13 @@ func syncFile(f *os.File) error { return f.Sync() }
 
 // writeDurable replaces path with data: written to a file beside it, synced,
 // renamed over it, and the directory synced, every error returned.
-func writeDurable(path string, data []byte) error {
+func writeDurable(path string, data []byte) error { return writeDurableMode(path, data, 0o600) }
+
+// writeDurableMode is writeDurable with the file's mode: the marker the health
+// check reads is world-readable, the count is not.
+func writeDurableMode(path string, data []byte, mode os.FileMode) error {
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
 		return err
 	}
@@ -351,6 +357,16 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		say(stopPhrase+": "+format, a...)
 		return exitStopped
 	}
+	// cannot reports that IBC cannot be started: to the journal, and to a marker
+	// file beside the count that the health check reads, so the Gateway being
+	// down is seen even when the journal takes nothing on either stream.
+	cannot := func(format string, a ...any) {
+		msg := fmt.Sprintf("cannot start IBC: "+format, a...)
+		say("%s", msg)
+		if cfg.MarkerFile != "" {
+			_ = writeDurableMode(cfg.MarkerFile, []byte(fmt.Sprintf("%d %s\n", cfg.Now().Unix(), msg)), 0o644)
+		}
+	}
 	for _, w := range cfg.Warnings {
 		say("%s", w)
 	}
@@ -363,7 +379,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		err := r.Run()
 		if renderFailed.Load() {
 			// What the renderer said cannot be journalled: stop before IBC starts.
-			say("cannot start IBC: the journal is not taking the config renderer's output, so the unit starts again; no attempt was counted")
+			cannot("the journal is not taking the config renderer's output, so the unit starts again; no attempt was counted")
 			return exitRetry
 		}
 		if err != nil {
@@ -371,16 +387,16 @@ func run(cfg config, stdout, stderr io.Writer) int {
 			if errors.As(err, &ee) && ee.ExitCode() > 0 {
 				// The renderer's own configuration exit, which the unit does not
 				// restart on: the line tells the health check IBC is not running.
-				say("cannot start IBC: the config renderer exited %d (see its message above)", ee.ExitCode())
+				cannot("the config renderer exited %d (see its message above)", ee.ExitCode())
 				return ee.ExitCode()
 			}
 			// Not a configuration exit: 78 would not be restarted.
-			say("cannot start IBC: the config renderer did not run: %v", err)
+			cannot("the config renderer did not run: %v", err)
 			return exitInternal
 		}
 	}
 	if len(cfg.Command) == 0 {
-		say("cannot start IBC: no command for it: GATEWAY_MAJOR and RUNTIME_DIRECTORY are not set by the unit")
+		cannot("no command for it: GATEWAY_MAJOR and RUNTIME_DIRECTORY are not set by the unit")
 		return exitConfig
 	}
 
@@ -403,7 +419,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		say("cannot start IBC: no pipe for its output: %v", err)
+		cannot("no pipe for its output: %v", err)
 		return exitInternal
 	}
 	//nolint:gosec // G204: IBC's command is built from the unit's environment (GATEWAY_MAJOR, RUNTIME_DIRECTORY) or TI_GATEWAY_IBC in the rehearsal, never from IBC's output.
@@ -412,7 +428,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	if err := cmd.Start(); err != nil {
 		_ = pr.Close()
 		_ = pw.Close()
-		say("cannot start IBC: %v", err)
+		cannot("%v", err)
 		return exitInternal
 	}
 	_ = pw.Close()
@@ -430,10 +446,10 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	// progress is how long after origin the reader last finished a line (the
 	// monotonic clock, so a correction of the wall clock changes nothing); the
 	// drain below waits on it, so lines the reader already holds, written
-	// through a slow (not stuck) journal, are delivered.
+	// through a slow (not stuck) journal, are delivered within the drain's bounds.
 	origin := time.Now()
 	var progress atomic.Int64
-	var draining atomic.Bool
+	var draining, abandoned atomic.Bool
 	mark := func() { progress.Store(int64(time.Since(origin))) }
 	mark()
 	readerDone := make(chan struct{})
@@ -442,6 +458,9 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		br := bufio.NewReaderSize(drainReader{pr, cfg.DrainDeadline, &draining}, maxLine)
 		seen, relogin := false, false
 		for {
+			if abandoned.Load() {
+				return // the run is over and its verdict final: nothing more is acted on
+			}
 			line, err := br.ReadSlice('\n')
 			mark()
 			if errors.Is(err, bufio.ErrBufferFull) {
@@ -458,6 +477,9 @@ func run(cfg config, stdout, stderr io.Writer) int {
 				if cfg.Accepted.MatchString(trimmed) {
 					if err := writeDurable(cfg.StateFile, nil); err != nil {
 						say("the login attempts could not be confirmed cleared after the accepted login (%v); the count may still hold the old attempts", err)
+					}
+					if cfg.MarkerFile != "" {
+						_ = os.Remove(cfg.MarkerFile)
 					}
 					relogin, seen = true, false
 				}
@@ -490,7 +512,8 @@ func run(cfg config, stdout, stderr io.Writer) int {
 				}
 			}
 			if err != nil {
-				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrDeadlineExceeded) {
+				closedByUs := abandoned.Load() && errors.Is(err, os.ErrClosed)
+				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrDeadlineExceeded) && !closedByUs {
 					stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": the output reader failed (%v); stopping IBC and not retrying", err)})
 				}
 				return
@@ -543,12 +566,15 @@ func run(cfg config, stdout, stderr io.Writer) int {
 
 	// After IBC ends its output is read on, each read bounded by DrainDeadline of
 	// waiting (the deadline is set before every read, so time spent writing
-	// buffered lines to the journal does not use it up): what the reader holds
-	// is delivered, each line bounded by SinkTimeout, and output an orphan of IBC
-	// writes later than DrainDeadline after the last read is not read. Two bounds end the wait with 75 (restartable: every exec
-	// was counted before it started, so a reader that never finished cannot lift
-	// the bound): no progress for DrainDeadline + SinkTimeout + 2 s, and a total
-	// of 2 x SinkTimeout + DrainDeadline since IBC ended.
+	// buffered lines to the journal does not use it up). What the reader gets
+	// through within the bounds is delivered, each line bounded by SinkTimeout;
+	// what is left when a bound ends the wait is NOT: output an orphan of IBC
+	// writes later than DrainDeadline after the last read, and lines still
+	// buffered or in the pipe. Two bounds end the wait with 75 (restartable:
+	// every exec was counted before it started, so a reader that never
+	// finished cannot lift the bound): no progress for DrainDeadline +
+	// SinkTimeout + 2 s, and a total of 2 x SinkTimeout + DrainDeadline since
+	// IBC ended (65 s by default).
 	drainStart := time.Now()
 	mark()
 	draining.Store(true)
@@ -571,6 +597,7 @@ drain:
 			}
 		}
 	}
+	abandoned.Store(true) // before the close, so a read it wakes returns quietly
 	_ = pr.Close()
 
 	if v := final.get(); v != nil {

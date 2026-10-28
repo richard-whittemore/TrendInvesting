@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -561,7 +562,7 @@ func TestAJournalWriteThatErrsOrIsShortStopsIBCAndAsksForARestart(t *testing.T) 
 
 // A journal that is slow (each write inside the sink bound) when IBC exits,
 // with several lines still buffered, does not turn a restartable exit into a
-// permanent stop: the drain is bounded by progress, not by one fixed time.
+// permanent stop: the drain waits on progress, within a total cap.
 type slowWriter2 struct {
 	delay time.Duration
 	mu    *sync.Mutex
@@ -696,5 +697,108 @@ func TestTheStartersWarningsAreBoundedByTheSink(t *testing.T) {
 	case <-done:
 	case <-time.After(20 * time.Second):
 		t.Fatal("a journal that takes nothing held the starter at its warnings")
+	}
+}
+
+// A chatty orphan keeps the reader alive until the drain's total cap: the cap's
+// 75 must stand, never become 77 because closing the pipe woke a blocked read.
+func TestTheTotalCapStaysRestartableWhenTheReaderIsWokenByTheClose(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t)
+			c := r.cfg(`echo "IBC: hi"; (j=0; while [ $j -lt 24 ]; do sleep 0.5; echo "IBC: tick"; j=$((j+1)); done) & exit 3`)
+			c.DrainDeadline, c.SinkTimeout = time.Second, time.Second // total cap 3 s
+			if code := run(c, &bytes.Buffer{}, &bytes.Buffer{}); code != 75 {
+				t.Fatalf("exit %d, want 75 from the cap", code)
+			}
+		})
+	}
+}
+
+// The pipe deadline is renewed before each read: lines still in the kernel pipe
+// after forwarding the first (slowly) are read and delivered.
+func TestLinesStillInThePipeAfterASlowForwardAreDelivered(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`l() { printf 'IBC: %s ' "$1"; head -c 20000 /dev/zero | tr '\\0' x; echo; }
+l L1; sleep 0.3; l L2; l L3; exit 3`)
+	c.DrainDeadline, c.SinkTimeout = time.Second, 10*time.Second
+	var mu sync.Mutex
+	var got strings.Builder
+	w := writerFunc(func(p []byte) (int, error) {
+		time.Sleep(3 * time.Second)
+		mu.Lock()
+		defer mu.Unlock()
+		got.Write(p)
+		return len(p), nil
+	})
+	if code := run(c, w, &bytes.Buffer{}); code != 3 {
+		t.Fatalf("exit %d, want IBC's own 3", code)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, want := range []string{"IBC: L1 ", "IBC: L2 ", "IBC: L3 "} {
+		if !strings.Contains(got.String(), want) {
+			t.Fatalf("the journal lacks %q: the line left in the pipe was dropped", want)
+		}
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// When IBC cannot be started, the starter leaves a marker file the health
+// check reads, even when the journal takes nothing on either stream.
+func TestAStartThatCannotLaunchIBCLeavesAMarkerEvenWithAWedgedJournal(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`exit 0`)
+	c.MarkerFile = filepath.Join(r.dir, "last-start-failure")
+	c.Render = []string{"sh", "-c", "echo 'render-ibc-config: bad key' >&2; exit 64"}
+	c.SinkTimeout = time.Second
+	b := blockedWriter{release: make(chan struct{})}
+	defer close(b.release)
+	if code := run(c, b, b); code != 75 {
+		t.Fatalf("exit %d, want 75 (the journal took nothing of what the renderer said)", code)
+	}
+	raw, err := os.ReadFile(c.MarkerFile)
+	if err != nil || !strings.Contains(string(raw), "cannot start IBC") {
+		t.Fatalf("marker %q, %v: want a line with 'cannot start IBC'", raw, err)
+	}
+	fields := strings.Fields(string(raw))
+	if _, err := strconv.ParseInt(fields[0], 10, 64); err != nil {
+		t.Fatalf("the marker does not begin with a time: %q", raw)
+	}
+	if fi, _ := os.Stat(c.MarkerFile); fi.Mode().Perm()&0o044 == 0 {
+		t.Fatalf("the marker is %v: the reporter's user must be able to read it", fi.Mode().Perm())
+	}
+}
+
+func TestACompletedLoginRemovesTheMarker(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`echo "IBC: Login has completed"; exit 0`)
+	c.MarkerFile = filepath.Join(r.dir, "last-start-failure")
+	if err := os.WriteFile(c.MarkerFile, []byte("1 cannot start IBC: earlier\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := r.run(c); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if _, err := os.Stat(c.MarkerFile); !os.IsNotExist(err) {
+		t.Fatalf("the marker survived a completed login: %v", err)
+	}
+}
+
+func TestARendererConfigurationExitLeavesTheMarker(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`exit 0`)
+	c.MarkerFile = filepath.Join(r.dir, "last-start-failure")
+	c.Render = []string{"sh", "-c", "exit 78"}
+	if code, _ := r.run(c); code != 78 {
+		t.Fatalf("exit %d, want 78", code)
+	}
+	raw, err := os.ReadFile(c.MarkerFile)
+	if err != nil || !strings.Contains(string(raw), "cannot start IBC: the config renderer exited 78") {
+		t.Fatalf("marker %q, %v", raw, err)
 	}
 }

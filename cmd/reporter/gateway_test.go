@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -837,5 +838,62 @@ func TestANewOutageDuringAPendingResolutionIsNotErasedWhenItsEvidenceRotatesAway
 	}
 	if got := gatewayPages(f.relay); got != 4 {
 		t.Fatalf("%d outage pages, want 2 per channel: the new outage was erased by missing evidence", got)
+	}
+}
+
+// gateway-start leaves a marker file when it cannot start IBC and the journal
+// takes nothing: the check reads it as not logged in, until a completed login
+// newer than it.
+func TestAMarkerOfAStartThatCouldNotLaunchIBCPagesWhenTheJournalHasNothingNewer(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted)) // the only thing the journal has: an old login
+	marker := filepath.Join(t.TempDir(), "last-start-failure")
+	if err := os.WriteFile(marker, []byte(fmt.Sprintf("%d gateway-start: cannot start IBC: the config renderer exited 78\n", tuesday(9, 0).Unix())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 11} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min), "-gateway-marker", marker); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages for a marker newer than the last login, want 1 per channel", gatewayPages(r))
+	}
+	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
+		if !strings.Contains(strings.Join(r.to(host), "\n"), "config renderer exited 78") {
+			t.Errorf("%s: the page does not say what the marker said", host)
+		}
+	}
+}
+
+func TestAMarkerOlderThanTheLastCompletedLoginIsIgnoredAndAMissingOneIsFine(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(10, 0), ibcCompleted))
+	marker := filepath.Join(t.TempDir(), "last-start-failure")
+	_ = os.WriteFile(marker, []byte(fmt.Sprintf("%d gateway-start: cannot start IBC: old\n", tuesday(9, 0).Unix())), 0o644)
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 11} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min), "-gateway-marker", marker); err != nil {
+			t.Fatal(err)
+		}
+	}
+	missing := filepath.Join(t.TempDir(), "none")
+	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 20), "-gateway-marker", missing); err != nil {
+		t.Fatal(err)
+	}
+	if gatewayPages(r) != 0 {
+		t.Fatalf("%d pages, want none", gatewayPages(r))
+	}
+}
+
+func TestAMarkerThatIsNotATimeFailsTheFiring(t *testing.T) {
+	g := newStandInGateway(t)
+	marker := filepath.Join(t.TempDir(), "last-start-failure")
+	_ = os.WriteFile(marker, []byte("garbage\n"), 0o644)
+	if err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0), "-gateway-marker", marker); err == nil {
+		t.Fatal("a marker with no time was accepted")
 	}
 }

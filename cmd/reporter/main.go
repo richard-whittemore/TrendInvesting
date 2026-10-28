@@ -103,6 +103,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
 	gatewayAdapters := flags.String("gateway-adapters", "", "comma-separated adapter units (ti-adapter-<instance>.service) whose journal shows a sustained loss of IBKR (codes 1100/2110) for the Gateway check")
 	gatewayState := flags.String("gateway-state", "", "the host's Gateway state (default: host-gateway.json beside -state)")
+	gatewayMarker := flags.String("gateway-marker", "", "the marker file ti-gateway-start leaves when it cannot start IBC (/var/lib/ti-gateway/last-start-failure): read as not logged in until a completed login newer than it, so the page comes even when the journal took nothing")
 	gatewayOwner := flags.String("gateway-owner", "", "the account whose reporter owns the Gateway check, which reads the ti-gateway and -gateway-adapters journals with -journalctl after the incident alerts: logged out for more than 10 minutes outside the Gateway's restart windows pages once for the host, hourly reminders follow, and a completed login resolves it; every other instance skips it, so three accounts do not page three times")
 	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, and beside which the reader's costs.jsonl gives the summary its costs line, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
 	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed unit is paged once per failure episode if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a unit no longer failed is resolved")
@@ -420,7 +421,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 		if sched, err := gatewayScheduleFrom(getenv); err != nil {
 			failures = append(failures, err)
-		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), hostName(), sched, senders, setAside, now); err != nil {
+		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters), *gatewayMarker), hostName(), sched, senders, setAside, now); err != nil {
 			failures = append(failures, err)
 		}
 	}

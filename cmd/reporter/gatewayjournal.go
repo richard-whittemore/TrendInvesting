@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -124,7 +126,7 @@ func lineTime(l string) (time.Time, error) {
 }
 
 // gatewayJournalChecker reads IBC's journal and each adapter's.
-func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker {
+func gatewayJournalChecker(journalctl string, adapters []string, marker string) gatewayChecker {
 	return func(now time.Time) (gatewayEvidence, error) {
 		ibc, err := journalQuery(journalctl, gatewayUnit, ibcEvent)
 		if err != nil {
@@ -159,6 +161,13 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) with no restoration since, for over %s: %s", unit, gatewayLinkLossAfter, line))
 			}
 		}
+		// gateway-start leaves a marker when it cannot start IBC, even when the
+		// journal took nothing: it counts until a completed login newer than it.
+		if said, at, err := startFailureMarker(marker); err != nil {
+			return gatewayEvidence{}, err
+		} else if said != "" && at.After(recovered) {
+			reasons = append(reasons, "gateway-start left a marker: "+said)
+		}
 		switch {
 		case len(reasons) > 0:
 			return gatewayEvidence{out: true, said: "gateway: logged out: " + strings.Join(reasons, "; "), recoveredAt: recovered}, nil
@@ -188,4 +197,26 @@ func lostSince(lines []string) (since time.Time, first string, restored time.Tim
 		since, first, restored = time.Time{}, "", at
 	}
 	return since, first, restored, nil
+}
+
+// startFailureMarker reads the file gateway-start leaves when it cannot start
+// IBC: its first field is the time, the rest what it said. No file is no
+// marker; a file that does not begin with a time is an error, not a silence.
+func startFailureMarker(path string) (said string, at time.Time, err error) {
+	if path == "" {
+		return "", time.Time{}, nil
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", time.Time{}, nil
+	}
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("reporter: the gateway check could not read %s: %w", path, err)
+	}
+	field, rest, _ := strings.Cut(strings.TrimSpace(string(raw)), " ")
+	secs, perr := strconv.ParseInt(field, 10, 64)
+	if perr != nil {
+		return "", time.Time{}, fmt.Errorf("reporter: the gateway check found %s, which does not begin with a time", path)
+	}
+	return strings.TrimSpace(rest), time.Unix(secs, 0), nil
 }

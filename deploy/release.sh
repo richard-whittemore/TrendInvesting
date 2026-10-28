@@ -415,7 +415,7 @@ restart_dashboard_verified() {
 # (GNU coreutils) its error is the answer; where it does not (the Mac), every
 # file system is flushed.
 flush() {
-  if sync --help 2>&1 | grep -q 'FILE'; then sync "$1"; else sync; fi
+  if LC_ALL=C sync --help 2>&1 | grep -q 'FILE'; then sync "$1"; else sync; fi
 }
 
 # put_back NAME: re-check the kept build NAME against its checksums and put it

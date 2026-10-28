@@ -716,7 +716,10 @@ runs and a line over 64 KiB. The count is the file
 `/var/lib/ti-gateway/login-failures`. A journal that errs or takes nothing for
 30 seconds stops IBC with exit 75, so systemd starts it again: that restart
 counts as an attempt like any other, so a journal wedged while IBC runs cannot
-loop forever; so does an output reader that makes no progress after IBC ends.
+loop forever; so does an output reader that makes no progress after IBC ends, or that has not
+finished 65 seconds (2 x the journal bound + 5 s) after IBC ends: it delivers what
+it can within those bounds, then exits 75, and what is left (a late line of an
+orphan, lines still buffered) is dropped.
 Failed logins you make on IBKR's website, or with the wrong paper password
 elsewhere, count against IBKR's 10 too, which is why the program stops at 3.
 A start whose IBC command or display wrapper cannot be launched exits 70, which
@@ -724,7 +727,11 @@ systemd retries every 30 seconds until the 3 are used (it counts). A renderer
 that cannot run, or whose output the journal will not take, stops the start
 before any attempt is counted (exit 70, or 75 for the journal): systemd retries
 it every 30 seconds without end and it never reaches 77, so a Gateway that stays
-down that way is paged by the health check after 10 minutes. Each such start
+down that way is paged by the health check after 10 minutes. The starter also
+writes a one-line marker, `/var/lib/ti-gateway/last-start-failure`, whenever it
+cannot start IBC, which the check reads as not logged in until a completed
+login (which removes it); that is what pages when the journal takes nothing on
+either stream, where the "cannot start IBC" line itself could not be recorded. Each such start
 logs "cannot start IBC", as does every exit that leaves the unit down without contacting IBKR (the renderer's 64, 65 and
 78). The health check reads that as logged out, and the reporter also samples
 `ti-gateway.service` as it does the engine and the adapter, so a unit that is
