@@ -34,6 +34,10 @@ const (
 	ibcStopped   = "host gateway-start[1]: gateway-start: login retries stopped: 3 of 3 refused logins within the window"
 	linkLost     = "host adapter[2]: ibkr link state=connectivity-lost reason=gateway-lost-ibkr client_id=11 attempt=None code=2110"
 	linkUp       = "host adapter[2]: ibkr link state=connected reason=restored client_id=11 attempt=None code=1102"
+	// The API handshake the adapter logs at every reconnect, restored or not.
+	linkHandshake  = "host adapter[2]: ibkr link state=connected reason= client_id=11 attempt=None code=None"
+	linkReconciled = "host adapter[2]: ibkr reconciled client_id=11 positions=0 open_orders=0 executions=0"
+	ibcStarting    = "host gateway-start[1]: gateway-start: starting IBC"
 )
 
 // stamp is a journal line's time, as journalctl -o short-iso writes it.
@@ -49,6 +53,7 @@ func newStandInGateway(t *testing.T) standInGateway {
 	t.Helper()
 	g := standInGateway{dir: t.TempDir()}
 	script := `#!/bin/sh
+echo "$*" >>'` + g.dir + `/argv'
 unit=""; pattern=""
 while [ $# -gt 0 ]; do case $1 in -u) unit=$2; shift;; -g) pattern=$2; shift;; esac; shift; done
 if [ -e '` + g.dir + `/fail' ]; then echo "Failed to open journal files" >&2; exit 1; fi
@@ -81,8 +86,11 @@ func (g standInGateway) flag(name string, on bool) {
 		_ = os.Remove(filepath.Join(g.dir, name))
 	}
 }
-func (g standInGateway) login()  { g.ibc("2024-01-01T00:00:00-0500 " + ibcCompleted) }
-func (g standInGateway) logout() { g.ibc("2024-01-01T00:00:00-0500 " + ibcRefused) }
+
+// login and logout stamp far in the future, so they count as newer than any
+// outage a test has opened; tests of older evidence write their own stamps.
+func (g standInGateway) login()  { g.ibc("2099-01-01T00:00:00-0500 " + ibcCompleted) }
+func (g standInGateway) logout() { g.ibc("2099-01-01T00:00:00-0500 " + ibcRefused) }
 
 func gatewayRun(t *testing.T, r http.RoundTripper, dir, check, account string, at time.Time, extra ...string) error {
 	t.Helper()
@@ -507,5 +515,141 @@ func TestNoJournalEvidenceKeepsAnOpenOutageOpenAndPagesNothingWhenNoneIsOpen(t *
 	}
 	if gatewayPages(r) != 2 {
 		t.Fatalf("%d pages, want the one page only", gatewayPages(r))
+	}
+}
+
+// The adapter reconnects every restore_timeout while the Gateway has no IBKR,
+// and logs the API handshake each time; only IBKR's restoration (or a
+// reconciliation, which needs IBKR) ends a loss. A silent drop of 4 hours is
+// lost, handshake, lost, handshake ... and pages.
+func TestARepeatedReconnectWhileIBKRIsGoneIsOneLongLossAndPages(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	var lines []string
+	for at := tuesday(6, 0); at.Before(tuesday(10, 0)); at = at.Add(5 * time.Minute) {
+		lines = append(lines, stamp(at, linkLost), stamp(at.Add(time.Minute), linkHandshake))
+	}
+	g.adapter(lines...)
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(11, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages for a 5-hour silent drop with a reconnect every 5 minutes, want 1 per channel", gatewayPages(r))
+	}
+}
+
+// The loss is timed from the FIRST loss after the newest restoration, not
+// from the newest loss line.
+func TestTheLossIsTimedFromTheFirstLossAfterTheNewestRestorationNotTheNewestLoss(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.adapter(stamp(tuesday(6, 0), linkLost), stamp(tuesday(10, 30), linkLost))
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(11, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages, want 1 per channel", gatewayPages(r))
+	}
+}
+
+func TestAReconciliationEndsALoss(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.adapter(stamp(tuesday(6, 0), linkLost), stamp(tuesday(8, 0), linkReconciled), stamp(tuesday(10, 55), linkLost))
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10, 15} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(11, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 0 {
+		t.Fatalf("paged %d times for a loss that began at 10:55", gatewayPages(r))
+	}
+}
+
+// Evidence that rotates away must not resolve an open outage through an older
+// completed login: only a login or restoration newer than the outage's start
+// does.
+func TestAnOutageIsNotResolvedByAnOlderLoginOnceItsEvidenceRotatesAway(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc("2024-01-01T00:00:00-0500 " + ibcCompleted)
+	g.adapter(stamp(tuesday(6, 0), linkLost))
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(11, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages, want 1 per channel", gatewayPages(r))
+	}
+	g.adapter() // the adapter's loss lines rotate away
+	for _, min := range []int{15, 20} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(11, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, m := range r.to("events.pagerduty.test") {
+		if strings.Contains(m, `"event_action":"resolve"`) {
+			t.Fatal("an outage was resolved by a login older than its start")
+		}
+	}
+	g.adapter(stamp(tuesday(11, 22), linkReconciled))
+	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(11, 25)); err != nil {
+		t.Fatal(err)
+	}
+	resolved := 0
+	for _, m := range r.to("events.pagerduty.test") {
+		if strings.Contains(m, `"event_action":"resolve"`) {
+			resolved++
+		}
+	}
+	if resolved != 1 {
+		t.Fatalf("%d resolves after a reconciliation newer than the outage, want 1", resolved)
+	}
+}
+
+// A restart of the unit (cmd/gateway-start logs "starting IBC") resets the
+// login state until a new "Login has completed", even if the newest IBC login
+// event before it was a completed one.
+func TestAnIBCRestartWithNoLoginYetIsLoggedOut(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted), stamp(tuesday(9, 0), ibcStarting))
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages for an IBC that restarted and never logged in, want 1 per channel", gatewayPages(r))
+	}
+}
+
+func TestTheJournalIsAskedForShortISOTimesWithoutAPagerFourteenDaysBack(t *testing.T) {
+	g := newStandInGateway(t)
+	g.adapter(stamp(tuesday(8, 0), linkUp))
+	if err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0)); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(g.dir, "argv"))
+	calls := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(calls) != 2 {
+		t.Fatalf("%d journal queries, want 2 (IBC and the adapter): %q", len(calls), calls)
+	}
+	for _, c := range calls {
+		for _, want := range []string{"-o short-iso", "--no-pager", "--since=-14d", "-g "} {
+			if !strings.Contains(c, want) {
+				t.Errorf("journalctl %q lacks %q", c, want)
+			}
+		}
 	}
 }

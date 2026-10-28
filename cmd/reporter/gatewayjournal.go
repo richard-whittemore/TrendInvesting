@@ -8,10 +8,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
-
-	"github.com/richard-whittemore/TrendInvesting/internal/procgroup"
 )
 
 // The Gateway's journals say whether it is logged in (ADR 0019, "Alerting").
@@ -44,6 +41,12 @@ const (
 type gatewayEvidence struct {
 	out, silent bool
 	said        string
+	// recoveredAt is the time of the newest positive event the journals show:
+	// IBC's completed login when it is IBC's newest login event, or the
+	// adapter's restored link or reconciliation. An open outage is closed only
+	// by one newer than the outage's start, never by older events that remain
+	// once the evidence of the outage has rotated away.
+	recoveredAt time.Time
 }
 
 // gatewayChecker reads the evidence as of now.
@@ -52,8 +55,18 @@ type gatewayChecker func(now time.Time) (gatewayEvidence, error)
 var (
 	// ibcEvent matches IBC's login events and the start script's stop, which
 	// cmd/gateway-start always logs with this phrase.
-	ibcEvent   = regexp.MustCompile(`Unrecognized Username or Password|LoginState is LOGGED_OUT|Login has completed|login retries stopped`)
-	linkEvent  = regexp.MustCompile(`ibkr link state=(connectivity-lost|connected)`)
+	// cmd/gateway-start logs "starting IBC" at every start and "cannot start
+	// IBC" when it cannot, so a restart of the unit resets the login state
+	// until a new "Login has completed"; IBC's own login screen after its
+	// restart is "LoginState is LOGGED_OUT".
+	ibcEvent = regexp.MustCompile(`Unrecognized Username or Password|LoginState is LOGGED_OUT|Login has completed|login retries stopped|gateway-start: starting IBC|gateway-start: cannot start IBC`)
+	// The adapter's link lines (adapter/ibkr/connection.py _report and
+	// loop.py): connectivity-lost is code 1100/2110; "connected reason=restored"
+	// is IBKR's restoration (1101/1102); "reconciled" is a successful read of the
+	// account after a connect, which needs IBKR. A plain "connected" (the API
+	// handshake, logged at every reconnect, including every restore_timeout while
+	// Gateway has no IBKR) proves nothing about IBKR and is not matched.
+	linkEvent  = regexp.MustCompile(`ibkr link state=connectivity-lost|ibkr link state=connected reason=restored|ibkr reconciled client_id=`)
 	lostAccess = regexp.MustCompile(`(?i)not seeing messages from other users|insufficient permissions|no journal files were opened`)
 	shortISO   = "2006-01-02T15:04:05-0700"
 )
@@ -67,8 +80,6 @@ func journalQuery(journalctl, unit string, pattern *regexp.Regexp) ([]string, er
 	defer cancel()
 	//nolint:gosec // G204: the binary is the operator's -journalctl flag; the unit is a fixed name or one -gateway-adapters named, and the pattern a fixed expression.
 	cmd := exec.CommandContext(ctx, journalctl, "-u", unit, "-o", "short-iso", "--no-pager", "--since="+gatewayJournalSince, "-g", pattern.String())
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return procgroup.Kill(cmd.Process.Pid) }
 	cmd.WaitDelay = gatewayCheckWaitDelay
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -98,6 +109,20 @@ func journalQuery(journalctl, unit string, pattern *regexp.Regexp) ([]string, er
 	return lines, nil
 }
 
+// lineTime reads the time journalctl -o short-iso puts first on a line.
+func lineTime(l string) (time.Time, error) {
+	field, _, _ := strings.Cut(l, " ")
+	at, err := time.Parse(shortISO, field)
+	if err != nil {
+		// systemd 255 and later write the offset with a colon.
+		at, err = time.Parse(time.RFC3339, field)
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("no time in %q: %w", l, err)
+	}
+	return at, nil
+}
+
 // gatewayJournalChecker reads IBC's journal and each adapter's.
 func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker {
 	return func(now time.Time) (gatewayEvidence, error) {
@@ -106,53 +131,61 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 			return gatewayEvidence{}, err
 		}
 		var reasons []string
-		if n := len(ibc); n > 0 && !strings.Contains(ibc[n-1], "Login has completed") {
-			reasons = append(reasons, "IBC's newest login event: "+ibc[n-1])
+		var recovered time.Time
+		if n := len(ibc); n > 0 {
+			if strings.Contains(ibc[n-1], "Login has completed") {
+				at, err := lineTime(ibc[n-1])
+				if err != nil {
+					return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
+				}
+				recovered = at
+			} else {
+				reasons = append(reasons, "IBC's newest login event: "+ibc[n-1])
+			}
 		}
 		for _, unit := range adapters {
 			lines, err := journalQuery(journalctl, unit, linkEvent)
 			if err != nil {
 				return gatewayEvidence{}, err
 			}
-			since, line, err := lostSince(lines)
+			since, line, restored, err := lostSince(lines)
 			if err != nil {
 				return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read %s's link events: %w", unit, err)
 			}
+			if restored.After(recovered) {
+				recovered = restored
+			}
 			if !since.IsZero() && now.Sub(since) >= gatewayLinkLossAfter {
-				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) without a connection since, for over %s: %s", unit, gatewayLinkLossAfter, line))
+				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) with no restoration since, for over %s: %s", unit, gatewayLinkLossAfter, line))
 			}
 		}
 		switch {
 		case len(reasons) > 0:
-			return gatewayEvidence{out: true, said: "gateway: logged out: " + strings.Join(reasons, "; ")}, nil
+			return gatewayEvidence{out: true, said: "gateway: logged out: " + strings.Join(reasons, "; "), recoveredAt: recovered}, nil
 		case len(ibc) == 0:
-			return gatewayEvidence{silent: true, said: "gateway: no login evidence: the ti-gateway journal holds no login event in the last 14 days"}, nil
+			return gatewayEvidence{silent: true, said: "gateway: no login evidence: the ti-gateway journal holds no login event in the last 14 days", recoveredAt: recovered}, nil
 		}
-		return gatewayEvidence{said: "gateway: logged in (IBC's newest login event is a completed login)"}, nil
+		return gatewayEvidence{said: "gateway: logged in (IBC's newest login event is a completed login)", recoveredAt: recovered}, nil
 	}
 }
 
 // lostSince finds when the current uninterrupted loss began: the first
-// connectivity-lost line after the newest connected one (zero when the link is
-// connected, or the journal shows nothing), and that line.
-func lostSince(lines []string) (time.Time, string, error) {
-	var since time.Time
-	var first string
+// connectivity-lost line after the newest restoration or reconciliation (zero
+// when there is none, or nothing is lost), that line, and the newest
+// restoration's time.
+func lostSince(lines []string) (since time.Time, first string, restored time.Time, err error) {
 	for _, l := range lines {
-		field, _, _ := strings.Cut(l, " ")
-		at, err := time.Parse(shortISO, field)
+		at, err := lineTime(l)
 		if err != nil {
-			// systemd 255 and later write the offset with a colon.
-			at, err = time.Parse(time.RFC3339, field)
+			return time.Time{}, "", time.Time{}, err
 		}
-		if err != nil {
-			return time.Time{}, "", fmt.Errorf("no time in %q: %w", l, err)
+		if strings.Contains(l, "state=connectivity-lost") {
+			if since.IsZero() {
+				since, first = at, l
+			}
+			continue
 		}
-		if strings.Contains(l, "state=connected") {
-			since, first = time.Time{}, ""
-		} else if since.IsZero() {
-			since, first = at, l
-		}
+		since, first, restored = time.Time{}, "", at
 	}
-	return since, first, nil
+	return since, first, restored, nil
 }

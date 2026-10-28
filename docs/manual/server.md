@@ -684,7 +684,7 @@ record is `host-gateway.json` in `/var/lib/trend-investing/reports/`.
 **The retry is bounded.** IBC 3.24.2 has no setting for a refused login: its
 user guide and `config.ini` cover only the second-factor timeouts and
 `LoginDialogDisplayTimeout`. The Gateway's start program (`ti-gateway-start`, run by `start-gateway.sh`) reads IBC's output for
-the refused-login dialog, counts the first one of each run, stops its own
+the refused-login dialog and, on the first of a run, stops its own
 `xvfb-run` process (SIGTERM, then SIGKILL after 15 seconds; systemd ends the
 rest of the unit's processes when the program exits) and lets systemd start it
 again 30 seconds later. IBKR's documentation says "After ten failed login
@@ -692,16 +692,23 @@ attempts in 24 hours, your Portal log in will be disabled" (IBKR Guides, "Log
 In and Log Out", ibkrguides.com/clientportal/gettingstarted/login.htm; the
 FAQ "Troubleshooting client portal login failures", article 1132, says the
 same). That is the Client Portal login; IBKR publishes no separate figure for
-the Gateway's, so the program assumes the same. It allows 3 refused logins
-within 24 hours: after the third it stops the unit and does not restart it
-(exit code 77), and a start while those 3 still count refuses at once with
-"login retries stopped" without touching IBKR. A counter file it cannot read,
-trust (not a plain list of times) or write also refuses, since an unknown
-history cannot authorise another try. A completed login (`Login has
-completed`) resets the count. The count is the file
-`/var/lib/ti-gateway/login-failures`. Failed logins you make on IBKR's
-website, or with the wrong paper password elsewhere, count against IBKR's 10
-too, which is why the program stops at 3.
+the Gateway's, so the program assumes the same. It counts every START of IBC
+since the last accepted login (a completed login, or IBKR's prompt for the
+second factor, which means the password was accepted), writes that count to
+disk before IBC is launched, and allows 3 within 24 hours: when the third is
+refused it stops the unit and does not restart it (exit code 77), and a start
+while 3 still count refuses at once with "login retries stopped" without
+touching IBKR. Counting at the start, not at the refusal, means a crash
+between the login and the program noticing its refusal still counts. A
+counter file it cannot read, trust (not a plain list of times) or write also
+refuses, since an unknown history cannot authorise another try; IBC output
+that ends while IBC runs, or a line over 64 KiB, stops IBC and the retries for
+the same reason. The count is the file `/var/lib/ti-gateway/login-failures`.
+Failed logins you make on IBKR's website, or with the wrong paper password
+elsewhere, count against IBKR's 10 too, which is why the program stops at 3.
+A start that fails (IBC's command missing, or the renderer not runnable)
+exits 70, which systemd retries every 30 seconds, and logs "cannot start IBC",
+which the health check reads as logged out.
 
 **What you do when paged:**
 

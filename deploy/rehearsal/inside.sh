@@ -777,10 +777,10 @@ pass "adapter state directory and configuration in place, sending off"
 install -m 0755 /root/dist/ti-engine /opt/trend-investing/bin/ti-engine
 rel=/root/fake-release
 mkdir -p "$rel/v9.9.9"
-for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
+for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   { cat "/root/dist/$b"; printf 'rehearsal-release'; } >"$rel/v9.9.9/$b"
 done
-(cd "$rel/v9.9.9" && sha256sum ti-engine ti-reporter ti-dashboard operator journal-query >checksums.txt && echo '{}' >attestation.sigstore.json)
+(cd "$rel/v9.9.9" && sha256sum ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start >checksums.txt && echo '{}' >attestation.sigstore.json)
 ctl_stub=$(mktemp -d)
 cat >"$ctl_stub/systemctl" <<'STUB'
 #!/bin/bash
@@ -797,14 +797,14 @@ if env -u TI_REHEARSAL /root/deploy/release.sh --unverified v9.9.9 >/root/releas
 test "${TI_REHEARSAL:-}" = 1 || fail "the rehearsal container does not set TI_REHEARSAL"
 /root/deploy/release.sh --unverified v9.9.9 >/root/release.out 2>&1 || { cat /root/release.out; fail "ti-release --unverified v9.9.9 failed"; }
 grep -q WARNING /root/release.out || fail "ti-release --unverified did not warn"
-for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
+for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   cmp "$rel/v9.9.9/$b" "/opt/trend-investing/bin/$b" || fail "ti-release did not install $b"
 done
 test "$(cat /opt/trend-investing/releases/current)" = v9.9.9 || fail "ti-release did not record the current build"
 grep -q '^restart ti-dashboard' /root/release-ctl.log || fail "ti-release did not restart the dashboard"
 grep -Eq 'ti-engine@' /root/release-ctl.log && grep -E '^(restart|stop|start|kill).*ti-engine' /root/release-ctl.log && fail "ti-release touched the engine"
 /root/deploy/release.sh --rollback >/root/release.out 2>&1 || { cat /root/release.out; fail "ti-release --rollback failed"; }
-for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
+for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   cmp "/root/dist/$b" "/opt/trend-investing/bin/$b" || fail "rollback did not restore $b byte for byte"
 done
 pass "ti-release refuses without gh, installs a fake release with --unverified, restarts only the dashboard, and --rollback restores the previous build"

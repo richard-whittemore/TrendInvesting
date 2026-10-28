@@ -1,5 +1,5 @@
 #!/bin/bash
-# ti-release: put a tagged release of the server's five programs on the
+# ti-release: put a tagged release of the server's six programs on the
 # server, or put the previous build back. Pull-based: the owner runs it over
 # Tailscale; nothing is pushed to the server and nothing deploys on a merge.
 #
@@ -81,7 +81,7 @@ max_bytes=${TI_RELEASE_MAX_BYTES:-209715200}
 max_time=300
 bin=$prefix/bin
 releases=$prefix/releases
-programs="ti-engine ti-reporter ti-dashboard operator journal-query"
+programs="ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start"
 
 die() { printf 'ti-release: %s\n' "$*" >&2; exit 1; }
 log() { printf 'ti-release: %s\n' "$*"; }

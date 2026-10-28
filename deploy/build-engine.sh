@@ -72,4 +72,4 @@ for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journa
     -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$stamp" \
     -o "$out/${tool#*:}" "./cmd/${tool%%:*}"
 done
-printf 'build-engine: %s/ti-engine, ti-reporter, ti-dashboard, operator and journal-query for linux/%s stamped %s\n' "$out" "$goarch" "$stamp"
+printf 'build-engine: %s/ti-engine, ti-reporter, ti-dashboard, operator, journal-query and ti-gateway-start for linux/%s stamped %s\n' "$out" "$goarch" "$stamp"

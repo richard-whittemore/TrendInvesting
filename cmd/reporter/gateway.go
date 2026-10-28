@@ -169,7 +169,7 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 	if err != nil {
 		return err
 	}
-	out, silent, said := ev.out, ev.silent, ev.said
+	out, said := ev.out, ev.said
 	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
 	for _, k := range h.Keys {
 		seen[k] = true
@@ -193,11 +193,14 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 		}
 	}
 	key := report.GatewayKey(host)
-	// A journal with no login event proves nothing about a login: while an
-	// outage is open it stays open, and none is opened from silence.
-	if silent && (h.Since != nil || deliveredAnywhere(seen, key)) {
+	// An open outage is closed only by a completed login or a restored link
+	// NEWER than its start. Silence in the journals, or events older than the
+	// outage that remain once the evidence of it has rotated away, prove
+	// nothing; none is opened from them either.
+	open := h.Since != nil || deliveredAnywhere(seen, key)
+	if !out && open && (h.Since == nil || !ev.recoveredAt.After(*h.Since)) {
 		out = true
-		said = "no login event is left in the journal to show a recovery (it rotated, or the last event aged out); still treated as logged out since the earlier check. " + said
+		said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as logged out. " + said
 		if h.Since == nil {
 			t := now
 			h.Since = &t

@@ -27,7 +27,7 @@ expect() { # description expected actual
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 str_sha() { printf '%s' "$1" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | cut -c1-40; }
 
-programs="ti-engine ti-reporter ti-dashboard operator journal-query"
+programs="ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start"
 slug=richard-whittemore/TrendInvesting
 
 # This machine's ELF e_machine as an octal byte, as release.sh expects it.
@@ -610,7 +610,7 @@ grep -q '^restart ti-dashboard' "$work/ctl.log" || fail "the dashboard was not r
 if grep -E '^(restart|stop|start|kill).*ti-engine' "$work/ctl.log"; then fail "the engine was touched"; fi
 if grep -E '^(restart|stop|start).*ti-reporter' "$work/ctl.log"; then fail "the reporter was restarted"; fi
 expect "gh verified each program once" "$(for p in $programs; do echo "verify $p"; done | sort)" "$(sort "$work/gh.log.verified")"
-expect "gh was called once per program" 5 "$(grep -c '^attestation verify' "$work/gh.log")"
+expect "gh was called once per program" 6 "$(grep -c '^attestation verify' "$work/gh.log")"
 grep -q "next fresh run" "$work/out" || fail "the output does not say the engine takes the build at the next fresh run"
 grep -q "v1.0.0" "$work/out" || fail "the output does not name the new tag"
 grep -qi "changed" "$work/out" || fail "the output does not say what changed"

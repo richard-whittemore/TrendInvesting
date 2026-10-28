@@ -55,7 +55,7 @@ jobs:
           # program.
           cache: false
 
-      - name: Build the five stamped programs
+      - name: Build the six stamped programs
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -67,7 +67,7 @@ jobs:
           # Outside the checkout so the build output cannot dirty the tree.
           deploy/build-engine.sh --out "$RUNNER_TEMP/release"
           cd "$RUNNER_TEMP/release"
-          sha256sum ti-engine ti-reporter ti-dashboard operator journal-query > checksums.txt
+          sha256sum ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start > checksums.txt
 
       - name: Attest the build
         id: attest
@@ -79,6 +79,7 @@ jobs:
             ${{ runner.temp }}/release/ti-dashboard
             ${{ runner.temp }}/release/operator
             ${{ runner.temp }}/release/journal-query
+            ${{ runner.temp }}/release/ti-gateway-start
 
       - name: Publish the release
         env:
@@ -91,4 +92,4 @@ jobs:
           cd "$RUNNER_TEMP/release"
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
             --notes "Install on the server with: sudo ti-release $TAG" \
-            ti-engine ti-reporter ti-dashboard operator journal-query checksums.txt attestation.sigstore.json
+            ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start checksums.txt attestation.sigstore.json

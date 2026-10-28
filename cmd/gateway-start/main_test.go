@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -243,15 +242,11 @@ func TestACounterThatCannotBeWrittenRefusesBeforeLaunch(t *testing.T) {
 	}
 }
 
-func TestACountThatCannotBeSavedMidRunStopsIBCAndTheRetries(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root writes anywhere")
-	}
+func TestACountThatCannotBeReadAfterARefusalStopsIBCAndTheRetries(t *testing.T) {
 	r := newRig(t)
-	// The stand-in makes the state directory read-only, then refuses.
-	c := r.cfg(`chmod 0500 ` + r.dir + `; echo "` + refusal + `"; sleep 30`)
+	// The stand-in corrupts the counter, then refuses.
+	c := r.cfg(`echo garbage >` + r.state + `; echo "` + refusal + `"; sleep 30`)
 	code, out := r.run(c)
-	_ = os.Chmod(r.dir, 0o700)
 	if code != 77 || !strings.Contains(out, "login retries stopped") {
 		t.Fatalf("exit %d, want 77 saying 'login retries stopped': %s", code, out)
 	}
@@ -275,13 +270,110 @@ func TestTheRenderersConfigurationExitIsPassedOnAndNothingLaunches(t *testing.T)
 	}
 }
 
-func TestACommandThatCannotStartFailsClosed(t *testing.T) {
+// A failure to START IBC is not a configuration exit: 78 is in the unit's
+// RestartPreventExitStatus, and a transient fork failure or a missing xvfb-run
+// must be retried by systemd. The renderer's own exits still pass through.
+func TestAFailureToStartIBCOrTheRendererIsRestartable(t *testing.T) {
 	r := newRig(t)
 	c := r.cfg(`exit 0`)
 	c.Command = []string{filepath.Join(r.dir, "missing")}
 	code, out := r.run(c)
-	if code == 0 || code == 75 {
-		t.Fatalf("exit %d for a command that does not exist: %s", code, out)
+	if code != 70 || !strings.Contains(out, "cannot start IBC") {
+		t.Fatalf("a command that does not exist: exit %d, want 70 saying 'cannot start IBC': %s", code, out)
 	}
-	_ = fmt.Sprint
+	r = newRig(t)
+	c = r.cfg(`exit 0`)
+	c.Render = []string{filepath.Join(r.dir, "no-renderer")}
+	if code, _ := r.run(c); code != 70 {
+		t.Fatalf("a renderer that could not run: exit %d, want 70", code)
+	}
+}
+
+// The attempt is recorded durably BEFORE IBC is launched, so a crash between
+// the login and the parse of its refusal still counts.
+func TestTheAttemptIsRecordedBeforeIBCIsLaunched(t *testing.T) {
+	r := newRig(t)
+	marker := filepath.Join(r.dir, "recorded")
+	code, out := r.run(r.cfg(`if [ -s ` + r.state + ` ]; then echo yes >` + marker + `; fi; echo "` + refusal + `"; exit 0`))
+	if code != 75 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	if raw, _ := os.ReadFile(marker); !strings.Contains(string(raw), "yes") {
+		t.Fatal("the counter was empty when IBC started: a crash after the login would go uncounted")
+	}
+	if got := len(r.counter()); got != 1 {
+		t.Fatalf("%d attempts counted for one start, want 1 (the refusal adds nothing)", got)
+	}
+}
+
+func TestARefusalWrittenToStderrIsRead(t *testing.T) {
+	r := newRig(t)
+	code, _ := r.run(r.cfg(`echo "` + refusal + `" >&2; exit 0`))
+	if code != 75 {
+		t.Fatalf("exit %d, want 75", code)
+	}
+}
+
+// A prompt for the second factor means IBKR accepted the credentials, so the
+// attempt is not a failed login and the count is cleared.
+func TestASecondFactorPromptClearsTheCount(t *testing.T) {
+	r := newRig(t)
+	r.seed(r.now.Add(-time.Hour), r.now.Add(-2*time.Hour))
+	code, _ := r.run(r.cfg(`echo "IBC: detected dialog entitled: Second Factor Authentication; event=Opened"; exit 1`))
+	if code != 1 || len(r.counter()) != 0 {
+		t.Fatalf("exit %d with count %v, want IBC's 1 and an empty count", code, r.counter())
+	}
+}
+
+// Output that ends while IBC still runs leaves nothing watching for the
+// refusal: IBC is stopped and the retries stop.
+func TestOutputThatEndsWhileIBCStillRunsStopsIBCAndTheRetries(t *testing.T) {
+	r := newRig(t)
+	start := time.Now()
+	code, out := r.run(r.cfg(`exec >/dev/null 2>&1; sleep 60`))
+	if code != 77 || !strings.Contains(out, "login retries stopped") {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	if time.Since(start) > 15*time.Second {
+		t.Fatalf("took %s", time.Since(start))
+	}
+}
+
+// A sink that stops draining must not stop the refusal from being counted
+// and IBC from being stopped.
+type blockedWriter struct{ release chan struct{} }
+
+func (b blockedWriter) Write(p []byte) (int, error) { <-b.release; return len(p), nil }
+
+func TestABlockedLogSinkDoesNotBlockRefusalHandling(t *testing.T) {
+	r := newRig(t)
+	b := blockedWriter{release: make(chan struct{})}
+	defer close(b.release)
+	done := make(chan int, 1)
+	go func() { done <- run(r.cfg(`echo "`+refusal+`"; sleep 60`), b, &bytes.Buffer{}) }()
+	select {
+	case code := <-done:
+		if code != 75 || len(r.counter()) != 1 {
+			t.Fatalf("exit %d with %d attempts, want 75 with 1", code, len(r.counter()))
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("a blocked log sink held up the refusal handling")
+	}
+}
+
+func TestAnOverLongLineStopsIBCAndTheRetries(t *testing.T) {
+	r := newRig(t)
+	code, out := r.run(r.cfg(`head -c 300000 /dev/zero | tr '\0' x; sleep 60`))
+	if code != 77 || !strings.Contains(out, "login retries stopped") {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+}
+
+func TestEveryMessageAtTheBoundSaysTheCheckedPhrase(t *testing.T) {
+	r := newRig(t)
+	r.seed(r.now.Add(-time.Hour), r.now.Add(-2*time.Hour))
+	_, out := r.run(r.cfg(`echo "` + refusal + `"; exit 0`))
+	if !strings.Contains(out, "login retries stopped") {
+		t.Fatalf("%s", out)
+	}
 }
