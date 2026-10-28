@@ -714,9 +714,13 @@ reading: the 7 New York calendar days before its own day through that day
 not cover them, the proof says `"set-aside"` with "IBKR ignored the
 requested dates" and the two periods, and the unit fails. After the first
 morning reading, `sudo cat /var/lib/trend-investing/flex/boost/executions.json`
-should show `from_date` a week back, `to_date` as that day and
-`covered_until` as that day's midnight (05:00 or 04:00 UTC); tell the
-developer if it does not.
+should show `from_date` a week back (or the first session after it, when
+that day was a holiday: IBKR's statement has nothing to cover before it),
+`to_date` as that day and `covered_until` as that day's midnight (05:00 or
+04:00 UTC); tell the developer if it does not. On a weekday holiday the
+statement may end on the session before; it then covers only to that
+session's start, so a file delivered that morning waits for the proof
+until 09:00 and is then withheld, which is expected.
 
 **What you set up once, in IBKR's Client Portal.** These steps, menu names
 and formats are from IBKR's documentation, not yet verified against a live

@@ -1268,6 +1268,19 @@ class ExecutionsTests(ReadOnceHarness):
         self.assertTrue(self.read_trades(now=monday, service=FakeFlex(statements=(cash, xml))), self.out.getvalue())
         self.assertEqual(self.proof()["from_date"], "20270119")
 
+    def test_a_holiday_reading_ending_on_the_session_before_covers_only_to_that_sessions_start(self):
+        # Monday 2027-01-18 (Martin Luther King Jr. Day): td is the holiday and IBKR's statement ends on Friday, the
+        # session before. That is the period asked for (no session in between), so the proof is read, but it lists
+        # every execution only up to the start of Friday: Friday's evening is not proven.
+        holiday = datetime(2027, 1, 18, 10, 30, tzinfo=timezone.utc)
+        xml = fixture("trade_confirms.xml").replace(b'fromDate="20270108" toDate="20270115"',
+                                                    b'fromDate="20270111" toDate="20270115"')
+        cash = self.statement(("900000101", "20270114", "2500"), period=("20261219", "20270117"))
+        self.assertTrue(self.read_trades(now=holiday, service=FakeFlex(statements=(cash, xml))), self.out.getvalue())
+        proof = self.proof()
+        self.assertEqual((proof["state"], proof["to_date"], proof["covered_until"]),
+                         ("read", "20270115", "2027-01-15T05:00:00Z"))
+
     def test_a_proof_never_reaches_past_an_hour_before_it_was_asked_for(self):
         # IBKR: a new execution is typically in a newly generated Trade Confirmation report within 5 to 10 minutes.
         early = datetime(2027, 1, 15, 5, 30, tzinfo=timezone.utc)
