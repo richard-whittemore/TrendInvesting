@@ -709,10 +709,14 @@ withholds that session's reading too, and the session stays withheld once
 the reading is sent; put the log back before the next session's reading.
 If it cannot be put back, start a fresh run approved with the starting
 book you read from IBKR's statement (`operator approve -log <latest
-run>.log -positions ... -cash ... -currency USD`, [operator](operator.md)): the walk stops
-at that run. A log the comparison with the previous close also needs stops
-the adapter instead ("cannot read the engine's durable log", [paper
-trading](paper-trading.md)).
+run>.log -positions ... -cash ... -currency USD`, [operator](operator.md)).
+Approve it before that session's close: the journal walk and the
+previous-close comparison stop at that run only for closes at or after the
+approval, so a run approved after the close leaves that session withheld
+too. The logs the adapter reads at start for recent order history must
+still be present ([paper trading](paper-trading.md), "cannot read the
+engine's durable log"). A log the comparison with the previous close also
+needs stops the adapter instead.
 An
 execution at a time New York skipped when the clocks went forward stops the
 adapter (send the journal line to the developer). Any other zone, a

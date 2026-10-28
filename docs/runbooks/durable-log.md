@@ -311,10 +311,16 @@ ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
    when it is one of those its manual says to keep ([paper
    trading](../manual/paper-trading.md), "cannot read the engine's durable
    log"): quarantining such a log stops the adapter or withholds every
-   session's reading after it. The way past it is a fresh run approved
-   with the starting book read from IBKR's statement (`operator approve
-   -log <latest run>.log -positions ... -cash ... -currency USD`): the adapter reads no
-   log behind that run.
+   session's reading after it. The way past a log the readings need is a
+   fresh run approved with the starting book read from IBKR's statement
+   (`operator approve -log <latest run>.log -positions ... -cash ...
+   -currency USD`), approved before that session's close (or accept one
+   more session withheld): the journal walk and the previous-close
+   comparison stop at that run, for closes at or after the approval. The
+   logs the adapter reads at start for recent order history (today's and
+   yesterday's session, the first run before them, and every run with an
+   order still working) must still be present: quarantining one of those
+   still stops the adapter.
 3. **Decide the restart again** ("Restarting an engine"): with the file set
    aside, the latest run may be a different log. If the quarantined log was
    the crashed run itself, it cannot be resumed: start a fresh run from a
