@@ -201,7 +201,10 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 	// NEWER than its start. Silence in the journals, or events older than the
 	// outage that remain once the evidence of it has rotated away, prove
 	// nothing; none is opened from them either.
-	open := (h.Since != nil || deliveredAnywhere(seen, key)) && !h.Resolving
+	// A pending resolution of an earlier incident is not an open outage, but a
+	// Since is: a new outage needs fresh evidence of recovery even while an old
+	// resolution is pending.
+	open := h.Since != nil || (deliveredAnywhere(seen, key) && !h.Resolving)
 	// An equal time counts as newer: the journal's times are to the
 	// microsecond, and a login in the same instant as the firing is a login.
 	if !out && open && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {

@@ -464,8 +464,8 @@ func TestEveryLineIsInTheJournalWhenRunReturns(t *testing.T) {
 	}
 }
 
-// The executable itself, with a journal nobody reads: it exits 77 with the
-// count on disk (the boundary the unit sees), not merely run's return.
+// The executable itself, with a journal nobody reads: it exits 75 (restartable)
+// with the count on disk (the boundary the unit sees), not merely run's return.
 func TestMain(m *testing.M) {
 	if os.Getenv("GATEWAY_START_AS_MAIN") == "1" {
 		main()
@@ -559,30 +559,37 @@ func TestAJournalWriteThatErrsOrIsShortStopsIBCAndAsksForARestart(t *testing.T) 
 	}
 }
 
-// A journal that is slow (not stuck) when IBC exits does not turn a
-// restartable exit into a permanent stop: the drain waits out the sink bound.
-type slowOnce struct {
-	mu   sync.Mutex
-	done bool
-}
+// A journal that is slow (each write inside the sink bound) when IBC exits,
+// with several lines still buffered, does not turn a restartable exit into a
+// permanent stop: the drain is bounded by progress, not by one fixed time.
+type slowWriter2 struct{ delay time.Duration }
 
-func (w *slowOnce) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	first := !w.done
-	w.done = true
-	w.mu.Unlock()
-	if first {
-		time.Sleep(3 * time.Second)
-	}
+func (w slowWriter2) Write(p []byte) (int, error) {
+	time.Sleep(w.delay)
 	return len(p), nil
 }
 
-func TestASlowJournalAtExitDoesNotTurnARestartIntoAStop(t *testing.T) {
+func TestASlowJournalWithManyBufferedLinesAtExitDoesNotTurnARestartIntoAStop(t *testing.T) {
 	r := newRig(t)
-	c := r.cfg(`echo "IBC: second factor timed out"; exit 3`)
-	c.DrainDeadline, c.SinkTimeout = time.Second, 10*time.Second
-	if code := run(c, &slowOnce{}, &bytes.Buffer{}); code != 3 {
+	c := r.cfg(`echo "IBC: one"; echo "IBC: two"; echo "IBC: three"; echo "IBC: four"; exit 3`)
+	c.DrainDeadline, c.SinkTimeout = time.Second, 4*time.Second
+	// Four writes of 3 s each: 12 s, past the old bound of 1 + 4 + 2 = 7 s.
+	if code := run(c, slowWriter2{3 * time.Second}, &bytes.Buffer{}); code != 3 {
 		t.Fatalf("exit %d, want IBC's own 3", code)
+	}
+}
+
+// A renderer whose output cannot be journalled is a restartable failure, and
+// IBC is not started.
+func TestARendererWhoseOutputCannotBeJournalledIsARestartableFailureAndIBCDoesNotStart(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`exit 0`)
+	c.Render = []string{"sh", "-c", "echo 'render-ibc-config: wrote config'"}
+	c.SinkTimeout = time.Second
+	b := blockedWriter{release: make(chan struct{})}
+	defer close(b.release)
+	if code := run(c, b, b); code != 75 || r.launches() != 0 {
+		t.Fatalf("exit %d with %d launches, want 75 and none", code, r.launches())
 	}
 }
 
@@ -590,21 +597,19 @@ func TestASlowJournalAtExitDoesNotTurnARestartIntoAStop(t *testing.T) {
 // recorded when it is seen with its own time.
 func TestAReloginsRefusalIsRecordedAtTheTimeItIsSeen(t *testing.T) {
 	r := newRig(t)
-	times := []time.Time{r.now, r.now.Add(time.Hour)}
-	i := 0
-	c := r.cfg(`echo "IBC: Login has completed"; sleep 1; echo "` + refusal + `"; sleep 30`)
-	c.Now = func() time.Time { // the start, then everything after it an hour later
-		defer func() {
-			if i < len(times)-1 {
-				i++
-			}
-		}()
-		return times[i]
-	}
+	// A clock that runs 3600 times faster than the wall: the start's attempt,
+	// the accepted login and the refusal two seconds later carry different stamps.
+	began := time.Now()
+	c := r.cfg(`echo "IBC: Login has completed"; sleep 2; echo "` + refusal + `"; sleep 30`)
+	c.Now = func() time.Time { return r.now.Add(time.Since(began) * 3600) }
 	code, _ := r.run(c)
 	got := r.counter()
-	if code != 75 || len(got) != 1 || got[0] != strconv.FormatInt(times[1].Unix(), 10) {
-		t.Fatalf("exit %d, count %v, want 75 and one attempt at the refusal's time %d", code, got, times[1].Unix())
+	if code != 75 || len(got) != 1 {
+		t.Fatalf("exit %d, count %v, want 75 and one attempt", code, got)
+	}
+	at, _ := strconv.ParseInt(got[0], 10, 64)
+	if at-r.now.Unix() < int64(1.5*3600) {
+		t.Fatalf("the attempt is stamped %ds after the start, want the refusal's time (about 2 s of wall time = 7200 s)", at-r.now.Unix())
 	}
 }
 

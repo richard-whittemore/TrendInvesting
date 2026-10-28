@@ -278,11 +278,17 @@ func (j *journal) write(text string) error {
 	}
 }
 
-// boundedWriter lets a child's output (the renderer's) go through a journal.
-type boundedWriter struct{ j *journal }
+// boundedWriter lets a child's output (the renderer's) go through a journal and
+// remembers that a write failed, so the caller can stop before starting IBC.
+type boundedWriter struct {
+	j      *journal
+	failed *atomic.Bool
+}
 
 func (b boundedWriter) Write(p []byte) (int, error) {
-	_ = b.j.write(string(p))
+	if err := b.j.write(string(p)); err != nil {
+		b.failed.Store(true)
+	}
 	return len(p), nil
 }
 
@@ -337,8 +343,15 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	if len(cfg.Render) > 0 {
 		//nolint:gosec // G204: the renderer is the unit's own installed script (TI_GATEWAY_RENDER only in the rehearsal), with no argument from outside.
 		r := exec.Command(cfg.Render[0], cfg.Render[1:]...)
-		r.Stdout, r.Stderr = boundedWriter{out}, boundedWriter{errj}
-		if err := r.Run(); err != nil {
+		var renderFailed atomic.Bool
+		r.Stdout, r.Stderr = boundedWriter{out, &renderFailed}, boundedWriter{errj, &renderFailed}
+		err := r.Run()
+		if renderFailed.Load() {
+			// What the renderer said cannot be journalled: stop before IBC starts.
+			say("the journal is not taking the config renderer's output; not starting IBC, so the unit starts again")
+			return exitRetry
+		}
+		if err != nil {
 			var ee *exec.ExitError
 			if errors.As(err, &ee) && ee.ExitCode() > 0 {
 				// The renderer's own configuration exit, which the unit does not
@@ -399,6 +412,11 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		once.Do(func() { close(stopCh) })
 	}
 
+	// progress is when the reader last finished a line; the drain below waits on
+	// it, not on one fixed time, so many buffered lines through a slow (not
+	// stuck) journal are all delivered.
+	var progress atomic.Int64
+	progress.Store(time.Now().UnixNano())
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
@@ -406,6 +424,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		seen, relogin := false, false
 		for {
 			line, err := br.ReadSlice('\n')
+			progress.Store(time.Now().UnixNano())
 			if errors.Is(err, bufio.ErrBufferFull) {
 				// A line this long is no log line; nothing can be trusted to
 				// watch for the refusal in it.
@@ -435,7 +454,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 					case cerr != nil:
 						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": the login count cannot be kept (%v); stopping IBC and not retrying", cerr)})
 					case count >= cfg.Max:
-						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": %d of %d login attempts within the window were refused; stopping IBC and not retrying", count, cfg.Max)})
+						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": %d of %d login attempts within the window were refused or never completed; stopping IBC and not retrying", count, cfg.Max)})
 					default:
 						stop(verdict{exitRetry, fmt.Sprintf("IBC reports a refused login (attempt %d of %d within the window); stopping IBC so the unit starts it again", count, cfg.Max)})
 					}
@@ -444,6 +463,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 				if werr == nil && !strings.HasSuffix(text, "\n") {
 					werr = out.write("\n")
 				}
+				progress.Store(time.Now().UnixNano())
 				if werr != nil {
 					// The bound on attempts does not depend on the journal, so a
 					// journal that fails is a restartable stop, which heals.
@@ -503,14 +523,25 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	}
 
 	// Everything IBC wrote is read: the pipe's buffered data first, then an end
-	// at EOF, or at the deadline when an orphan of IBC still holds the pipe.
-	// The reader may be inside a journal write, which the sink bound limits, so
-	// the wait covers one such write too.
+	// at EOF, or at the deadline when an orphan of IBC still holds the pipe. The
+	// reader may still be writing buffered lines to the journal, each bounded by
+	// SinkTimeout, so the wait runs out only when the reader has made no
+	// progress for DrainDeadline + SinkTimeout + 2 s. That is restartable (75):
+	// every exec was counted before it started, so what a reader that never
+	// finished may have missed cannot lift the bound.
 	_ = pr.SetReadDeadline(time.Now().Add(cfg.DrainDeadline))
-	select {
-	case <-readerDone:
-	case <-time.After(cfg.DrainDeadline + cfg.SinkTimeout + 2*time.Second):
-		stop(verdict{exitStopped, stopPhrase + ": the output reader did not finish; the refusal may be unseen, so not retrying"})
+	idle := cfg.DrainDeadline + cfg.SinkTimeout + 2*time.Second
+drain:
+	for {
+		select {
+		case <-readerDone:
+			break drain
+		case <-time.After(250 * time.Millisecond):
+			if time.Since(time.Unix(0, progress.Load())) > idle {
+				stop(verdict{exitRetry, "the output reader made no progress after IBC ended; the refusal may be unseen, so stopping and starting again (the attempt is already counted)"})
+				break drain
+			}
+		}
 	}
 	_ = pr.Close()
 

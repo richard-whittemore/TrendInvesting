@@ -809,3 +809,33 @@ func TestABriefSecondOutageDoesNotDiscardAPendingResolution(t *testing.T) {
 		t.Fatalf("%d resolves, want the pending one delivered at the recovery", resolved)
 	}
 }
+
+// While an earlier recovery's resolution is pending, a NEW outage is still an
+// open outage that only a newer login can close: if its own evidence rotates
+// away it is not erased.
+func TestANewOutageDuringAPendingResolutionIsNotErasedWhenItsEvidenceRotatesAway(t *testing.T) {
+	f := &refusingResolve{relay: &relay{sent: map[string][]string{}}}
+	g := newStandInGateway(t)
+	g.logout()
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.ibc(stamp(tuesday(14, 12), ibcCompleted))
+	_ = gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, 15)) // the resolve fails: pending
+	g.ibc(stamp(tuesday(14, 16), ibcCompleted), stamp(tuesday(14, 17), ibcRefused))
+	if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, 20)); err != nil { // a new outage, in its grace
+		t.Fatal(err)
+	}
+	g.ibc(stamp(tuesday(14, 12), ibcCompleted)) // its evidence rotates away; only the old login is left
+	for _, min := range []int{25, 31} {
+		if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := gatewayPages(f.relay); got != 4 {
+		t.Fatalf("%d outage pages, want 2 per channel: the new outage was erased by missing evidence", got)
+	}
+}

@@ -527,7 +527,12 @@ if test "$mode" = release; then
   # copy kept by an upgrade that was interrupted is the original and is never
   # overwritten by a retry.
   if ! listed "$releases/$cur" | grep -qx ti-gateway-start && test -f "$bin/ti-gateway-start" && test ! -f "$releases/$cur/.starter-installed"; then
-    cp -p "$bin/ti-gateway-start" "$releases/$cur/.starter-installed" || die "could not keep the installed ti-gateway-start with $cur; nothing installed"
+    # Copied to a name of its own and renamed into place, so a copy that was
+    # cut short is never mistaken for the original.
+    rm -f "$releases/$cur/.starter-installed.tmp"
+    if ! cp -p "$bin/ti-gateway-start" "$releases/$cur/.starter-installed.tmp" || ! mv -f "$releases/$cur/.starter-installed.tmp" "$releases/$cur/.starter-installed"; then
+      die "could not keep the installed ti-gateway-start with $cur; nothing installed"
+    fi
   fi
   if ! install_from "$stage" || ! restart_dashboard_verified; then
     log "$tag did not install, or the dashboard did not stay up on it; putting $cur back"

@@ -737,6 +737,27 @@ fake_program "$TI_PREFIX/bin/ti-gateway-start" "echo ti-gateway-start candidate-
 expect "a retried upgrade whose dashboard fails is refused" nonzero "$(nonzero "$(run v1.2.0)")"
 expect "the original starter is put back, not the interrupted candidate" "echo ti-gateway-start original" "$(installed ti-gateway-start)"
 
+# A copy of the starter that is cut short is not the original: a cp that fails
+# after writing part of the file leaves nothing a retry would trust.
+fresh_server
+run v1.0.0 >/dev/null
+make_five v1.0.0
+fake_program "$TI_PREFIX/bin/ti-gateway-start" "echo ti-gateway-start installed"
+mkdir -p "$work/shim"
+cat >"$work/shim/cp" <<SHIM
+#!/bin/sh
+for a; do last=\$a; done
+case \$last in *.starter-installed*) if [ ! -e "$work/shim/once" ]; then touch "$work/shim/once"; printf partial >"\$last"; exit 1; fi ;; esac
+exec /bin/cp "\$@"
+SHIM
+chmod +x "$work/shim/cp"
+rm -f "$work/shim/once"
+s=0; PATH="$work/shim:$PATH" "$script" v1.2.0 >"$work/out" 2>&1 || s=$?
+expect "an upgrade whose starter copy is cut short is refused" nonzero "$(nonzero "$s")"
+expect "nothing was installed over the starter" "echo ti-gateway-start installed" "$(installed ti-gateway-start)"
+expect "the retry whose dashboard fails is refused" nonzero "$(nonzero "$(PATH="$work/shim:$PATH" run v1.2.0)")"
+expect "the installed starter, not a partial copy, is put back" "echo ti-gateway-start installed" "$(installed ti-gateway-start)"
+
 # A hand-installed build (initial) without the starter is refused as a rollback target too.
 fresh_server
 rm "$TI_PREFIX/bin/ti-gateway-start"
