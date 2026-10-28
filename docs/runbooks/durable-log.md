@@ -315,7 +315,8 @@ ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
    fresh run approved with the starting book read from IBKR's statement
    (`operator approve -log <latest run>.log -positions ... -cash ...
    -currency USD`), approved before that session's close (or accept one
-   more session withheld): the journal walk and the previous-close
+   more session withheld): the journal check (the readings' search of the
+   logs for a fill at or after the close) and the previous-close
    comparison stop at that run, for closes at or after the approval. The
    logs the adapter reads at start for recent order history (today's and
    yesterday's session, the first run before them, and every run with an

@@ -710,7 +710,8 @@ the reading is sent; put the log back before the next session's reading.
 If it cannot be put back, start a fresh run approved with the starting
 book you read from IBKR's statement (`operator approve -log <latest
 run>.log -positions ... -cash ... -currency USD`, [operator](operator.md)).
-Approve it before that session's close: the journal walk and the
+Approve it before that session's close: the journal check (this search of
+the logs for a fill at or after the close) and the
 previous-close comparison stop at that run only for closes at or after the
 approval, so a run approved after the close leaves that session withheld
 too. The logs the adapter reads at start for recent order history must
