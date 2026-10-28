@@ -109,6 +109,11 @@ STREAM_FILE = re.compile(r"[a-z][a-z0-9-]*-([0-9]{4}-[0-9]{2}-[0-9]{2})\.jsonl")
 STREAM_FIELDS = ("configuration_hash", "correlation_id", "envelope_version", "event_time", "id", "payload",
                  "payload_hash", "recorded_at", "schema_version", "sequence", "source", "strategy_version", "type")
 BATCH_FIELDS = ("files", "run", "snapshot", "state")
+# A batch this adapter records carries journal_checked: its broker snapshot's reading ran the journal check of the
+# close window (loop._journal_fills), so one that stood for a close bounds that check's walk for later readings (ADR
+# 0019, amended 2026-10-28). A batch an earlier adapter recorded carries none, and bounds nothing.
+JOURNAL_CHECKED = "close-window"
+MARKED_BATCH_FIELDS = ("files", "journal_checked", "run", "snapshot", "state")
 FILE_FIELDS = ("lines", "name", "sha256")
 QUEUING, QUEUED, DROPPED = "queuing", "queued", "dropped"
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -274,11 +279,12 @@ class DeliveryRecord:
     """The batches of stream files the adapter has recorded in its outbox, oldest first, in a JSON file.
 
     {"batches": [{"run", "snapshot", "files": [{"name", "sha256", "lines"}],
-    "state"}]}: the run the files were written for, the input ID of the
+    "state", "journal_checked"}]}: the run the files were written for, the input ID of the
     broker snapshot recorded before them, the files in delivery order, and
     QUEUING until the outbox write is made, then QUEUED; DROPPED for a batch
     not delivered to its run (see the module): its files may be named again
-    by a later batch of that run. Read strictly: anything else raises
+    by a later batch of that run. journal_checked is JOURNAL_CHECKED, absent
+    from a batch an earlier adapter recorded. Read strictly: anything else raises
     DeliveryRecordInvalid. Written whole, atomically and synced, only by the
     adapter holding the pending file's lock.
     """
@@ -299,7 +305,8 @@ class DeliveryRecord:
             raise self._invalid("it is not an object holding only its batches")
         named = set()
         for n, batch in enumerate(record["batches"], 1):
-            if (not isinstance(batch, dict) or tuple(sorted(batch)) != BATCH_FIELDS or not _is_text(batch["run"])
+            if (not isinstance(batch, dict) or tuple(sorted(batch)) not in (BATCH_FIELDS, MARKED_BATCH_FIELDS)
+                    or batch.get("journal_checked", JOURNAL_CHECKED) != JOURNAL_CHECKED or not _is_text(batch["run"])
                     or not _is_text(batch["snapshot"]) or batch["state"] not in (QUEUING, QUEUED, DROPPED)
                     or not isinstance(batch["files"], list) or not batch["files"]):
                 raise self._invalid("batch {} is not a batch as the adapter records one".format(n))
@@ -622,7 +629,8 @@ class Deliverer:
         if snapshot is None:
             return
         batch = {"run": self.run, "snapshot": self._new_id(BROKER_SNAPSHOT_TYPE),
-                 "files": [{"name": s.name, "sha256": s.sha256, "lines": len(s.envelopes)} for s in streams]}
+                 "files": [{"name": s.name, "sha256": s.sha256, "lines": len(s.envelopes)} for s in streams],
+                 "journal_checked": JOURNAL_CHECKED}
         self.record.begin(batch)
         entries = _entries(self.run, batch["snapshot"], snapshot, streams, self._holds_book())
         self._outbox.extend(entries)
@@ -659,6 +667,15 @@ class Deliverer:
             streams.append(stream)
             previous = stream.session
         return streams
+
+    def journal_checked_snapshots(self):
+        """The input IDs of the broker snapshots whose readings ran the journal check of the close window
+        (JOURNAL_CHECKED); none when the record cannot be read, so nothing is taken as checked (fail closed)."""
+        try:
+            batches = self.record.load()
+        except DeliveryRecordInvalid:
+            return frozenset()
+        return frozenset(b["snapshot"] for b in batches if b.get("journal_checked") == JOURNAL_CHECKED)
 
     def _holds_book(self):
         """Whether the engine has committed an account snapshot: its book, which a reconciliation is classified against."""

@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4, and an ended run's never-sent sale is settled for the fresh run's approval; amended 2026-10-27 by the owner ("Flex"): the morning reading stands for the close with the Flex executions proof)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4, and an ended run's never-sent sale is settled for the fresh run's approval; amended 2026-10-27 by the owner ("Flex"): the morning reading stands for the close with the Flex executions proof; noted 2026-10-28: IBKR's Eastern label does not follow daylight saving time, so IB Gateway's clock is checked against the adapter's instead)
 - Date: 2026-09-17
 
 ## In plain English
@@ -1275,3 +1275,94 @@ executions proof; `ti-flex@.timer`: the morning firings), and one secret,
 `TI_IBKR_FLEX_TRADES_QUERY_ID`. The engine, its schemas and its rules are
 unchanged: a snapshot stamped as of the close is the one the engine already
 reads, and a withheld one is stamped as before. No RulesVersion change.
+
+**Note (2026-10-28): IBKR's Eastern label does not follow daylight saving
+time, so the Gateway's clock is checked instead.** On 2026-10-28 (New York
+on EDT until 2026-11-01), IB Gateway 10.50 running with
+`TZ=America/New_York`, reached through ibapi 10.51.01, gave the connection
+time `20261028 09:49:19 EST` to an adapter that connected at 09:49:22 New
+York time: the wall clock was New York's, the label was not. The season
+check on the label described above ("an abbreviation or long name ... that
+New York used at the date and time stated") therefore withheld every
+morning reading in summer time, and an execution time labelled `EST` in
+summer was read an hour late (`EST` is a fixed UTC-5 zone; `EDT` names no
+zone at all and was refused). The intent is unchanged (fail closed unless
+the Gateway's clock is New York time); the evidence is now the clock, not
+the label:
+
+- A connection or execution time's zone stands when it is a New York zone
+  name (`US/Eastern`, `America/New_York`, `EST5EDT`) or an Eastern label
+  (`EST`, `EDT`, `Eastern Standard Time`, `Eastern Daylight Time`), with no
+  season check on the label; a local time New York skipped when the clocks
+  went forward, a time not of the shape, or any other zone, withholds as
+  before, and an execution reported at a skipped time is refused outright
+  (the adapter stops rather than invent its instant).
+- The connection time, read so, must be within 5 minutes of the adapter's
+  own (NTP-synced) clock when the link's handshake completed (the time is
+  recorded at the handshake, so a link Gateway restores with no new
+  handshake is held to the same moment). A Gateway on a fixed `EST` all year
+  is an hour off in summer, and a Gateway in another zone labelled `EST` is
+  hours off: both withhold, the reason saying how far off and which way. In
+  the hour repeated when daylight saving time ends, the reading within the
+  tolerance is taken; with neither within it, the reading is withheld.
+- The check holds only while New York is at the UTC offset it was at when
+  the link connected: a Gateway on fixed EST matches New York's clock until
+  the clocks go forward, so a link kept, or restored by Gateway (1101/1102)
+  with no new handshake, across a change of New York's clocks is not
+  trusted after it, and a morning reading on it is withheld until the link
+  connects again.
+- An execution time is not compared with the clock (it may be hours old):
+  the connection's check is what shows the Gateway's clock, and so its
+  executions' times, are New York's. While the link's check holds, an
+  execution under any New York name or Eastern label is read on New York's
+  clock. Until it holds (before the reconcile, after a failed check, or
+  after New York's clocks changed), no reading of the Gateway's clock
+  bounds the instant (a Gateway an hour slow in winter stamps a 16:30
+  execution "15:30:00 EST", 20:30 UTC by any reading of its label, before
+  the 21:00 UTC close), so the execution is stamped with the later of that
+  reading and the adapter's own receipt time: nothing executes after the
+  adapter hears of it, so the stamp is never earlier than the execution.
+  That stamp is the one the same-day check, the journal (`filled_at`) and
+  every later reading of the journal, on a link set right, compare with the
+  close: a fill recorded on an unchecked link can never pass for one before
+  the close. A same-day reading that lists such an execution names the
+  Gateway's clock first as the cause. A tracker told nothing of the clock
+  believes none (it stamps with the system clock's receipt time). In the
+  hour repeated when daylight saving time ends, the later reading is taken
+  (no session trades then, Sunday 01:00 to 02:00 New York).
+- A Gateway up to the 5-minute tolerance slow passes its check, so a 16:02
+  execution may be stamped 15:58: every at-or-after-close check on the
+  Gateway's stamps (the same-day list and the journalled fills) takes one
+  stamped within the tolerance before the close as at the close. When a
+  run's business was recorded proves nothing of the stamps of the runs
+  behind it: a fast Gateway's stamp on an unchecked link can be hours
+  after the fill was recorded. So the journal check's walk back through the
+  chain stops only after the newest run that either holds a broker
+  snapshot the engine committed stamped as of a close whose reading ran
+  this same check (the adapter marks every batch it records so,
+  `journal_checked` in its delivery record): that reading stood only
+  because the check, reading every run behind it, found no fill stamped
+  from that close's window on, so every fill behind it is stamped before
+  this close's window too; or was approved, no later than the close, with
+  a starting book the owner stated (ADR 0027), the account at the
+  approval, which every fill behind it is in. A snapshot an earlier adapter recorded carries no mark and
+  bounds nothing, so the first walks after the change read to the chain's
+  first run. A log the walk needs and cannot read withholds the reading,
+  with any fills found before it; logs behind the bound may be archived.
+  A log lost for good is passed by a fresh run approved with the starting
+  book read from IBKR's statement. A same-day reading checks the
+  journal's fills too, not only IBKR's re-read list: a fill journalled
+  after the close on an earlier link (a fast Gateway's, before its check)
+  is the stamp the engine applies on top of the close's book, though IBKR
+  may now list the execution before the close. The reason names each fill
+  and which side of the close it is, and says the journal keeps it, so the
+  session stays withheld. The Flex
+  proof's times are IBKR's statement times, not the Gateway's, and are
+  compared with the close itself. The clock is compared only at the
+  handshake: a Gateway whose clock jumps after a passed check stays trusted
+  until the link connects again (an open residual).
+
+What changes where: the IBKR adapter only (`loop.py`, `orders.py`,
+`connection.py`, and `delivery.py`'s record, whose batches now carry
+`journal_checked`; an earlier record is still read). The engine, its
+schemas and its rules are unchanged; no RulesVersion change.

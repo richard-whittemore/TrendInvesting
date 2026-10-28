@@ -224,6 +224,34 @@ class ReconnectTests(unittest.TestCase):
         self.assertTrue(h.conn.needs_reconciliation)
 
 
+    def test_the_handshake_time_is_the_adapters_clock_when_a_link_connects(self):
+        # IB Gateway's connection time is held against it (loop.gateway_clock_problem; ADR 0019, amended 2026-10-28).
+        from datetime import datetime, timedelta, timezone
+        h = Harness()
+        at = {"now": datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc)}
+        h.conn._wall_clock = lambda: at["now"]
+        self.assertIsNone(h.conn.connected_at, "no link yet")
+        h.fake.connect_behaviours = ["silent"]
+        with self.assertRaises(ConnectFailed):
+            h.conn.connect()
+        self.assertIsNone(h.conn.connected_at, "a failed connect records no handshake")
+        h.conn.connect()
+        self.assertEqual(h.conn.connected_at, at["now"])
+        h.conn.gateway_clock_offset = timedelta(hours=-4)
+        h.conn.mark_reconciled()
+        h.fake.drop()
+        h.conn.pump(0.01)
+        at["now"] = datetime(2026, 10, 28, 15, 0, tzinfo=timezone.utc)
+        h.fake.connect_behaviours = ["silent"]
+        with self.assertRaises(ConnectFailed):
+            h.conn.connect()
+        self.assertIsNone(h.conn.connected_at, "the dropped link's handshake is not the new one's")
+        self.assertIsNone(h.conn.gateway_clock_offset, "nor is its clock check")
+        h.conn.reconnect()
+        self.assertEqual(h.conn.connected_at, at["now"])
+        self.assertIsNone(h.conn.gateway_clock_offset, "a new link's clock is checked afresh at its reconcile")
+
+
 class DisconnectDetectionTests(unittest.TestCase):
     def test_socket_close_is_reported(self):
         h = Harness()

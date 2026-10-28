@@ -1,7 +1,7 @@
 """Turning IBKR's order status, open-order and execution callbacks into plain records."""
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +15,7 @@ from test_connection import Harness
 from connection import REQUEST_ID_BASE, NotConnected
 from orders import (BrokerOrdersIncomplete, OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
                     CommissionReport, OpenOrdersUnsettled, UnrecognisedOrderReport, collect_broker_orders,
-                    collect_settled_broker_orders, match_on_reconnect, parse_execution_time)
+                    collect_settled_broker_orders, execution_report, match_on_reconnect, parse_execution_time)
 
 STATE = SimpleNamespace(status="Submitted")
 
@@ -31,7 +31,8 @@ class Tracked:
         self.h = Harness()
         self.h.conn.connect()
         self.reports = []
-        self.tracker = OrderTracker(ACCOUNT, 11, sink or self.reports.append)
+        # A Gateway clock taken as checked: the execution times are the Gateway's (orders.execution_report).
+        self.tracker = OrderTracker(ACCOUNT, 11, sink or self.reports.append, unverified_receipt=lambda: None)
         self.h.conn.subscribe(self.tracker.on_event)
         self.cb = self.h.fake.callbacks
 
@@ -361,6 +362,106 @@ class OrderStatusTests(unittest.TestCase):
         for bad in ("20261016  09:30:01", "yesterday", "20261016 09:30:01 Mars/Olympus"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_execution_time(bad)
+
+
+    def test_an_eastern_label_is_read_as_new_york_time_whatever_its_season(self):
+        # IBKR's short label does not follow daylight saving time (IB Gateway 10.50 on TZ=America/New_York gave
+        # "EST" at 09:49:19 EDT on 2026-10-28): EST, EDT and their long names are read on New York's clock, the
+        # Gateway's being checked as New York's at every connect (ADR 0019, amended 2026-10-28).
+        for text, utc in (("20261028 09:49:19 EST", datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc)),
+                          ("20261028 09:49:19 EDT", datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc)),
+                          ("20261028 09:49:19 Eastern Standard Time",
+                           datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc)),
+                          ("20270114 10:00:01 EDT", datetime(2027, 1, 14, 15, 0, 1, tzinfo=timezone.utc)),
+                          ("20270114 10:00:01 Eastern Daylight Time",
+                           datetime(2027, 1, 14, 15, 0, 1, tzinfo=timezone.utc)),
+                          ("20270114 10:00:01 EST", datetime(2027, 1, 14, 15, 0, 1, tzinfo=timezone.utc)),
+                          ("20261028 09:49:19 US/Eastern", datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc)),
+                          ("20261028 09:49:19 EST5EDT", datetime(2026, 10, 28, 13, 49, 19, tzinfo=timezone.utc))):
+            with self.subTest(text=text):
+                self.assertEqual(parse_execution_time(text), utc)
+
+
+
+def utc(*args):
+    return datetime(*args, tzinfo=timezone.utc)
+
+
+class EasternLabelTests(unittest.TestCase):
+    """An execution's time read on a Gateway whose clock is, or is not, shown to be New York's (ADR 0019, amended
+    2026-10-28)."""
+
+    def test_an_eastern_label_is_read_on_new_yorks_clock(self):
+        for text, at in (("20261028 15:30:00 EST", utc(2026, 10, 28, 19, 30)),
+                         ("20261028 15:30:00 Eastern Standard Time", utc(2026, 10, 28, 19, 30)),
+                         ("20270114 10:00:01 EDT", utc(2027, 1, 14, 15, 0, 1)),
+                         ("20270114 10:00:01 Eastern Daylight Time", utc(2027, 1, 14, 15, 0, 1)),
+                         ("20261028 15:30:00 US/Eastern", utc(2026, 10, 28, 19, 30))):
+            with self.subTest(text=text):
+                self.assertEqual(parse_execution_time(text), at)
+
+    def test_a_time_new_york_skipped_is_refused_under_every_label(self):
+        for zone in ("EST", "EDT", "Eastern Standard Time", "Eastern Daylight Time", "US/Eastern", "America/New_York",
+                     "EST5EDT"):
+            with self.subTest(zone=zone):
+                with self.assertRaises(ValueError) as caught:
+                    parse_execution_time("20260308 02:30:00 " + zone)
+                self.assertIn("did not happen", str(caught.exception))
+
+    def test_the_repeated_autumn_hour_takes_its_later_reading(self):
+        # 01:30 on 2026-11-01 is 05:30Z (EDT) and 06:30Z (EST): the later is the one no check of the close can miss.
+        for zone in ("EST", "EDT", "US/Eastern", "America/New_York"):
+            with self.subTest(zone=zone):
+                self.assertEqual(parse_execution_time("20261101 01:30:00 " + zone), utc(2026, 11, 1, 6, 30))
+
+    def test_on_an_unchecked_clock_the_receipt_time_stands_for_the_execution(self):
+        # A Gateway an hour slow in winter stamps a 16:30 New York execution "15:30:00 EST" (20:30Z by any reading
+        # of its label); the adapter received it at 21:30Z, and it cannot have happened later than that.
+        received = utc(2027, 1, 14, 21, 30, 2)
+        report = execution_report(contract(), execution(time="20270114 15:30:00 EST"), received_at=received)
+        self.assertEqual((report.time, report.occurred_at), ("20270114 15:30:00 EST", received))
+        self.assertEqual(execution_report(contract(), execution(time="20270114 15:30:00 EST")).occurred_at,
+                         utc(2027, 1, 14, 20, 30))
+        with self.assertRaises(ValueError):
+            execution_report(contract(), execution(time="20260308 02:30:00 EST"), received_at=received)
+
+    def test_a_tracker_told_nothing_of_the_clock_stamps_no_earlier_than_its_receipt(self):
+        # Fail closed (AGENTS.md): built without unverified_receipt, a tracker does not believe the Gateway's clock.
+        reports = []
+        t = Tracked(lambda report: None)  # the harness's own tracker; the one under test follows
+        t.tracker = OrderTracker(ACCOUNT, 11, reports.append)
+        t.h.conn.subscribe(t.tracker.on_event)
+        before = datetime.now(timezone.utc)
+        t.cb.exec_details(-1, contract(), execution(exec_id="x.03", time="20261016 09:30:01 US/Eastern"))
+        t.drain()
+        fill = [r for r in reports if isinstance(r, ExecutionReport)][0]
+        self.assertGreaterEqual(fill.occurred_at, before)
+
+    def test_the_tracker_stamps_executions_as_its_clock_check_allows(self):
+        received = {"at": utc(2027, 1, 14, 21, 30, 2)}
+        reports = []
+        t = Tracked(lambda report: None)  # the harness's own tracker; the one under test follows
+        t.tracker = OrderTracker(ACCOUNT, 11, reports.append, unverified_receipt=lambda: received["at"])
+        t.h.conn.subscribe(t.tracker.on_event)
+        t.cb.exec_details(-1, contract(), execution(exec_id="x.01", time="20270114 15:30:00 EST"))
+        t.drain()
+        received["at"] = None
+        t.cb.exec_details(-1, contract(), execution(exec_id="x.02", time="20270114 15:30:00 EST"))
+        t.drain()
+        fills = {r.exec_id: r.occurred_at for r in reports if isinstance(r, ExecutionReport)}
+        self.assertEqual(fills, {"x.01": utc(2027, 1, 14, 21, 30, 2), "x.02": utc(2027, 1, 14, 20, 30)})
+
+    def test_the_account_read_stamps_executions_as_the_connections_clock_check_allows(self):
+        h = Harness()
+        h.conn._wall_clock = lambda: utc(2027, 1, 14, 22, 0)
+        h.conn.connect()
+        h.fake.executions = [(contract(), execution(time="20270114 15:30:00 EST"))]
+        self.assertEqual(collect_broker_orders(h.conn).executions[0].occurred_at, utc(2027, 1, 14, 22, 0))
+        h.conn.gateway_clock_offset = timedelta(hours=-5)
+        self.assertEqual(collect_broker_orders(h.conn).executions[0].occurred_at, utc(2027, 1, 14, 20, 30))
+        # New York's offset since changed (the clocks went forward): the check no longer holds.
+        h.conn._wall_clock = lambda: utc(2027, 3, 15, 14, 0)
+        self.assertEqual(collect_broker_orders(h.conn).executions[0].occurred_at, utc(2027, 3, 15, 14, 0))
 
 
 class RequestIdTests(unittest.TestCase):

@@ -173,16 +173,17 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, time as clock_time, timezone
+from datetime import datetime, time as clock_time, timedelta, timezone
 from decimal import Decimal
 
 from connection import Connection, LinkChanged, NotConnected
 from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReading, SnapshotRefused, market_open,
                       nyse_calendar, run_name)
-from orders import (OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker,
-                    agrees_with_account, collect_broker_orders, collect_settled_broker_orders, match_on_reconnect,
-                    order_key)
-from relay import (LOG_INPUT, OUTBOX_SUFFIX, RUN_APPROVED, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
+from orders import (EASTERN_LABELS, NEW_YORK, NEW_YORK_ZONES, OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete,
+                    OpenOrdersUnsettled, OrderTracker, agrees_with_account, collect_broker_orders,
+                    collect_settled_broker_orders, gateway_clock_trusted, match_on_reconnect, new_york_instants,
+                    order_key, unverified_receipt)
+from relay import (LOG_INPUT, OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
                    Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
                    run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
@@ -256,67 +257,118 @@ CASH_DRIFT_BOUND = Decimal("0.01")
 # open, so a session decided is decided before the next one starts (ADR 0019,
 # amended 2026-10-27).
 PROOF_WAIT_UNTIL = clock_time(9, 0)
-# The zone names IB Gateway gives an execution's time when its login is on
-# New York time. IBKR's executions reach back only to midnight in that zone
-# (ADR 0025 point 5); ti-gateway.service sets TZ=America/New_York, and an
-# execution reported in any other zone shows the list's midnight is not New
-# York's, so a morning reading is withheld (ADR 0019, amended 2026-10-27).
-NEW_YORK_ZONES = frozenset(("US/Eastern", "America/New_York", "EST5EDT"))
-# New York's abbreviations, and the long names IB Gateway may give for them, each New York's only while it is in
-# force there.
-NEW_YORK_ABBREVIATIONS = {"EST": "EST", "EDT": "EDT", "Eastern Standard Time": "EST",
-                          "Eastern Daylight Time": "EDT"}
+# IBKR's executions reach back only to midnight in IB Gateway's own zone (ADR 0025 point 5);
+# ti-gateway.service sets TZ=America/New_York, and a connection or execution time in any zone but New York's
+# (orders.NEW_YORK_ZONES, orders.EASTERN_LABELS) shows the list's midnight is not New York's, so a morning reading is
+# withheld (ADR 0019, amended 2026-10-27). IBKR's Eastern label does not follow daylight saving time, so it says
+# nothing of the season: the Gateway's clock is shown to be New York's by its connection time, read on New York's
+# clock, falling within GATEWAY_CLOCK_TOLERANCE of the adapter's own clock (NTP-synced) when the link connected (ADR
+# 0019, amended 2026-10-28). A Gateway on fixed EST in summer is an hour off; another zone labelled EST is hours off.
+GATEWAY_CLOCK_TOLERANCE = timedelta(minutes=5)
+_SET_NEW_YORK = ("set IB Gateway to New York time (ti-gateway.service, TZ=America/New_York, and its login's time "
+                 "zone)")
 
 
-def gateway_zone_problem(text, what="IB Gateway's connection time"):
-    """Why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", does not show it on New York time; "" when it
-    does. what names the text in the reason, which quotes it exactly as given.
+def _new_york_readings(text, what):
+    """(problem, readings): why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", is not a New York reading
+    ("" when it is), and when it is, the instants (UTC) it can stand for on New York's clock: two in the hour repeated
+    when daylight saving time ends, one otherwise. what names the text in the reason, which quotes it as given.
 
-    The TWS API gives a session's connection time (EClient.twsConnectionTime)
-    and each execution's time in the Gateway's own zone, the zone its
-    execution list's midnight is in (ADR 0025 point 5). IBKR documents the
-    call, not the format, so it is read defensively (ADR 0019, amended
-    2026-10-27; AGENTS.md: fail closed): the zone, everything after the date
-    and time, must be a New York zone name (NEW_YORK_ZONES), or an
-    abbreviation or long name (NEW_YORK_ABBREVIATIONS) New York used at the
-    time stated, at either reading of a local time repeated when daylight
-    saving time ends; a local time New York skipped when daylight saving
-    time began, anything else, or a text not of that shape, is a problem.
+    IBKR documents the call, not the format, so it is read defensively (ADR 0019, amended 2026-10-27; AGENTS.md: fail
+    closed): the zone, everything after the date and time, must be a New York zone name or an Eastern label, the label
+    taken on New York's clock whatever its season (ADR 0019, amended 2026-10-28); a local time New York skipped when
+    daylight saving time began, any other zone, or a text not of that shape, is a problem.
     """
     parts = text.split(None, 2) if isinstance(text, str) else []
     if len(parts) != 3:
         return ("{} {!r} is not 'YYYYMMDD HH:MM:SS Zone', so the zone its list of executions starts its midnight "
-                "in is not known".format(what, text))
+                "in is not known".format(what, text)), ()
     try:
         local = datetime.strptime(parts[0] + " " + parts[1], "%Y%m%d %H:%M:%S")
     except ValueError:
         return ("{} {!r} does not state a date and time that can be read, so the zone it is in is not "
-                "trusted".format(what, text))
+                "trusted".format(what, text)), ()
     zone = parts[2].strip()
-    if zone in NEW_YORK_ZONES or zone in NEW_YORK_ABBREVIATIONS:
-        # A wall-clock time New York skipped (the hour the clocks go forward) does not come back from UTC as
-        # itself: the text is no New York reading at all. The repeated autumn hour does, at its first reading.
-        aware = local.replace(tzinfo=nyse_calendar.NEW_YORK)
-        try:
-            back = aware.astimezone(timezone.utc).astimezone(nyse_calendar.NEW_YORK).replace(tzinfo=None)
-            used = {local.replace(tzinfo=nyse_calendar.NEW_YORK, fold=fold).tzname() for fold in (0, 1)}
-        except (OverflowError, ValueError, OSError) as err:
-            # Fail closed (AGENTS.md): a time the calendar cannot place is no New York reading.
-            return ("{} {!r} cannot be placed in New York's calendar ({}), so it is not a New York "
-                    "reading".format(what, text, type(err).__name__))
-        if back != local:
-            return ("{} {!r} is a time that did not happen in New York (the clocks went forward over it), so it "
-                    "is not a New York reading".format(what, text))
-    if zone in NEW_YORK_ZONES:
+    if zone not in NEW_YORK_ZONES and zone not in EASTERN_LABELS:
+        return ("{} {!r} is in the zone {!r}, not New York's: IBKR's executions reach back only to midnight in the "
+                "Gateway's own zone, so the midnight its list starts at is not New York's; {}".format(
+                    what, text, zone, _SET_NEW_YORK)), ()
+    try:
+        # A wall-clock time New York skipped (the hour the clocks go forward) is no New York reading at all; the
+        # repeated autumn hour is, at either reading (orders.new_york_instants).
+        return "", new_york_instants(local)
+    except ValueError:
+        return ("{} {!r} is a time that did not happen in New York (the clocks went forward over it), so it "
+                "is not a New York reading".format(what, text)), ()
+    except (OverflowError, OSError) as err:
+        # Fail closed (AGENTS.md): a time the calendar cannot place is no New York reading.
+        return ("{} {!r} cannot be placed in New York's calendar ({}), so it is not a New York "
+                "reading".format(what, text, type(err).__name__)), ()
+
+
+def gateway_zone_problem(text, what="IBKR's execution time"):
+    """Why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", is not a New York reading; "" when it is.
+
+    The zone check alone (_new_york_readings), for each execution's time: an execution may be hours old, so its
+    time cannot be held against the adapter's clock; the connection time's clock check (gateway_clock_problem) is
+    what shows the Gateway's clock, and so its executions' times, are New York's.
+    """
+    return _new_york_readings(text, what)[0]
+
+
+def _span(delta):
+    seconds = int(abs(delta).total_seconds())
+    minutes, seconds = divmod(seconds, 60)
+    return "{} minutes".format(minutes) + (" {} seconds".format(seconds) if seconds else "")
+
+
+def _utc_offset(at):
+    offset = at.astimezone(NEW_YORK).utcoffset()
+    sign, offset = ("-", -offset) if offset < timedelta(0) else ("+", offset)
+    hours, rest = divmod(int(offset.total_seconds()), 3600)
+    return "UTC{}{:02d}:{:02d}".format(sign, hours, rest // 60)
+
+
+def clock_change_problem(connected_at, now):
+    """Why IB Gateway's clock, checked when the link connected at connected_at, is not known to be New York's at
+    now: New York's clocks changed between them ("" when they did not). A Gateway on fixed EST matches New York's
+    clock until the clocks go forward, so a link kept (or restored by Gateway, 1101/1102) with no new handshake across
+    the change is trusted again only once it connects again (ADR 0019, amended 2026-10-28)."""
+    if connected_at is None or now is None:
         return ""
-    if zone in NEW_YORK_ABBREVIATIONS:
-        if NEW_YORK_ABBREVIATIONS[zone] in used:
-            return ""
-        return ("{} {!r} is in {}, which is not what New York uses at that date and time: the Gateway is not on New "
-                "York time".format(what, text, zone))
-    return ("{} {!r} is in the zone {!r}, not New York's: IBKR's executions reach back only to midnight in the "
-            "Gateway's own zone, so the midnight its list starts at is not New York's; set IB Gateway to New York "
-            "time (ti-gateway.service, TZ=America/New_York, and its login's time zone)".format(what, text, zone))
+    before, after = connected_at.astimezone(NEW_YORK).utcoffset(), now.astimezone(NEW_YORK).utcoffset()
+    if before == after:
+        return ""
+    return ("New York's clocks changed ({} to {}) since IB Gateway's clock was checked when the link connected ({}), "
+            "so it is not known to be on New York time until the link connects again".format(
+                _utc_offset(connected_at), _utc_offset(now),
+                connected_at.astimezone(NEW_YORK).strftime("%Y-%m-%d %H:%M:%S %Z")))
+
+
+def gateway_clock_problem(text, connected_at, now=None, what="IB Gateway's connection time"):
+    """Why text, the session's connection time IB Gateway gave at the handshake (TWS API EClient.twsConnectionTime,
+    "YYYYMMDD HH:MM:SS Zone" in the Gateway's own zone), does not show its clock on New York time; "" when it does.
+
+    It must be a New York reading (_new_york_readings), and one of the instants it can stand for must be within
+    GATEWAY_CLOCK_TOLERANCE of connected_at, the adapter's own clock when the link connected (Connection.connected_at;
+    ADR 0019, amended 2026-10-28): that one is taken, so the clock settles the hour repeated when daylight saving
+    time ends, and with none so near, or no connected_at, it is a problem quoting the text as given. With now, the
+    check holds only while New York is at the UTC offset it was at connected_at (clock_change_problem).
+    """
+    problem, readings = _new_york_readings(text, what)
+    if problem:
+        return problem
+    if connected_at is None:
+        return ("{} {!r} cannot be compared with the adapter's clock at the handshake (none was recorded), so the "
+                "Gateway's clock is not known to be on New York time".format(what, text))
+    off = min((at - connected_at for at in readings), key=abs)
+    if abs(off) <= GATEWAY_CLOCK_TOLERANCE:
+        return clock_change_problem(connected_at, now)
+    return ("{} {!r}, read on New York's clock, is {} {} the adapter's clock when it connected ({}), more than the "
+            "{} allowed: the Gateway is not on New York time; {}".format(
+                what, text, _span(off), "ahead of" if off > timedelta(0) else "behind",
+                connected_at.astimezone(NEW_YORK).strftime("%Y-%m-%d %H:%M:%S %Z"),
+                _span(GATEWAY_CLOCK_TOLERANCE), _SET_NEW_YORK))
 
 
 class ReconcileIncomplete(Exception):
@@ -376,13 +428,45 @@ def _event_time_readable(payload, field):
     return at.tzinfo is not None
 
 
-def _recorded_at_or_after(envelope, moment):
-    """Whether a logged input's recorded time is at or after moment; True when it cannot be read (fail closed)."""
+def close_window(close):
+    """The earliest instant a Gateway's stamp counts as at the close: GATEWAY_CLOCK_TOLERANCE before it, since a
+    Gateway up to that slow passes its clock check and may stamp a 16:02 execution 15:58 (ADR 0019, amended
+    2026-10-28). Every at-or-after-close check on the Gateway's stamps or the journal uses it."""
+    return close - GATEWAY_CLOCK_TOLERANCE
+
+
+def _book_stated_by(approval, close):
+    """Whether a run's approval states a starting book the owner approved no later than close (_journal_fills stops
+    behind it)."""
+    if not isinstance(approval, dict) or not isinstance(approval.get("starting_book"), dict):
+        return False
     try:
-        at = datetime.fromisoformat(str(envelope["recorded_at"]).replace("Z", "+00:00"))
-        return at.tzinfo is None or at >= moment
+        at = datetime.fromisoformat(str(approval["approved_at"]).replace("Z", "+00:00"))
     except (KeyError, TypeError, ValueError):
-        return True
+        return False
+    return at.tzinfo is not None and at <= close
+
+
+def _stood_for_a_close(envelope, close, checked):
+    """Whether a logged input is a broker snapshot the engine committed stamped as of a close no later than close,
+    one of checked, the snapshots whose readings ran the journal check of the close window (its reading stood for that
+    close under that check; _journal_fills stops behind it)."""
+    if envelope.get("type") != BROKER_SNAPSHOT_TYPE or envelope.get("id") not in checked:
+        return False
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict) or payload.get("as_of_close") is not True:
+        return False
+    try:
+        as_of = datetime.fromisoformat(str(payload["as_of"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return as_of.tzinfo is not None and as_of <= close
+
+
+def _side_of_close(at, close):
+    """Which side of close a stamp from close_window(close) on is, for a reason to name."""
+    return "at or after the close" if at >= close else "within {} before the close".format(
+        _span(GATEWAY_CLOCK_TOLERANCE))
 
 
 def _stamp(at):
@@ -484,7 +568,8 @@ class AdapterLoop:
         self._proof_retryable = False
         # Every execution time IBKR reported in the account on this connection, as it gave it
         # (_count_execution), and why IB Gateway's own zone, read at this connection's reconcile, is not New
-        # York's ("" when it is): both are read afresh at every reconcile (gateway_zone_problem).
+        # York's ("" when it is): both are read afresh at every reconcile (gateway_zone_problem,
+        # gateway_clock_problem).
         self._execution_zones = set()
         self._gateway_zone = "IB Gateway's connection time has not been read yet (no reconcile has run)"
         self.delivery = None if streams is None else Deliverer(
@@ -523,7 +608,8 @@ class AdapterLoop:
             held_path=self._pending_path + HELD_SUFFIX, owns_lock=self.relay.holds, ready=self.ready,
             journalled=self._journalled(chain), acknowledged=self.pending.acknowledged_corrections(),
             late_fills=self.pending.acknowledged_late_fills())
-        self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record)
+        self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record,
+                                    unverified_receipt=lambda: unverified_receipt(self.conn))
         self.conn.subscribe(self.tracker.on_event)
         self.conn.subscribe(self._count_execution)
         self.conn.connect_with_backoff()
@@ -538,6 +624,14 @@ class AdapterLoop:
             else:
                 self.conn.pump(self._poll)
         self._settle_waiting()
+
+    def _gateway_problem(self):
+        """Why IB Gateway's clock is not known to be New York's now ("" when it is): its reconcile's check
+        (gateway_clock_problem), or New York's clocks having changed since (clock_change_problem)."""
+        if self._gateway_zone or gateway_clock_trusted(self.conn):
+            return self._gateway_zone
+        return (clock_change_problem(self.conn.connected_at, self._now())
+                or "IB Gateway's clock has not been checked on this link")
 
     def _session(self):
         """Today's session date (New York) as the loop was given it, or None for the relay's own default."""
@@ -563,13 +657,19 @@ class AdapterLoop:
 
         Each reconcile starts this connection's evidence of IB Gateway's zone
         afresh: the zones of the executions it reports, and its connection
-        time's zone (gateway_zone_problem), so a Gateway set right and
+        time's zone and clock against the adapter's own when the link
+        connected (gateway_clock_problem), so a Gateway set right and
         reconnected is trusted again without a restart (ADR 0019, amended
-        2026-10-27).
+        2026-10-27 and 2026-10-28).
         """
         self._execution_zones = set()
+        self.conn.gateway_clock_offset = None
         try:
-            self._gateway_zone = gateway_zone_problem(self._api.connection_time())
+            self._gateway_zone = gateway_clock_problem(self._api.connection_time(), self.conn.connected_at,
+                                                       self._now())
+            if not self._gateway_zone:
+                # Executions read from here on are stamped as the Gateway gives them (orders.execution_report).
+                self.conn.gateway_clock_offset = self.conn.connected_at.astimezone(NEW_YORK).utcoffset()
         except Exception as err:  # any failure to read it is a zone not known (fail closed)
             self._gateway_zone = "IB Gateway's connection time could not be read ({})".format(type(err).__name__)
         if self._gateway_zone:
@@ -1078,15 +1178,19 @@ class AdapterLoop:
           proof (_morning_proof; the owner's decision of 2026-10-27, ADR
           0019 amended that day): before the next open, the Flex reader's
           executions proof covering the close to the reading's midnight with
-          nothing in it at or after the close, and no fill journalled since;
+          nothing in it at or after the close, and no fill journalled from
+          close_window(close) on (within 5 minutes before the close or after);
         - no open order for the account, of any client (working, pending or
           cancel-pending, snapshot.OPEN_STATUS), in the account read and in
           the last open-order list IBKR returned (broker);
-        - no execution in the account at or since the close in IBKR's list
-          (orders.collect_broker_orders), which shows other clients'
-          executions only when this client ID is Gateway's Master API client
-          ID; one stamped at the close's own second counts, since the engine
-          applies a fill stamped in a book's second to that book;
+        - no execution in the account stamped from close_window(close) on
+          (within 5 minutes before the close, a Gateway clock's tolerance,
+          or after it) in IBKR's list (orders.collect_broker_orders), which
+          shows other clients' executions only when this client ID is
+          Gateway's Master API client ID; one stamped at the close's own
+          second counts, since the engine applies a fill stamped in a book's
+          second to that book; on the session's own date, no fill journalled
+          from close_window(close) on either (_journal_reason);
         - every holding has an official close in the batch, so the account
           can be valued at the close, and IBKR's own net liquidation at the
           read is positive (the margin alarm's basis beside the valuation);
@@ -1119,6 +1223,7 @@ class AdapterLoop:
             reasons.append("it was read at {}, not after the close at {}".format(_stamp(reading.as_of), _stamp(close)))
         elif read_ny.date() != close_ny.date():
             reasons.extend(self._morning_proof(reading, close))
+        gateway = self._gateway_problem() if read_ny.date() == close_ny.date() else ""
         if reading.open_orders:
             reasons.append("IBKR shows {} open order(s) for the account (working, pending or cancel-pending): "
                            "{}".format(len(reading.open_orders),
@@ -1133,10 +1238,26 @@ class AdapterLoop:
             # stamped in the book's second to that book (internal/reconcile
             # Classify), so a closing-auction fill stamped at the close is
             # one the close's snapshot must not already show.
-            since = [e for e in broker.executions if e.occurred_at >= close]
+            # An execution stamped within the clock tolerance before the close is taken as at it (close_window).
+            since = [e for e in broker.executions if e.occurred_at >= close_window(close)]
             if since:
-                reasons.append("IBKR reports {} execution(s) in the account since the close: {}".format(
-                    len(since), ", ".join(e.exec_id for e in since)))
+                if gateway:
+                    # The cause first: on a link whose clock is not believed, each execution is stamped no earlier
+                    # than the adapter received it (orders.execution_report), so all of the day's are after the close.
+                    reasons.insert(0, "{}; so IBKR's execution times on this link are not believed, and each is "
+                                      "taken at the time the adapter received it if that is later".format(gateway))
+                reasons.append("IBKR reports {} execution(s) in the account since the close, or within {} before "
+                               "it (a Gateway clock up to that slow passes its check): {}".format(
+                                   len(since), _span(GATEWAY_CLOCK_TOLERANCE),
+                                   ", ".join("{} ({})".format(e.exec_id, _side_of_close(e.occurred_at, close))
+                                             for e in since)))
+        if read_ny.date() == close_ny.date() and reading.as_of > close:
+            # The journal's stamps are the ones the engine applies on top of the close's book: one journalled after
+            # the close on an earlier link (a fast Gateway's, before its check) withholds a same-date reading too,
+            # though IBKR's own list now shows the execution before the close.
+            journal = self._journal_reason(close)
+            if journal:
+                reasons.append(journal)
         valuation = None
         try:
             valuation = close_valuation(reading, closes)
@@ -1174,10 +1295,11 @@ class AdapterLoop:
           calendar), so the account has not traded since;
         - the executions proof lists every execution from the session's day
           up to that midnight, and none at or after the close;
-        - IBKR's own list shows none at or after the close (checked with the
-          other conditions, _not_as_of_close);
+        - IBKR's own list shows none from close_window(close) on (checked
+          with the other conditions, _not_as_of_close);
         - the journal (the engine's durable log and the outbox) holds no fill
-          stamped at or after the close.
+          stamped from close_window(close) on: within 5 minutes before the
+          close or after it.
         """
         reasons = []
         read_ny = reading.as_of.astimezone(nyse_calendar.NEW_YORK)
@@ -1201,18 +1323,31 @@ class AdapterLoop:
         now = self._now().astimezone(nyse_calendar.NEW_YORK)
         self._proof_retryable = (bool(proof) and not decisive and self._cash_ledger is not None and now > close
                                  and now.date() != day and now.time() < PROOF_WAIT_UNTIL)
-        if self._gateway_zone:
-            reasons.append(self._gateway_zone)
+        gateway = self._gateway_problem()
+        if gateway:
+            reasons.append(gateway)
         # Each execution time is checked as the connection time is, quoted as IBKR gave it.
         for text in sorted(self._execution_zones, key=repr):
             problem = gateway_zone_problem(text, "IBKR's execution time")
             if problem:
                 reasons.append(problem)
-        fills = self._journalled_fills_since(close)
-        if fills:
-            reasons.append("the journal records {} fill(s) stamped at or after the close, or with a time that cannot "
-                           "be compared with it: {}".format(len(fills), ", ".join(fills)))
+        journal = self._journal_reason(close)
+        if journal:
+            reasons.append(journal)
         return reasons
+
+    def _journal_reason(self, close):
+        """Why the journal shows the account may have traded at the close or after it ("" when it does not): the
+        fills _journal_fills finds, each saying which side of the close it is, and why the chain of runs' logs cannot
+        be read, each when there is one."""
+        fills, refused = self._journal_fills(close)
+        reasons = [refused] if refused else []
+        if fills:
+            reasons.append("the journal records {} fill(s) after the close, within {} before it (a Gateway clock up to "
+                           "that slow passes its check), or with a time that cannot be compared with it: {}; the "
+                           "journal keeps them, so this session's reading stays withheld".format(
+                               len(fills), _span(GATEWAY_CLOCK_TOLERANCE), ", ".join(fills)))
+        return "; ".join(reasons)
 
     def _flex_proof(self, close, midnight):
         """(reasons, decisive): why the Flex reader's executions proof does not show that nothing executed in the
@@ -1246,29 +1381,40 @@ class AdapterLoop:
                            "{})".format(_stamp(proof.covered_until), _stamp(midnight), proof.to_day.isoformat()))
         return reasons, False
 
-    def _journalled_fills_since(self, close):
-        """The fill IDs journalled stamped at or after close: in the outbox, this run's durable log, and the log of
-        every earlier run its Run approvals chain back to, as the previous close's book reads them
-        (book_basis.previous_close; relay.run_chain), so a fresh run hides no fill of the run before it.
+    def _journal_fills(self, close):
+        """(fills, refused): the fills journalled stamped from close_window(close) on (at or after the close, or
+        within GATEWAY_CLOCK_TOLERANCE before it), each named with its stamp and which of the two it is, in the
+        outbox, this run's durable log, and the log of every earlier run its Run approvals chain back to
+        (relay.run_chain), so a fresh run hides no fill of a run before it; and why the chain cannot be read ("" when
+        it can; fail closed, AGENTS.md).
 
-        The walk stops after the first earlier run whose business (every input but its configuration and Run
-        approval) was all recorded strictly before close: each run before it ended earlier still. A run with no
-        business is walked past. A chain that cannot be read is itself a reason (fail closed, AGENTS.md).
+        When a run's business was recorded proves nothing of the stamps of the runs behind it: a fill read on a link
+        whose Gateway clock was not believed is stamped with the later of the Gateway's reading and its receipt
+        (orders.execution_report), and a fast Gateway's reading can be hours after the fill was recorded. The walk
+        stops instead after the first run, newest first, that either
+        - holds a broker snapshot the engine committed stamped as of a close, whose reading this adapter recorded
+          under this same check (Deliverer.journal_checked_snapshots): it stood only because the check, reading every
+          run behind it, found no fill stamped from that close's window on, so every fill behind it is stamped before
+          that earlier close's window and so before this one's; a snapshot an earlier adapter recorded bounds
+          nothing; or
+        - was approved, no later than close, with a starting book the owner stated (ADR 0027): the account at the
+          approval, which every fill of the runs behind it is in, each made before it and so before the close. A
+          fresh run so approved is the way past a log that cannot be restored.
+        (ADR 0019, amended 2026-10-28.) A chain that cannot be read up to that run is a reason, given with the fills
+        found before it (fail closed, AGENTS.md).
         """
         payloads = [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
+        checked = self.delivery.journal_checked_snapshots() if self.delivery is not None else frozenset()
+        refused = ""
         try:
-            for n, (_, groups, _) in enumerate(run_chain(self._engine_log_path)):
+            for _, groups, approval in run_chain(self._engine_log_path):
                 inputs = [envelope for group in groups for _, kind, envelope in group if kind == LOG_INPUT]
                 payloads += [e["payload"] for e in inputs if e["type"] == FILL_TYPE]
-                # A run's configuration and Run approval say nothing about when its business ran: a run holding
-                # nothing else is walked past, never taken as ending before the close.
-                business = [e for e in inputs if e["type"] != RUN_APPROVED and not e["type"].endswith(
-                    ".configuration")]
-                if n > 0 and business and not any(_recorded_at_or_after(e, close) for e in business):
+                if any(_stood_for_a_close(e, close, checked) for e in inputs) or _book_stated_by(approval, close):
                     break
-        except ResolveRefused as refused:
-            return ["the chain of runs' logs cannot be read, so their fills cannot be checked ({})".format(refused)]
-        found = []
+        except ResolveRefused as err:
+            refused = "the chain of runs' logs cannot be read, so their fills cannot be checked ({})".format(err)
+        found, seen = [], set()
         for payload in payloads:
             ident = str(payload.get("fill_id", "a fill with no ID")) if isinstance(payload, dict) else "a fill"
             try:
@@ -1279,9 +1425,10 @@ class AdapterLoop:
             if at.tzinfo is None:
                 # Fail closed (AGENTS.md): a time with no zone cannot be placed against the close.
                 found.append("{} (its time has no zone)".format(ident))
-            elif at >= close and ident not in found:
-                found.append(ident)
-        return found
+            elif at >= close_window(close) and ident not in seen:
+                seen.add(ident)
+                found.append("{} (stamped {}, {})".format(ident, _stamp(at), _side_of_close(at, close)))
+        return found, refused
 
     def _awaits_proof(self, close):
         """Whether a batch for the session closing at close waits, unread, for the Flex reader's executions proof.

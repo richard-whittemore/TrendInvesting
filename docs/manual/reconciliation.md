@@ -664,13 +664,67 @@ time zone, which its unit sets to New York's (`TZ=America/New_York` in
 `ti-gateway.service`; do not change it, and keep the Gateway login's time
 zone New York's). The adapter checks it at every connect and reconnect,
 whether or not anything has executed: it reads the connection time the
-Gateway gives (for example `20261027 07:10:01 US/Eastern`; `EST`, `EDT`,
-`Eastern Standard Time` and `Eastern Daylight Time` stand only in their own
-season, either one in the hour repeated when the clocks go back), and every
-execution's time the same way. Any other zone, or a time it cannot read,
-withholds the morning reading, the page and `journalctl -u
-ti-adapter-boost` quoting the Gateway's text exactly as it gave it (send
-that to the developer if it is New York time in a form not listed here); once the
+Gateway gives (for example `20261027 07:10:01 US/Eastern`, or `20261028
+09:49:19 EST`). Its zone must be a New York name (`US/Eastern`,
+`America/New_York`, `EST5EDT`) or an Eastern label (`EST`, `EDT`, `Eastern
+Standard Time`, `Eastern Daylight Time`). IBKR's label does not follow
+daylight saving time (on 2026-10-28 a Gateway on New York time said `EST`
+in summer time), so the label is not taken to say the season: instead the
+time it states, read on New York's clock, must be within 5 minutes of the
+adapter's own clock when it connected. A Gateway on a fixed `EST` all year
+is an hour off in summer, and one in another zone is hours off; either
+withholds the morning reading, and the message says how far off it was and
+which way (for example `60 minutes 3 seconds behind`). In the hour repeated
+when the clocks go back, the reading that matches the adapter's clock is
+taken. The check holds only until New York's clocks next change: a link
+that stays up (or that the Gateway restores without reconnecting) across a
+change is not trusted after it, and withholds the morning reading until it
+connects again (the Gateway's nightly restart does that). Every
+execution's time must be in one of the same zones (the clocks are not
+compared: an execution can be hours old). While the link's check holds it
+is read on New York's clock whatever its label; until then, the adapter
+records it at the time it heard of it (or the Gateway's time, if later),
+so a fill after the close is never recorded as one before it, even by a
+Gateway whose clock is slow. A fill recorded that way may carry a time
+later than it happened: by as long as the adapter took to hear of it, or,
+when the Gateway's time is the later, by as much as the Gateway's clock is
+fast (hours, for a Gateway on another zone's clock). On an evening reading
+over such a link, an execution listed since the close is withheld with the
+Gateway's clock named first as the cause. Because a Gateway up to 5 minutes
+slow still passes the check, an execution or fill stamped within five
+minutes before that session's close (from 3:55 p.m. on a normal day,
+12:55 p.m. on a 1 p.m. early close) is taken as at the close, and the
+reading is withheld; the reason names each one and says whether it is
+after the close or within those five minutes. A fill in the journal in
+that window keeps that session's reading withheld for good (the journal
+is never rewritten), on the evening reading as well as the next morning's.
+The check reads the earlier runs' logs back through the chain of approvals
+as far as the newest run holding a reading that stood for a close under
+this check (a broker snapshot stamped as of a close, recorded by this
+version of the adapter), or approved with a starting book you stated:
+that reading's own check, or your stated book, already covers every log
+behind it. Until the first such reading after this version is installed,
+it reads back to the account's first run. A log it needs and cannot read
+withholds that session's reading too, and the session stays withheld once
+the reading is sent; put the log back before the next session's reading.
+If it cannot be put back, start a fresh run approved with the starting
+book you read from IBKR's statement (`operator approve -log <latest
+run>.log -positions ... -cash ... -currency USD`, [operator](operator.md)).
+Approve it before that session's close: the journal check (this search of
+the logs for a fill at or after the close) and the
+previous-close comparison stop at that run only for closes at or after the
+approval, so a run approved after the close leaves that session withheld
+too. The logs the adapter reads at start for recent order history must
+still be present ([paper trading](paper-trading.md), "cannot read the
+engine's durable log"). A log the comparison with the previous close also
+needs stops the adapter instead.
+An
+execution at a time New York skipped when the clocks went forward stops the
+adapter (send the journal line to the developer). Any other zone, a
+connection time New York skipped, or a time it cannot read, withholds the
+morning reading, the page and `journalctl -u ti-adapter-boost` quoting the
+Gateway's text exactly as it gave it (send that to the developer if it is
+New York time in a form not listed here); once the
 Gateway is set right and the adapter reconnects, it is trusted again. IBKR's
 Python library hands the connection time over as raw bytes rather than
 text; the adapter turns them into text first. Whether it arrives as bytes
