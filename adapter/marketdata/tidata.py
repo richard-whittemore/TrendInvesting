@@ -83,23 +83,42 @@ the same file contract, with these differences:
   which no momentum configuration holds: the first stream starts at it, and
   every later file is based at the first file's calendar's first session,
   so the base is fixed for the life of the run (encode.py);
+- first, before any request to Massive, the latest settled session's
+  sector labels (sectors.record_sectors: the sources serve only that
+  session's files, so a morning whose Massive requests fail still keeps the
+  labels a later catch-up needs; a source that fails is named);
 - per session after the last stream the grouped bars are recorded once
   (history.backfill, the request Boost's job makes; a session either job
   has recorded is not fetched again, and a retracted session never is);
-  for the latest settled session also its universe, the common-stock
-  listing with that same recording's bars (steps.run_universe, so the two
-  recordings agree), and its sector labels (sectors.record_sectors; a source
-  that fails is named, and the encoder then refuses a universe session with
-  no labels within a week);
+  then, for every such session with the labels of both sources within the
+  week up to it, its universe: the common-stock listing dated that session
+  with that same recording's bars (steps.run_universe, so the two recordings
+  agree). A session without labels gets no universe, so the engine withholds
+  a decision on it (missing-universe) rather than every later stream being
+  refused for a universe that could never be labelled. So a month-start
+  morning whose firings all failed is caught up the next morning with the
+  month-end universe and histories;
+- Boost's job and the IRAs' may run at once (a Persistent catch-up after a
+  boot, a start by hand, a long catch-up still running at the next timer):
+  a recording another job writes between this job's check and its write is
+  taken as recorded (record.AlreadyRecorded), as a recording is written once
+  (record.py);
 - the holdings that get their own daily bars (encode's ``optional``) are
-  read from the engine's own durable log (holdings): the positions of its
-  last account snapshot, else of its Run approval's starting book, plus
-  every instrument filled since; a log with none holds nothing;
+  read from the engine's own durable log (_Holdings), a line at a time: the
+  positions of its last account snapshot, else of its Run approval's
+  starting book, plus every instrument filled since; a log with none holds
+  nothing, and a snapshot, fill or approval of a version kinds.py does not
+  name, or a log whose record hash chain breaks, is refused;
+- the ranker reads a private copy of the configuration bytes checked
+  against the engine's log, never the file's path;
 - the stream is encode's compact stream (``ranker``: cmd/universe-rank
   with the instance's configuration, go_ranker), read one session at a time
   within the stated memory budget (docs/live-trading/lessons-2026-10.md L1;
   docs/manual/market-data.md);
-- before a new file is written, the files a newly recorded split or
+- every firing first checks the run's files are one unbroken chain from
+  the warm-up (_check_chain: each begins where the one before it ends, read
+  from its own calendar), so a missing file stops the job; before a new
+  file is written, the files a newly recorded split or
   dividend could reach (those whose last session is on or after the start
   of this run's action window) are re-encoded alone, each with the holdings
   its own bars name, and must match byte for byte; a firing that finds the
@@ -117,6 +136,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from collections import namedtuple
 
 from . import encode, engine_log, history, kinds, massive, nyse_calendar, record, sectors, steps
@@ -127,11 +147,11 @@ STREAM = re.compile(r"boost-(\d{4}-\d{2}-\d{2})\.jsonl")
 # An instance's name: its stream folder and file prefix, its engine folder
 # and its configuration's name (ti-data@<instance>.service).
 INSTANCE = re.compile(r"[a-z][a-z0-9-]*")
-# The inputs the holdings are read from (internal/event): the adapter's
-# account snapshot (version 3, positions), the owner's Run approval and its
+# The inputs the holdings are read from (internal/event; their versions in
+# kinds.py): the adapter's account snapshot, the owner's Run approval and its
 # starting book, and the engine's fills.
-SNAPSHOT_TYPE, SNAPSHOT_POSITIONS_VERSION = kinds.ACCOUNT_SNAPSHOT
-FILL_TYPE = "execution.fill"
+SNAPSHOT_TYPE = kinds.ACCOUNT_SNAPSHOT[0]
+FILL_TYPE = kinds.TARGET_WEIGHT_FILL[0]
 # How far back each run's action window reaches: an action Massive publishes
 # up to this late is still recorded before a later session needs it.
 ACTION_OVERLAP = dt.timedelta(days=14)
@@ -280,63 +300,103 @@ def read_engine_log(path, engine=ENGINE):
     adapter/ibkr/relay.py's run_identity): a crash resume's log holds a copy
     of the crashed run's records, its approval included (ADR 0027 section
     6), so the resume keeps the identity, and a fresh run after an earlier
-    one has its own approval."""
+    one has its own approval.
+
+    A momentum log (``engine`` "momentum") is read keeping only its
+    configuration and, of every later input, its ID, type, version and
+    recorded time, with the holdings worked out as each group is committed
+    (_Holdings), so memory holds one line of the log, never its universe
+    snapshots and histories (docs/live-trading/lessons-2026-10.md L1). One
+    whose record hash chain breaks is refused: its holdings would come from
+    records changed after the engine wrote them (AGENTS.md rule 5)."""
     run = os.path.basename(path)[:-len(".log")]
     if not path.endswith(".log") or not run:
         raise Refused("{} is not an engine durable log (<run>.log)".format(path))
+    held = _Holdings(path) if engine == MOMENTUM else None
     try:
-        log = engine_log.read(path)
+        log = engine_log.read(path, keep=held.keep if held else None)
     except engine_log.LogUnreadable as err:
         raise _refused(err) from None
     if not log.groups:
         raise Refused("the engine's durable log {} holds no committed configuration input: start the engine "
                       "first".format(path))
+    if held and log.chain_break is not None:
+        raise Refused("the engine's durable log {} does not follow its record hash chain at record {}: the hash it "
+                      "states is not the one its records give (LOG_CHAIN_ALGORITHM), so it was changed after the "
+                      "engine wrote it, and neither its configuration nor its holdings are read. Restore it from the "
+                      "backup as the engine wrote it; never edit it (docs/manual/market-data.md, \"A crash "
+                      "resume\")".format(path, log.chain_break))
     n, _, first = log.groups[0][0]
     configuration = _logged_configuration(path, log.header, n, first, engine)
     inputs = [group[0][2] for group in log.groups]
     market = sum((e.get("type"), e.get("schema_version")) in kinds.DELIVERED_KINDS for e in inputs)
-    held = holdings(path, log.groups) if engine == MOMENTUM else ()
     return EngineLog(log.header["configuration_hash"], log.header["strategy_version"], run, configuration,
                      engine_log.identity(log.groups), tuple(e.get("id") for e in inputs), log.record_hashes,
-                     log.chain_break, market, held)
+                     log.chain_break, market, held.held() if held else ())
 
 
 def _positions(path, n, positions):
-    """The instruments of a positions list (account.snapshot version 3, a starting book); Refused if it is not
-    one, never read as holding nothing."""
+    """The instruments of a positions list (account.snapshot versions 3 and 4, a starting book); Refused if it
+    is not one, never read as holding nothing."""
     if not isinstance(positions, list):
-        raise _log_error(path, n, "its positions are not a list")
+        raise _log_error(path, n, "cannot read holdings: its positions are not a list")
     out = set()
     for p in positions:
         ticker = p.get("instrument_id") if isinstance(p, dict) else None
         if not isinstance(ticker, str) or not ticker:
-            raise _log_error(path, n, "its positions name a holding without an instrument: {!r}".format(p))
+            raise _log_error(path, n, "cannot read holdings: its positions name a holding without an instrument: "
+                                      "{!r}".format(p))
         out.add(ticker)
     return out
 
 
-def holdings(path, groups):
+class _Holdings:
     """The instruments a momentum run holds by its own durable log, which need their own daily bars (encode's
     ``optional``: ADR 0026 point 5, amended 2026-10-18, scores a holding across a gap only from its own bars):
-    the positions of the last committed account snapshot (version 3), else of the Run approval's starting
-    book (the book the owner confirmed the run starts from, ADR 0027), plus every instrument of a fill
-    committed after it, which a later snapshot will show. A log with none of these (a first run before its
-    first reading) holds nothing."""
-    held = set()
-    for group in groups:
-        n, _, e = group[0]
+    the positions of the last committed account snapshot (kinds.POSITIONS_SNAPSHOTS), else of the Run
+    approval's starting book (the book the owner confirmed the run starts from, ADR 0027), plus every
+    instrument of a fill committed after it, which a later snapshot will show. A log with none of these (a
+    first run before its first reading) holds nothing. A snapshot, fill or approval of a version this table
+    does not name is refused, never skipped (ADR 0015).
+
+    keep is engine_log.read's ``keep``: it reads each committed group as it is committed and keeps the first
+    (the configuration) whole and of the others only the input's ID, type, version and recorded time."""
+
+    def __init__(self, path):
+        self.path, self.current, self.groups = path, set(), 0
+
+    def keep(self, group):
+        n, kind, e = group[0]
+        self.groups += 1
+        if self.groups == 1:
+            return group
+        kind_version = (e.get("type"), e.get("schema_version"))
         payload = e.get("payload")
-        if (e.get("type"), e.get("schema_version")) == (SNAPSHOT_TYPE, SNAPSHOT_POSITIONS_VERSION):
-            held = _positions(path, n, (payload or {}).get("positions") if isinstance(payload, dict) else None)
-        elif e.get("type") == RUN_APPROVED and isinstance(payload, dict) and payload.get("starting_book") is not None:
-            book = payload["starting_book"]
-            held = _positions(path, n, book.get("positions") if isinstance(book, dict) else None)
+        if e.get("type") == SNAPSHOT_TYPE:
+            if kind_version not in kinds.POSITIONS_SNAPSHOTS:
+                raise _log_error(self.path, n, "cannot read holdings: account.snapshot version {} (this job reads "
+                                               "versions {})".format(e.get("schema_version"), ", ".join(
+                                                   str(v) for _, v in kinds.POSITIONS_SNAPSHOTS)))
+            self.current = _positions(self.path, n, payload.get("positions") if isinstance(payload, dict) else None)
+        elif e.get("type") == RUN_APPROVED:
+            if e.get("schema_version") not in kinds.RUN_APPROVED_VERSIONS:
+                raise _log_error(self.path, n, "cannot read holdings: {} version {}".format(
+                    RUN_APPROVED, e.get("schema_version")))
+            book = payload.get("starting_book") if isinstance(payload, dict) else None
+            if e.get("schema_version") >= kinds.RUN_APPROVED_BOOK_FROM and book is not None:
+                self.current = _positions(self.path, n, book.get("positions") if isinstance(book, dict) else None)
         elif e.get("type") == FILL_TYPE:
+            if kind_version != kinds.TARGET_WEIGHT_FILL:
+                raise _log_error(self.path, n, "cannot read holdings: {} version {}".format(
+                    FILL_TYPE, e.get("schema_version")))
             ticker = payload.get("instrument_id") if isinstance(payload, dict) else None
             if not isinstance(ticker, str) or not ticker:
-                raise _log_error(path, n, "its fill names no instrument")
-            held.add(ticker)
-    return tuple(sorted(held))
+                raise _log_error(self.path, n, "cannot read holdings: its fill names no instrument")
+            self.current.add(ticker)
+        return [(n, kind, {k: e.get(k) for k in ("id", "type", "schema_version", "recorded_at")})]
+
+    def held(self):
+        return tuple(sorted(self.current))
 
 
 def head_identity(path):
@@ -807,13 +867,93 @@ def _has_bars(data, day):
                for kind in ("grouped", "universe"))
 
 
-def run_momentum(data, streams, config, engine_log, key, now, settle, instance, ranker, session=None,
-                 backfill_from=None, client_factory=massive.Client, sectors_get=sectors.http_get, warn=None):
-    """Runs the momentum engine's job once (see above) and returns the stream's path."""
+def _check_chain(spans, retracted):
+    """Refuses unless the written files ([(first, last, path)], oldest first) are one unbroken chain: each
+    begins at the first session after the one before it ends (the first at the run's base), read from its
+    own calendar's time, never inferred from its neighbours. A file missing between two others, or the
+    warm-up's, is a published history that is gone, and stops the job for a person."""
+    for first, last, path in spans:
+        expected = first
+        while expected in retracted:
+            expected = nyse_calendar.sessions_after(expected, 1)[0]
+        with open(path) as f:
+            line = f.readline()
+        try:
+            envelope = json.loads(line)
+            if envelope["type"] != encode.CALENDAR[0]:
+                raise ValueError("its first input is {}, not the calendar".format(envelope["type"]))
+            begins = dt.date.fromisoformat(envelope["event_time"][:10])
+        except (ValueError, KeyError, TypeError) as e:
+            raise Refused("the run's file {} does not begin with its calendar ({}); this stops the job for a "
+                          "person".format(path, e)) from None
+        if begins != expected:
+            raise Refused("the run's files are not one unbroken chain: {} begins at {}, but the sessions from {} "
+                          "are in no file, so a file written for the run is missing; nothing more is written for "
+                          "the run: this stops the job for a person (restore the file from the backup, unchanged: "
+                          "docs/manual/market-data.md, \"A job for the IRAs\")".format(path, begins, expected))
+
+
+def _labelled(day, kinds_dates):
+    """Whether both sector sources have a recording dated within the week up to ``day``, the labels the
+    encoder reads a universe session with (encode._universe_rows, sectors.latest's 7 days); the checks of its
+    fetch time are the encoder's, here only whether one could serve."""
+    return all(any(day - dt.timedelta(days=7) <= d <= day for d in dates) for dates in kinds_dates.values())
+
+
+def _sector_dates(data):
+    out = {}
+    for kind in ("sectors-iwv", "sectors-nasdaq"):
+        out[kind] = {dt.date.fromisoformat(os.path.basename(p)[len(kind) + 1:-len(".json")])
+                     for p in glob.glob(os.path.join(data, kind + "_*.json"))}
+    return out
+
+
+def _record_sectors(data, session, sectors_get, now, settle, warn):
+    """The session's sector labels, before any request to Massive, so a morning whose Massive requests fail
+    still records the labels a later catch-up's universe needs (the sources serve only the latest session's
+    files). A recording another job writes first is taken as recorded and the other source fetched."""
+    for _ in range(3):
+        try:
+            sectors.record_sectors(data, session, get=sectors_get, now=now, settle=settle)
+            return
+        except record.AlreadyRecorded:
+            continue
+        except Exception as e:   # a source down: a universe session needs labels within a week (_labelled)
+            warn("the sector labels of {} were not recorded ({}: {})".format(session, type(e).__name__, e))
+            return
+
+
+def _record_universe(client, data, day, now, settle, warn):
+    """The universe of ``day``: its common-stock listing from Massive's reference tickers dated that day, with
+    the bars of its whole-market recording, so the two recordings agree. One another job records first is
+    taken as recorded."""
+    grouped = os.path.join(data, "grouped_{}.json".format(day.isoformat()))
+    if not os.path.exists(grouped):   # a universe recording alone holds the session's bars already
+        return
+    recorded = record.read(grouped)
+    try:
+        steps.run_universe(client, day, data, now=now, grouped_body={"results": recorded["bars"]}, settle=settle)
+    except record.AlreadyRecorded:
+        pass
+
+
+def run_momentum(data, streams, config, engine_log, key, now, settle, instance, ranker_bin=None, ranker=None,
+                 session=None, backfill_from=None, client_factory=massive.Client, sectors_get=sectors.http_get,
+                 warn=None):
+    """Runs the momentum engine's job once (see above) and returns the stream's path. The ranker is
+    ``ranker`` if given, else cmd/universe-rank at ``ranker_bin``, run on a private copy of the configuration's
+    bytes checked against the engine's log, never on the file's path, which may change while the job runs."""
     if warn is None:
         def warn(text):
             print("ti-data warning: " + text, file=sys.stderr)
-    cfg = read_momentum_config(config)
+    try:
+        with open(config, "rb") as f:
+            raw = f.read()
+        cfg = _momentum(json.loads(raw))
+    except (OSError, ValueError) as e:
+        raise Refused("cannot read the momentum configuration {}: {}".format(config, e)) from None
+    except Refused as e:
+        raise Refused("{}: {}".format(config, e)) from None
     if session is None:
         session = settled_session(now(), settle)
     else:
@@ -822,6 +962,18 @@ def run_momentum(data, streams, config, engine_log, key, now, settle, instance, 
     if log.boost != cfg:
         raise Refused("the momentum configuration {} is not the one the engine's durable log {} holds: the stream "
                       "would carry the run's configuration hash over another ranking".format(config, engine_log))
+    with tempfile.TemporaryDirectory(prefix="ti-data-") as private:
+        if ranker is None:
+            checked = os.path.join(private, "configuration.json")
+            with open(checked, "wb") as f:
+                f.write(raw)
+            ranker = encode.go_ranker([ranker_bin, "-config", checked])
+        return _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session, backfill_from,
+                             client_factory, sectors_get, warn, cfg, log)
+
+
+def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session, backfill_from,
+                  client_factory, sectors_get, warn, cfg, log):
     run_id = stream_run(os.path.join(streams, instance), engine_log, log, engine=MOMENTUM)
     identity = encode.Identity(log.configuration_hash, log.strategy_version, run_id)
     directory = os.path.join(streams, instance, run_id)
@@ -838,29 +990,37 @@ def run_momentum(data, streams, config, engine_log, key, now, settle, instance, 
         raise Refused("--backfill-from {} is not an NYSE session".format(base))
     if session < base:
         raise Refused("session {} precedes the run's base {}".format(session, base))
+    retracted = encode.load_retractions(data)
     spans = _spans(existing, base)
+    _check_chain(spans, retracted)
     for first, last, path in spans:
         if first <= session <= last:
             _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker)
             return path
     previous = existing[-1][0] if existing else None
     first = base if previous is None else nyse_calendar.sessions_after(previous, 1)[0]
-    retracted = encode.load_retractions(data)
     span = [d for d in nyse_calendar.sessions(first, session) if d not in retracted]
     if previous is None and len([d for d in nyse_calendar.sessions(base, session) if d not in retracted]) < cfg.trend_closes:
         raise Refused("the history {}..{} holds fewer sessions than the {} closes of the trend".format(
             base, session, cfg.trend_closes))
     latest = settled_session(now(), settle)
+    if session == latest and session not in retracted:
+        _record_sectors(data, session, sectors_get, now, settle, warn)
     client = _LatestSession(client_factory(key), session if session == latest else None)
     try:
         for day in span:
             if not _has_bars(data, day):
                 history.backfill(client, data, day, 1, now=now, settle=settle)
-        if session == latest and session not in retracted and not os.path.exists(
-                os.path.join(data, "universe_{}.json".format(session.isoformat()))):
-            recorded = record.read(os.path.join(data, "grouped_{}.json".format(session.isoformat())))
-            steps.run_universe(client, session, data, now=now, grouped_body={"results": recorded["bars"]},
-                               settle=settle)
+        labels = _sector_dates(data)
+        for day in span:
+            if os.path.exists(os.path.join(data, "universe_{}.json".format(day.isoformat()))):
+                continue
+            if _labelled(day, labels):
+                _record_universe(client, data, day, now, settle, warn)
+            elif day >= latest - dt.timedelta(days=7):
+                warn("the universe of {} is not recorded: no sector labels of both sources within the week up to "
+                     "it, so its snapshot could never be labelled; a decision on it is withheld "
+                     "(missing-universe)".format(day))
     except NotAvailableYet as e:
         if now() >= quiet_until(session):
             raise Refused("Massive still refuses session {} at or after {} New York on the next trading day, when "
@@ -868,12 +1028,6 @@ def run_momentum(data, streams, config, engine_log, key, now, settle, instance, 
                               session, QUIET_BEFORE.strftime("%H:%M"), e)) from None
         raise NotAvailableYet("session {} is not available yet on this plan ({}); the next firing asks again"
                               .format(session, e)) from None
-    if session == latest and session not in retracted:
-        try:
-            sectors.record_sectors(data, session, get=sectors_get, now=now, settle=settle)
-        except Exception as e:   # a source down: the encoder decides whether an earlier label recording serves
-            warn("the sector labels of {} were not recorded ({}: {}); the stream uses the latest within a week, "
-                 "or is refused".format(session, type(e).__name__, e))
     start = base + dt.timedelta(days=1)
     window = max(min(_actions_reach(data, start) + dt.timedelta(days=1), session - ACTION_OVERLAP), start)
     try:
@@ -887,12 +1041,14 @@ def run_momentum(data, streams, config, engine_log, key, now, settle, instance, 
     envelopes = encode.iter_encode(data, first, session, identity, required=list(cfg.required),
                                    optional=[t for t in log.holdings if t not in cfg.required], base=base,
                                    first_sequence=1, engine=MOMENTUM, excluded=excluded, ranker=ranker)
+    os.makedirs(directory, exist_ok=True)
+    path = encode.write_stream(os.path.join(directory, "{}-{}.jsonl".format(instance, session)), envelopes)
+    # After the stream is written, so every exclusion its encoding found is named.
     for ticker in sorted(excluded):
         for left in excluded[ticker]:
             print("ti-data: excluded {} from {} to {} ({} sessions): {}".format(
                 ticker, left.first, left.last, left.sessions, left.reason), file=sys.stderr)
-    os.makedirs(directory, exist_ok=True)
-    return encode.write_stream(os.path.join(directory, "{}-{}.jsonl".format(instance, session)), envelopes)
+    return path
 
 
 def parse(argv):
@@ -1033,8 +1189,7 @@ def main(argv, now=steps._now, client_factory=massive.Client, ranker=None, secto
         if momentum:
             path = run_momentum(args.data, args.streams, args.config, args.engine_log, key, now,
                                 dt.timedelta(minutes=args.settle_minutes), args.instance,
-                                ranker or encode.go_ranker([args.ranker, "-config", args.config]),
-                                session=args.session, backfill_from=args.backfill_from,
+                                ranker_bin=args.ranker, ranker=ranker, session=args.session, backfill_from=args.backfill_from,
                                 client_factory=client_factory, sectors_get=sectors_get)
         else:
             path = run(args.data, args.streams, args.config, args.engine_log, key, now,

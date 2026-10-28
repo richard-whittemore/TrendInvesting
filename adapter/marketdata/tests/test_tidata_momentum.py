@@ -15,7 +15,8 @@ from pathlib import Path
 from unittest import mock
 
 from marketdata import encode, nyse_calendar, record, tidata
-from marketdata.tests.test_compact import (CHURN_DAILY_SHA256, CHURN_FIRST, CHURN_LAST, CHURN_RETRACTED, FakeRanker,
+from marketdata.tests.test_compact import (CHURN_DAILY_SHA256, CHURN_FIRST, CHURN_LAST, CHURN_NAMES, CHURN_RETRACTED,
+                                           FakeRanker,
                                            build_churn, churn_ranker)
 from marketdata.tests.test_encode import IDENTITY, bars_for, build
 from marketdata.tests.test_sectors import iwv_csv, screener
@@ -40,10 +41,11 @@ def momentum_config(**momentum):
 
 
 def write_momentum_log(path, config, inputs=(), configuration_hash=IDENTITY.configuration_hash,
-                       strategy_version=IDENTITY.strategy_version):
+                       strategy_version=IDENTITY.strategy_version, broken=None):
     """A durable log in the engine's shape: the header, the configuration input, then each of ``inputs``
     ((type, schema version, payload)) as one committed group, each record's hash chained as
-    LOG_CHAIN_ALGORITHM states."""
+    LOG_CHAIN_ALGORITHM states; with ``broken`` (a record's sequence), that record's stated hash is not its
+    chain's, as in a log changed after the engine wrote it."""
     header = {"chain_algorithm": CHAIN, "configuration_hash": configuration_hash, "log_version": 1,
               "strategy_version": strategy_version}
     lines = [json.dumps(header, sort_keys=True, separators=(",", ":"))]
@@ -57,7 +59,7 @@ def write_momentum_log(path, config, inputs=(), configuration_hash=IDENTITY.conf
                     "source": "engine", "strategy_version": strategy_version, "configuration_hash": configuration_hash,
                     "payload_hash": hashlib.sha256(raw.encode()).hexdigest(), "payload": payload}
         chain = tidata.engine_log.chain_next(chain, "input", envelope, raw.encode("utf-8"))
-        digest = "sha256:" + chain.hex()
+        digest = "sha256:" + (hashlib.sha256(b"changed").hexdigest() if n == broken else chain.hex())
         lines.append(json.dumps({"record": {"sequence": n, "kind": "input", "envelope": envelope,
                                             "record_hash": digest}}, separators=(",", ":")))
         lines.append(json.dumps({"commit": {"sequence": n, "record_hash": digest}}, separators=(",", ":")))
@@ -65,8 +67,8 @@ def write_momentum_log(path, config, inputs=(), configuration_hash=IDENTITY.conf
     Path(path).write_text("\n".join(lines) + "\n")
 
 
-def snapshot(*held):
-    return SNAPSHOT + ({"account_id": "trad-ira", "as_of": "2025-01-02T21:00:00Z", "net_liquidation": 1000.0,
+def snapshot(*held, version=SNAPSHOT[1]):
+    return (SNAPSHOT[0], version) + ({"account_id": "trad-ira", "as_of": "2025-01-02T21:00:00Z", "net_liquidation": 1000.0,
                         "currency": "USD", "positions": [{"instrument_id": t, "quantity": 1} for t in sorted(held)]},)
 
 
@@ -181,6 +183,15 @@ def renumbered_from_two(raw):
     return "".join(out).encode()
 
 
+class ChurnMassive(FakeMassive):
+    """The churn fixture's listing: its first twenty sessions are recorded with their bars only, and those
+    with sector labels within a week get their universe from this listing."""
+
+    def tickers(self, day, kind):
+        self.calls.append(("tickers", day, kind))
+        return [{"results": [{"ticker": t, "type": "CS", "market": "stocks"} for t in CHURN_NAMES]}]
+
+
 class MomentumOutputContractTest(unittest.TestCase):
     """The encoder's output contract: the job's momentum run writes exactly what `encode --ranker` writes for
     the IRA's span, on the compact stream's recorded fixture (churn, actions, bad data and a retraction):
@@ -191,7 +202,8 @@ class MomentumOutputContractTest(unittest.TestCase):
         self.data = Path(self.tmp.name) / "data"
         self.data.mkdir()
         build_churn(str(self.data))
-        self.job = MomentumJob(self.tmp.name, data=self.data, ranker=churn_ranker, sectors_get=no_sector_pages)
+        self.job = MomentumJob(self.tmp.name, data=self.data, ranker=churn_ranker, sectors_get=no_sector_pages,
+                               client=ChurnMassive())
         self.previous = nyse_calendar.sessions(D(2026, 4, 29), D(2026, 4, 29))[0]
 
     def tearDown(self):
@@ -351,17 +363,25 @@ class MomentumJobTest(unittest.TestCase):
         snapshots = [e for e in job.envelopes(D(2026, 11, 27)) if e["type"] == "market.universe.snapshot"]
         self.assertEqual([e["payload"]["session"] for e in snapshots], ["2026-11-27"])
 
-    def test_a_sector_source_that_is_down_is_named_and_the_encoder_decides(self):
+    def test_a_session_with_no_labels_within_a_week_gets_no_universe_and_the_next_morning_carries_on(self):
+        # The sector sources are down at 11-27 and no labels are recorded within the week before it: the
+        # universe of 11-27 is not recorded (a universe the encoder can never label would refuse every later
+        # stream), the file is written without its snapshot, and the next morning writes its own.
         def down(url):
             raise tidata.massive.MarketDataError("HTTP 503 from a sector source")
         client = FakeMassive({D(2026, 11, 27): bars_for(D(2026, 11, 27))})
         job = MomentumJob(self.tmp.name, data=self.data, client=client, ranker=FakeRanker(), sectors_get=down)
         status, _, err = job.main(after_settle(D(2026, 11, 27)), "--backfill-from", "2026-11-23")
-        # No sector recording within a week before 11-27, so the encoder refuses the universe session.
-        self.assertEqual(status, 1)
-        self.assertIn("sector", err)
-        self.assertIn("sectors-iwv", err)
-        self.assertFalse(job.stream_dir().exists())
+        self.assertEqual(status, 0, err)
+        self.assertIn("the universe of 2026-11-27 is not recorded", err)
+        self.assertFalse((self.data / "universe_2026-11-27.json").exists())
+        self.assertNotIn("market.universe.snapshot", {e["type"] for e in job.envelopes(D(2026, 11, 27))})
+        self.assertEqual([c for c in client.calls if c[0] == "tickers"], [])
+        job.sectors_get = sector_pages
+        status, _, err = job.main(after_settle(D(2026, 11, 30)))
+        self.assertEqual(status, 0, err)
+        self.assertEqual([e["payload"]["session"] for e in job.envelopes(D(2026, 11, 30))
+                          if e["type"] == "market.universe.snapshot"], ["2026-11-30"])
 
     def test_a_missing_run_env_is_a_quiet_wait_naming_the_instance(self):
         job = MomentumJob(self.tmp.name, data=self.data)
@@ -549,3 +569,229 @@ class TemplateUnitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LogHoldingsRefusalTest(unittest.TestCase):
+    """The holdings are read only from inputs whose versions the job reads, from a log whose record hash
+    chain holds; anything else refuses the firing (AGENTS.md rule 5: fail closed)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.log = Path(self.tmp.name) / "run-1.log"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def held(self, inputs, **kw):
+        write_momentum_log(self.log, momentum_config(), inputs, **kw)
+        return tidata.read_engine_log(str(self.log), engine="momentum").holdings
+
+    def refused(self, inputs, **kw):
+        write_momentum_log(self.log, momentum_config(), inputs, **kw)
+        with self.assertRaises(tidata.Refused) as caught:
+            tidata.read_engine_log(str(self.log), engine="momentum")
+        return str(caught.exception)
+
+    def test_the_versions_with_positions_are_read(self):
+        # Version 3 is what the adapter writes today (Boost's book); version 4 adds the cash an IRA's buys are
+        # budgeted from, which the momentum engine reads.
+        self.assertEqual(self.held([snapshot("AAA"), snapshot("CCC", version=4)]), ("CCC",))
+        self.assertEqual(self.held([snapshot("CCC", version=4), snapshot("AAA", version=3)]), ("AAA",))
+
+    def test_a_snapshot_of_another_version_is_refused(self):
+        for version in (2, 5):
+            why = self.refused([snapshot("AAA"), snapshot("CCC", version=version)])
+            self.assertIn("cannot read holdings: account.snapshot version {}".format(version), why)
+
+    def test_a_fill_or_an_approval_of_a_version_the_job_does_not_read_is_refused(self):
+        self.assertIn("execution.fill version 4", self.refused([("execution.fill", 4, {"instrument_id": "AAA"})]))
+        approval = ("operator.run.approved", 7, {"starting_book": {"positions": []}})
+        self.assertIn("operator.run.approved version 7", self.refused([approval]))
+
+    def test_a_log_whose_record_hash_chain_breaks_is_refused_naming_it(self):
+        why = self.refused([snapshot("AAA"), snapshot("CCC")], broken=3)
+        self.assertIn(str(self.log), why)
+        self.assertIn("hash chain", why)
+
+    def test_a_firing_on_a_log_whose_chain_breaks_writes_nothing(self):
+        data = Path(self.tmp.name) / "data"
+        data.mkdir()
+        build(str(data))
+        job = MomentumJob(self.tmp.name, data=data, ranker=FakeRanker())
+        self.assertEqual(job.main(after_settle(D(2026, 11, 27)), "--backfill-from", "2026-11-23")[0], 0)
+        write_momentum_log(job.log, job.cfg, [snapshot("CCC")], broken=2)
+        status, _, err = job.main(after_settle(D(2026, 11, 30)))
+        self.assertEqual(status, 1)
+        self.assertIn(str(job.log), err)
+        self.assertFalse(job.path(D(2026, 11, 30)).exists())
+
+
+class StreamChainTest(unittest.TestCase):
+    """The run's files must form one unbroken chain from the warm-up to the newest; a missing file refuses
+    the firing, whichever files the morning re-encodes."""
+
+    def test_a_missing_file_between_two_others_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data))
+            job = MomentumJob(root, data=data, ranker=FakeRanker())
+            self.assertEqual(job.main(after_settle(D(2026, 11, 25)), "--backfill-from", "2026-11-23")[0], 0)
+            for day in (D(2026, 11, 27), D(2026, 11, 30)):
+                status, _, err = job.main(after_settle(day))
+                self.assertEqual(status, 0, err)
+            os.remove(job.path(D(2026, 11, 27)))
+            # The 11-30 file is outside no action window, but the firing that finds it still sees the gap.
+            status, _, err = job.main(after_settle(D(2026, 11, 30)))
+            self.assertEqual(status, 1)
+            self.assertIn("missing", err)
+            self.assertIn("the sessions from 2026-11-27", err)
+
+
+class RankerConfigurationTest(unittest.TestCase):
+    """The ranker reads the configuration the job checked against the engine's log, not the file's path,
+    which may change while the job runs."""
+
+    def test_the_ranker_reads_the_checked_bytes_even_when_the_file_changes(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data))
+            os.remove(data / "grouped_2026-11-27.json")
+            seen = []
+
+            def go_ranker(argv, timeout=None):
+                def rank(requests):
+                    path = argv[argv.index("-config") + 1]
+                    seen.append((path, Path(path).read_bytes()))
+                    return FakeRanker()(requests)
+                return rank
+
+            class Changing(FakeMassive):
+                def grouped(self, day):
+                    job.config.write_text(json.dumps(momentum_config(universe_size=99)))
+                    return super().grouped(day)
+            job = MomentumJob(root, data=data, client=Changing({D(2026, 11, 27): bars_for(D(2026, 11, 27))}))
+            checked = job.config.read_bytes()
+            with mock.patch.object(tidata.encode, "go_ranker", go_ranker):
+                status, _, err = job.main(after_settle(D(2026, 11, 27)), "--backfill-from", "2026-11-23",
+                                          ranker_path="/opt/trend-investing/bin/universe-rank")
+            self.assertEqual(status, 0, err)
+            self.assertTrue(seen)
+            for path, raw in seen:
+                self.assertNotEqual(path, str(job.config))
+                self.assertEqual(raw, checked)
+
+
+class ExclusionReportTest(unittest.TestCase):
+    def test_a_member_left_out_for_bad_data_is_named_on_stderr(self):
+        from marketdata.tests.test_encode import break_bar
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data))
+            break_bar(str(data), "2026-11-27", "DDD")
+            job = MomentumJob(root, data=data, ranker=FakeRanker())
+            self.assertEqual(job.main(after_settle(D(2026, 11, 25)), "--backfill-from", "2026-11-23")[0], 0)
+            status, _, err = job.main(after_settle(D(2026, 11, 27)))
+            self.assertEqual(status, 0, err)
+            self.assertIn("ti-data: excluded DDD from 2026-11-27 to 2026-11-27", err)
+
+
+class SharedRecordingTest(unittest.TestCase):
+    """Boost's job and the IRAs' may run at once (a Persistent catch-up after a boot, a start by hand, a long
+    catch-up still running at the next timer): a recording another job writes between this job's check and
+    its write is taken as recorded, and the firing carries on (record.py: a recording is written once)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name) / "data"
+        self.data.mkdir()
+        build(str(self.data))
+        os.remove(self.data / "grouped_2026-11-27.json")
+        self.bars = bars_for(D(2026, 11, 27))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def other(self, kind, **extra):
+        record.write(str(self.data), dict({"kind": kind, "source": "massive", "session": "2026-11-27",
+                                           "fetched_at": "2026-11-27T22:10:00Z", "adjusted": False,
+                                           "bars": self.bars}, **extra))
+
+    def run_with(self, client, sectors_get=sector_pages):
+        job = MomentumJob(self.tmp.name, data=self.data, client=client, ranker=FakeRanker(), sectors_get=sectors_get)
+        status, _, err = job.main(after_settle(D(2026, 11, 27)), "--backfill-from", "2026-11-23")
+        self.assertEqual(status, 0, err)
+        return job
+
+    def test_grouped_bars_another_job_records_first_are_used(self):
+        test = self
+
+        class Racing(FakeMassive):
+            def grouped(self, day):
+                test.other("grouped")
+                return super().grouped(day)
+        self.run_with(Racing({D(2026, 11, 27): self.bars}))
+        self.assertEqual(record.read(str(self.data / "grouped_2026-11-27.json"))["fetched_at"], "2026-11-27T22:10:00Z")
+
+    def test_a_universe_another_job_records_first_is_used(self):
+        test = self
+
+        class Racing(FakeMassive):
+            def tickers(self, day, kind):
+                test.other("universe", ticker_type="CS", tickers=list(TICKERS))
+                return super().tickers(day, kind)
+        job = self.run_with(Racing({D(2026, 11, 27): self.bars}))
+        self.assertTrue(job.path(D(2026, 11, 27)).exists())
+
+    def test_sector_labels_another_job_records_first_are_used(self):
+        from marketdata import sectors as sector_module
+
+        def racing(url):
+            if url == sector_module.IWV_URL and not (self.data / "sectors-iwv_2026-11-27.json").exists():
+                text, read = sector_pages(url)
+                record.write(str(self.data), {"kind": "sectors-iwv", "source": sector_module.IWV_SOURCE,
+                                              "session": "2026-11-27", "fetched_at": "2026-11-27T22:10:00Z",
+                                              "url": read, "as_of": "Mar 26, 2026", "body": text})
+            return sector_pages(url)
+        job = self.run_with(FakeMassive({D(2026, 11, 27): self.bars}), sectors_get=racing)
+        self.assertTrue((self.data / "sectors-nasdaq_2026-11-27.json").exists())
+        self.assertIn("market.universe.snapshot", {e["type"] for e in job.envelopes(D(2026, 11, 27))})
+
+
+class MissedMonthStartTest(unittest.TestCase):
+    """A month's first session whose morning firings all failed (a 403 that lasted past 08:00): the labels of
+    the month's last session were recorded that morning before any request to Massive, so the next morning's
+    catch-up records that session's universe from its date and the file carries the month's decision."""
+
+    def test_the_catch_up_after_a_missed_month_start_writes_the_month_end_universe_and_histories(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data), sector_session="2026-11-27")
+            os.remove(data / "universe_2026-11-30.json")
+
+            class Refusing(FakeMassive):
+                def grouped(self, day):
+                    if self.refuse:
+                        self.calls.append(("grouped", day))
+                        raise tidata.massive.MarketDataError("HTTP 403 from massive", status=403)
+                    return super().grouped(day)
+            client = Refusing({D(2026, 11, 30): bars_for(D(2026, 11, 30)), D(2026, 12, 1): bars_for(D(2026, 12, 1))})
+            client.refuse = False
+            job = MomentumJob(root, data=data, client=client, ranker=FakeRanker(members=("BBB", "AAA")))
+            self.assertEqual(job.main(after_settle(D(2026, 11, 27)), "--backfill-from", "2026-11-23")[0], 0)
+            client.refuse = True
+            status, _, err = job.main(dt.datetime(2026, 12, 1, 8, 15, tzinfo=nyse_calendar.NEW_YORK))
+            self.assertEqual(status, 1, err)
+            self.assertTrue((data / "sectors-iwv_2026-11-30.json").exists())
+            client.refuse = False
+            status, out, err = job.main(dt.datetime(2026, 12, 2, 6, 15, tzinfo=nyse_calendar.NEW_YORK))
+            self.assertEqual(status, 0, err)
+            stream = job.envelopes(D(2026, 12, 1))
+            self.assertEqual([e["payload"]["session"] for e in stream if e["type"] == "market.universe.snapshot"],
+                             ["2026-11-30", "2026-12-01"])
+            self.assertEqual(sorted({e["payload"]["session"] for e in stream if e["type"] == "market.close.history"}),
+                             ["2026-11-30"])
+            self.assertIn(("tickers", D(2026, 11, 30), "CS"), client.calls)

@@ -255,7 +255,13 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 // handled (handleRuns) and it does not page again.
 func remindsUnit(unit string) bool { return !dataJobUnit.MatchString(unit) }
 
-// dataJobUnit is a data job's unit: Boost's, or an IRA's instance.
+// dataJobUnit is a data job's unit: Boost's ti-data.service, or an IRA's
+// instance ti-data@<account>.service. A unit it matches is paged once by its
+// OnFailure hook and then only resolved, never reminded, and never holds back
+// the heartbeat, because its timer runs it again (ADR 0019, "Alerting": each
+// incident once, and a fault that persists is not left silent). Only these
+// timer-retried data services may match: the engine, the adapter and the
+// reporter must stay excluded, or their failures would lose their reminders.
 var dataJobUnit = regexp.MustCompile(`^ti-data(@[a-z0-9][a-z0-9-]*)?\.service$`)
 
 // unnamedRun is what a firing names a failed unit systemd gave no invocation

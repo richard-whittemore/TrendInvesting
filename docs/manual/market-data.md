@@ -829,8 +829,11 @@ its paging and its schedule did not have to change at all.
 **When it runs.** At 06:15, 07:15 and 08:15 New York time, Monday to
 Friday: Boost's three mornings, ten minutes later, so Boost's job has
 usually recorded the session's whole-market bars already and the IRA's job
-reuses them, and the two never ask Massive at the same time at the free
-plan's 5 requests a minute. Each firing reads the previous session (a test
+reuses them. The two may still run at once (a catch-up after the server was
+off, a start by hand, a long Boost catch-up still running at :15), and that
+is safe: a recording the other job wrote first is used as it stands, never
+fetched twice into the same file, and a 429 from Massive at the free plan's
+5 requests a minute is waited out. Each firing reads the previous session (a test
 checks every firing of 2026 and 2027). The free plan serves a session only
 the next morning (`docs/live-trading/lessons-2026-10.md` L2), and an IRA
 decides on the first session of a month from the previous session's
@@ -853,34 +856,52 @@ wait; one still there at 08:15 is a failure that pages, as for Boost.
    the file, so an edited file would rank another market). The
    configuration must say `"universe_input": "compact"`.
 3. Reads from the same log **which stocks you hold**: the positions of the
-   engine's last account snapshot, or, before the first one, of the Run
-   approval's starting book, plus every stock filled since. Those get their
-   own daily bars (`--optional`); nothing else does. There is no flag to
-   name them, so a holding cannot be forgotten. A first run before its first
-   reading holds nothing.
-4. Records each session since the run's last file: the whole-market bars
-   once (skipped if Boost's job already recorded them; a cancelled session
-   recorded with `retract` is never asked for), and, for the latest session
-   only, its universe (the common-stock listing, written with the very bars
-   just recorded, so the two recordings agree) and its sector labels. A
-   sector source that is down is named in a warning line; the stream then
-   uses the newest labels within a week, or is refused (below). Then the
+   engine's last account snapshot (version 3, as the adapter writes today,
+   or 4, which adds the cash an IRA's buys are budgeted from), or, before
+   the first one, of the Run approval's starting book, plus every stock
+   filled since. Those get their own daily bars (`--optional`); nothing else
+   does. There is no flag to name them, so a holding cannot be forgotten. A
+   first run before its first reading holds nothing. A snapshot, fill or
+   approval of another version, or a log whose record hash chain is broken
+   (changed after the engine wrote it), stops the job, naming the log.
+   The log is read a line at a time, keeping a few fields of each input, so
+   the memory it needs is its longest line (a day's universe snapshot, under
+   1 MB) and a few hundred bytes an input, not the log: a test reads a year of
+   daily snapshots inside the 64 MiB budget.
+4. Checks the run's files are one unbroken chain from the warm-up: each
+   begins at the session after the one before it ends. A missing file stops
+   the job (restore it from the backup, unchanged).
+5. Records first, before asking Massive anything, the latest session's
+   sector labels (the sources serve only that session's files, so a morning
+   when Massive fails still keeps them; a source that is down is named in a
+   warning line). Then each session since the run's last file: the
+   whole-market bars once (skipped if Boost's job already recorded them; a
+   cancelled session recorded with `retract` is never asked for), and the
+   universe (the common-stock listing dated that session, written with the
+   very bars just recorded, so the two recordings agree) of every such
+   session that has labels from both sources within the week up to it. So
+   when every firing of a month's first morning failed, the next morning's
+   catch-up still writes the month-end universe and histories. A session
+   with no labels within a week gets no universe: a decision on it is
+   withheld (`missing-universe`), and the next mornings carry on. Then the
    splits and dividends of the last two weeks, as Boost's job does.
-5. Checks the files already written that a newly recorded split or
+6. Checks the files already written that a newly recorded split or
    dividend could reach (those ending on or after the start of the two-week
    window), each encoded again alone, with the holdings its own bars name.
    One that differs stops the job ("A file already written differs",
    above). Older files are not re-encoded: no action dated before the
    window is recorded, and re-encoding the whole market's history once per
    file every morning would not finish before the open.
-6. Writes the compact stream for the new sessions, exactly what `encode
+7. Writes the compact stream for the new sessions, exactly what `encode
    --ranker` writes for them (a test compares the bytes, on the recorded
    fixture of the compact stream above): the calendar from the run's base,
    SPY, IEF, SHY and the holdings' bars, the session's universe snapshot,
    and on a month's last session the 500 ranked stocks' histories, to
    `/var/lib/trend-investing/data/streams/trad-ira/<TI_RUN>/trad-ira-<YYYY-MM-DD>.jsonl`.
-   The ranker is `/opt/trend-investing/bin/universe-rank -config
-   /etc/trend-investing/engines/trad-ira.config`.
+   The ranker is `/opt/trend-investing/bin/universe-rank`, run on a
+   private copy of the configuration checked against the engine's log, so
+   a file edited while the job runs cannot change the ranking. The stocks
+   left out for bad data are named on stderr after the file is written.
 
 **Memory.** The stream is the one-session-at-a-time path above, inside the
 same 64 MiB budget; a test runs this job's warm-up and daily firing, with
@@ -930,14 +951,21 @@ waiting for the account's first run: ... (start the trad-ira engine once)`.
   only.
 - "the momentum configuration ... is not the one the engine's durable log
   ... holds": the file was edited after the engine started; put it back.
-- "the sector labels of ... were not recorded", then a refusal "no
-  sectors-iwv recording on or before ..." or "... more than 7 days before
-  ...": iShares or Nasdaq was down this morning and no labels from the past
-  week are recorded. Run `sudo systemctl start ti-data@trad-ira` again
-  before the session's next close; after that the sources serve only the
-  next day's file, and that session's universe stays unwritten (a month-end
-  then withholds the decision as `missing-universe`, [momentum
-  universe](momentum-universe.md)).
+- "the sector labels of ... were not recorded", then "the universe of ...
+  is not recorded": iShares or Nasdaq was down this morning and no labels
+  from the past week are recorded. The day's file is written without that
+  session's universe. Run `sudo systemctl start ti-data@trad-ira` again
+  before the session's next close if it is a month's last session; after
+  that the sources serve only the next day's file, that session's universe
+  stays unwritten, and a decision on it is withheld as `missing-universe`
+  ([momentum universe](momentum-universe.md)); the next mornings carry on.
+- "cannot read holdings: account.snapshot version ..." (or a fill's or an
+  approval's), or "does not follow its record hash chain": the engine's log
+  holds an input this build does not read, or was changed after the engine
+  wrote it. Nothing is written; restore the log from the backup, or install
+  the build that reads that version.
+- "the run's files are not one unbroken chain": a file the job wrote for
+  the run is missing. Restore it from the backup, unchanged.
 - "the ranker refused" or "did not answer within 60 s": `universe-rank` is
   missing, from another build, or given another configuration
   ([momentum universe](momentum-universe.md), "What can go wrong").
@@ -1439,12 +1467,18 @@ exits with status 1 and a message on stderr, for the scheduler to alert on.
   daily file the compact stream's recorded bytes, the retracted session
   never fetched, a second firing fetching nothing; the holdings read from a
   synthetic engine log: none, the last snapshot's, a fill since, the
-  starting book's, no flag; the latest session's universe recorded from the
-  same bars as its whole-market recording, its sector labels, a source
-  down; a holiday month-end decided by the real Go ranker; the instance
+  starting book's, no flag, a snapshot, fill or approval of an unread
+  version, a broken record hash chain; the latest session's universe
+  recorded from the same bars as its whole-market recording, its sector
+  labels, a session with no labels left without a universe and the next
+  morning carrying on, the month-end universe written by the catch-up after
+  a missed month-start; a recording another job writes first; a missing
+  file in the run's chain; the ranker reading the checked configuration;
+  exclusions named; a holiday month-end decided by the real Go ranker; the instance
   unit and its timer against Boost's), `test_memory.py`
   (`test_the_iras_data_job_stays_inside_the_budget`: the job itself, with the
-  real ranker, on the two-year fixture), `BoostBytesTest` in
+  real ranker, on the two-year fixture, its daily firing reading a log of a
+  year of daily universe snapshots), `BoostBytesTest` in
   `test_tidata.py` (Boost's files keep their bytes), and the rehearsal
   (`deploy/rehearse.sh`: the instance refused while the secrets are locked,
   paging as `ti-data@trad-ira.service`, waiting before the first run, and a

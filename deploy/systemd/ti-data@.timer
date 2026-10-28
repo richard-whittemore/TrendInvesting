@@ -3,9 +3,13 @@ Description=Run momentum engine %i's market-data step on weekday mornings, for t
 
 [Timer]
 # 06:15, 07:15 and 08:15 New York on weekdays: Boost's mornings
-# (ti-data.timer, :05), ten minutes later, so Boost's job has recorded the
-# session's grouped bars and this one reuses them, and the two never fetch
-# at once at the free plan's 5 requests a minute. The free plan serves a
+# (ti-data.timer, :05), ten minutes later, so that on an ordinary morning
+# Boost's job has recorded the session's grouped bars and this one reuses
+# them. That is a preference, not a guarantee: the two may run at once (a
+# Persistent catch-up after a boot, a start by hand, a Boost catch-up still
+# running at :15), and that is safe: a recording the other job writes first
+# is taken as recorded (adapter/marketdata/tidata.py), and Massive's 429 at
+# the free plan's 5 requests a minute is waited out (massive.py). The free plan serves a
 # session only the next morning (docs/live-trading/lessons-2026-10.md L2);
 # an IRA decides on the first session of a month from the previous session's
 # closes, so the month-end universe and the ranked histories are written on

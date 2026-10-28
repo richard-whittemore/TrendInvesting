@@ -66,8 +66,15 @@ def backfill(client, directory, asof, sessions, max_weekdays=None, now=_now, set
         bars = client.grouped(day).get("results") or []
         if not bars:
             raise MissingData("no bars for trading day {}".format(day))
-        record.write(directory, {"kind": "grouped", "source": SOURCE, "session": day.isoformat(),
-                                 "fetched_at": _stamp(now), "adjusted": False, "bars": bars})
+        try:
+            record.write(directory, {"kind": "grouped", "source": SOURCE, "session": day.isoformat(),
+                                     "fetched_at": _stamp(now), "adjusted": False, "bars": bars})
+        except record.AlreadyRecorded:
+            # Another job (Boost's and the IRAs' data jobs may run at once)
+            # recorded the session between the check above and this write: a
+            # recording is written once, so that one stands (record.py).
+            have += 1
+            continue
         fetched += 1
         have += 1
     return {"sessions": have, "fetched": fetched}
