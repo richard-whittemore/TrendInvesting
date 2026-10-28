@@ -275,6 +275,15 @@ MIN_REQUEST_GAP = 1.0
 REQUESTS_PER_MINUTE = 10
 RATE_BACKOFF = (10, 30, 60)
 QUERY_GAP = 5
+# Every account's reader uses the one Flex token, so one reading at a time holds it: an exclusive flock on the Flex
+# state root (the folder holding each account's ledger folder; token_root), taken after the account's own lock and
+# held for the whole reading, then for TOKEN_COOLDOWN after its last request, so the next holder's requests never
+# share a minute with these. A reading waits for it at most TOKEN_LOCK_WAIT, asking every TOKEN_LOCK_POLL, then
+# sets itself aside, asking IBKR nothing.
+TOKEN_LOCK_WAIT = 240
+TOKEN_LOCK_POLL = 5
+# A second past the minute the rate is measured over, so no request of the next holder's is inside it.
+TOKEN_COOLDOWN = 61
 # IBKR's error codes that say the token, its account or the query is not
 # accepted: the owner's setup must change, so the reading is set aside as
 # rejected. Every other code is the service's own (busy, not ready, a
@@ -649,6 +658,11 @@ class _Pacer:
     def __init__(self, sleep, monotonic):
         self._sleep, self._clock, self._sent = sleep, monotonic, deque()
 
+    @property
+    def last(self):
+        """The steady-clock time of the last request, or None before the first."""
+        return self._sent[-1] if self._sent else None
+
     def wait(self):
         now = self._clock()
         while self._sent and now - self._sent[0] >= 60:
@@ -658,12 +672,62 @@ class _Pacer:
             delay = max(delay, MIN_REQUEST_GAP - (now - self._sent[-1]))
         if len(self._sent) >= REQUESTS_PER_MINUTE:
             delay = max(delay, 60 - (now - self._sent[0]))
+        # Never negative, never more than the minute the rate is measured over: a clock stepping back cannot make an
+        # unbounded wait.
+        delay = min(max(delay, 0.0), 60.0)
         if delay > 0:
             self._sleep(delay)
             now = max(self._clock(), now + delay)
         self._sent.append(now)
         while len(self._sent) > REQUESTS_PER_MINUTE:
             self._sent.popleft()
+
+
+def token_root(ledger_path):
+    """The Flex state root the token lock is held on: the folder holding each account's ledger folder."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(ledger_path)))
+
+
+class _TokenLock:
+    """The one Flex token's turn across every account's reader (TOKEN_LOCK_WAIT, TOKEN_COOLDOWN)."""
+
+    def __init__(self, ledger_path, sleep, monotonic):
+        self._root, self._sleep, self._clock, self._fd = token_root(ledger_path), sleep, monotonic, None
+
+    def acquire(self):
+        """True once held; False after TOKEN_LOCK_WAIT, or when the root cannot be opened (fail closed)."""
+        try:
+            fd = os.open(self._root, os.O_RDONLY)
+        except OSError:
+            return False
+        deadline = self._clock() + TOKEN_LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._fd = fd
+                return True
+            except BlockingIOError:
+                if self._clock() >= deadline:
+                    os.close(fd)
+                    return False
+                self._sleep(TOKEN_LOCK_POLL)
+
+    def release(self, pacer):
+        """Hold on until TOKEN_COOLDOWN after the last request, then let the next reader have the token."""
+        if self._fd is None:
+            return
+        if pacer.last is not None:
+            wait = min(max(TOKEN_COOLDOWN - (self._clock() - pacer.last), 0.0), float(TOKEN_COOLDOWN))  # bounded
+            if wait > 0:
+                self._sleep(wait)
+        fcntl.flock(self._fd, fcntl.LOCK_UN)
+        os.close(self._fd)
+        self._fd = None
+
+
+TOKEN_BUSY = ("another Flex reader on this server held the Flex token for {} seconds (every account's reader "
+              "shares it, and IBKR limits a token to 1 request a second and 10 a minute), so this reading asked "
+              "IBKR nothing; the next firing reads again (docs/manual/reconciliation.md)").format(TOKEN_LOCK_WAIT)
 
 
 def fetch_statement(token, query_id, get=_get, sleep=time.sleep, period=None, monotonic=time.monotonic, pacer=None):
@@ -1365,7 +1429,11 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
         # a proof that cannot be written never stops the cash reading (step 5 of the module).
         proof_unwritten = _write_proof(ledger_path, _unfinished_proof(checked_at, account_id), say)
         _write_whole(status_path, _running(checked_at))
+        token_lock = _TokenLock(ledger_path, sleep, monotonic)
+        held = token_lock.acquire()
         try:
+            if not held:
+                raise FlexUnavailable(None, TOKEN_BUSY)
             ledger = read_ledger(ledger_path)
             coverage = read_coverage(coverage_path)
             resolutions = read_resolutions(ledger_path + RESOLUTIONS_SUFFIX)
@@ -1430,7 +1498,11 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
         except OSError as unwritten:
             say("flex: the costs status cannot be written: " + str(unwritten))
             ok = False
-        proof = _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say, pacer)
+        proof = _read_executions_once(status, trades_query_id if held else None, token, account_id, get, sleep, now,
+                                      say, pacer)
+        if not held:
+            proof.update(state=PROOF_SET_ASIDE, code=None, reason=TOKEN_BUSY)
+        token_lock.release(pacer)
         if _write_proof(ledger_path, json.dumps(proof, sort_keys=True) + "\n", say) or proof_unwritten:
             return False
     return ok and costs_status["state"] == "read" and proof["state"] != PROOF_SET_ASIDE

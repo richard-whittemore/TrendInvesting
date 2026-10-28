@@ -7,6 +7,7 @@ account, amounts and IDs, never a real statement. No network: the Flex Web
 Service is a fake that answers from the files in testdata/flex.
 """
 import fcntl
+import os
 import http.server
 import io
 import json
@@ -216,6 +217,16 @@ class ServiceTests(unittest.TestCase):
         service = TimedFlex(clock, statements=["get_in_progress.xml"] * 25 + ["statement.xml"])
         flex.fetch_statement(TOKEN, QUERY, get=service, sleep=clock.sleep, monotonic=clock)
         assert_within_rate(self, service.times)
+
+    def test_a_clock_stepping_back_never_makes_a_wait_longer_than_a_minute(self):
+        clock = FakeClock()
+        pacer = flex._Pacer(clock.sleep, clock)
+        pacer.wait()
+        clock.now -= 100000  # the steady clock should never do this; a wait must still stay bounded
+        pacer.wait()
+        for _ in range(12):
+            pacer.wait()
+        self.assertTrue(all(0 <= s <= 60 for s in clock.slept), clock.slept)
 
     def test_a_statement_that_never_finishes_is_unavailable(self):
         service = FakeFlex(statements=["get_in_progress.xml"] * flex.GENERATION_ATTEMPTS)
@@ -1378,6 +1389,47 @@ class ExecutionsTests(ReadOnceHarness):
         self.assertFalse(self.read_trades(now=holiday, service=FakeFlex(statements=(cash, xml))))
         self.assert_proof_set_aside("IBKR ignored the requested dates", "20270111", "20270118", "20270114")
 
+    def instance(self, name):
+        """A second account's ledger folder beside this one, under the same Flex state root."""
+        folder = self.dir / "root" / name
+        folder.mkdir(parents=True)
+        return folder / "cash-movements.jsonl"
+
+    def test_two_readers_sharing_the_token_keep_ibkrs_rate_together(self):
+        # Every account's reader uses the one Flex token: one holds the token for its whole reading, and the next
+        # starts its requests only once a minute has passed since the last one, so the two streams together keep
+        # 1 request a second and 10 a minute.
+        clock = FakeClock()
+        times = []
+        for name in ("boost", "trad-ira"):
+            ledger = self.instance(name)
+            service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+            service.times = times
+            self.assertTrue(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(ledger), get=service,
+                                           sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING,
+                                           err=self.out, trades_query_id="654321"), self.out.getvalue())
+        self.assertEqual(len(times), 8)
+        assert_within_rate(self, times)
+
+    def test_a_reader_waits_for_the_token_then_sets_itself_aside(self):
+        ledger = self.instance("roth-ira")
+        root = os.open(str(ledger.parent.parent), os.O_RDONLY)
+        self.addCleanup(os.close, root)
+        fcntl.flock(root, fcntl.LOCK_EX)  # another account's reader holds the token
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+        self.assertFalse(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(ledger), get=service,
+                                        sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING, err=self.out,
+                                        trades_query_id="654321"))
+        self.assertEqual(service.calls, [], "nothing is asked of IBKR without the token")
+        self.assertGreaterEqual(sum(clock.slept), flex.TOKEN_LOCK_WAIT)
+        status = json.loads(Path(str(ledger) + flex.STATUS_SUFFIX).read_text())
+        self.assertEqual(status["state"], "set-aside")
+        self.assertIn("another Flex reader", status["reason"])
+        proof = json.loads(Path(flex.executions_path(str(ledger))).read_text())
+        self.assertEqual(proof["state"], "set-aside")
+        self.assertIn("another Flex reader", proof["reason"])
+
     def test_a_proof_never_reaches_past_an_hour_before_it_was_asked_for(self):
         # IBKR: a new execution is typically in a newly generated Trade Confirmation report within 5 to 10 minutes.
         early = datetime(2027, 1, 15, 5, 30, tzinfo=timezone.utc)
@@ -1696,9 +1748,11 @@ class DeploymentTests(unittest.TestCase):
         # and the waits between them.
         # A 1018 answer adds its backoff and one more request, at most len(RATE_BACKOFF) times a query; the
         # trades query waits QUERY_GAP after the cash query; the rate's own waits are each under a minute.
-        per_query = (flex.REQUEST_TIMEOUT * (1 + flex.GENERATION_ATTEMPTS + len(flex.RATE_BACKOFF))
-                     + flex.GENERATION_WAIT * (flex.GENERATION_ATTEMPTS - 1) + sum(flex.RATE_BACKOFF))
-        worst = 2 * per_query + flex.QUERY_GAP
+        requests = 1 + flex.GENERATION_ATTEMPTS + len(flex.RATE_BACKOFF)
+        per_query = (flex.REQUEST_TIMEOUT * requests + flex.GENERATION_WAIT * (flex.GENERATION_ATTEMPTS - 1)
+                     + sum(flex.RATE_BACKOFF) + flex.MIN_REQUEST_GAP * requests)
+        # The wait for the token, the gap between the queries and the minute held after the last request.
+        worst = flex.TOKEN_LOCK_WAIT + 2 * per_query + flex.QUERY_GAP + flex.TOKEN_COOLDOWN
         minutes = int(re.search(r"(?m)^TimeoutStartSec=([0-9]+)min$", self.service).group(1))
         self.assertGreater(minutes * 60, worst)
 

@@ -33,7 +33,10 @@ Type=oneshot
 # them, and up to three answers of IBKR's 1018 (too many requests) asked
 # again after 10, 30 and 60 seconds (flex.REQUEST_TIMEOUT,
 # GENERATION_ATTEMPTS, GENERATION_WAIT, RATE_BACKOFF; about 41 minutes a
-# query, 82 in all with the gap between them). A firing of the timer while a reading
+# query, 82 in all with the gap between them), with the wait for the Flex
+# token (at most 4 minutes while another account's reader holds it) and the
+# minute it is held after the last request (flex.TOKEN_LOCK_WAIT,
+# TOKEN_COOLDOWN): about 87 minutes. A firing of the timer while a reading
 # still runs starts nothing. A reading that hangs past this is stopped and shows as
 # failed rather than staying "activating"; its status file then still says
 # "running" with the time it began, never the previous reading's "read".
