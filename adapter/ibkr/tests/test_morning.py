@@ -385,6 +385,82 @@ class MorningTests(unittest.TestCase):
                             ["2027-01-14T15:10:00Z", "2027-01-14T18:00:00Z", "2027-01-14T20:50:00Z"],
                             "0001f4e8.morning.01.01")
 
+    def archived_chain(self, snapshot_in_between, outbox_fill=False, as_of_close=True):
+        """Run A, whose log is then archived (gone from the state directory); run B, its successor, holding business
+        recorded on Wednesday and, given snapshot_in_between, a broker snapshot the engine committed stamped as of
+        Wednesday's close; run C, B's successor, the run now running. Returns an AdapterLoop on C, not started."""
+        first = self.engine_log
+        commit_at(self.engine, "a:business", "2027-01-12T15:00:00Z")
+        middle = str(Path(self.dir.name) / (RUN + "-2.log"))
+        between = LoggedEngine(middle, approval=run_approval(ACCOUNT, previous_log=RUN + ".log",
+                                                             previous_log_final_hash=final_hash(first)))
+        commit_at(between, "b:business", "2027-01-13T15:00:00Z")
+        if snapshot_in_between:
+            commit_at(between, "b:snapshot", "2027-01-13T22:05:00Z", kind=BROKER_SNAPSHOT_TYPE, version=1,
+                      payload={"account_id": ACCOUNT, "as_of": "2027-01-13T21:00:00Z" if as_of_close else
+                               "2027-01-13T22:05:00Z", "as_of_close": as_of_close,
+                               "not_as_of_close": "" if as_of_close else "synthetic: withheld",
+                               "read_at": "2027-01-13T22:05:00Z"})
+        fresh = RUN + "-3"
+        self.engine_log = str(Path(self.dir.name) / (fresh + ".log"))
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, previous_log=RUN + "-2.log", previous_log_final_hash=final_hash(middle)))
+        Path(first).unlink()
+        loop = self.loop()
+        if outbox_fill:
+            payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.found.01.01",
+                       "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                       "filled_at": "2027-01-14T21:30:00Z"}
+            loop.outbox.append({"id": "fill:found", "event_type": FILL_TYPE, "schema_version": 1,
+                                "event_time": "2027-01-14T21:30:00Z", "payload": payload})
+        return loop
+
+    def test_an_archived_log_behind_a_run_with_a_close_stamped_snapshot_is_never_read(self):
+        # The snapshot as of Wednesday's close stood only because its own journal check, reading every run behind
+        # it, found no fill stamped from Wednesday's close window on: every older stamp is before it, so before
+        # Thursday's too, and the walk stops at that run (ADR 0019, amended 2026-10-28).
+        loop = self.archived_chain(snapshot_in_between=True)
+        close = nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc)
+        self.assertEqual(loop._journal_fills(close), ([], ""))
+
+    def test_a_withheld_snapshot_does_not_end_the_walk(self):
+        # A reading stamped at its read time proves nothing of the journal behind it.
+        loop = self.archived_chain(snapshot_in_between=True, as_of_close=False)
+        close = nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc)
+        self.assertIn("the chain of runs' logs cannot be read", loop._journal_fills(close)[1])
+
+    def test_an_archived_log_before_the_nearest_close_stamped_snapshot_withholds(self):
+        loop = self.archived_chain(snapshot_in_between=False)
+        close = nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc)
+        fills, refused = loop._journal_fills(close)
+        self.assertIn("the chain of runs' logs cannot be read", refused)
+
+    def test_fills_found_before_the_chain_breaks_are_reported_with_it(self):
+        loop = self.archived_chain(snapshot_in_between=False, outbox_fill=True)
+        close = nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc)
+        reason = loop._journal_reason(close)
+        self.assertIn("the chain of runs' logs cannot be read", reason)
+        self.assertIn("0001f4e8.found.01.01 (stamped 2027-01-14T21:30:00Z, at or after the close)", reason)
+        self.assertIn("the journal keeps them", reason)
+
+    def test_a_reading_over_a_chain_with_a_missing_log_stops_the_adapter_naming_it(self):
+        # End to end, no stand-in for the chain: a log gone from the state directory that the reading needs. The
+        # comparison with the previous close (book_basis) reads the same chain back to the last account snapshot or
+        # starting book, and stops the adapter on it before anything is sent; the journal check's reason
+        # (test_an_archived_log_before_the_nearest_close_stamped_snapshot_withholds) is for a log only it reads.
+        from relay import ResolveRefused
+        self.proof(FRIDAY_MORNING)
+        loop = self.archived_chain(snapshot_in_between=False)
+        self.folder = self.streams / (RUN + "-3")
+        write_stream(self.folder, THURSDAY, session_envelopes([THURSDAY], run=RUN + "-3"))
+        loop.start()
+        with self.assertRaises(ResolveRefused) as caught:
+            for _ in range(40):
+                loop.step()
+        self.assertIn("engine.log", str(caught.exception))
+        self.assertIn("put it back", str(caught.exception))
+        self.assertEqual(self.sent(BROKER_SNAPSHOT_TYPE), [], "nothing is sent")
+
     def test_a_fill_two_runs_back_is_found_past_an_empty_run(self):
         # A run between them with nothing but its configuration and approval says nothing about when it started:
         # the walk goes past it (book_basis.previous_close walks the same chain).
@@ -560,7 +636,8 @@ class MorningTests(unittest.TestCase):
                        "filled_at": filled_at}
             loop.outbox.append({"id": "fill:" + ident, "event_type": FILL_TYPE, "schema_version": 1,
                                 "event_time": filled_at, "payload": payload})
-        found = loop._journalled_fills_since(close)
+        found, refused = loop._journal_fills(close)
+        self.assertEqual(refused, "")
         self.assertIn("0001f4e8.near.01.01 (stamped 2027-01-14T20:57:00Z, within 5 minutes before the close)", found)
         self.assertIn("0001f4e8.after.01.01 (stamped 2027-01-14T21:30:00Z, at or after the close)", found)
 
@@ -659,7 +736,7 @@ class MorningTests(unittest.TestCase):
             loop.outbox.append({"id": "fill:edge{}".format(n), "event_type": FILL_TYPE, "schema_version": 1,
                                 "event_time": filled_at, "payload": payload})
             with self.subTest(filled_at=filled_at):
-                self.assertEqual(ident in " ".join(loop._journalled_fills_since(close)), listed)
+                self.assertEqual(ident in " ".join(loop._journal_fills(close)[0]), listed)
 
     def test_the_same_execution_on_a_link_whose_clock_holds_is_read_as_the_gateway_gave_it(self):
         # The control: with the check passed, "15:30:00 EST" is 20:30Z, before the close, and not listed after it.
@@ -814,8 +891,8 @@ class MorningTests(unittest.TestCase):
                    "filled_at": "2027-01-14T21:30:00"}
         loop.outbox.append({"id": "fill:nozone", "event_type": FILL_TYPE, "schema_version": 1,
                             "event_time": "2027-01-14T21:30:00Z", "payload": payload})
-        self.assertIn("0001f4e8.nozone.01.01", " ".join(loop._journalled_fills_since(
-            nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc))))
+        self.assertIn("0001f4e8.nozone.01.01", " ".join(loop._journal_fills(
+            nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc))[0]))
 
     def test_an_execution_reported_in_another_zone_withholds(self):
         # IBKR's executions reach back to midnight in the zone of IB Gateway's login, set to New York by its unit;

@@ -306,7 +306,12 @@ ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
    ```
 
    The engine reads only the state directory's root, never the quarantine
-   folder, so the file is kept and no longer counted as a run.
+   folder, so the file is kept and no longer counted as a run. The IBKR
+   adapter still reads a superseded log through the chain of Run approvals
+   when it is one of those its manual says to keep ([paper
+   trading](../manual/paper-trading.md), "cannot read the engine's durable
+   log"): quarantining such a log stops the adapter or withholds the
+   session's reading until a fresh run's reading stands for a close.
 3. **Decide the restart again** ("Restarting an engine"): with the file set
    aside, the latest run may be a different log. If the quarantined log was
    the crashed run itself, it cannot be resumed: start a fresh run from a
