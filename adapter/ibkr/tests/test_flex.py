@@ -228,6 +228,14 @@ class ServiceTests(unittest.TestCase):
             pacer.wait()
         self.assertTrue(all(0 <= s <= 60 for s in clock.slept), clock.slept)
 
+    def test_a_clock_jumping_forward_makes_no_wait_and_never_a_negative_one(self):
+        clock = FakeClock()
+        pacer = flex._Pacer(clock.sleep, clock)
+        pacer.wait()
+        clock.now += 100000
+        pacer.wait()
+        self.assertEqual(clock.slept, [])
+
     def test_a_statement_that_never_finishes_is_unavailable(self):
         service = FakeFlex(statements=["get_in_progress.xml"] * flex.GENERATION_ATTEMPTS)
         with self.assertRaises(flex.FlexUnavailable) as caught:
@@ -1435,37 +1443,18 @@ class ExecutionsTests(ReadOnceHarness):
                               monotonic=clock, now=kwargs.pop("now", lambda: self.MORNING), err=self.out,
                               trades_query_id="654321", **kwargs)
 
-    def test_a_reader_killed_after_a_request_still_makes_the_next_wait(self):
-        # Another account's reader asked IBKR at 05:30:00 and was killed before its cooldown: its record of that
-        # request, beside its own ledger, makes this reading wait out the rest of the minute first.
-        other = self.instance("trad-ira")
-        Path(str(other.parent / flex.TOKEN_RECORD_NAME)).write_text(json.dumps(
-            {"last_request": "2027-01-15T10:30:00Z"}) + "\n")
+    def test_the_first_request_comes_a_full_minute_after_the_token_is_taken(self):
+        # The holder before may have been killed straight after a request, leaving no cooldown of its own: every
+        # reader waits TOKEN_COOLDOWN on the steady clock once it holds the token, whatever came before.
         ledger = self.instance("boost")
         clock = FakeClock()
         start = clock()
         service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
         self.assertTrue(self.read_instance(ledger, clock, service), self.out.getvalue())
         self.assertGreaterEqual(service.times[0] - start, flex.TOKEN_COOLDOWN)
-
-    def test_each_request_is_recorded_beside_the_readers_own_ledger(self):
-        ledger = self.instance("boost")
-        clock = FakeClock()
-        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
-        self.assertTrue(self.read_instance(ledger, clock, service))
-        record = json.loads(Path(str(ledger.parent / flex.TOKEN_RECORD_NAME)).read_text())
-        self.assertEqual(record, {"last_request": "2027-01-15T10:30:00Z"})
-
-    def test_an_unreadable_record_means_no_wait_and_says_so(self):
-        other = self.instance("trad-ira")
-        Path(str(other.parent / flex.TOKEN_RECORD_NAME)).write_text("not json")
-        ledger = self.instance("boost")
-        clock = FakeClock()
-        start = clock()
-        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
-        self.assertTrue(self.read_instance(ledger, clock, service))
-        self.assertLess(service.times[0] - start, flex.TOKEN_COOLDOWN)
-        self.assertIn("cannot be read", self.out.getvalue())
+        self.assertEqual(clock.slept[0], flex.TOKEN_COOLDOWN)
+        self.assertFalse(any(p.name == "token-last-request.json" for p in ledger.parent.parent.rglob("*")),
+                         "no request record is kept")
 
     def test_a_root_that_cannot_be_opened_is_set_aside_at_once_with_its_error(self):
         ledger = self.instance("roth-ira")

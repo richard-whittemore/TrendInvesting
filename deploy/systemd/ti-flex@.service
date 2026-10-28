@@ -34,9 +34,10 @@ Type=oneshot
 # again after 10, 30 and 60 seconds (flex.REQUEST_TIMEOUT,
 # GENERATION_ATTEMPTS, GENERATION_WAIT, RATE_BACKOFF; about 41 minutes a
 # query, 82 in all with the gap between them), with the wait for the Flex
-# token (at most 4 minutes while another account's reader holds it) and the
-# minute it is held after the last request (flex.TOKEN_LOCK_WAIT,
-# TOKEN_COOLDOWN): about 87 minutes. A firing of the timer while a reading
+# token (at most 4 minutes while another account's reader holds it, on
+# /var/lib/trend-investing/flex, read only) and the minute its holder waits
+# before its first request (flex.TOKEN_LOCK_WAIT, TOKEN_COOLDOWN): about 87
+# minutes. A firing of the timer while a reading
 # still runs starts nothing. A reading that hangs past this is stopped and shows as
 # failed rather than staying "activating"; its status file then still says
 # "running" with the time it began, never the previous reading's "read".
@@ -62,11 +63,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Its cash ledger, its costs ledger (costs.jsonl), its executions proof
-# (executions.json, read by the adapter) and its record of its last request
-# to IBKR (token-last-request.json, read by every account's reader under
-# /var/lib/trend-investing/flex, which they read and hold the Flex token's
-# lock on, never write), in the same folder, and
+# Its cash ledger, its costs ledger (costs.jsonl) and its executions proof
+# (executions.json, read by the adapter), in the same folder, and
 # beside them the status, coverage, resolutions and lock files and the .tmp
 # each whole-file write renames over its file, and nothing else.
 ReadWritePaths=/var/lib/trend-investing/flex/%i
