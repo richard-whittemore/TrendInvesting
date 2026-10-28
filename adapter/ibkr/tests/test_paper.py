@@ -108,8 +108,9 @@ class PaperAdapter:
         except BaseException:
             self.relay.close()
             raise
+        # A Gateway clock taken as checked: the execution times are the Gateway's (orders.execution_report).
         self.tracker = OrderTracker(self.conn.config.account_id, self.conn.config.client_id,
-                                    self.reports.on_record)
+                                    self.reports.on_record, unverified_receipt=lambda: None)
         self.conn.subscribe(self.tracker.on_event)
 
     def _journal_input(self, record):

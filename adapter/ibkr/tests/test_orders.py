@@ -31,7 +31,8 @@ class Tracked:
         self.h = Harness()
         self.h.conn.connect()
         self.reports = []
-        self.tracker = OrderTracker(ACCOUNT, 11, sink or self.reports.append)
+        # A Gateway clock taken as checked: the execution times are the Gateway's (orders.execution_report).
+        self.tracker = OrderTracker(ACCOUNT, 11, sink or self.reports.append, unverified_receipt=lambda: None)
         self.h.conn.subscribe(self.tracker.on_event)
         self.cb = self.h.fake.callbacks
 
@@ -424,10 +425,22 @@ class EasternLabelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             execution_report(contract(), execution(time="20260308 02:30:00 EST"), received_at=received)
 
+    def test_a_tracker_told_nothing_of_the_clock_stamps_no_earlier_than_its_receipt(self):
+        # Fail closed (AGENTS.md): built without unverified_receipt, a tracker does not believe the Gateway's clock.
+        reports = []
+        t = Tracked(lambda report: None)  # the harness's own tracker; the one under test follows
+        t.tracker = OrderTracker(ACCOUNT, 11, reports.append)
+        t.h.conn.subscribe(t.tracker.on_event)
+        before = datetime.now(timezone.utc)
+        t.cb.exec_details(-1, contract(), execution(exec_id="x.03", time="20261016 09:30:01 US/Eastern"))
+        t.drain()
+        fill = [r for r in reports if isinstance(r, ExecutionReport)][0]
+        self.assertGreaterEqual(fill.occurred_at, before)
+
     def test_the_tracker_stamps_executions_as_its_clock_check_allows(self):
         received = {"at": utc(2027, 1, 14, 21, 30, 2)}
         reports = []
-        t = Tracked(reports.append)
+        t = Tracked(lambda report: None)  # the harness's own tracker; the one under test follows
         t.tracker = OrderTracker(ACCOUNT, 11, reports.append, unverified_receipt=lambda: received["at"])
         t.h.conn.subscribe(t.tracker.on_event)
         t.cb.exec_details(-1, contract(), execution(exec_id="x.01", time="20270114 15:30:00 EST"))

@@ -276,12 +276,13 @@ class OrderTracker:
     same report free to be recorded.
     """
 
-    def __init__(self, account_id, client_id, sink, unverified_receipt=lambda: None):
+    def __init__(self, account_id, client_id, sink, unverified_receipt=lambda: datetime.now(timezone.utc)):
         self.account_id = account_id
         self.client_id = client_id
         self._sink = sink
         # The adapter's receipt time while IB Gateway's clock is not shown to be New York's, None while it is
-        # (execution_report), read as each execution arrives.
+        # (execution_report), read as each execution arrives. Told nothing, the tracker believes no Gateway clock
+        # (fail closed, AGENTS.md): the receipt time is the system clock's.
         self._unverified_receipt = unverified_receipt
         self._client_ids = {}
         self._foreign = set()

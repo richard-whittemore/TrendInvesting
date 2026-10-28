@@ -462,7 +462,53 @@ class MorningTests(unittest.TestCase):
         self.fake.executions = [(contract(), execution(exec_id="0008.slow.01.01", order_id=0, perm_id=7474,
                                                        order_ref="", client_id=0, time="20270114 15:30:00 EST"))]
         self.deliver(THURSDAY, loop)
-        self.assert_withheld("since the close", "0008.slow.01.01")
+        reason = self.assert_withheld("since the close", "0008.slow.01.01")
+        # The cause comes first: the Gateway's clock, not a trade after the close.
+        self.assertTrue(reason.startswith("IB Gateway's connection time '20270114 16:00:00 EST'"), reason)
+        self.assertIn("taken at the time the adapter received", reason)
+
+    def test_a_same_date_reading_on_an_unchecked_link_with_no_execution_stands(self):
+        # The clock matters only to the executions' times: with none listed, the account read stands for the close.
+        self.at(ny(THURSDAY, 17, 0))
+        self.fake.tws_connection_time = "20270114 16:00:00 EST"
+        loop = self.loop()
+        loop.start()
+        self.deliver(THURSDAY, loop)
+        self.assert_as_of_close(THURSDAY)
+
+    def test_an_execution_within_the_clock_tolerance_before_the_close_is_taken_as_at_it(self):
+        # A Gateway up to GATEWAY_CLOCK_TOLERANCE slow passes its check, so a 16:02 execution may be stamped 15:58:
+        # one stamped within the tolerance before the close is taken as at the close (ADR 0019, amended 2026-10-28).
+        for stamped, listed in (("15:58:00", True), ("15:55:00", True), ("15:54:59", False)):
+            with self.subTest(stamped=stamped):
+                self.setUp()
+                self.at(ny(THURSDAY, 17, 0))
+                loop = self.loop()
+                loop.start()
+                self.assertEqual(loop._gateway_zone, "", "setup: the clock check holds")
+                self.fake.executions = [(contract(), execution(
+                    exec_id="0009.edge.01.01", order_id=0, perm_id=7575, order_ref="", client_id=0,
+                    time="20270114 {} US/Eastern".format(stamped)))]
+                self.deliver(THURSDAY, loop)
+                if listed:
+                    self.assert_withheld("since the close", "0009.edge.01.01", "within 5 minutes before it")
+                else:
+                    self.assert_as_of_close(THURSDAY)
+
+    def test_a_journalled_fill_within_the_clock_tolerance_before_the_close_is_taken_as_at_it(self):
+        self.proof(FRIDAY_MORNING)
+        loop = self.loop()
+        loop.start()
+        close = nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc)
+        for n, (filled_at, listed) in enumerate((("2027-01-14T20:58:00Z", True), ("2027-01-14T20:54:59Z", False))):
+            ident = "0001f4e8.edge{}.01.01".format(n)
+            payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": ident,
+                       "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                       "filled_at": filled_at}
+            loop.outbox.append({"id": "fill:edge{}".format(n), "event_type": FILL_TYPE, "schema_version": 1,
+                                "event_time": filled_at, "payload": payload})
+            with self.subTest(filled_at=filled_at):
+                self.assertEqual(ident in " ".join(loop._journalled_fills_since(close)), listed)
 
     def test_the_same_execution_on_a_link_whose_clock_holds_is_read_as_the_gateway_gave_it(self):
         # The control: with the check passed, "15:30:00 EST" is 20:30Z, before the close, and not listed after it.

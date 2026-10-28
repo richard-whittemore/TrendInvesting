@@ -1187,6 +1187,7 @@ class AdapterLoop:
             reasons.append("it was read at {}, not after the close at {}".format(_stamp(reading.as_of), _stamp(close)))
         elif read_ny.date() != close_ny.date():
             reasons.extend(self._morning_proof(reading, close))
+        gateway = self._gateway_problem() if read_ny.date() == close_ny.date() else ""
         if reading.open_orders:
             reasons.append("IBKR shows {} open order(s) for the account (working, pending or cancel-pending): "
                            "{}".format(len(reading.open_orders),
@@ -1201,10 +1202,18 @@ class AdapterLoop:
             # stamped in the book's second to that book (internal/reconcile
             # Classify), so a closing-auction fill stamped at the close is
             # one the close's snapshot must not already show.
-            since = [e for e in broker.executions if e.occurred_at >= close]
+            # A Gateway up to GATEWAY_CLOCK_TOLERANCE slow passes its clock check, so an execution stamped within
+            # the tolerance before the close is taken as at it (ADR 0019, amended 2026-10-28).
+            since = [e for e in broker.executions if e.occurred_at >= close - GATEWAY_CLOCK_TOLERANCE]
             if since:
-                reasons.append("IBKR reports {} execution(s) in the account since the close: {}".format(
-                    len(since), ", ".join(e.exec_id for e in since)))
+                if gateway:
+                    # The cause first: on a link whose clock is not believed, each execution is stamped no earlier
+                    # than the adapter received it (orders.execution_report), so all of the day's are after the close.
+                    reasons.insert(0, "{}; so IBKR's execution times on this link are not believed, and each is "
+                                      "taken at the time the adapter received it if that is later".format(gateway))
+                reasons.append("IBKR reports {} execution(s) in the account since the close (or within {} before it, "
+                               "the Gateway clock's tolerance): {}".format(
+                                   len(since), _span(GATEWAY_CLOCK_TOLERANCE), ", ".join(e.exec_id for e in since)))
         valuation = None
         try:
             valuation = close_valuation(reading, closes)
@@ -1316,7 +1325,8 @@ class AdapterLoop:
         return reasons, False
 
     def _journalled_fills_since(self, close):
-        """The fill IDs journalled stamped at or after close: in the outbox, this run's durable log, and the log of
+        """The fill IDs journalled stamped at or after close, or within GATEWAY_CLOCK_TOLERANCE before it (a Gateway
+        up to that slow passes its clock check; ADR 0019, amended 2026-10-28): in the outbox, this run's durable log, and the log of
         every earlier run its Run approvals chain back to, as the previous close's book reads them
         (book_basis.previous_close; relay.run_chain), so a fresh run hides no fill of the run before it.
 
@@ -1348,7 +1358,7 @@ class AdapterLoop:
             if at.tzinfo is None:
                 # Fail closed (AGENTS.md): a time with no zone cannot be placed against the close.
                 found.append("{} (its time has no zone)".format(ident))
-            elif at >= close and ident not in found:
+            elif at >= close - GATEWAY_CLOCK_TOLERANCE and ident not in found:
                 found.append(ident)
         return found
 

@@ -1325,9 +1325,19 @@ the label:
   That stamp is the one the same-day check, the journal (`filled_at`) and
   every later reading of the journal, on a link set right, compare with the
   close: a fill recorded on an unchecked link can never pass for one before
-  the close. In the hour repeated when daylight saving time ends, the later
-  reading is taken (no session trades then, Sunday 01:00 to 02:00 New
-  York).
+  the close. A same-day reading that lists such an execution names the
+  Gateway's clock first as the cause. A tracker told nothing of the clock
+  believes none (it stamps with the system clock's receipt time). In the
+  hour repeated when daylight saving time ends, the later reading is taken
+  (no session trades then, Sunday 01:00 to 02:00 New York).
+- A Gateway up to the 5-minute tolerance slow passes its check, so a 16:02
+  execution may be stamped 15:58: every at-or-after-close check on the
+  Gateway's stamps (the same-day list and the journalled fills) takes one
+  stamped within the tolerance before the close as at the close. The Flex
+  proof's times are IBKR's statement times, not the Gateway's, and are
+  compared with the close itself. The clock is compared only at the
+  handshake: a Gateway whose clock jumps after a passed check stays trusted
+  until the link connects again (an open residual).
 
 What changes where: the IBKR adapter only (`loop.py`, `orders.py`,
 `connection.py`). The engine, its schemas and its rules are unchanged; no

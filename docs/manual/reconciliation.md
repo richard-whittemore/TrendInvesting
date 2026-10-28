@@ -685,8 +685,15 @@ compared: an execution can be hours old). While the link's check holds it
 is read on New York's clock whatever its label; until then, the adapter
 records it at the time it heard of it (or the Gateway's time, if later),
 so a fill after the close is never recorded as one before it, even by a
-Gateway whose clock is slow. A fill recorded that way may carry a time a
-little later than it happened. An
+Gateway whose clock is slow. A fill recorded that way may carry a time
+later than it happened: by as long as the adapter took to hear of it, or,
+when the Gateway's time is the later, by as much as the Gateway's clock is
+fast (hours, for a Gateway on another zone's clock). On an evening reading
+over such a link, an execution listed since the close is withheld with the
+Gateway's clock named first as the cause. Because a Gateway up to 5 minutes
+slow still passes the check, an execution or fill stamped within 5 minutes
+before the close (from 3:55 p.m.) is taken as at the close, and the reading
+is withheld. An
 execution at a time New York skipped when the clocks went forward stops the
 adapter (send the journal line to the developer). Any other zone, a
 connection time New York skipped, or a time it cannot read, withholds the

@@ -464,7 +464,7 @@ class PostCloseTests(unittest.TestCase):
                 if self.armed:
                     self.armed = False
                     ex = execution(exec_id="0004.late.01.01", order_id=0, perm_id=5353, order_ref="", client_id=0,
-                                   time="20270114 15:59:59 US/Eastern")
+                                   time="20270114 15:54:59 US/Eastern")
                     self.executions.append((contract(), ex))
                 super().req_executions(req_id, account_id)
         fake = ExecutionAtTheLastRead()
@@ -559,8 +559,9 @@ class PostCloseTests(unittest.TestCase):
         self.assert_stamped_at_read_time("execution", "0002.auction.01.01")
 
     def test_an_execution_before_the_close_does_not(self):
+        # Before the close, and earlier than the Gateway clock's tolerance before it (loop.GATEWAY_CLOCK_TOLERANCE).
         ex = execution(exec_id="0003.before.01.01", order_id=0, perm_id=5252, order_ref="", client_id=0,
-                       time="20270114 15:59:59 US/Eastern")
+                       time="20270114 15:54:59 US/Eastern")
         loop = self.loop()
         loop.start()
         self.fake.executions.append((contract(), ex))
