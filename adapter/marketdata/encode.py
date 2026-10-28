@@ -47,7 +47,11 @@ be, on each session of the ranker's window (calendar sessions ending at the
 decision session) that it traded and was not left out of. Which members, and
 the window, are Go rules (targetweight.MomentumHistoryRequest, served by
 cmd/universe-rank through go_ranker), so nothing here ranks; the engine ranks
-the snapshot again and refuses a history set that differs. The calendar then
+the snapshot again and refuses a history set that differs. The recordings
+are read one session at a time, three times over (_compact), so memory holds
+one session's recordings and the closes of the ranked names' windows, never
+every instrument of every session (docs/live-trading/lessons-2026-10.md L1;
+iter_encode writes the envelopes as they are made). The calendar then
 starts at ``base``, since histories reach back to it. A decision session with
 no universe recording gets no histories, and the engine withholds that
 decision (missing-universe).
@@ -85,6 +89,8 @@ configuration hash and strategy version) and contiguous sequences from
 ``first_sequence``; a composition that interleaves another producer's
 inputs restamps them.
 """
+import array
+import bisect
 import collections
 import datetime as dt
 import glob
@@ -126,16 +132,25 @@ class RankerFailed(MarketDataError):
     """The ranker refused a request or answered something unusable."""
 
 
-def go_ranker(argv):
+# How long one ranker call may take: a call ranks one session, normally in
+# well under a second, so a ranker still running after this is stuck, and the
+# stream is refused rather than the data job left waiting.
+RANKER_TIMEOUT_SECONDS = 60
+
+
+def go_ranker(argv, timeout=RANKER_TIMEOUT_SECONDS):
     """A ranker that asks cmd/universe-rank (``argv``, for example
     ["bin/universe-rank", "-config", "momentum.json"]): one JSON request per
-    line on its stdin, one answer per line on its stdout. The ranking rule
-    and the window are the Go engine's own (targetweight.MomentumHistoryRequest),
-    so nothing here ranks."""
+    line on its stdin, one answer per line on its stdout, within ``timeout``
+    seconds a call (the process it started is stopped after that). The
+    ranking rule and the window are the Go engine's own
+    (targetweight.MomentumHistoryRequest), so nothing here ranks."""
     def rank(requests):
         text = "".join(json.dumps(r, separators=(",", ":"), allow_nan=False) + "\n" for r in requests)
         try:
-            done = subprocess.run(argv, input=text, capture_output=True, text=True, check=False)
+            done = subprocess.run(argv, input=text, capture_output=True, text=True, check=False, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise RankerFailed("the ranker {} did not answer within {} s".format(argv, timeout)) from None
         except OSError as e:
             raise RankerFailed("the ranker {} did not run: {}".format(argv, e)) from None
         if done.returncode != 0:
@@ -233,18 +248,65 @@ def load_sessions(directory, first, last, retracted=(), tickers=None):
     the recordings are released before the next day is read. So memory holds
     at most one day's recordings (two when both exist) plus the kept bars,
     not every instrument of every session."""
-    out = []
+    return list(iter_sessions(directory, first, last, retracted, tickers))
+
+
+def list_recordings(directory):
+    """{file name: (inode, size, modification time)} for every bar and sector
+    recording in ``directory``: the listing a multi-pass reader takes once,
+    so every pass reads the same files (iter_sessions)."""
+    out = {}
+    for pattern in ("grouped_*.json", "universe_*.json", "sectors-*_*.json"):
+        for path in glob.glob(os.path.join(directory, pattern)):
+            st = os.stat(path)
+            out[os.path.basename(path)] = (st.st_ino, st.st_size, st.st_mtime_ns)
+    return out
+
+
+def _read_listed(directory, name, listing):
+    """record.read of a file in ``listing``: the file is opened first, and
+    the open file's identity is checked against the listing before it is
+    read and again after, so what is read is the listed recording or a
+    Conflict, never a replacement (one that has disappeared or been replaced
+    since the listing was taken)."""
+    path = os.path.join(directory, name)
+    try:
+        f = open(path)
+    except FileNotFoundError:
+        raise Conflict("{} disappeared during the encode".format(name)) from None
+    with f:
+        def check():
+            st = os.fstat(f.fileno())
+            if (st.st_ino, st.st_size, st.st_mtime_ns) != listing[name]:
+                raise Conflict("{} changed during the encode".format(name))
+        check()
+        rec = record.read_open(f, path)
+        check()
+    return rec
+
+
+def iter_sessions(directory, first, last, retracted=(), tickers=None, listing=None):
+    """The sessions of load_sessions, read, checked and yielded one at a
+    time, so a caller that keeps only part of each holds one day's
+    recordings at once (docs/live-trading/lessons-2026-10.md L1). With
+    ``listing`` (list_recordings), only the files it names are read, and one
+    that has disappeared or changed since is a Conflict, so passes over the
+    same span read the same recordings."""
+    def exists(name):
+        return name in listing if listing is not None else os.path.exists(os.path.join(directory, name))
+
     for day in nyse_calendar.sessions(first, last):
         if day in retracted:
             for kind in ("grouped", "universe"):
-                if os.path.exists(os.path.join(directory, "{}_{}.json".format(kind, day.isoformat()))):
+                if exists("{}_{}.json".format(kind, day.isoformat())):
                     raise Conflict("{} is retracted, but its {} bars are recorded".format(day, kind))
             continue
         found = []
         for kind in ("grouped", "universe"):
-            path = os.path.join(directory, "{}_{}.json".format(kind, day.isoformat()))
-            if os.path.exists(path):
-                found.append((kind, path, record.read(path)))
+            name = "{}_{}.json".format(kind, day.isoformat())
+            if exists(name):
+                path = os.path.join(directory, name)
+                found.append((kind, path, record.read(path) if listing is None else _read_listed(directory, name, listing)))
         if not found:
             raise Gap("no recording for trading day {}".format(day))
         if len(found) == 2 and (sorted(map(_canonical, found[0][2]["bars"]))
@@ -262,9 +324,10 @@ def load_sessions(directory, first, last, retracted=(), tickers=None):
             if tickers is None or ticker in tickers:
                 bars[ticker] = row
         universe = None if tickers is not None else next((r for kind, _, r in found if kind == "universe"), None)
-        out.append(Session(day, bars, _fetched_at(rec, path), universe))
-        del found, rec, seen
-    return out
+        session = Session(day, bars, _fetched_at(rec, path), universe)
+        del found, rec, seen, bars, universe
+        yield session
+        del session
 
 
 def _actions(directory, kind, first, last, tickers=None):
@@ -295,7 +358,7 @@ def _view(label, r, price, shares):
             "low": float(r["l"]) * price, "close": float(r["c"]) * price, "volume": float(r["v"]) / shares}
 
 
-def _universe_rows(directory, day, rec, max_age_days, named):
+def _universe_rows(directory, day, rec, max_age_days, named, listing=None):
     """(rows, skipped): the snapshot rows, and {ticker: reason} for each row
     whose close or volume is missing or negative. Such a row is left out of
     this session's snapshot, unless the ticker is ``named`` (required or
@@ -308,8 +371,14 @@ def _universe_rows(directory, day, rec, max_age_days, named):
         types[sym] = kind
     if not types:
         raise MissingData("universe {} has no reference tickers".format(day))
-    labels = sectors.labels(sectors.latest(directory, "sectors-iwv", day, max_age_days),
-                            sectors.latest(directory, "sectors-nasdaq", day, max_age_days))
+    def latest(kind):
+        if listing is None:
+            return sectors.latest(directory, kind, day, max_age_days)
+        # The recordings listed for the whole encode, read as iter_sessions reads them.
+        return sectors.latest(directory, kind, day, max_age_days,
+                              paths=[os.path.join(directory, n) for n in listing if n.startswith(kind + "_")],
+                              read=lambda path: _read_listed(directory, os.path.basename(path), listing))
+    labels = sectors.labels(latest("sectors-iwv"), latest("sectors-nasdaq"))
     rows, skipped = {}, {}
     for b in rec["bars"]:
         sym = b.get("T")
@@ -381,6 +450,17 @@ def _member_factors(ticker, loaded, days, actions, base):
                 bad[s.day] = (str(e), 1)
                 continue
             closes[s.day] = float(s.bars[ticker]["c"])
+    return _member_factors_from(ticker, closes, bad, days, actions, base)
+
+
+def _member_factors_from(ticker, closes, bad, days, actions, base):
+    """_member_factors from the ticker's closes ({session: raw close} of its
+    well-formed bars) and ``bad`` (its malformed sessions, as
+    _member_factors records them; extended in place). ``closes`` may be any
+    subset of the well-formed closes that holds the first one and the one
+    before each of the ticker's dividend ex-dates: adjust.forward_factors
+    reads no other close, so the sessions left out are the same, and the
+    factors are the same on every session ``closes`` holds."""
     splits, dividends = actions
     while True:
         try:
@@ -446,16 +526,39 @@ class _Stream:
             raise ValueError("run identity is required")
         self.identity, self.sequence, self.out = identity, first_sequence, []
 
-    def add(self, kind, id_, event_time, recorded_at, payload):
+    def make(self, kind, id_, event_time, recorded_at, payload):
+        """The next envelope, with the next sequence."""
         raw = json.dumps(payload, separators=(",", ":"), allow_nan=False)
-        self.out.append({
+        envelope = {
             "id": id_, "type": kind[0], "envelope_version": 1, "schema_version": kind[1],
             "event_time": event_time, "recorded_at": recorded_at, "sequence": self.sequence,
             "correlation_id": self.identity.run_id, "source": SOURCE,
             "strategy_version": self.identity.strategy_version,
             "configuration_hash": self.identity.configuration_hash,
-            "payload_hash": hashlib.sha256(raw.encode()).hexdigest(), "payload": payload})
+            "payload_hash": hashlib.sha256(raw.encode()).hexdigest(), "payload": payload}
         self.sequence += 1
+        return envelope
+
+    def add(self, kind, id_, event_time, recorded_at, payload):
+        self.out.append(self.make(kind, id_, event_time, recorded_at, payload))
+
+
+def _check_request(first, last, required, optional, universe_members, base, ahead, engine, ranker):
+    """(boost, compact, base) for an encode request, or ValueError."""
+    if engine not in ENGINES:
+        raise ValueError("engine {!r} is not one of {}".format(engine, ", ".join(ENGINES)))
+    boost = engine == "boost"
+    if boost and (len(required) != 1 or optional or universe_members):
+        raise ValueError("a boost stream names exactly one required instrument and nothing else")
+    compact = ranker is not None
+    if compact and (boost or universe_members):
+        raise ValueError("a compact stream is a momentum stream that writes ranked members' histories, not their bars")
+    base = base or first
+    if base > first or not nyse_calendar.is_trading_day(base):
+        raise ValueError("base {} must be a session on or before the first {}".format(base, first))
+    if first > last or ahead < 1:
+        raise ValueError("need first <= last and ahead >= 1")
+    return boost, compact, base
 
 
 def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), optional=(),
@@ -511,26 +614,21 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     still refuses the stream.
 
     ``ranker`` (go_ranker, or any callable with its contract) makes the
-    stream compact, as described above: it is called once with a request
-    {"universe": snapshot payload, "next_session": YYYY-MM-DD} per universe
-    session and must answer each, in order, with {"session",
-    "decision_session", "window", "members"}; an answer that does not fit
-    its request (RankerFailed) refuses the stream. A member with bad data is
+    stream compact, as described above: it is called once per universe
+    session, oldest first, with a list of one request {"universe": snapshot
+    payload, "next_session": YYYY-MM-DD}, and must answer it with a list of
+    one {"session", "decision_session", "window", "members"}; an answer
+    that does not fit its request (RankerFailed) refuses the stream. The
+    compact stream is read one session at a time (_compact), so its memory
+    is bounded by one session's recordings and the ranked names' windows of
+    closes, not by every instrument of every session. A member with bad data is
     left out of the same sessions as above, in its history instead of its
     bars, and named in ``excluded`` the same way."""
-    if engine not in ENGINES:
-        raise ValueError("engine {!r} is not one of {}".format(engine, ", ".join(ENGINES)))
-    boost = engine == "boost"
-    if boost and (len(required) != 1 or optional or universe_members):
-        raise ValueError("a boost stream names exactly one required instrument and nothing else")
-    compact = ranker is not None
-    if compact and (boost or universe_members):
-        raise ValueError("a compact stream is a momentum stream that writes ranked members' histories, not their bars")
-    base = base or first
-    if base > first or not nyse_calendar.is_trading_day(base):
-        raise ValueError("base {} must be a session on or before the first {}".format(base, first))
-    if first > last or ahead < 1:
-        raise ValueError("need first <= last and ahead >= 1")
+    boost, compact, base = _check_request(first, last, required, optional, universe_members, base, ahead,
+                                          engine, ranker)
+    if compact:
+        return list(_compact(directory, first, last, identity, required, optional, base, ahead, first_sequence,
+                             max_sector_age_days, excluded, ranker))
     retractions = {} if boost else load_retractions(directory)
     # A boost stream reads its one instrument's bars only, so the other
     # instruments of each recording are not kept.
@@ -650,6 +748,364 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
             if runs:
                 excluded[ticker] = runs
     return stream.out
+
+
+# How many malformed bars of one ticker keep their own reason in a compact
+# stream; the rest share one reason, so a feed broken for many stocks every
+# session costs a few runs per stock, not an entry per stock per session
+# (docs/live-trading/lessons-2026-10.md L1).
+REASONS_KEPT = 3
+
+
+class _Runs:
+    """The sessions one ticker is left out of, with why, as runs of
+    consecutive sessions (indexes into the loaded sessions) sharing a
+    reason, plus single sessions set apart. Reads like the
+    {session: reason} map encode keeps (``in``, get, setdefault), at a size
+    set by the number of runs, not of sessions."""
+
+    __slots__ = ("index", "firsts", "runs", "extra", "count")
+
+    def __init__(self, index):
+        self.index, self.firsts, self.runs, self.extra, self.count = index, [], [], {}, 0
+
+    def add(self, i, reason):
+        """Adds session ``i``, after every session added so far."""
+        self.count += 1
+        if self.runs and self.runs[-1][1] == i - 1 and self.runs[-1][2] == reason:
+            self.runs[-1][1] = i
+        else:
+            self.firsts.append(i)
+            self.runs.append([i, i, reason])
+
+    def put(self, day, reason):
+        self.extra[self.index[day]] = reason
+
+    def get(self, day, default=None):
+        i = self.index.get(day)
+        if i is None:
+            return default
+        if i in self.extra:
+            return self.extra[i]
+        k = bisect.bisect_right(self.firsts, i) - 1
+        if k >= 0 and self.runs[k][1] >= i:
+            return self.runs[k][2]
+        return default
+
+    def __contains__(self, day):
+        return self.get(day) is not None
+
+    def setdefault(self, day, reason):
+        found = self.get(day)
+        if found is None:
+            self.put(day, reason)
+            return reason
+        return found
+
+
+def _compact(directory, first, last, identity, required, optional, base, ahead, first_sequence,
+             max_sector_age_days, excluded, ranker):
+    """The compact stream of encode, read one session at a time in three
+    passes over the recordings, so memory holds one session's recordings,
+    the closes of the names ranked at a decision whose window covers the
+    session (8 bytes a close), and per-ticker figures of a few sessions or
+    runs each, never every instrument of every session
+    (docs/live-trading/lessons-2026-10.md L1; the budget is stated in
+    docs/manual/market-data.md):
+
+    1. every session base..last: the named instruments' bars, the universe
+       members, and per listed ticker its malformed sessions (as runs, the
+       first REASONS_KEPT with their own reason), its first well-formed
+       close and its close before each of its dividend ex-dates, which is
+       all _member_factors_from reads to find the sessions a member is left
+       out of;
+    2. every universe session of the span: its snapshot, ranked by the
+       ranker one session at a time;
+    3. from the earliest window start: the closes of the names ranked at a
+       decision whose window covers the session, and, from ``first``, the
+       envelopes, made one at a time (the returned generator).
+
+    The recordings are listed once, before pass 1 (list_recordings), and
+    every pass reads only those, so a recording written meanwhile is not
+    read and one removed or replaced meanwhile refuses the stream. Passes 1
+    and 2 run before this returns and raise what encode raises, in the
+    order it raises them, so the generator only writes. The envelopes are
+    byte for byte encode's own before it read this way (the recorded
+    fixture in the compact stream's tests pins that)."""
+    listing = list_recordings(directory)
+    retractions = load_retractions(directory)
+    named = set(required) | set(optional)
+    start = base + dt.timedelta(days=1)
+    by_ticker = collections.defaultdict(lambda: ([], []))
+    # The actions are read first, to know whose closes pass 1 keeps, but
+    # encode refuses the recordings before the actions, so whatever reading
+    # them raised is raised once pass 1 has checked the recordings.
+    actions_failed = None
+    try:
+        for r in _actions(directory, "splits", start, last, None):
+            by_ticker[r.get("ticker")][0].append(r)
+        for r in _actions(directory, "dividends", start, last, None):
+            by_ticker[r.get("ticker")][1].append(r)
+    except Exception as e:
+        actions_failed = e
+    # The session before each dividend ex-date, whose close the dividend's
+    # factor reads (adjust.forward_factors).
+    expected = [d for d in nyse_calendar.sessions(base, last) if d not in retractions]
+    priors = collections.defaultdict(set)   # session -> tickers whose close on it a factor reads
+    if actions_failed is None:
+        for ticker, (_, dividends) in by_ticker.items():
+            for r in dividends:
+                d = _event_day(r, "ex_dividend_date")
+                i = bisect.bisect_left(expected, d) if d is not None else 0
+                if i > 0:
+                    priors[expected[i - 1]].add(ticker)
+
+    # Pass 1.
+    days, index, kept, members = [], {}, [], set()
+    malformed = {}                             # ticker -> _Runs of its malformed sessions
+    closes = collections.defaultdict(dict)     # ticker -> {session: raw close}: first, and before ex-dates
+    for s in iter_sessions(directory, base, last, retractions, listing=listing):
+        i = index[s.day] = len(days)
+        days.append(s.day)
+        kept.append(Session(s.day, {t: s.bars[t] for t in sorted(named) if t in s.bars}, s.fetched_at, None))
+        if s.day >= first and s.universe is not None:
+            listed = {t.get("ticker") for t in s.universe.get("tickers") or ()}
+            members |= listed & set(s.bars)
+        wanted_close = priors.get(s.day, ())
+        for ticker, row in s.bars.items():
+            if ticker in named:
+                continue
+            try:
+                _check_bar(ticker, s.day, row)
+            except Malformed as e:
+                runs = malformed.get(ticker)
+                if runs is None:
+                    runs = malformed[ticker] = _Runs(index)
+                runs.add(i, str(e) if runs.count < REASONS_KEPT else
+                         "{} has more malformed bars; only its first {} reasons are kept".format(ticker, REASONS_KEPT))
+                continue
+            if ticker not in closes or ticker in wanted_close:
+                closes[ticker].setdefault(s.day, float(row["c"]))
+        del s
+    if not [d for d in days if d >= first]:
+        raise MissingData("no session in {}..{}".format(first, last))
+    if actions_failed is not None:
+        raise actions_failed
+
+    factors, out = {}, {}   # out: ticker -> the sessions it is left out of, with why
+    for ticker in sorted(named | members):
+        if ticker in named:
+            factors[ticker] = _factors(ticker, kept, days, by_ticker[ticker], base)
+            continue
+        runs = malformed.get(ticker)
+        # A malformed session that an action also leaves out carries both
+        # reasons, as _member_factors records them.
+        seeds = {}
+        splits, dividends = by_ticker[ticker]
+        for r, key in [(r, "execution_date") for r in splits] + [(r, "ex_dividend_date") for r in dividends]:
+            d = _event_day(r, key)
+            j = bisect.bisect_left(days, d) if d is not None else len(days)
+            if j < len(days) and runs is not None and days[j] in runs:
+                seeds[days[j]] = (runs.get(days[j]), 1)
+        _, bad = _member_factors_from(ticker, dict(closes.get(ticker, {})), seeds, days, by_ticker[ticker], base)
+        if any(n > 1 for _, n in bad.values()):   # nothing could be adjusted: every session is left out
+            left = _Runs(index)
+            reason = next(iter(bad.values()))[0]
+            for i in range(len(days)):
+                left.add(i, reason)
+        else:
+            left = runs if runs is not None else _Runs(index)
+            for day, (reason, _) in bad.items():
+                left.put(day, reason)
+        if left.runs or left.extra:
+            out[ticker] = left
+    span = [s for s in kept if s.day >= first]
+    for ticker in required:
+        missing = [s.day.isoformat() for s in span if ticker not in s.bars]
+        if missing:
+            raise MissingData("{} has no bar on {}".format(ticker, ", ".join(missing)))
+    for ticker in list(closes):   # only a member's figures are read again
+        if ticker not in members:
+            del closes[ticker]
+    for ticker in list(malformed):
+        if ticker not in members:
+            del malformed[ticker]
+
+    stream = _Stream(identity, first_sequence)
+    after = nyse_calendar.sessions_after(last, ahead)
+    while len([d for d in after if d not in retractions]) < ahead:
+        after = nyse_calendar.sessions_after(last, len(after) + 1)
+    through = after[-1]
+    opening = _utc(nyse_calendar.session_close(span[0].day).astimezone(dt.timezone.utc))
+    rules = nyse_calendar.sessions(base, through)
+    calendar = [d for d in rules if d not in retractions]
+
+    # Pass 2: each universe session's snapshot, ranked one session at a time.
+    # encode ranks once every snapshot is built, so a ranker refusal waits
+    # until every snapshot has been checked.
+    answers, skipped_by_day, fetched_by_day, ranker_failed = {}, {}, {}, None
+    for s in iter_sessions(directory, first, last, retractions, listing=listing):
+        if s.universe is None:
+            continue
+        rows, skipped = _universe_rows(directory, s.day, s.universe, max_sector_age_days, named, listing)
+        rows = [r for r in rows if s.day not in out.get(r["instrument_id"], ())]
+        # A skipped row's bar is malformed too, so it is normally left out
+        # already; only the rest are kept, to be added to the left-out sessions.
+        skipped = {t: r for t, r in skipped.items() if s.day not in out.get(t, ())}
+        if skipped:
+            skipped_by_day[s.day] = skipped
+        try:
+            fetched_by_day[s.day] = _fetched_at(s.universe, "universe " + s.day.isoformat())
+        except Malformed as e:
+            fetched_by_day[s.day] = e
+        if ranker_failed is None:
+            requests = [{"universe": {"session": s.day.isoformat(), "source": s.universe.get("source"), "rows": rows},
+                         "next_session": calendar[calendar.index(s.day) + 1].isoformat()}]
+            try:
+                answers[s.day] = _check_answers(requests, ranker(requests))[0]
+            except RankerFailed as e:
+                # One session per call, so the ranker's own message cannot
+                # say which session it refused.
+                ranker_failed = RankerFailed("universe {}: {}".format(s.day.isoformat(), e))
+        del s, rows
+    if ranker_failed is not None:
+        raise ranker_failed
+    for s in span:   # what encode refuses as it writes, refused before anything is written
+        if not any(t in s.bars for t in named):
+            raise MissingData("no requested instrument has a bar on {}".format(s.day.isoformat()))
+        if isinstance(fetched_by_day.get(s.day), Malformed):
+            raise fetched_by_day[s.day]
+    for day, skipped in sorted(skipped_by_day.items()):
+        for ticker, reason in skipped.items():
+            out.setdefault(ticker, {}).setdefault(day, reason)
+    if excluded is not None:
+        for ticker in sorted(out):
+            runs = _exclusions([s.day for s in span], out[ticker])
+            if runs:
+                excluded[ticker] = runs
+
+    # The closes pass 3 keeps: per ranked name, the window of each decision
+    # that ranks it, (first session, decision session) as indexes, oldest
+    # first.
+    needs = collections.defaultdict(list)
+    for day in sorted(answers):
+        answer = answers[day]
+        if answer["decision_session"]:
+            window = [d for d in calendar if d <= day][-answer["window"]:]
+            for ticker in answer["members"]:
+                needs[ticker].append((index[window[0]], index[day]))
+        else:
+            del answers[day]
+    # A later decision may ask for a longer window than an earlier one, so a
+    # name's closes are needed from the earliest start of all its windows.
+    reach = min([first] + [days[min(a for a, _ in spans)] for spans in needs.values()])
+    del kept, span
+
+    def emit():
+        yield stream.make(CALENDAR, "marketdata:calendar:{}:{}".format(rules[0], through), opening, opening,
+                          {"source": CALENDAR_SOURCE, "sessions": [d.isoformat() for d in rules]})
+        for day in sorted(d for d in retractions if rules[0] <= d <= through):
+            rec = retractions[day]
+            yield stream.make(RETRACTED, "marketdata:retracted:{}".format(day), opening, rec["fetched_at"],
+                              {"source": rec["source"], "session": day.isoformat(), "reason": rec["reason"]})
+        # Ranked name -> [index of its first held session, its raw closes from
+        # there, NaN where none is used]: 8 bytes a session, from the start of
+        # the earliest window still to be written.
+        held = {}
+        for s in iter_sessions(directory, reach, last, retractions, listing=listing):
+            i = index[s.day]
+            for ticker, spans in needs.items():
+                if min(a for a, _ in spans) > i:
+                    continue
+                entry = held.get(ticker)
+                if entry is None:
+                    entry = held[ticker] = [i, array.array("d")]
+                row = s.bars.get(ticker)
+                use = (row is not None and any(a <= i <= b for a, b in spans)
+                       and s.day not in malformed.get(ticker, ()))
+                entry[1].append(float(row["c"]) if use else math.nan)
+            if s.day < first:
+                continue
+            end, session = _utc(nyse_calendar.session_close(s.day).astimezone(dt.timezone.utc)), s.day.isoformat()
+            for ticker in sorted(t for t in named if t in s.bars):
+                r = s.bars[ticker]
+                split_m, total_m = factors[ticker][s.day]
+                yield stream.make(BAR, "marketdata:bar:{}:{}".format(ticker, session), end, s.fetched_at, {
+                    "instrument_id": ticker, "period_end": end,
+                    "split_adjusted": _view("split-adjusted", r, split_m, split_m),
+                    "raw": _view("raw", r, 1.0, 1.0),
+                    "adjusted": _view("split-and-dividend-adjusted", r, total_m, split_m),
+                    "adjusted_base": base.isoformat()})
+            ids = sorted(t for t in named if t in s.bars)
+            if s.universe is not None:
+                rows, _ = _universe_rows(directory, s.day, s.universe, max_sector_age_days, named, listing)
+                rows = [r for r in rows if s.day not in out.get(r["instrument_id"], ())]
+                fetched = fetched_by_day[s.day]
+                yield stream.make(UNIVERSE, "marketdata:universe:{}".format(session), end, fetched,
+                                  {"session": session, "source": s.universe.get("source"), "rows": rows})
+                del rows
+                answer = answers.get(s.day)
+                if answer is not None:
+                    window = [d for d in calendar if d <= s.day][-answer["window"]:]
+                    for ticker in sorted(answer["members"]):
+                        first_held, values = held.get(ticker, (i + 1, ()))
+                        known = {days[first_held + k]: v for k, v in enumerate(values) if not math.isnan(v)}
+                        yield stream.make(HISTORY, "marketdata:history:{}:{}".format(ticker, session), end, fetched,
+                                          _held_history(ticker, s.day, window, known, named, factors,
+                                                        closes, days, by_ticker, out, base))
+                        del known
+                        spans = needs[ticker]
+                        spans.pop(0)
+                        if not spans:
+                            del needs[ticker]
+                            held.pop(ticker, None)
+                            continue
+                        keep_from = min(a for a, _ in spans)
+                        entry = held.get(ticker)
+                        if entry is not None and keep_from > i:   # its next window has not started
+                            del held[ticker]
+                        elif entry is not None and keep_from > entry[0]:
+                            del entry[1][:keep_from - entry[0]]
+                            entry[0] = keep_from
+            yield stream.make(SESSION_CLOSED, "marketdata:session-closed:{}".format(session), end, s.fetched_at,
+                              {"period_end": end, "instrument_ids": ids})
+            del s
+
+    return emit()
+
+
+def _held_history(ticker, day, window, held, named, factors, closes, days, by_ticker, out, base):
+    """_history from the closes pass 3 held for ``ticker`` (see _compact): a
+    named instrument's factors are its own, a member's come from
+    _member_factors_from over its pass-1 closes and the held ones (the
+    factors do not depend on the sessions left out, so none are passed)."""
+    if ticker in named:
+        f = factors[ticker]
+    else:
+        known = dict(closes.get(ticker, {}))
+        known.update(held)
+        f, _ = _member_factors_from(ticker, known, {}, days, by_ticker[ticker], base)
+    left_out = out.get(ticker, {})
+    return {"instrument_id": ticker, "session": day.isoformat(), "adjusted_base": base.isoformat(),
+            "closes": [{"session": d.isoformat(), "close": held[d] * f[d][1]}
+                       for d in window if d in held and d not in left_out]}
+
+
+def iter_encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), optional=(),
+                universe_members=False, base=None, ahead=1, first_sequence=2, max_sector_age_days=7,
+                engine="momentum", excluded=None, ranker=None):
+    """The envelopes of encode (same arguments), as an iterator for
+    write_stream. A compact stream (with ``ranker``) is checked and ranked
+    in full before this returns, so it fails as encode does and
+    ``excluded`` is filled; its envelopes are then made one at a time as
+    they are written, so the stream is never held whole (docs/live-trading/
+    lessons-2026-10.md L1). Any other stream is encode's list."""
+    if ranker is None:
+        return iter(encode(directory, first, last, identity, required, optional, universe_members, base, ahead,
+                           first_sequence, max_sector_age_days, engine, excluded))
+    _, _, base = _check_request(first, last, required, optional, universe_members, base, ahead, engine, ranker)
+    return _compact(directory, first, last, identity, required, optional, base, ahead, first_sequence,
+                    max_sector_age_days, excluded, ranker)
 
 
 def write_stream(path, envelopes):

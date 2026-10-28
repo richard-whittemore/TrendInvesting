@@ -3,17 +3,21 @@ universe snapshot per session, bars only for the named instruments, and at
 a decision session one close history per member the Go ranker names.
 Synthetic data only; no network."""
 import datetime as dt
+import hashlib
 import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from marketdata import __main__ as cli
-from marketdata import encode, record
-from marketdata.tests.test_encode import ALL_SESSIONS, FIRST, REPO, bar_of, break_bar, build, of, rewrite, run, unadjustable_ddd
+from marketdata import encode, nyse_calendar, record, sectors
+from marketdata.tests.test_encode import (ALL_SESSIONS, FIRST, IDENTITY, REPO, bar_of, bars_for, break_bar, build, of,
+                                          rewrite, row, run, stamp, unadjustable_ddd)
+from marketdata.tests.test_sectors import iwv_csv, screener
 
 D = dt.date
 HISTORY = "market.close.history"
@@ -213,6 +217,404 @@ class CompactRefusalTest(unittest.TestCase):
         self.assertEqual(status, 0)
         named.assert_called_once_with(["bin/universe-rank", "-config", "my config.json"])
         self.assertEqual([json.loads(line) for line in Path(out).read_text().splitlines()], compact(self.tmp.name))
+
+
+class OneSessionAtATimeTest(unittest.TestCase):
+    """The compact stream is read and ranked one session at a time, so the
+    data job never holds every instrument of every session
+    (docs/live-trading/lessons-2026-10.md L1), and the stream it writes is
+    the one encode returns."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        build(self.tmp.name, sector_session="2026-11-27")
+        # A second universe recording, beside 11-27's grouped one (they agree).
+        tickers = [{"ticker": t, "type": "CS", "market": "stocks"} for t in ("AAA", "BBB", "CCC", "DDD", "ZZZ")]
+        record.write(self.tmp.name, {"kind": "universe", "source": "massive", "session": "2026-11-27",
+                                     "fetched_at": "2026-11-27T23:30:00Z", "adjusted": False, "ticker_type": "CS",
+                                     "bars": bars_for(D(2026, 11, 27)), "tickers": tickers})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_ranker_is_asked_one_session_at_a_time(self):
+        calls, ranker = [], FakeRanker()
+
+        def asked(requests):
+            calls.append([r["universe"]["session"] for r in requests])
+            return ranker(requests)
+        compact(self.tmp.name, ranker=asked)
+        self.assertEqual(calls, [["2026-11-27"], ["2026-11-30"]])
+
+    def test_the_streamed_envelopes_are_the_bytes_encode_returns(self):
+        break_bar(self.tmp.name, "2026-11-25", "AAA")
+        unadjustable_ddd(self.tmp.name)
+        ranker = FakeRanker(members=("AAA", "CCC", "DDD"))
+        listed, streamed = {}, {}
+        whole, lazy = os.path.join(self.tmp.name, "whole.jsonl"), os.path.join(self.tmp.name, "lazy.jsonl")
+        encode.write_stream(whole, compact(self.tmp.name, ranker=ranker, excluded=listed))
+        envelopes = encode.iter_encode(self.tmp.name, FIRST, D(2026, 11, 30), IDENTITY, required=["SPY", "IEF"],
+                                       optional=[], ranker=ranker, excluded=streamed)
+        self.assertEqual(streamed, listed)   # filled before the first envelope is written
+        encode.write_stream(lazy, envelopes)
+        self.assertEqual(Path(lazy).read_bytes(), Path(whole).read_bytes())
+
+    def test_a_refusal_is_raised_before_any_envelope_is_written(self):
+        rewrite(self.tmp.name, "universe", "2026-11-30", "SPY", c=None)   # a named instrument's bad row
+        with self.assertRaises(encode.Malformed):
+            encode.iter_encode(self.tmp.name, FIRST, D(2026, 11, 30), IDENTITY, required=["SPY", "IEF"],
+                               optional=[], ranker=FakeRanker())
+
+
+# A recorded fixture for the compact stream's bytes: sixteen months of
+# universe sessions (the first twenty grouped only), so the last four
+# decisions have full 260-session windows; a retracted session; a split on
+# a Saturday and one on a weekday; a dividend; a dividend the encoder cannot
+# adjust; a malformed bar inside a window; a stock priced near 1e30; and a
+# ranked set that churns: C05 is ranked in January 2026, not February, and
+# again in March. Synthetic prices only.
+CHURN_FIRST, CHURN_LAST = D(2025, 1, 2), D(2026, 4, 30)
+CHURN_RETRACTED = D(2025, 6, 11)
+CHURN_NAMES = ["C{:02d}".format(n) for n in range(12)] + ["BIG"]
+CHURN_DEFAULT = ["BIG", "C00", "C01", "C02", "C03", "C04"]
+CHURN_MEMBERS = {"2026-01": CHURN_DEFAULT + ["C05"], "2026-02": CHURN_DEFAULT + ["C06"],
+                 "2026-03": CHURN_DEFAULT + ["C05", "C06"]}
+CHURN_WINDOW = 260
+# The sha256 of the streams the encoder wrote, for this fixture, before it
+# read the recordings one session at a time (git merge-base of that change,
+# adapter/marketdata/encode.py), and the exclusions it reported.
+CHURN_WARM_UP_SHA256 = "f32373ec7de1492956e65017534ace9860c28f71fec0c163bf4c69696719e33f"
+CHURN_DAILY_SHA256 = "d9bfb434befd87d7c89daeae869f9f39ea6fa661850e83caff881945dbee00af"
+CHURN_EXCLUDED = {"C03": [("2026-02-18", "2026-02-18", 1)], "C06": [("2026-02-10", "2026-02-10", 1)]}
+
+
+def churn_days():
+    return [d for d in nyse_calendar.sessions(CHURN_FIRST, CHURN_LAST) if d != CHURN_RETRACTED]
+
+
+def churn_close(n, i):
+    return 10.0 + n + 0.05 * ((i * (n + 3)) % 17)
+
+
+def build_churn(d):
+    days = churn_days()
+    tickers = [{"ticker": t, "type": "CS", "market": "stocks"} for t in CHURN_NAMES]
+    split_c04, split_big = D(2025, 9, 15), D(2025, 8, 1)   # C04's split executes Saturday 09-13
+    last_sectors = None
+    for i, day in enumerate(days):
+        bars = [row("SPY", 600.0 + i * 0.1), row("IEF", 95.0, v=5000)]
+        for n, t in enumerate(CHURN_NAMES[:-1]):
+            c = churn_close(n, i) / (2 if t == "C04" and day >= split_c04 else 1)
+            bars.append(row(t, c, v=1000 * (n + 1)))
+        big = 1e30 * (1 + (i % 7) * 0.001) / (2 if day >= split_big else 1)
+        bars.append(row("BIG", big, v=1, spread=big * 0.01))
+        if i == 280:
+            next(b for b in bars if b["T"] == "C03")["h"] = 1.0   # a high below the close
+        if i < 20:
+            record.write(d, {"kind": "grouped", "source": "massive", "session": day.isoformat(),
+                             "fetched_at": stamp(day), "adjusted": False, "bars": bars})
+        else:
+            record.write(d, {"kind": "universe", "source": "massive", "session": day.isoformat(),
+                             "fetched_at": stamp(day), "adjusted": False, "ticker_type": "CS", "bars": bars,
+                             "tickers": tickers})
+        if last_sectors is None or (day - last_sectors).days >= 5:
+            last_sectors = day
+            record.write(d, {"kind": "sectors-iwv", "source": sectors.IWV_SOURCE, "session": day.isoformat(),
+                             "fetched_at": stamp(day), "url": sectors.IWV_URL, "as_of": "Jan 2, 2025",
+                             "body": iwv_csv(("C00", "Information Technology", "Equity"), ("C01", "Financials", "Equity"))})
+            record.write(d, {"kind": "sectors-nasdaq", "source": sectors.NASDAQ_SOURCE, "session": day.isoformat(),
+                             "fetched_at": stamp(day), "url": sectors.NASDAQ_URL,
+                             "rows": json.loads(screener(("C02", "Energy"), ("C00", "Finance")))["data"]["rows"]})
+    record.write(d, {"kind": "splits", "source": "massive", "session": CHURN_LAST.isoformat(),
+                     "from": CHURN_FIRST.isoformat(), "fetched_at": stamp(CHURN_LAST),
+                     "rows": [{"id": "S1", "ticker": "C04", "execution_date": "2025-09-13", "split_from": 1, "split_to": 2},
+                              {"id": "S2", "ticker": "BIG", "execution_date": "2025-08-01", "split_from": 1, "split_to": 2}]})
+    record.write(d, {"kind": "dividends", "source": "massive", "session": CHURN_LAST.isoformat(),
+                     "from": CHURN_FIRST.isoformat(), "fetched_at": stamp(CHURN_LAST),
+                     "rows": [{"id": "V1", "ticker": "C02", "ex_dividend_date": "2025-10-15", "cash_amount": 0.5},
+                              {"id": "V2", "ticker": "C06", "ex_dividend_date": "2026-02-10", "cash_amount": 99.0}]})
+    encode.record_retraction(d, CHURN_RETRACTED, "NYSE closed for a national day of mourning",
+                             recorded_at="2025-06-10T23:00:00Z")
+
+
+def churn_ranker(requests):
+    out = []
+    for r in requests:
+        session, nxt = r["universe"]["session"], r["next_session"]
+        decision = session[:7] != nxt[:7]
+        out.append({"session": session, "decision_session": decision, "window": CHURN_WINDOW,
+                    "members": CHURN_MEMBERS.get(session[:7], CHURN_DEFAULT) if decision else []})
+    return out
+
+
+def churn_stream(d, first, path, encoder=encode, excluded=None):
+    envelopes = encoder.encode(d, first, CHURN_LAST, IDENTITY, required=["SPY", "IEF"], optional=["C01"],
+                               base=CHURN_FIRST, ranker=churn_ranker, excluded=excluded)
+    encoder.write_stream(path, envelopes)
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def exclusions(excluded):
+    return {t: [(r.first.isoformat(), r.last.isoformat(), r.sessions) for r in runs] for t, runs in sorted(excluded.items())}
+
+
+class RecordedStreamTest(unittest.TestCase):
+    """The compact stream is byte for byte the one the encoder wrote before
+    it read the recordings one session at a time, on a fixture with churn,
+    actions, bad data and a retraction."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        build_churn(cls.tmp.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_warm_up_and_the_daily_stream_are_the_recorded_bytes(self):
+        excluded = {}
+        self.assertEqual(churn_stream(self.tmp.name, CHURN_FIRST, os.path.join(self.tmp.name, "warm.jsonl"),
+                                      excluded=excluded), CHURN_WARM_UP_SHA256)
+        self.assertEqual(exclusions(excluded), CHURN_EXCLUDED)
+        self.assertEqual(churn_stream(self.tmp.name, CHURN_LAST, os.path.join(self.tmp.name, "daily.jsonl")),
+                         CHURN_DAILY_SHA256)
+
+    def test_a_name_ranked_again_after_a_month_out_keeps_its_whole_window(self):
+        path = os.path.join(self.tmp.name, "churn.jsonl")
+        churn_stream(self.tmp.name, CHURN_FIRST, path)
+        stream = [json.loads(line) for line in Path(path).read_text().splitlines()]
+        histories = {(e["payload"]["instrument_id"], e["payload"]["session"]): e["payload"] for e in of(stream, HISTORY)}
+        march = "2026-03-31"
+        self.assertNotIn(("C05", "2026-02-27"), histories)
+        window = [d.isoformat() for d in churn_days() if d.isoformat() <= march][-CHURN_WINDOW:]
+        self.assertEqual([c["session"] for c in histories[("C05", march)]["closes"]], window)
+        self.assertEqual(len(window), CHURN_WINDOW)
+        # C03's malformed bar is inside this window, so that one session is missing.
+        c03 = [c["session"] for c in histories[("C03", march)]["closes"]]
+        self.assertEqual(len(c03), CHURN_WINDOW - 1)
+
+
+class OverflowTest(unittest.TestCase):
+    def test_an_adjusted_close_beyond_a_float_refuses_the_stream_and_writes_nothing(self):
+        """A finite close that its split multiplier pushes past the largest
+        float cannot be written as JSON, so the stream is refused, as the
+        encoder refused it before it read one session at a time."""
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            rewrite(d, "grouped", "2026-11-27", "BBB", o=1e308, h=1e308, l=1e307, c=1e308)   # BBB splits 2-for-1 on 11-25
+            with self.assertRaises(ValueError):
+                compact(d)
+            path = os.path.join(d, "overflow.jsonl")
+            with self.assertRaises(ValueError):
+                encode.write_stream(path, encode.iter_encode(d, FIRST, D(2026, 11, 30), IDENTITY, required=["SPY", "IEF"],
+                                                             ranker=FakeRanker()))
+            self.assertFalse(os.path.exists(path))
+
+
+class FrozenRecordingsTest(unittest.TestCase):
+    """The recordings are listed once, when the encode starts: a recording
+    written meanwhile is not read, and one that disappears or changes refuses
+    the stream (docs/live-trading/lessons-2026-10.md L1 keeps the passes
+    separate, so they must read the same files)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        build_churn(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def during_ranking(self, change):
+        done = []
+
+        def rank(requests):
+            if not done:
+                done.append(change())
+            return churn_ranker(requests)
+        return rank
+
+    def encode(self, ranker, path):
+        envelopes = encode.iter_encode(self.tmp.name, CHURN_FIRST, CHURN_LAST, IDENTITY, required=["SPY", "IEF"],
+                                       optional=["C01"], base=CHURN_FIRST, ranker=ranker)
+        encode.write_stream(path, envelopes)
+
+    def test_a_universe_recording_written_during_the_encode_is_not_read(self):
+        clean = os.path.join(self.tmp.name, "clean.jsonl")
+        churn_stream(self.tmp.name, CHURN_FIRST, clean)
+        day = churn_days()[5]   # grouped only
+
+        def add():
+            rec = record.read(os.path.join(self.tmp.name, "grouped_{}.json".format(day)))
+            record.write(self.tmp.name, dict(rec, kind="universe", ticker_type="CS",
+                                             tickers=[{"ticker": t, "type": "CS", "market": "stocks"} for t in CHURN_NAMES]))
+        path = os.path.join(self.tmp.name, "during.jsonl")
+        self.encode(self.during_ranking(add), path)
+        self.assertEqual(Path(path).read_bytes(), Path(clean).read_bytes())
+
+    def test_a_recording_that_disappears_during_the_encode_refuses_the_stream(self):
+        gone = os.path.join(self.tmp.name, "universe_{}.json".format(churn_days()[100]))
+        path = os.path.join(self.tmp.name, "gone.jsonl")
+        with self.assertRaises(encode.Conflict) as caught:
+            self.encode(self.during_ranking(lambda: os.remove(gone)), path)
+        self.assertIn(os.path.basename(gone), str(caught.exception))
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_recording_rewritten_during_the_encode_refuses_the_stream(self):
+        name = "universe_{}.json".format(churn_days()[100])
+
+        def rewrite_it():
+            rec = record.read(os.path.join(self.tmp.name, name))
+            os.remove(os.path.join(self.tmp.name, name))
+            rec["bars"][0]["v"] += 1
+            record.write(self.tmp.name, rec)
+        with self.assertRaises(encode.Conflict) as caught:
+            self.encode(self.during_ranking(rewrite_it), os.path.join(self.tmp.name, "rewritten.jsonl"))
+        self.assertIn(name, str(caught.exception))
+
+
+class ListedReadTest(unittest.TestCase):
+    """Each listed recording is opened first and its open file checked
+    against the listing, so a file replaced as it is read gives either the
+    listed contents or a Conflict, never the replacement; sector recordings
+    are read the same way."""
+
+    @classmethod
+    def setUpClass(cls):
+        # The clean stream once for the class; each test changes its own copy.
+        with tempfile.TemporaryDirectory() as d:
+            build_churn(d)
+            churn_stream(d, CHURN_FIRST, os.path.join(d, "clean.jsonl"))
+            cls.clean = Path(d, "clean.jsonl").read_bytes()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        build_churn(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def encode(self, ranker, path):
+        envelopes = encode.iter_encode(self.tmp.name, CHURN_FIRST, CHURN_LAST, IDENTITY, required=["SPY", "IEF"],
+                                       optional=["C01"], base=CHURN_FIRST, ranker=ranker)
+        encode.write_stream(path, envelopes)
+
+    def replace(self, name):
+        path = os.path.join(self.tmp.name, name)
+        rec = record.read(path)
+        os.remove(path)
+        if "bars" in rec:
+            next(b for b in rec["bars"] if b["T"] == "SPY")["c"] += 1.0   # a named bar, written as it is read
+        else:
+            rec["as_of"] = rec.get("as_of", "") + " "   # a sector recording, written again
+        record.write(self.tmp.name, rec)
+
+    def armed_at_the_last_ranking(self, action):
+        def rank(requests):
+            if requests[-1]["universe"]["session"] == CHURN_LAST.isoformat():
+                action()
+            return churn_ranker(requests)
+        return rank
+
+    def test_a_bar_recording_replaced_as_it_is_read_is_never_read_as_the_replacement(self):
+        name = "universe_{}.json".format(churn_days()[100])
+        target = os.path.join(self.tmp.name, name)
+        armed, real_stat, real_fstat = [], os.stat, os.fstat
+        original = real_stat(target).st_ino
+
+        def after(result):
+            if armed and armed[0] and result.st_ino == original:
+                armed[0] = False
+                self.replace(name)
+            return result
+
+        def stat(path, *a, **kw):
+            return after(real_stat(path, *a, **kw))
+
+        def fstat(fd):
+            return after(real_fstat(fd))
+        path = os.path.join(self.tmp.name, "raced.jsonl")
+        with mock.patch("marketdata.encode.os.stat", stat), mock.patch("marketdata.encode.os.fstat", fstat):
+            try:
+                self.encode(self.armed_at_the_last_ranking(lambda: armed.append(True)), path)
+            except encode.Conflict as e:
+                self.assertEqual(armed, [False])   # the replacement happened
+                self.assertIn(name, str(e))
+                return
+        self.assertEqual(armed, [False])   # the replacement happened, as the file was read
+        self.assertEqual(Path(path).read_bytes(), self.clean)
+
+    def latest_sector(self, kind):
+        day = churn_days()[100]
+        names = sorted(n for n in os.listdir(self.tmp.name)
+                       if n.startswith(kind + "_") and n[len(kind) + 1:-5] <= day.isoformat())
+        return names[-1]
+
+    def test_a_sector_recording_replaced_during_the_encode_refuses_the_stream(self):
+        name = self.latest_sector("sectors-iwv")
+        with self.assertRaises(encode.Conflict) as caught:
+            self.encode(self.armed_at_the_last_ranking(lambda: self.replace(name)),
+                        os.path.join(self.tmp.name, "sector-replaced.jsonl"))
+        self.assertIn(name, str(caught.exception))
+
+    def test_a_sector_recording_removed_during_the_encode_refuses_the_stream(self):
+        name = self.latest_sector("sectors-nasdaq")
+        with self.assertRaises(encode.Conflict) as caught:
+            self.encode(self.armed_at_the_last_ranking(lambda: os.remove(os.path.join(self.tmp.name, name))),
+                        os.path.join(self.tmp.name, "sector-removed.jsonl"))
+        self.assertIn(name, str(caught.exception))
+
+
+class LongerLaterWindowTest(unittest.TestCase):
+    """A name's closes are kept from the earliest start of all its windows,
+    not only its first decision's: a later decision may ask for a longer
+    window."""
+
+    def test_a_later_longer_window_is_held_whole_in_a_stream_that_starts_late(self):
+        def ranker(requests):
+            out = churn_ranker(requests)
+            for a in out:
+                a["window"] = 5 if a["session"].startswith("2026-03") else CHURN_WINDOW
+            return out
+        with tempfile.TemporaryDirectory() as d:
+            build_churn(d)
+            late, whole = (encode.encode(d, first, CHURN_LAST, IDENTITY, required=["SPY", "IEF"], optional=["C01"],
+                                         base=CHURN_FIRST, ranker=ranker)
+                           for first in (D(2026, 3, 2), CHURN_FIRST))
+            late, whole = list(late), list(whole)
+        april = lambda stream: {e["payload"]["instrument_id"]: e["payload"] for e in of(stream, HISTORY)
+                                if e["payload"]["session"] == "2026-04-30"}
+        self.assertEqual(len(april(late)["C00"]["closes"]), CHURN_WINDOW)
+        self.assertEqual(april(late), april(whole))
+
+
+class RankerRefusalTest(unittest.TestCase):
+    """A ranker that refuses, or does not answer in time, refuses the stream
+    with the session it was asked about."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        build(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_refusal_names_the_session(self):
+        with self.assertRaises(encode.RankerFailed) as caught:
+            compact(self.tmp.name, ranker=encode.go_ranker(["sh", "-c", "echo 'line 1: no' >&2; exit 1"]))
+        self.assertIn("universe 2026-11-30", str(caught.exception))
+        self.assertIn("line 1: no", str(caught.exception))
+
+    def test_a_ranker_that_does_not_answer_in_time_names_the_session(self):
+        started = time.monotonic()
+        with self.assertRaises(encode.RankerFailed) as caught:
+            compact(self.tmp.name, ranker=encode.go_ranker(["sleep", "30"], timeout=0.5))
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn("universe 2026-11-30", str(caught.exception))
+        self.assertIn("did not answer within 0.5 s", str(caught.exception))
+
+    def test_the_go_ranker_waits_sixty_seconds_by_default(self):
+        self.assertEqual(encode.RANKER_TIMEOUT_SECONDS, 60)
 
 
 def retract(d, day, reason="NYSE closed for a national day of mourning"):
