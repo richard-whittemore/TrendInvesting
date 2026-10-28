@@ -697,7 +697,10 @@ minutes before that session's close (from 3:55 p.m. on a normal day,
 reading is withheld; the reason names each one and says whether it is
 after the close or within those five minutes. A fill in the journal in
 that window keeps that session's reading withheld for good (the journal
-is never rewritten), on the evening reading as well as the next morning's.
+is never rewritten), on the evening reading as well as the next morning's;
+the check reads every earlier run's log back through the chain of
+approvals, however old. A log it cannot read withholds the reading too,
+but only until it can be read.
 An
 execution at a time New York skipped when the clocks went forward stops the
 adapter (send the journal line to the developer). Any other zone, a

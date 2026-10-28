@@ -1333,9 +1333,11 @@ the label:
 - A Gateway up to the 5-minute tolerance slow passes its check, so a 16:02
   execution may be stamped 15:58: every at-or-after-close check on the
   Gateway's stamps (the same-day list and the journalled fills) takes one
-  stamped within the tolerance before the close as at the close, and the
-  walk back through earlier runs' logs stops only at a run whose business
-  was all recorded before that same boundary. A same-day reading checks the
+  stamped within the tolerance before the close as at the close. The
+  journal check reads every run of the chain: when a run's business was
+  recorded proves nothing of the stamps of the runs behind it, since a fast
+  Gateway's stamp on an unchecked link can be hours after the fill was
+  recorded, so no run is taken as ending the walk. A same-day reading checks the
   journal's fills too, not only IBKR's re-read list: a fill journalled
   after the close on an earlier link (a fast Gateway's, before its check)
   is the stamp the engine applies on top of the close's book, though IBKR

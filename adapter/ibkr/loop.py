@@ -183,7 +183,7 @@ from orders import (EASTERN_LABELS, NEW_YORK, NEW_YORK_ZONES, OPEN_ORDER_DISAGRE
                     OpenOrdersUnsettled, OrderTracker, agrees_with_account, collect_broker_orders,
                     collect_settled_broker_orders, gateway_clock_trusted, match_on_reconnect, new_york_instants,
                     order_key, unverified_receipt)
-from relay import (LOG_INPUT, OUTBOX_SUFFIX, RUN_APPROVED, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
+from relay import (LOG_INPUT, OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
                    Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
                    run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
@@ -433,15 +433,6 @@ def close_window(close):
     Gateway up to that slow passes its clock check and may stamp a 16:02 execution 15:58 (ADR 0019, amended
     2026-10-28). Every at-or-after-close check on the Gateway's stamps or the journal uses it."""
     return close - GATEWAY_CLOCK_TOLERANCE
-
-
-def _recorded_at_or_after(envelope, moment):
-    """Whether a logged input's recorded time is at or after moment; True when it cannot be read (fail closed)."""
-    try:
-        at = datetime.fromisoformat(str(envelope["recorded_at"]).replace("Z", "+00:00"))
-        return at.tzinfo is None or at >= moment
-    except (KeyError, TypeError, ValueError):
-        return True
 
 
 def _side_of_close(at, close):
@@ -1320,7 +1311,9 @@ class AdapterLoop:
     def _journal_reason(self, close):
         """Why the journal shows the account traded at the close or after it ("" when it does not): the fills
         _journalled_fills_since finds, each saying which side of the close it is."""
-        fills = self._journalled_fills_since(close)
+        fills, refused = self._journal_fills(close)
+        if refused:
+            return refused
         if not fills:
             return ""
         return ("the journal records {} fill(s) after the close, within {} before it (a Gateway clock up to that slow "
@@ -1361,28 +1354,30 @@ class AdapterLoop:
         return reasons, False
 
     def _journalled_fills_since(self, close):
-        """The fills journalled stamped from close_window(close) on (at or after the close, or within
-        GATEWAY_CLOCK_TOLERANCE before it), each named with its stamp and which of the two it is: in the outbox, this run's durable log, and the log of
-        every earlier run its Run approvals chain back to, as the previous close's book reads them
-        (book_basis.previous_close; relay.run_chain), so a fresh run hides no fill of the run before it.
+        """The fills journalled stamped from close_window(close) on, each named with its stamp and which side of the
+        close it is (_journal_fills), or the one reason the chain of runs' logs cannot be read."""
+        fills, refused = self._journal_fills(close)
+        return [refused] if refused else fills
 
-        The walk stops after the first earlier run whose business (every input but its configuration and Run
-        approval) was all recorded strictly before close_window(close), the same boundary: each run before it ended earlier still. A run with no
-        business is walked past. A chain that cannot be read is itself a reason (fail closed, AGENTS.md).
+    def _journal_fills(self, close):
+        """(fills, refused): the fills journalled stamped from close_window(close) on (at or after the close, or
+        within GATEWAY_CLOCK_TOLERANCE before it), each named with its stamp and which of the two it is, in the
+        outbox, this run's durable log, and the log of every earlier run its Run approvals chain back to
+        (relay.run_chain), so a fresh run hides no fill of a run before it; and why the chain cannot be read ("" when
+        it can; fail closed, AGENTS.md).
+
+        Every run of the chain is read: when a run's business was recorded proves nothing of the stamps of the runs
+        behind it, since a fill read on a link whose Gateway clock was not believed is stamped with the later of the
+        Gateway's reading and its receipt (orders.execution_report), and a fast Gateway's reading can be hours after
+        the fill was recorded (ADR 0019, amended 2026-10-28).
         """
         payloads = [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
         try:
-            for n, (_, groups, _) in enumerate(run_chain(self._engine_log_path)):
+            for _, groups, _ in run_chain(self._engine_log_path):
                 inputs = [envelope for group in groups for _, kind, envelope in group if kind == LOG_INPUT]
                 payloads += [e["payload"] for e in inputs if e["type"] == FILL_TYPE]
-                # A run's configuration and Run approval say nothing about when its business ran: a run holding
-                # nothing else is walked past, never taken as ending before the close.
-                business = [e for e in inputs if e["type"] != RUN_APPROVED and not e["type"].endswith(
-                    ".configuration")]
-                if n > 0 and business and not any(_recorded_at_or_after(e, close_window(close)) for e in business):
-                    break
         except ResolveRefused as refused:
-            return ["the chain of runs' logs cannot be read, so their fills cannot be checked ({})".format(refused)]
+            return [], "the chain of runs' logs cannot be read, so their fills cannot be checked ({})".format(refused)
         found, seen = [], set()
         for payload in payloads:
             ident = str(payload.get("fill_id", "a fill with no ID")) if isinstance(payload, dict) else "a fill"
@@ -1397,7 +1392,7 @@ class AdapterLoop:
             elif at >= close_window(close) and ident not in seen:
                 seen.add(ident)
                 found.append("{} (stamped {}, {})".format(ident, _stamp(at), _side_of_close(at, close)))
-        return found
+        return found, ""
 
     def _awaits_proof(self, close):
         """Whether a batch for the session closing at close waits, unread, for the Flex reader's executions proof.

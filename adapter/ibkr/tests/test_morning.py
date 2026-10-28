@@ -343,6 +343,48 @@ class MorningTests(unittest.TestCase):
             loop.step()
         self.assert_withheld("journal", "0001f4e8.window.01.01", "within 5 minutes before the close")
 
+    def chain_of_three(self, fill_recorded, fill_stamped, between_recorded, ident):
+        """Run A holds one fill recorded at fill_recorded and stamped fill_stamped (a fast Gateway's, on an unchecked
+        link); run B, its successor, holds business recorded at each of between_recorded; run C, B's successor, is
+        the fresh run whose morning reading is delivered. Returns the reading's withheld reason."""
+        self.proof(FRIDAY_MORNING)
+        payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": ident,
+                   "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                   "filled_at": fill_stamped}
+        commit_at(self.engine, "fill:" + ident, fill_recorded, kind=FILL_TYPE, payload=payload, version=5)
+        first = self.engine_log
+        middle = str(Path(self.dir.name) / (RUN + "-2.log"))
+        between = LoggedEngine(middle, approval=run_approval(ACCOUNT, previous_log=RUN + ".log",
+                                                             previous_log_final_hash=final_hash(first)))
+        for n, recorded in enumerate(between_recorded):
+            commit_at(between, "between:business:{}".format(n), recorded)
+        fresh = RUN + "-3"
+        self.engine_log = str(Path(self.dir.name) / (fresh + ".log"))
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, previous_log=RUN + "-2.log", previous_log_final_hash=final_hash(middle)))
+        self.folder = self.streams / fresh
+        write_stream(self.folder, THURSDAY, session_envelopes([THURSDAY], run=fresh))
+        self.fake.positions = [(ACCOUNT, contract(), Decimal("148"), 312.5)]
+        self.fake.summary = [(a, t, "99597.75" if t == "TotalCashValue" else v, c) for a, t, v, c in SUMMARY]
+        loop = self.loop()
+        loop.start()
+        for _ in range(40):
+            loop.step()
+        return self.assert_withheld("journal", ident)
+
+    def test_a_fill_stamped_after_the_close_is_found_behind_a_run_that_ended_before_it(self):
+        # A fast Gateway's stamp is not bounded by when the fill was recorded: a run whose business was all recorded
+        # before the close window proves nothing of the stamps of the runs behind it, so the walk reads every run of
+        # the chain. Run A's fill is recorded at 15:30 and stamped 18:30; run B's business is recorded at 15:40.
+        self.chain_of_three("2027-01-14T20:30:00Z", "2027-01-14T23:30:00Z", ["2027-01-14T20:40:00Z"],
+                            "0001f4e8.behind.01.01")
+
+    def test_a_morning_fill_stamped_after_the_close_is_found_behind_a_day_of_business(self):
+        # Run A's 10:00 fill stamped 17:00; run B's business from 10:10 to 15:50; run C from 15:52.
+        self.chain_of_three("2027-01-14T15:00:00Z", "2027-01-14T22:00:00Z",
+                            ["2027-01-14T15:10:00Z", "2027-01-14T18:00:00Z", "2027-01-14T20:50:00Z"],
+                            "0001f4e8.morning.01.01")
+
     def test_a_fill_two_runs_back_is_found_past_an_empty_run(self):
         # A run between them with nothing but its configuration and approval says nothing about when it started:
         # the walk goes past it (book_basis.previous_close walks the same chain).
@@ -522,6 +564,24 @@ class MorningTests(unittest.TestCase):
         self.assertIn("0001f4e8.near.01.01 (stamped 2027-01-14T20:57:00Z, within 5 minutes before the close)", found)
         self.assertIn("0001f4e8.after.01.01 (stamped 2027-01-14T21:30:00Z, at or after the close)", found)
 
+    def test_a_chain_that_cannot_be_read_is_not_reported_as_a_fill_kept_for_good(self):
+        from relay import ResolveRefused
+        import loop as loop_module
+        self.proof(FRIDAY_MORNING)
+        loop = self.loop()
+        loop.start()
+        close = nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc)
+
+        def refused(path):
+            raise ResolveRefused("synthetic: the log breaks its chain")
+        original = loop_module.run_chain
+        loop_module.run_chain = refused
+        self.addCleanup(setattr, loop_module, "run_chain", original)
+        reason = loop._journal_reason(close)
+        self.assertIn("the chain of runs' logs cannot be read", reason)
+        self.assertNotIn("fill(s)", reason)
+        self.assertNotIn("keeps them", reason)
+
     def test_a_journalled_fill_in_the_window_withholds_the_session_for_good(self):
         self.proof(FRIDAY_MORNING)
         payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.near.01.01",
@@ -545,9 +605,12 @@ class MorningTests(unittest.TestCase):
         self.assertEqual(loop._gateway_zone, "", "setup: the corrected link's check holds")
         payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.fast.01.01",
                    "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
-                   "filled_at": "2027-01-14T23:30:00Z"}
+                   "filled_at": "2027-01-14T21:30:00Z"}
         loop.outbox.append({"id": "fill:fast", "event_type": FILL_TYPE, "schema_version": 1,
-                            "event_time": "2027-01-14T23:30:00Z", "payload": payload})
+                            "event_time": "2027-01-14T21:30:00Z", "payload": payload})
+        # The reading shows the fill: one more share, and the cash it cost.
+        self.fake.positions = [(ACCOUNT, contract(), Decimal("148"), 312.5)]
+        self.fake.summary = [(a, t, "99597.75" if t == "TotalCashValue" else v, c) for a, t, v, c in SUMMARY]
         self.fake.executions = [(contract(), execution(exec_id="0001f4e8.fast.01.01", order_id=0, perm_id=7676,
                                                        order_ref="", client_id=0, time="20270114 15:30:00 EST"))]
         self.deliver(THURSDAY, loop)
