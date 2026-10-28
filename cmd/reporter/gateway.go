@@ -131,11 +131,10 @@ type hostGateway struct {
 	// The Gateway unit as the previous firing saw it: its restart count, whether
 	// it was waiting to restart, and whether a start that keeps failing is what
 	// opened the outage.
-	Restarts     *int `json:"restarts,omitempty"`
-	Auto         bool `json:"auto_restart,omitempty"`
-	Rose         bool `json:"rose,omitempty"`          // restarts rose at the previous firing
+	Restarts     *int `json:"restarts,omitempty"`      // NRestarts at the last good sample
+	Baseline     *int `json:"baseline,omitempty"`      // NRestarts when the unit was last seen quiet twice in a row
+	Quiet        int  `json:"quiet,omitempty"`         // consecutive good quiet firings
 	StartFailing bool `json:"start_failing,omitempty"` // a failing start is open, until it closes
-	Quiet        int  `json:"quiet,omitempty"`         // consecutive quiet firings while StartFailing
 	RestartOnly  bool `json:"restart_only,omitempty"`  // the outage was opened by the restart rule alone
 }
 
@@ -190,39 +189,18 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	out, said := ev.out, ev.said
 	restartOut, restartClosed := false, false
 	if sampleErr == nil {
-		delta := 0
-		if h.Restarts != nil && unit.restarts > *h.Restarts {
-			delta = unit.restarts - *h.Restarts
+		var detail string
+		restartOut, restartClosed, detail = h.advanceRestartRule(unit)
+		said += detail
+	} else {
+		// A firing whose sample failed leaves the baseline alone and counts no
+		// quiet firing (it breaks the streak); while a failing start is open the
+		// outage stays open whatever the journal shows.
+		h.Quiet = 0
+		if h.StartFailing {
+			restartOut = true
+			said += " ti-gateway.service keeps failing to start; systemd could not be asked at this firing."
 		}
-		risen := delta >= gatewayRestartsPage
-		slow := delta >= 1 && h.Rose
-		waiting := h.Auto && unit.auto
-		switch {
-		case risen || slow || waiting:
-			restartOut, h.StartFailing, h.Quiet = true, true, 0
-			switch {
-			case risen:
-				said += fmt.Sprintf(" ti-gateway.service keeps failing to start: its restart count rose by %d since the last firing.", delta)
-			case slow:
-				said += " ti-gateway.service restarted at two firings in a row."
-			default:
-				said += " ti-gateway.service has been waiting to restart (activating, auto-restart) at two firings in a row."
-			}
-		case h.StartFailing:
-			if unit.active && delta == 0 {
-				h.Quiet++
-			} else {
-				h.Quiet = 0
-			}
-			if h.Quiet >= gatewayQuietToClose {
-				h.StartFailing, h.Quiet, restartClosed = false, 0, true
-			} else {
-				restartOut = true
-				said += " ti-gateway.service keeps failing to start: the loop has not yet been quiet for two firings."
-			}
-		}
-		r := unit.restarts
-		h.Restarts, h.Auto, h.Rose = &r, unit.auto, delta >= 1
 	}
 	out = out || restartOut
 	// Only an outage the restart rule opened alone is closed by the unit being
@@ -246,7 +224,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Auto: h.Auto, Rose: h.Rose, StartFailing: h.StartFailing, Quiet: h.Quiet, RestartOnly: h.RestartOnly})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly})
 		if err != nil {
 			return err
 		}
@@ -314,4 +292,62 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		h.Resolving = false
 	}
 	return deliver(senders, report.GatewayLoggedOutAlert(host, *h.Since, now, said), seen, sent, repeats, now, gatewayRemindEvery, record)
+}
+
+// advanceRestartRule applies the restart rule to a good sample of the Gateway
+// unit and says whether a failing start is open, and whether it has just closed.
+//
+// The rule (docs/manual/server.md, "The Gateway is logged out"; ADR 0019,
+// "Alerting": fail closed on a unit that does not stay up): the reporter keeps
+// a quiet baseline, the unit's NRestarts when it was last seen quiet (active,
+// with NRestarts unchanged from the previous good sample) at two firings in a
+// row. A failing start is detected when NRestarts minus that baseline is at
+// least gatewayRestartsPage, at any pace: a 30 s loop makes about ten a firing,
+// a ten-minute one a restart every other firing, which never lets the baseline
+// move. A fall in NRestarts (a manual start, reset-failed) re-bases and counts
+// as neither a rise nor a quiet firing. An open failing start closes after
+// gatewayQuietToClose consecutive good quiet firings.
+func (h *hostGateway) advanceRestartRule(unit gatewayUnitSample) (open, closed bool, detail string) {
+	cur := unit.restarts
+	if h.Restarts == nil || h.Baseline == nil {
+		h.Restarts, h.Baseline, h.Quiet = &cur, &cur, 0
+		return false, false, ""
+	}
+	prev := *h.Restarts
+	if cur < prev {
+		h.Restarts, h.Baseline, h.Quiet = &cur, &cur, 0
+		return h.StartFailing, false, restartDetail(h.StartFailing, 0)
+	}
+	quiet := unit.active && cur == prev
+	if quiet {
+		h.Quiet++
+	} else {
+		h.Quiet = 0
+	}
+	h.Restarts = &cur
+	if quiet && h.Quiet >= gatewayQuietToClose {
+		h.Baseline = &cur
+	}
+	rise := cur - *h.Baseline
+	switch {
+	case rise >= gatewayRestartsPage:
+		h.StartFailing = true
+		return true, false, restartDetail(true, rise)
+	case h.StartFailing && h.Quiet >= gatewayQuietToClose:
+		h.StartFailing = false
+		return false, true, ""
+	case h.StartFailing:
+		return true, false, restartDetail(true, 0)
+	}
+	return false, false, ""
+}
+
+func restartDetail(failing bool, rise int) string {
+	switch {
+	case !failing:
+		return ""
+	case rise > 0:
+		return fmt.Sprintf(" ti-gateway.service keeps failing to start: its restart count is %d above where it last stayed quiet.", rise)
+	}
+	return " ti-gateway.service keeps failing to start: it has not yet been quiet for two firings in a row."
 }

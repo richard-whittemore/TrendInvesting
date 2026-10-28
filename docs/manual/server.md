@@ -729,17 +729,21 @@ before any attempt is counted (exit 70, or 75 for the journal): systemd retries
 it every 30 seconds without end and it never reaches 77. A start that keeps
 failing is seen through systemd's restart count: every firing the reporter asks
 systemd for `ti-gateway.service`'s restart count and state (`systemctl show`),
-and counts the Gateway as logged out when the count has risen by 3 or more
-since the last firing (the unit restarts every 30 seconds, so a loop makes
-about ten), or has risen by 1 or more at two firings in a row (a slow loop),
-or the unit was waiting to restart (activating, auto-restart) at two firings
-in a row. The usual 10 minutes outside the restart windows then page you. Such
-an outage closes after two firings in a row with the unit active and no new
-restarts; with a silent journal that is all the reporter can tell, namely
-that the start loop has ended, not that IBKR has accepted the login. An outage
-the journal evidences (a refused login, a login screen, a lost link) is never
-closed that way: it needs a completed login or a restored link newer than its
-start. This does not depend on the journal, so the 10-minute promise holds
+and keeps a baseline: the restart count when the unit was last seen quiet (active,
+with the count unchanged) at two firings in a row. It counts the Gateway as
+logged out when the count stands 3 or more above that baseline, at any pace: a
+loop that restarts every 30 seconds makes about ten a firing, one that restarts
+every ten minutes never lets the baseline move. A fall in the count (a start
+by hand, `reset-failed`) re-bases and counts as neither. The usual 10 minutes
+outside the restart windows then page you. Such an outage closes after two
+good firings in a row with the unit active and no new restarts (a firing
+where systemd could not be asked breaks the streak); with a silent journal
+that is all the reporter can tell, namely that the start loop has ended, not
+that IBKR has accepted the login. An outage the journal evidences (a refused
+login, a login screen, a lost link) is never closed that way: it needs a
+completed login or a restored link newer than its start, and an outage the
+restart rule opened that later gains journal evidence is the journal's from
+then on. This does not depend on the journal, so the 10-minute promise holds
 even when the journal takes nothing; a single restart pages nothing. If
 `systemctl` itself fails, a page the journal evidences still goes out and the
 failure is the firing's error.

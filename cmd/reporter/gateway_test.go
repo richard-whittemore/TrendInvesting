@@ -904,38 +904,6 @@ func TestASingleRestartPagesNothing(t *testing.T) {
 	}
 }
 
-func TestAUnitInAutoRestartAtTwoFiringsInARowPages(t *testing.T) {
-	r := &relay{sent: map[string][]string{}}
-	g := newStandInGateway(t)
-	dir := t.TempDir()
-	g.unit(2, "activating", "auto-restart")
-	for _, min := range []int{0, 5, 10, 16} {
-		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if gatewayPages(r) != 2 {
-		t.Fatalf("%d pages for a unit in auto-restart at consecutive firings, want 1 per channel", gatewayPages(r))
-	}
-}
-
-func TestAUnitSeenInAutoRestartAtOneFiringOnlyPagesNothing(t *testing.T) {
-	r := &relay{sent: map[string][]string{}}
-	g := newStandInGateway(t)
-	dir := t.TempDir()
-	g.unit(1, "activating", "auto-restart")
-	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
-	g.unit(1, "active", "running")
-	for _, min := range []int{5, 10, 16} {
-		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if gatewayPages(r) != 0 {
-		t.Fatalf("%d pages", gatewayPages(r))
-	}
-}
-
 func TestARestartLoopInsideTheRestartWindowPagesAfterTheWindowEndsPlusGrace(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
@@ -1040,7 +1008,7 @@ func TestASlowLoopOfOneRestartPerFiringPages(t *testing.T) {
 	dir := t.TempDir()
 	g.unit(0, "active", "running")
 	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
-	for i, min := range []int{5, 10, 16, 21} {
+	for i, min := range []int{5, 10, 16, 21, 26, 31} {
 		g.unit(i+1, "activating", "start")
 		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
 			t.Fatal(err)
@@ -1128,5 +1096,118 @@ func TestAnOldUnitFilesMarkerFlagIsAcceptedAndIgnored(t *testing.T) {
 	g := newStandInGateway(t)
 	if err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0), "-gateway-marker", "/var/lib/ti-gateway/last-start-failure"); err != nil {
 		t.Fatalf("the old argv was refused: %v", err)
+	}
+}
+
+func resolvesOf(r *relay) int {
+	n := 0
+	for _, m := range r.to("events.pagerduty.test") {
+		if strings.Contains(m, `"event_action":"resolve"`) {
+			n++
+		}
+	}
+	return n
+}
+
+// A loop that restarts once every other firing (a ten-minute loop) is caught:
+// the baseline only moves once the unit has been quiet for two firings in a row.
+func TestATenMinuteLoopOfOneRestartEveryOtherFiringPages(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	counts := []int{0, 1, 1, 2, 2, 3, 3, 4, 4}
+	for i, n := range counts {
+		g.unit(n, "active", "running")
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 5*i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages for a restart every ten minutes, want 1 per channel", gatewayPages(r))
+	}
+}
+
+// A counter that goes DOWN (a manual start, reset-failed) re-bases and counts
+// nothing: it is neither a rise nor a quiet firing, so it cannot close an outage early.
+func TestACounterResetDoesNotCloseARestartOutageEarly(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	g.unit(0, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
+	for i, min := range []int{5, 10, 16} {
+		g.unit(10*(i+1), "activating", "start")
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	g.unit(30, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 20)) // quiet 1
+	g.unit(0, "active", "running")                                // reset: not a quiet firing
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 25))
+	if resolvesOf(r) != 0 {
+		t.Fatal("a counter reset counted as the second quiet firing")
+	}
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 30)) // quiet 1 after the reset
+	if resolvesOf(r) != 0 {
+		t.Fatal("closed after one quiet firing following a reset")
+	}
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 35)) // quiet 2
+	if resolvesOf(r) != 1 {
+		t.Fatalf("%d resolves after two quiet firings following the reset, want 1", resolvesOf(r))
+	}
+}
+
+// A firing whose sample failed counts as no quiet firing and breaks the streak,
+// and while the start loop is open it does not let a journal login close it.
+func TestAFailedSampleBreaksTheQuietStreakAndKeepsTheOutageOpen(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	g.unit(0, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
+	for i, min := range []int{5, 10, 16} {
+		g.unit(10*(i+1), "activating", "start")
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	g.unit(30, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 20)) // quiet 1
+	_ = os.WriteFile(filepath.Join(g.dir, "systemctl-fail"), nil, 0o600)
+	g.ibc(stamp(tuesday(14, 22), ibcCompleted)) // a login appears while systemd cannot be asked
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 25))
+	_ = os.Remove(filepath.Join(g.dir, "systemctl-fail"))
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 30)) // quiet 1 again, not 2
+	if resolvesOf(r) != 0 {
+		t.Fatal("a failed sample did not break the streak, or let a journal login close the loop")
+	}
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 35)) // quiet 2
+	if resolvesOf(r) != 1 {
+		t.Fatalf("%d resolves after two good quiet firings, want 1", resolvesOf(r))
+	}
+}
+
+// An outage the restart rule opened that then gains journal evidence is the
+// journal's: a quiet unit no longer closes it.
+func TestARestartOpenedOutageThatGainsJournalEvidenceIsNotClosedByAQuietUnit(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	g.unit(0, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
+	for i, min := range []int{5, 10, 16} {
+		g.unit(10*(i+1), "activating", "start")
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted), stamp(tuesday(14, 17), ibcRefused)) // the journal now evidences it
+	g.unit(30, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 20))
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted)) // and the evidence rotates back to the old login
+	for _, min := range []int{25, 30, 35, 40} {
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	if resolvesOf(r) != 0 {
+		t.Fatal("a quiet unit closed an outage the journal had evidenced")
 	}
 }

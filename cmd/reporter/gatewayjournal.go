@@ -192,25 +192,21 @@ func lostSince(lines []string) (since time.Time, first string, restored time.Tim
 }
 
 // gatewayUnitSample is what systemd says of ti-gateway.service: how many times
-// it has restarted, and whether it is active or waiting to restart.
+// it has restarted, and whether it is active.
 type gatewayUnitSample struct {
-	restarts     int
-	active, auto bool // ActiveState=active; activating (auto-restart)
+	restarts int
+	active   bool // ActiveState=active
 }
 
-// A start is failing when NRestarts rose by at least gatewayRestartsPage since
-// the last firing, OR by at least 1 at two firings in a row, OR the unit was
-// activating (auto-restart) at two firings in a row. The unit restarts 30 s
-// after each exit, so a fast loop makes about ten restarts per firing and a
-// slow one (a journal that takes minutes to time out) one per firing. The
-// stance is fail closed: a Gateway that does not stay up is not trusted to be
-// logged in (docs/manual/server.md, "The Gateway is logged out"; ADR 0019,
-// "Alerting": an alert is a safety requirement).
-const gatewayRestartsPage = 3
-
-// A restart-opened outage closes after this many consecutive firings with the
-// unit active and no new restarts.
-const gatewayQuietToClose = 2
+// gatewayRestartsPage is how far NRestarts must stand above the quiet baseline
+// for a start to count as failing, and gatewayQuietToClose how many consecutive
+// good quiet firings end it (the rule is advanceRestartRule's; docs/manual/
+// server.md, "The Gateway is logged out"; ADR 0019, "Alerting": fail closed on
+// a unit that does not stay up).
+const (
+	gatewayRestartsPage = 3
+	gatewayQuietToClose = 2
+)
 
 // knownActiveStates are the ActiveState values systemd defines.
 var knownActiveStates = map[string]bool{"active": true, "activating": true, "inactive": true, "failed": true, "deactivating": true, "reloading": true, "maintenance": true, "refreshing": true}
@@ -253,7 +249,6 @@ func gatewayUnitSampler(systemctl string) func() (gatewayUnitSample, error) {
 			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not trust what systemd said of %s (NRestarts present: %v, SubState %q, ActiveState %q)", gatewayUnit, haveRestarts, sub, state)
 		}
 		s.active = state == "active"
-		s.auto = state == "activating" && sub == "auto-restart"
 		return s, nil
 	}
 }
