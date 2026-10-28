@@ -652,11 +652,14 @@ journal (`journalctl -u ti-gateway`) and the Boost adapter's every 5 minutes,
 after it has sent its other alerts. The Gateway counts as logged out when
 IBC's newest login event is a refused-login dialog, the retry stop below, or a
 login screen with no `Login has completed` after it. It also counts when the
-adapter has reported IBKR's servers lost (codes 1100/2110) and has not
-reported a connection since, for 3 hours: IBKR's own scheduled server resets
+adapter has reported IBKR's servers lost (codes 1100/2110) and no
+restoration (IBKR's 1101/1102, or a reconciliation of the account) since, for
+3 hours: IBKR's own scheduled server resets
 and weekend maintenance drop that link for shorter spells while the Gateway is
 perfectly logged in, so a shorter loss alone pages nothing, and a loss
-interrupted by a connection starts again from zero. **What this does not
+interrupted by a restoration starts again from zero; the adapter's plain
+reconnects, made every 5 minutes while the Gateway has no IBKR, restore
+nothing. **What this does not
 catch quickly:** if IBKR drops the session silently, with no IBC event in the
 journal, you are paged only after about 3 hours 10 minutes (the 3 hours, then
 the 10 minutes below). That is a stated limit of this check, and an owner decision still to be
@@ -665,7 +668,8 @@ A journal the reporter cannot read (`journalctl` missing or failing, or
 refusing the reporter's user the journal) fails the reporter's firing, which
 pages as a failed unit; it never counts as logged in. A readable journal with
 no login event at all (a fresh server, or the evidence rotated away) opens no
-page, and an outage already open stays open: only a completed login closes it.
+page, and an outage already open stays open: only a completed login, a restored link or a reconciliation newer
+than the outage's start closes it.
 
 Logged out for more than 10 minutes, counted from the end of any restart
 window, pages you once: Pushover, your own ntfy and the private alerts
@@ -692,11 +696,12 @@ attempts in 24 hours, your Portal log in will be disabled" (IBKR Guides, "Log
 In and Log Out", ibkrguides.com/clientportal/gettingstarted/login.htm; the
 FAQ "Troubleshooting client portal login failures", article 1132, says the
 same). That is the Client Portal login; IBKR publishes no separate figure for
-the Gateway's, so the program assumes the same. It counts every START of IBC
-since the last accepted login (a completed login, or IBKR's prompt for the
+the Gateway's, so the program assumes the same. It counts every exec of IBC
+that actually ran since the last accepted login (a completed login, or IBKR's prompt for the
 second factor, which means the password was accepted), writes that count to
 disk before IBC is launched, and allows 3 within 24 hours: when the third is
-refused it stops the unit and does not restart it (exit code 77), and a start
+refused (a refusal after an accepted login in the same run, as after the
+nightly or Sunday restart, is a new attempt of its own, counted as 1) it stops the unit and does not restart it (exit code 77), and a start
 while 3 still count refuses at once with "login retries stopped" without
 touching IBKR. Counting at the start, not at the refusal, means a crash
 between the login and the program noticing its refusal still counts. A
@@ -706,9 +711,14 @@ that ends while IBC runs, or a line over 64 KiB, stops IBC and the retries for
 the same reason. The count is the file `/var/lib/ti-gateway/login-failures`.
 Failed logins you make on IBKR's website, or with the wrong paper password
 elsewhere, count against IBKR's 10 too, which is why the program stops at 3.
-A start that fails (IBC's command missing, or the renderer not runnable)
-exits 70, which systemd retries every 30 seconds, and logs "cannot start IBC",
-which the health check reads as logged out.
+A start that fails before IBC runs (its command missing, or the renderer not
+runnable) gives its count back and exits 70, which systemd retries every 30
+seconds without using up the 3; it logs "cannot start IBC", as does every exit
+that leaves the unit down without contacting IBKR (the renderer's 64, 65 and
+78). The health check reads that as logged out, and the reporter also samples
+`ti-gateway.service` as it does the engine and the adapter, so a unit that is
+failed and stays down pages at its next firing as a failed unit ("A failed
+unit").
 
 **What you do when paged:**
 

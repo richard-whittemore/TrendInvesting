@@ -182,3 +182,17 @@ func TestTheStateAtStartLineNamesTheDataJobClauseOnlyWhenTheDataJobIsListed(t *t
 		t.Errorf("the engine's state-at-start line changed:\n%s", a.Body)
 	}
 }
+
+// The Gateway's unit is restarted by systemd after most stops, so its page
+// does not say the owner starts every one, and it names the Gateway's manual row.
+func TestTheGatewayUnitsFailedPageSaysWhenSystemdRestartsIt(t *testing.T) {
+	a := report.UnitFailedAlert("lightsail", "ti-gateway.service", "0123456789abcdef0123456789abcdef", "login retries stopped", time.Date(2026, 10, 28, 15, 4, 0, 0, time.UTC))
+	for _, want := range []string{"systemd starts the Gateway again after most stops", "ti-gateway failed and stays down"} {
+		if !strings.Contains(a.Body, want) {
+			t.Errorf("body lacks %q: %s", want, a.Body)
+		}
+	}
+	if strings.Contains(a.Body, "does not restart the engine or the adapter") {
+		t.Errorf("body tells the owner systemd never restarts the Gateway: %s", a.Body)
+	}
+}

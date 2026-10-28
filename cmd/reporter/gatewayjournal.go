@@ -68,7 +68,7 @@ var (
 	// Gateway has no IBKR) proves nothing about IBKR and is not matched.
 	linkEvent  = regexp.MustCompile(`ibkr link state=connectivity-lost|ibkr link state=connected reason=restored|ibkr reconciled client_id=`)
 	lostAccess = regexp.MustCompile(`(?i)not seeing messages from other users|insufficient permissions|no journal files were opened`)
-	shortISO   = "2006-01-02T15:04:05-0700"
+	shortISO   = "2006-01-02T15:04:05-0700" // fractional seconds are accepted when parsing
 )
 
 // journalQuery returns the lines of a unit's journal that match the pattern,
@@ -79,7 +79,7 @@ func journalQuery(journalctl, unit string, pattern *regexp.Regexp) ([]string, er
 	ctx, cancel := context.WithTimeout(context.Background(), gatewayCheckTimeout)
 	defer cancel()
 	//nolint:gosec // G204: the binary is the operator's -journalctl flag; the unit is a fixed name or one -gateway-adapters named, and the pattern a fixed expression.
-	cmd := exec.CommandContext(ctx, journalctl, "-u", unit, "-o", "short-iso", "--no-pager", "--since="+gatewayJournalSince, "-g", pattern.String())
+	cmd := exec.CommandContext(ctx, journalctl, "-u", unit, "-o", "short-iso-precise", "--no-pager", "--since="+gatewayJournalSince, "-g", pattern.String())
 	cmd.WaitDelay = gatewayCheckWaitDelay
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

@@ -79,7 +79,7 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # sign of a run it is an alert and a fault (docs/manual/server.md, "The reporter before the
 # first run").
 SupplementaryGroups=systemd-journal
-ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover,github-issues -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -gateway-owner boost -gateway-adapters ti-adapter-boost.service -gateway-state ${TI_REPORTS_DIR}/host-gateway.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -resolve-units ti-data.service -self-unit ti-reporter@%i.service
+ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover,github-issues -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -gateway-owner boost -gateway-adapters ti-adapter-boost.service -gateway-state ${TI_REPORTS_DIR}/host-gateway.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service,ti-gateway.service -resolve-units ti-data.service -self-unit ti-reporter@%i.service
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

@@ -831,7 +831,7 @@ func TestEveryUnitNameIsCheckedBeforeSystemctlOrJournalctlRuns(t *testing.T) {
 		{"ti-engine@boost.service,-H evil", ""},
 		{"sshd.service", ""},
 		{"ti-engine@boost.service", "--now"},
-		{"ti-engine@boost.service", "ti-gateway.service"},
+		{"ti-engine@boost.service", "ti-ntfy.service"},
 	} {
 		r := &relay{sent: map[string][]string{}}
 		systemd := newStandInSystemd(t)

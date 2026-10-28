@@ -646,10 +646,97 @@ func TestTheJournalIsAskedForShortISOTimesWithoutAPagerFourteenDaysBack(t *testi
 		t.Fatalf("%d journal queries, want 2 (IBC and the adapter): %q", len(calls), calls)
 	}
 	for _, c := range calls {
-		for _, want := range []string{"-o short-iso", "--no-pager", "--since=-14d", "-g "} {
+		for _, want := range []string{"-o short-iso-precise", "--no-pager", "--since=-14d", "-g "} {
 			if !strings.Contains(c, want) {
 				t.Errorf("journalctl %q lacks %q", c, want)
 			}
 		}
+	}
+}
+
+// A recovery whose notification fails is retried, never reverted to an
+// outage that starts after the recovery.
+func TestAFailedResolveIsRetriedAndNeverReopensTheOutage(t *testing.T) {
+	f := &refusingResolve{relay: &relay{sent: map[string][]string{}}}
+	g := newStandInGateway(t)
+	g.logout()
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.ibc(stamp(tuesday(14, 12), ibcCompleted))
+	if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, 15)); err == nil {
+		t.Error("a failed resolve was not reported as the run's error")
+	}
+	f.mu.Lock()
+	f.allow = true
+	f.mu.Unlock()
+	for _, min := range []int{20, 25, 30} {
+		if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolved := 0
+	for _, m := range f.to("events.pagerduty.test") {
+		if strings.Contains(m, `"event_action":"resolve"`) {
+			resolved++
+		}
+	}
+	if resolved != 1 {
+		t.Fatalf("%d resolves, want 1 on the retry", resolved)
+	}
+	if got := gatewayPages(f.relay); got != 2 {
+		t.Fatalf("%d outage pages, want the original one per channel only (the recovery was reopened)", got)
+	}
+}
+
+// A login in the same second as the firing that saw the outage is newer: the
+// journal's times are to the microsecond, and an equal time counts.
+func TestALoginInTheSameSecondAsTheFiringThatSawTheOutageResolvesIt(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.logout()
+	dir := t.TempDir()
+	first := tuesday(14, 0).Add(400 * time.Millisecond)
+	if err := gatewayRun(t, r, dir, g.path(), "boost", first); err != nil {
+		t.Fatal(err)
+	}
+	for _, min := range []int{5, 11} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// -o short-iso-precise: the login at 14:00:00.8 is after the outage seen at .4.
+	g.ibc(tuesday(14, 0).Add(800*time.Millisecond).Format("2006-01-02T15:04:05.000000-0700") + " " + ibcCompleted)
+	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 15)); err != nil {
+		t.Fatal(err)
+	}
+	resolved := 0
+	for _, m := range r.to("events.pagerduty.test") {
+		if strings.Contains(m, `"event_action":"resolve"`) {
+			resolved++
+		}
+	}
+	if resolved != 1 {
+		t.Fatalf("%d resolves for a login in the second after the outage was seen, want 1", resolved)
+	}
+}
+
+func TestTheJournalIsAskedForPreciseTimes(t *testing.T) {
+	g := newStandInGateway(t)
+	if err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0)); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(g.dir, "argv"))
+	if !strings.Contains(string(raw), "-o short-iso-precise") {
+		t.Fatalf("journalctl was asked %q, want -o short-iso-precise", raw)
+	}
+}
+
+func TestTheGatewayUnitIsATradingUnitTheReporterCanSample(t *testing.T) {
+	if err := checkTradingUnits("-units", []string{"ti-gateway.service"}); err != nil {
+		t.Fatal(err)
 	}
 }

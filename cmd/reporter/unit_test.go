@@ -216,7 +216,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	// The instance's engine and adapter are checked, and the reporter's own
 	// failure page is resolved by a clean firing.
 	for flag, value := range map[string]string{
-		"-units":         "ti-engine@boost.service,ti-adapter-boost.service",
+		"-units":         "ti-engine@boost.service,ti-adapter-boost.service,ti-gateway.service",
 		"-resolve-units": "ti-data.service",
 		"-self-unit":     "ti-reporter@boost.service",
 	} {

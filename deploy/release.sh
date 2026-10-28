@@ -281,16 +281,21 @@ listed() {
   done
 }
 
-# check_dir DIR: every program DIR/checksums.txt lists is present and
-# matches, and all five are listed; only the hand-installed build (initial)
-# may lack one, so a lost line cannot mix two builds.
+# check_dir DIR [strict]: every program DIR/checksums.txt lists is present and
+# matches, and all six are listed; only the hand-installed build (initial)
+# may lack one, so a lost line cannot mix two builds. A build saved before
+# ti-gateway-start joined the release (five programs) is still valid when
+# it is not "strict": a freshly fetched release must list all six. Putting a
+# five-program build back leaves ti-gateway-start as it is, since the starter
+# does not depend on the others' build.
 check_dir() {
-  local dir=$1 p want got n=0
+  local dir=$1 strict=${2:-} p want got n=0
   test -f "$dir/checksums.txt" || { echo "no checksums.txt in $dir" >&2; return 1; }
   for p in $programs; do
     want=$(awk -v f="$p" '$2 == f { print $1 }' "$dir/checksums.txt")
     if test -z "$want"; then
       test "$(basename "$dir")" != initial || continue
+      if test "$p" = ti-gateway-start && test "$strict" != strict; then continue; fi
       echo "$p is not listed in checksums.txt" >&2
       return 1
     fi
@@ -473,7 +478,7 @@ if test "$mode" = release; then
   for f in $programs checksums.txt attestation.sigstore.json; do
     fetch "$base_url/$tag/$f" "$stage/$f" || die "could not fetch $base_url/$tag/$f (or it is over $max_bytes bytes); nothing installed"
   done
-  check_dir "$stage" || die "$tag failed its checksums; nothing installed"
+  check_dir "$stage" strict || die "$tag failed its checksums; nothing installed"
   require_native_programs "$stage"
   if test "$unverified" = 0; then
     commit=$(tag_commit) || die "could not read the commit $tag names from $api_url (a rate limit, the network, or a bad answer); nothing installed; try again later"

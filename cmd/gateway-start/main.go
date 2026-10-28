@@ -75,12 +75,20 @@ type config struct {
 }
 
 const (
-	defaultMax      = 3
-	defaultWindow   = 24 * time.Hour
-	defaultStop     = 15 * time.Second
-	defaultDrain    = 5 * time.Second
-	defaultPattern  = `Unrecognized Username or Password`
-	defaultAccepted = `Login has completed|Second Factor Authentication`
+	defaultMax     = 3
+	defaultWindow  = 24 * time.Hour
+	defaultStop    = 15 * time.Second
+	defaultDrain   = 5 * time.Second
+	defaultPattern = `Unrecognized Username or Password`
+	// defaultAccepted matches IBC's own lines for an accepted login, anchored
+	// so that no other text containing the words clears the count. "IBC: Login
+	// has completed" is the line in IBC 3.24.2's log (it ends the Gateway's
+	// logins in the journal). The second-factor prompt line follows the form of
+	// the refusal's ("detected dialog entitled: ...; event=Opened") but its
+	// wording is NOT verified against IBC 3.24.2; if it is wrong the prompt
+	// clears nothing and the start stays counted, which fails closed (a few
+	// unapproved prompts then stop the unit), never open.
+	defaultAccepted = `IBC: Login has completed\s*$|detected dialog entitled: Second Factor Authentication; event=Opened\s*$`
 	maxLine         = 64 << 10
 	defaultRender   = "/usr/local/libexec/trend-investing/render-ibc-config.sh"
 	defaultState    = "/var/lib/ti-gateway/login-failures"
@@ -252,35 +260,81 @@ func (s *verdictState) get() *verdict {
 }
 
 // forward sends IBC's output to the journal from a goroutine of its own, so a
-// sink that stops draining cannot hold up the reading of the refusal. Lines
-// that do not fit the queue are dropped, and counted.
+// sink that stops draining cannot hold up the reading of the refusal. Only
+// noise is ever dropped, past a bound; the lines that carry a health-state
+// change (evidence) are always kept. A send after close is ignored.
 type forward struct {
-	ch      chan string
+	mu      sync.Mutex
+	cond    *sync.Cond
+	q       []fwdLine
+	noise   int
+	closed  bool
 	dropped int
 	done    chan struct{}
 }
 
+type fwdLine struct {
+	text     string
+	evidence bool
+}
+
+const maxQueuedNoise = 4096
+
 func newForward(w io.Writer) *forward {
-	f := &forward{ch: make(chan string, 4096), done: make(chan struct{})}
+	f := &forward{done: make(chan struct{})}
+	f.cond = sync.NewCond(&f.mu)
 	go func() {
 		defer close(f.done)
-		for l := range f.ch {
-			_, _ = io.WriteString(w, l)
+		for {
+			f.mu.Lock()
+			for len(f.q) == 0 && !f.closed {
+				f.cond.Wait()
+			}
+			if len(f.q) == 0 {
+				f.mu.Unlock()
+				return
+			}
+			l := f.q[0]
+			f.q = f.q[1:]
+			if !l.evidence {
+				f.noise--
+			}
+			f.mu.Unlock()
+			_, _ = io.WriteString(w, l.text)
 		}
 	}()
 	return f
 }
 
-func (f *forward) send(l string) {
-	select {
-	case f.ch <- l:
-	default:
-		f.dropped++
+func (f *forward) send(text string, evidence bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return
 	}
+	if !evidence {
+		if f.noise >= maxQueuedNoise {
+			f.dropped++
+			return
+		}
+		f.noise++
+	}
+	f.q = append(f.q, fwdLine{text, evidence})
+	f.cond.Signal()
 }
 
+func (f *forward) droppedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dropped
+}
+
+// close stops accepting lines and waits a bounded time for the queue to drain.
 func (f *forward) close(wait time.Duration) {
-	close(f.ch)
+	f.mu.Lock()
+	f.closed = true
+	f.cond.Broadcast()
+	f.mu.Unlock()
 	select {
 	case <-f.done:
 	case <-time.After(wait):
@@ -305,7 +359,10 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		if err := r.Run(); err != nil {
 			var ee *exec.ExitError
 			if errors.As(err, &ee) && ee.ExitCode() > 0 {
-				return ee.ExitCode() // the renderer's own configuration exit
+				// The renderer's own configuration exit, which the unit does not
+				// restart on: the line tells the health check IBC is not running.
+				say("cannot start IBC: the config renderer exited %d (see its message above)", ee.ExitCode())
+				return ee.ExitCode()
 			}
 			// Not a configuration exit: 78 would not be restarted.
 			say("cannot start IBC: the config renderer did not run: %v", err)
@@ -313,7 +370,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		}
 	}
 	if len(cfg.Command) == 0 {
-		say("no command for IBC: GATEWAY_MAJOR and RUNTIME_DIRECTORY are not set by the unit")
+		say("cannot start IBC: no command for it: GATEWAY_MAJOR and RUNTIME_DIRECTORY are not set by the unit")
 		return exitConfig
 	}
 
@@ -331,10 +388,18 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	}
 
 	say("starting IBC (login attempt %d of %d within the window)", n+1, cfg.Max)
+	// Only an exec of IBC that actually ran is an attempt: a start that fails
+	// before it gives its count back.
+	giveBack := func() int {
+		if err := writeDurable(cfg.StateFile, raw); err != nil {
+			return stopped("the attempt of a start that never ran IBC could not be given back (%v), so the count may be one too high; not starting IBC", err)
+		}
+		return exitInternal
+	}
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		say("cannot start IBC: no pipe for its output: %v", err)
-		return exitInternal
+		return giveBack()
 	}
 	//nolint:gosec // G204: IBC's command is built from the unit's environment (GATEWAY_MAJOR, RUNTIME_DIRECTORY) or TI_GATEWAY_IBC in the rehearsal, never from IBC's output.
 	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)
@@ -343,7 +408,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		_ = pr.Close()
 		_ = pw.Close()
 		say("cannot start IBC: %v", err)
-		return exitInternal
+		return giveBack()
 	}
 	_ = pw.Close()
 
@@ -362,7 +427,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	go func() {
 		defer close(readerDone)
 		br := bufio.NewReaderSize(pr, maxLine)
-		seen := false
+		seen, cleared := false, false
 		for {
 			line, err := br.ReadSlice('\n')
 			if errors.Is(err, bufio.ErrBufferFull) {
@@ -373,22 +438,31 @@ func run(cfg config, stdout, stderr io.Writer) int {
 			}
 			if len(line) > 0 {
 				text := string(line)
-				fwd.send(text)
+				trimmed := strings.TrimRight(text, "\r\n")
+				accepted, refused := cfg.Accepted.MatchString(trimmed), cfg.Pattern.MatchString(trimmed)
+				fwd.send(text, accepted || refused)
 				if !strings.HasSuffix(text, "\n") {
-					fwd.send("\n")
+					fwd.send("\n", accepted || refused)
 				}
-				text = strings.TrimRight(text, "\r\n")
-				if cfg.Accepted.MatchString(text) {
+				if accepted {
 					// IBKR accepted the login: the attempts since the last one are cleared.
 					if err := writeDurable(cfg.StateFile, nil); err != nil {
 						say("the login attempts could not be confirmed cleared after the accepted login (%v); the count may already be empty or may still hold the old attempts", err)
 					}
+					// A refusal after this is a new episode, counted as its own.
+					cleared, seen = true, false
 				}
-				if !seen && cfg.Pattern.MatchString(text) {
+				if !seen && refused {
 					seen = true
-					// The attempt was counted before launch; this only decides
-					// whether another may follow.
-					count, _, cerr := loadCount(cfg.StateFile, cfg.Now(), cfg.Window)
+					// The start was counted before launch; a refusal after an
+					// accepted login in this same run (the nightly or Sunday
+					// restart, a second-factor relogin) is a new attempt.
+					count, rawNow, cerr := loadCount(cfg.StateFile, cfg.Now(), cfg.Window)
+					if cerr == nil && cleared {
+						cerr = writeDurable(cfg.StateFile, append(rawNow, []byte(strconv.FormatInt(cfg.Now().Unix(), 10)+"\n")...))
+						count++
+						cleared = false
+					}
 					switch {
 					case cerr != nil:
 						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": the login count cannot be read (%v); stopping IBC and not retrying", cerr)})
@@ -463,8 +537,8 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	}
 	_ = pr.Close()
 	fwd.close(2 * time.Second)
-	if fwd.dropped > 0 {
-		say("%d lines of IBC's output were not forwarded to the journal (the sink was not draining)", fwd.dropped)
+	if n := fwd.droppedCount(); n > 0 {
+		say("%d lines of IBC's output were not forwarded to the journal (the sink was not draining)", n)
 	}
 
 	if v := final.get(); v != nil {

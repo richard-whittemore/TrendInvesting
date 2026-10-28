@@ -124,6 +124,10 @@ func (s gatewaySchedule) graceFrom(since, now time.Time) time.Time {
 type hostGateway struct {
 	delivered
 	Since *time.Time `json:"logged_out_since,omitempty"`
+	// Resolving is set when the Gateway has recovered but a channel has not yet
+	// taken the resolution: the next firing retries it and does not read the
+	// receipts that remain as an outage still open.
+	Resolving bool `json:"resolving,omitempty"`
 }
 
 func loadHostGateway(path string) (hostGateway, error) {
@@ -181,7 +185,7 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving})
 		if err != nil {
 			return err
 		}
@@ -197,8 +201,10 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 	// NEWER than its start. Silence in the journals, or events older than the
 	// outage that remain once the evidence of it has rotated away, prove
 	// nothing; none is opened from them either.
-	open := h.Since != nil || deliveredAnywhere(seen, key)
-	if !out && open && (h.Since == nil || !ev.recoveredAt.After(*h.Since)) {
+	open := (h.Since != nil || deliveredAnywhere(seen, key)) && !h.Resolving
+	// An equal time counts as newer: the journal's times are to the
+	// microsecond, and a login in the same instant as the firing is a login.
+	if !out && open && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
 		out = true
 		said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as logged out. " + said
 		if h.Since == nil {
@@ -209,6 +215,7 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 	if !out {
 		h.Since = nil
 		if !deliveredAnywhere(seen, key) {
+			h.Resolving = false
 			return record()
 		}
 		failed, resolveErr := resolveAll(senders, key, seen, now)
@@ -220,8 +227,10 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 			keep[name] = true
 		}
 		forgetAlert(key, keep, seen, sent, repeats)
+		h.Resolving = deliveredAnywhere(seen, key)
 		return errors.Join(resolveErr, record())
 	}
+	h.Resolving = false
 	if h.Since == nil {
 		t := now
 		h.Since = &t

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -376,4 +377,135 @@ func TestEveryMessageAtTheBoundSaysTheCheckedPhrase(t *testing.T) {
 	if !strings.Contains(out, "login retries stopped") {
 		t.Fatalf("%s", out)
 	}
+}
+
+// Only an exec of IBC that actually ran is an attempt: a start that fails
+// before launching IBC gives its count back, so a persistent start failure
+// never turns into a permanent stop.
+func TestAStartThatNeverRanIBCGivesItsAttemptBack(t *testing.T) {
+	r := newRig(t)
+	r.seed(r.now.Add(-time.Hour))
+	c := r.cfg(`exit 0`)
+	c.Command = []string{filepath.Join(r.dir, "missing")}
+	for i := 0; i < 5; i++ {
+		if code, out := r.run(c); code != 70 {
+			t.Fatalf("start %d: exit %d, want 70 every time: %s", i+1, code, out)
+		}
+	}
+	if got := len(r.counter()); got != 1 {
+		t.Fatalf("%d attempts after five starts that never ran IBC, want the 1 seeded", got)
+	}
+}
+
+// A refusal later in the same process, after the count was cleared by an
+// accepted login (the nightly restart, the Sunday cold restart, a second-
+// factor relogin), is attempt 1 of its own: the bound is 3 per episode.
+func TestARefusalAfterAnAcceptedLoginInTheSameRunIsCounted(t *testing.T) {
+	r := newRig(t)
+	code, out := r.run(r.cfg(`echo "IBC: Login has completed"; echo "` + refusal + `"; sleep 30`))
+	if code != 75 || len(r.counter()) != 1 || !strings.Contains(out, "attempt 1 of 3") {
+		t.Fatalf("exit %d with %d attempts: %s", code, len(r.counter()), out)
+	}
+}
+
+func TestTheBoundIsThreePerEpisodeAcrossAcceptedLoginsInOneRun(t *testing.T) {
+	r := newRig(t)
+	r.seed(r.now.Add(-time.Hour), r.now.Add(-2*time.Hour))
+	// The start is attempt 3 of an episode that an accepted login then ends;
+	// the refusal that follows is attempt 1 of the next, not a stop.
+	code, _ := r.run(r.cfg(`echo "IBC: Login has completed"; echo "` + refusal + `"; sleep 30`))
+	if code != 75 {
+		t.Fatalf("exit %d, want 75", code)
+	}
+}
+
+// The accepted patterns are IBC's exact lines, not a substring anywhere.
+func TestOnlyIBCsExactLinesClearTheCount(t *testing.T) {
+	for _, line := range []string{
+		"note: Login has completed soon",
+		"IBC: Login has completed? no",
+		"the Second Factor Authentication dialog is discussed here",
+		"detected dialog entitled: Second Factor Authentication; event=Closed",
+	} {
+		r := newRig(t)
+		r.seed(r.now.Add(-time.Hour))
+		r.run(r.cfg(`echo '` + line + `'; exit 0`))
+		if got := len(r.counter()); got != 2 {
+			t.Errorf("%q cleared the count: %d attempts, want the seeded one and this start", line, got)
+		}
+	}
+}
+
+func TestEveryExitThatLeavesTheUnitDownSaysCannotStartIBC(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`exit 0`)
+	for _, code := range []int{64, 65, 78} {
+		c.Render = []string{"sh", "-c", "echo 'render-ibc-config: bad' >&2; exit " + strconv.Itoa(code)}
+		got, out := r.run(c)
+		if got != code || !strings.Contains(out, "cannot start IBC") {
+			t.Errorf("renderer exit %d: got %d, output %q, want the code and 'cannot start IBC'", code, got, out)
+		}
+	}
+	c.Render, c.Command = nil, nil
+	if got, out := r.run(c); got != 78 || !strings.Contains(out, "cannot start IBC") {
+		t.Errorf("no command: got %d, output %q", got, out)
+	}
+}
+
+// Evidence lines are never dropped from the journal, even when the sink was
+// stuck while thousands of other lines went by.
+type recordingWriter struct {
+	mu      sync.Mutex
+	release chan struct{}
+	buf     bytes.Buffer
+}
+
+func (w *recordingWriter) Write(p []byte) (int, error) {
+	<-w.release
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *recordingWriter) text() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+func TestEvidenceLinesSurviveAStuckSink(t *testing.T) {
+	r := newRig(t)
+	w := &recordingWriter{release: make(chan struct{})}
+	code := run(r.cfg(`i=0; while [ $i -lt 6000 ]; do echo "noise $i"; i=$((i+1)); done; echo "IBC: Login has completed"; exit 0`), w, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	close(w.release)
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(w.text(), "IBC: Login has completed") {
+		if time.Now().After(deadline) {
+			t.Fatal("the completed-login line was dropped while the sink was stuck")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Sends after the queue is closed, and concurrently with the close, are
+// harmless (go test -race).
+func TestTheForwardQueueSurvivesSendsAfterAndDuringClose(t *testing.T) {
+	f := newForward(&bytes.Buffer{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 2000; j++ {
+				f.send("line\n", j%7 == 0)
+			}
+		}()
+	}
+	f.close(time.Second)
+	wg.Wait()
+	f.send("after\n", true)
+	_ = f.droppedCount()
 }

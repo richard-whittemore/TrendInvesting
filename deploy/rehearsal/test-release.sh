@@ -701,6 +701,21 @@ all_are "bin untouched over a damaged current build" v1.1.0
 if grep -q '^restart' "$work/ctl.log"; then fail "rollback restarted the dashboard over a damaged current build"; fi
 grep -q "v1.1.0" "$work/out" || fail "the refusal does not name the current build: $(cat "$work/out")"
 
+# A build saved before ti-gateway-start joined the release (five programs) is
+# still valid: the server can upgrade from it and roll back to it, while a
+# freshly fetched release must list all six.
+fresh_server
+run v1.0.0 >/dev/null
+rm "$TI_PREFIX/releases/v1.0.0/ti-gateway-start"
+grep -v ti-gateway-start "$TI_PREFIX/releases/v1.0.0/checksums.txt" >"$work/five" && mv "$work/five" "$TI_PREFIX/releases/v1.0.0/checksums.txt"
+expect "an upgrade from a saved five-program release succeeds" 0 "$(run v1.1.0)"
+expect "rollback to a saved five-program release succeeds" 0 "$(run --rollback)"
+fresh_server
+rm "$work/rel/v1.3.0/ti-gateway-start"
+grep -v ti-gateway-start "$work/rel/v1.3.0/checksums.txt" >"$work/five" && mv "$work/five" "$work/rel/v1.3.0/checksums.txt"
+expect "a freshly fetched release without the sixth program is refused" nonzero "$(nonzero "$(run v1.3.0)")"
+make_release v1.3.0
+
 # Rollback with no previous build.
 fresh_server
 expect "rollback with nothing to roll back to is refused" nonzero "$(nonzero "$(run --rollback)")"
