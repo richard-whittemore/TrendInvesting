@@ -413,3 +413,45 @@ func TestARefusedApprovalWithNoAcceptanceIsNotReadAsNone(t *testing.T) {
 		t.Fatalf("a log whose only approval was refused: %v, want a refusal naming it", err)
 	}
 }
+
+// TestAnyUnacceptedApprovalRefusesWhateverItNames: an approval input the run
+// was given while it had accepted none, with no acceptance after it, refuses
+// whatever account it names or fails to name, and whether or not it
+// decodes: the run accepted no approval, so its state is not known from the
+// log (ADR 0026, point 5).
+func TestAnyUnacceptedApprovalRefusesWhateverItNames(t *testing.T) {
+	approval := func(payload string) journal.Entry {
+		e := recorded(t, journal.KindInput, "operator-run-approved:x", event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, nil)
+		e.Envelope.Payload = json.RawMessage(payload)
+		return e
+	}
+	for name, payload := range map[string]string{
+		"no account":      `{"previous_log":"run-0.log"}`,
+		"a null account":  `{"account_id":null,"previous_log":"run-0.log"}`,
+		"another account": `{"account_id":"DUOTHER","previous_log":"run-0.log"}`,
+		"not an object":   `5`,
+	} {
+		if _, err := restart.RebalanceAtEnd(recordedLog(t, approval(payload)), "run-1.log"); err == nil || !strings.Contains(err.Error(), "cannot be read back") {
+			t.Errorf("%s: %v, want a refusal saying it cannot be read back", name, err)
+		}
+	}
+}
+
+// TestARefusedFirstRunsApprovalNamesTheWayToStartAgain: when the run that
+// refused its approval was the account's first, there is no run before it:
+// the refusal says to set the log aside and start again as a first run.
+// A fresh run's refused approval names the run before it.
+func TestARefusedFirstRunsApprovalNamesTheWayToStartAgain(t *testing.T) {
+	approval := func(previous string) journal.Entry {
+		return recorded(t, journal.KindInput, "operator-run-approved:x", event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion,
+			map[string]any{"account_id": iraLogAccount, "previous_log": previous})
+	}
+	_, err := restart.RebalanceAtEnd(recordedLog(t, approval("")), "run-1.log")
+	if err == nil || !strings.Contains(err.Error(), "operator approve -first-run") || strings.Contains(err.Error(), "run before it") {
+		t.Errorf("a refused first run's approval: %v, want it to name starting again with operator approve -first-run", err)
+	}
+	_, err = restart.RebalanceAtEnd(recordedLog(t, approval("run-0.log")), "run-1.log")
+	if err == nil || !strings.Contains(err.Error(), "run-0.log") || strings.Contains(err.Error(), "-first-run") {
+		t.Errorf("a refused fresh run's approval: %v, want it to name the run before it, run-0.log", err)
+	}
+}

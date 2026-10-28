@@ -301,7 +301,12 @@ Every `*.log` in the root of the account's state directory,
 run. A log whose content the engine cannot recover (ADR 0027 §5: a damaged file, an old
 log whose bytes rotted after it was superseded and still read back, or a stray file ending in
 `.log`; rot the disk reports as a read error is "A log that cannot be read") refuses every start, resume and fresh run alike, with a message
-ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
+ending "move `<name>`, unchanged, into `<state directory>/quarantine`". An
+IRA's log whose run refused the only approval it was given refuses a fresh
+run's approval the same way: "the rebalance in progress of `<name>` cannot be
+read back: its run refused its approval ... and accepted none: move `<name>`,
+unchanged, into the quarantine folder beside it, then ..." (the steps below,
+with step 3 as that message says).
 
 1. **Do not edit or delete the file.** It is recorded evidence (ADR 0018).
 2. **Move it, unchanged, into the quarantine folder** beside the logs:
@@ -318,7 +323,10 @@ ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
    aside, the latest run may be a different log. If the quarantined log was
    the crashed run itself, it cannot be resumed: start a fresh run from a
    reconciled baseline (ADR 0019's recovery procedure), with an approval
-   naming the latest run left in the directory.
+   naming the latest run left in the directory. For an IRA's log whose run
+   refused its approval, approve the run before it, which the message
+   names; if it was the account's first run, there is none: start again as
+   a first run (`operator approve -first-run`).
 
 ## A resume that does not reproduce its log
 

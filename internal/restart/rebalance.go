@@ -118,6 +118,9 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 	// refused names an approval input the run was given while it had
 	// accepted none, which therefore refused it; "" when there is none.
 	refused, accepted := "", false
+	// refusedPrevious is the previous log the refused approval names: "" for
+	// a first run's, nil when it names none it can be read for.
+	var refusedPrevious *string
 	for _, entry := range entries {
 		env := entry.Envelope
 		if entry.Kind == journal.KindDecision {
@@ -156,13 +159,16 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 			continue
 		}
 		if env.Type == event.OperatorRunApprovedEventType && !accepted {
-			// Its own group records no acceptance unless the next record
-			// is one; an acceptance clears it (above).
+			// Its own group records no acceptance unless the next record is
+			// one, which clears it (above). Whatever account it names, or
+			// fails to name, and whether or not it decodes: the run had
+			// accepted no approval, so its state is not known from the log.
 			var p struct {
-				AccountID string `json:"account_id"`
+				PreviousLog *string `json:"previous_log"`
 			}
-			if json.Unmarshal(env.Payload, &p) != nil || p.AccountID == accountID {
-				refused = env.ID
+			refused, refusedPrevious = env.ID, nil
+			if json.Unmarshal(env.Payload, &p) == nil {
+				refusedPrevious = p.PreviousLog
 			}
 		}
 		// The venue's reports, retirements and clearances the run was sent;
@@ -201,8 +207,16 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 	if refused != "" {
 		// The run refused the only approval it was given: the rebalance that
 		// approval named is not known to be carried, nor to be ended, so the
-		// earlier run's state is still in force (ADR 0026, point 5).
-		return nil, "", cannotReadBack(logName, fmt.Errorf("its run refused its approval %s and accepted none, so the state in force is the run's before it: move %s, unchanged, into the quarantine folder and approve the run before it (docs/runbooks/durable-log.md, \"An unrecoverable log\")", refused, logName))
+		// state in force is the run's before it, or, for an account's first
+		// run, none was ever carried (ADR 0026, point 5).
+		next := "approve the run before it, or, if it was the account's first run, start again as a first run with `operator approve -first-run`"
+		switch {
+		case refusedPrevious != nil && *refusedPrevious == "":
+			next = "it was the account's first run, so start again as a first run with `operator approve -first-run`"
+		case refusedPrevious != nil:
+			next = fmt.Sprintf("approve the run before it, %s", *refusedPrevious)
+		}
+		return nil, "", cannotReadBack(logName, fmt.Errorf("its run refused its approval %s and accepted none: move %s, unchanged, into the quarantine folder beside it, then %s (docs/runbooks/durable-log.md, \"An unrecoverable log\")", refused, logName, next))
 	}
 	if carried != nil {
 		return carried, accountID, nil
