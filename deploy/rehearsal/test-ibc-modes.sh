@@ -94,6 +94,7 @@ printf '%s\n' '# comment' 'IbLoginId=' 'IbPassword=' 'TradingMode=live' 'ReadOnl
   'AcceptNonBrokerageAccountWarning=no' 'CommandServerPort=7462' \
   'TrustedTwsApiClientIPs=100.64.0.1' 'AcceptIncomingConnectionAction=manual' 'LoginDialogDisplayTimeout=20' >"$work/template.ini"
 CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run_dir IBC_TEMPLATE=$work/template.ini "$render" >/dev/null
+grep -qx 'LoginDialogDisplayTimeout=60' "$run_dir/config.ini" || expect "login dialog timeout is pinned to IBC's documented default" LoginDialogDisplayTimeout=60 "$(grep '^LoginDialogDisplayTimeout' "$run_dir/config.ini" || echo missing)"
 grep -qx 'AcceptIncomingConnectionAction=reject' "$run_dir/config.ini" || expect "incoming API connections are rejected" reject "$(grep '^AcceptIncomingConnectionAction' "$run_dir/config.ini" || echo missing)"
 grep -qx 'TrustedTwsApiClientIPs=' "$run_dir/config.ini" || expect "no trusted API client addresses" "TrustedTwsApiClientIPs=" "$(grep '^TrustedTwsApiClientIPs' "$run_dir/config.ini" || echo missing)"
 

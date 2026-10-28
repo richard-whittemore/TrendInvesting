@@ -18,7 +18,7 @@ func TestGatewayLoggedOutAlertIsUrgentRepeatsAndSaysWhatToDo(t *testing.T) {
 	if a.Title != "srv: IB Gateway is logged out" {
 		t.Errorf("title %q", a.Title)
 	}
-	for _, want := range []string{"2026-10-27T23:45:00Z", "gateway: logged out: dialog", "paper login", "systemctl restart ti-gateway", "3 refused logins", "login-failures", "may still show active", "start script"} {
+	for _, want := range []string{"2026-10-27T23:45:00Z", "gateway: logged out: dialog", "paper login", "systemctl restart ti-gateway", "3 refused logins", "login-failures", "may still show active", "start program"} {
 		if !strings.Contains(a.Body, want) {
 			t.Errorf("body lacks %q: %s", want, a.Body)
 		}

@@ -40,8 +40,6 @@ useradd --system --no-create-home --shell /usr/sbin/nologin ti-trader
 install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing "$reports"
 install -D -m 0755 /dist/ti-reporter /opt/trend-investing/bin/ti-reporter
 install -D -m 0755 /dist/ti-data /opt/trend-investing/bin/ti-data
-# The reporter's Gateway check, as provision.sh services installs it.
-install -D -m 0755 /deploy/libexec/gateway-check.sh /usr/local/libexec/trend-investing/gateway-check.sh
 install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/data /var/lib/trend-investing/engines/boost
 install -d -m 0755 /etc/trend-investing
 install -d -m 0700 /etc/trend-investing/accounts

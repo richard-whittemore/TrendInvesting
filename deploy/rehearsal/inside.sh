@@ -252,7 +252,7 @@ pass "the data step is installed, runs, and refuses a missing key with nothing w
 # The reporter, the dashboard and the owner's two tools are installed from
 # the build beside deploy/, and the tools are on sudo's PATH for ti-trader,
 # as the runbooks run them.
-for b in ti-reporter ti-dashboard operator journal-query; do
+for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   cmp "/root/dist/$b" "/opt/trend-investing/bin/$b" || fail "$b is not installed from the build"
 done
 # Each tool exits 1 with its usage when given no command.
@@ -374,6 +374,14 @@ echo ActiveState=active
 echo InvocationID=0123456789abcdef0123456789abcdef
 SH
 chmod 0755 "$sysd/systemctl"
+# Nor does a journal: the Gateway check reads ti-gateway's and the adapter's,
+# so a stand-in journalctl answers with a completed login and a restored link.
+cat >"$sysd/journalctl" <<'SH'
+#!/bin/sh
+echo "2026-01-01T00:00:00+0000 host ibc[1]: Login has completed"
+echo "2026-01-01T00:00:00+0000 host adapter[2]: ibkr link state=connected reason=restored"
+SH
+chmod 0755 "$sysd/journalctl"
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $line >/dev/null || fail "the reporter, run as its unit runs it (as ti-trader), failed"
 { grep -qx 'show -p ActiveState -p InvocationID ti-engine@boost.service' "$sysd/calls" && grep -qx 'show -p ActiveState -p InvocationID ti-adapter-boost.service' "$sysd/calls"; } ||

@@ -55,7 +55,7 @@ cp "$repo/adapter/marketdata/tests/testdata/boost-fixture.log" "$dist/boost-fixt
 (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
   -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=rehearsal" \
   -o "$dist/ti-engine" ./cmd/engine)
-for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query; do
+for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query gateway-start:ti-gateway-start; do
   (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build -o "$dist/${tool#*:}" "./cmd/${tool%%:*}")
 done
 id=$(docker "${args[@]}" ubuntu:24.04 bash /deploy/rehearsal/inside.sh)

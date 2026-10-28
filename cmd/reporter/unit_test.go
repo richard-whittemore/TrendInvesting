@@ -204,10 +204,8 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		// The server's script is not on this machine: a stand-in that passes.
 		args[i+1] = newStandInCheck(t).path()
 	}
-	if i := indexOf(args, "-gateway-check"); i < 0 || i+1 >= len(args) || args[i+1] != "/usr/local/libexec/trend-investing/gateway-check.sh" {
-		t.Errorf("ExecStart %v does not run the installed gateway check", args)
-	} else {
-		args[i+1] = newStandInGateway(t).path()
+	if i := indexOf(args, "-gateway-adapters"); i < 0 || i+1 >= len(args) || args[i+1] != "ti-adapter-boost.service" {
+		t.Errorf("ExecStart %v does not give the Gateway check the Boost adapter's journal", args)
 	}
 	if i := indexOf(args, "-gateway-owner"); i < 0 || i+1 >= len(args) || args[i+1] != "boost" {
 		t.Errorf("ExecStart %v does not name boost as the gateway check's owner", args)
@@ -229,7 +227,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	// The server's systemctl is not on this machine: a stand-in with no unit failed.
 	systemd := newStandInSystemd(t)
 	systemd.fail()
-	args = append(args, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl())
+	args = append(args, "-systemctl", systemd.systemctl(), "-journalctl", newStandInGateway(t).journalctl())
 
 	if err := os.Rename(writeDurableLog(t, t.TempDir()), filepath.Join(state, env["TI_RUN"]+".log")); err != nil {
 		t.Fatal(err)

@@ -29,7 +29,7 @@ IBKR view.
    website): IBC waits rather than fight for the session. Log out of the
    other session, then `sudo systemctl restart ti-gateway`.
 4. **Bad credentials**: do not retry in a loop (IBKR locks the login; the
-   start script stops after 3 refused logins in 24 hours and you are paged;
+   start program stops after 3 refused logins in 24 hours and you are paged;
    see `docs/manual/server.md`, "The Gateway is logged out").
    `sudo systemctl stop ti-gateway`, **[OWNER]** correct
    the login with `sudo ti-secrets edit ibkr-login.env`, delete

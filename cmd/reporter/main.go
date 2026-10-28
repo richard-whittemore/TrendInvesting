@@ -101,9 +101,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	ackWithin := flags.Duration("ack-within", defaultAckWithin, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
 	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run after the incident alerts at every firing, a failure two checks in a row pages once for the host, a passing check resolves it, and the daily summary shows the last check")
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
-	gatewayCheck := flags.String("gateway-check", "", "command that checks IB Gateway is logged in (deploy/libexec/gateway-check.sh; exit 0 logged in, 1 logged out): run after the incident alerts by the one instance named by -gateway-owner; logged out for more than 10 minutes outside the Gateway's restart windows pages once for the host, hourly reminders follow, and a logged-in check resolves it")
+	gatewayAdapters := flags.String("gateway-adapters", "", "comma-separated adapter units (ti-adapter-<instance>.service) whose journal shows a sustained loss of IBKR (codes 1100/2110) for the Gateway check")
 	gatewayState := flags.String("gateway-state", "", "the host's Gateway state (default: host-gateway.json beside -state)")
-	gatewayOwner := flags.String("gateway-owner", "", "the account whose reporter owns the Gateway check; every other instance skips it, so three accounts do not page three times (required with -gateway-check)")
+	gatewayOwner := flags.String("gateway-owner", "", "the account whose reporter owns the Gateway check, which reads the ti-gateway and -gateway-adapters journals with -journalctl after the incident alerts: logged out for more than 10 minutes outside the Gateway's restart windows pages once for the host, hourly reminders follow, and a completed login resolves it; every other instance skips it, so three accounts do not page three times")
 	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, and beside which the reader's costs.jsonl gives the summary its costs line, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
 	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed unit is paged once per failure episode if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a unit no longer failed is resolved")
 	resolveUnits := flags.String("resolve-units", "", "comma-separated units (ti-data.service) that systemctl show samples only to end their failure episode once a run has ended well: the reporter pages one once only when its OnFailure hook could not, never reminds or names it, and it never holds back the heartbeat; only ti-data.service is accepted, and not a unit also in -units")
@@ -119,8 +119,8 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if *journalPath == "" || *statePath == "" {
 		return errors.New("reporter: -journal and -state are required")
 	}
-	if *gatewayCheck != "" && (*gatewayOwner == "" || *accountName == "") {
-		return errors.New("reporter: -gateway-check needs -gateway-owner and -account: one account's reporter owns the host's Gateway check")
+	if *gatewayOwner != "" && *accountName == "" {
+		return errors.New("reporter: -gateway-owner needs -account: one account's reporter owns the host's Gateway check")
 	}
 	if *runEnv != "" && *accountName == "" {
 		return errors.New("reporter: -run-env needs -account: the first-run marker is the account's own, named by it, and a name taken from the state file could be shared by two accounts")
@@ -413,14 +413,14 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	// The Gateway is the host's, so one instance owns its check (ADR 0019,
 	// "Alerting"); like the clock check it follows the incident alerts.
-	if *gatewayCheck != "" && *accountName == *gatewayOwner {
+	if *gatewayOwner != "" && *accountName == *gatewayOwner {
 		path := *gatewayState
 		if path == "" {
 			path = filepath.Join(filepath.Dir(*statePath), "host-gateway.json")
 		}
 		if sched, err := gatewayScheduleFrom(getenv); err != nil {
 			failures = append(failures, err)
-		} else if err := gatewayStep(path, *gatewayCheck, hostName(), sched, senders, setAside, now); err != nil {
+		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), hostName(), sched, senders, setAside, now); err != nil {
 			failures = append(failures, err)
 		}
 	}

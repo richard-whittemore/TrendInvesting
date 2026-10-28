@@ -1,27 +1,14 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/richard-whittemore/TrendInvesting/internal/procgroup"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
-)
-
-// The Gateway health check (deploy/libexec/gateway-check.sh) reads IBC's and
-// the adapters' journals: exit 0 is logged in (or nothing to say), exit 1 is
-// logged out, anything else is a check that could not tell. It is bounded as
-// the clock check is (clock.go).
-var (
-	gatewayCheckTimeout   = 40 * time.Second
-	gatewayCheckWaitDelay = 5 * time.Second
 )
 
 const (
@@ -40,7 +27,15 @@ const (
 // 09:00), both New York time, read from the same settings the IBC render uses
 // (deploy/libexec/render-ibc-config.sh). Being logged out near them pages
 // nothing; the grace counts from the window's end.
-type gatewaySchedule struct{ nightly, cold int } // minutes after midnight
+type gatewaySchedule struct {
+	nightly, cold int // minutes after midnight
+	loc           *time.Location
+}
+
+// loadNewYork loads the zone the restart times are in; a test replaces it. A
+// host without the zone data cannot place the windows, so the firing fails
+// rather than guess another zone.
+var loadNewYork = func() (*time.Location, error) { return time.LoadLocation("America/New_York") }
 
 // The window around a restart: it opens gatewayWindowLead before it, and
 // closes after the nightly restart's login (the Gateway restarts, then logs in
@@ -67,26 +62,35 @@ func gatewayScheduleFrom(getenv func(string) string) (gatewaySchedule, error) {
 	if err != nil {
 		return gatewaySchedule{}, fmt.Errorf("reporter: TI_GATEWAY_COLD_RESTART must be HH:MM on a 24-hour clock, as IBC's ColdRestartTime is: %w", err)
 	}
-	return gatewaySchedule{nightly: nightly.Hour()*60 + nightly.Minute(), cold: cold.Hour()*60 + cold.Minute()}, nil
+	loc, err := loadNewYork()
+	if err != nil {
+		return gatewaySchedule{}, fmt.Errorf("reporter: the Gateway's restart windows are in New York time and the host has no time zone data for it (install tzdata): %w", err)
+	}
+	return gatewaySchedule{nightly: nightly.Hour()*60 + nightly.Minute(), cold: cold.Hour()*60 + cold.Minute(), loc: loc}, nil
 }
 
 type gatewayWindow struct{ start, end time.Time }
 
-// windows returns every restart window that can touch [from, to].
+// windows returns every restart window that touches [from, to]. The dates
+// run from the day before from to the day after to, so a window that opens the
+// previous evening (a restart just after midnight) is found.
 func (s gatewaySchedule) windows(from, to time.Time) []gatewayWindow {
-	loc, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		loc = time.UTC
-	}
-	from, to = from.In(loc), to.In(loc)
+	from, to = from.In(s.loc), to.In(s.loc)
 	var out []gatewayWindow
-	for d := time.Date(from.Year(), from.Month(), from.Day()-1, 0, 0, 0, 0, loc); !d.After(to); d = d.AddDate(0, 0, 1) {
-		at := func(mins int) time.Time { return time.Date(d.Year(), d.Month(), d.Day(), mins/60, mins%60, 0, 0, loc) }
+	add := func(w gatewayWindow) {
+		if w.end.After(from) && !w.start.After(to) {
+			out = append(out, w)
+		}
+	}
+	for d := time.Date(from.Year(), from.Month(), from.Day()-1, 0, 0, 0, 0, s.loc); !d.After(to.AddDate(0, 0, 1)); d = d.AddDate(0, 0, 1) {
+		at := func(mins int) time.Time {
+			return time.Date(d.Year(), d.Month(), d.Day(), mins/60, mins%60, 0, 0, s.loc)
+		}
 		n := at(s.nightly)
-		out = append(out, gatewayWindow{n.Add(-gatewayWindowLead), n.Add(gatewayNightlyWindowTail)})
+		add(gatewayWindow{n.Add(-gatewayWindowLead), n.Add(gatewayNightlyWindowTail)})
 		if d.Weekday() == time.Sunday {
 			c := at(s.cold)
-			out = append(out, gatewayWindow{c.Add(-gatewayWindowLead), c.Add(gatewayColdWindowTail)})
+			add(gatewayWindow{c.Add(-gatewayWindowLead), c.Add(gatewayColdWindowTail)})
 		}
 	}
 	return out
@@ -113,40 +117,6 @@ func (s gatewaySchedule) graceFrom(since, now time.Time) time.Time {
 		}
 	}
 	return from
-}
-
-// gatewayNoEvidenceExit is the check's exit status for a readable journal that
-// holds no login event (rotated, or aged out): neither logged in nor out.
-const gatewayNoEvidenceExit = 4
-
-// runGatewayCheck runs the check: out is true for exit 1, silent for exit 4
-// (no evidence). Any other failure, a missing command or a timeout is an
-// error, not a logout.
-func runGatewayCheck(command string) (out, silent bool, said string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gatewayCheckTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return procgroup.Kill(cmd.Process.Pid) }
-	cmd.WaitDelay = gatewayCheckWaitDelay
-	raw, runErr := cmd.CombinedOutput()
-	said = strings.TrimSpace(string(raw))
-	if len(said) > maxClockOutput {
-		said = said[:maxClockOutput]
-	}
-	var exit *exec.ExitError
-	switch {
-	case runErr == nil:
-		return false, false, said, nil
-	case ctx.Err() != nil:
-		return false, false, said, fmt.Errorf("reporter: the gateway check timed out after %s", gatewayCheckTimeout)
-	case errors.As(runErr, &exit) && exit.ExitCode() == 1:
-		return true, false, said, nil
-	case errors.As(runErr, &exit) && exit.ExitCode() == gatewayNoEvidenceExit:
-		return false, true, said, nil
-	default:
-		return false, false, said, fmt.Errorf("reporter: the gateway check could not tell: %w (it said: %s)", runErr, said)
-	}
 }
 
 // hostGateway is the host's record of the Gateway: the channels that took its
@@ -178,7 +148,7 @@ func loadHostGateway(path string) (hostGateway, error) {
 // seen in; it pages once the time passes gatewayPagesAfter outside a window,
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
-func gatewayStep(path, command, host string, sched gatewaySchedule, senders []sender, setAside []channelFault, clock func() time.Time) error {
+func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySchedule, senders []sender, setAside []channelFault, clock func() time.Time) error {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -194,11 +164,12 @@ func gatewayStep(path, command, host string, sched gatewaySchedule, senders []se
 	if err != nil {
 		return err
 	}
-	out, silent, said, err := runGatewayCheck(command)
+	now := clock()
+	ev, err := check(now)
 	if err != nil {
 		return err
 	}
-	now := clock()
+	out, silent, said := ev.out, ev.silent, ev.said
 	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
 	for _, k := range h.Keys {
 		seen[k] = true

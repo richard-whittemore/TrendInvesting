@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 )
 
 // The Gateway health check: the reporter runs the check command
-// (deploy/libexec/gateway-check.sh: exit 0 logged in, 1 logged out) and pages
+// (it reads the ti-gateway and adapter journals itself) and pages
 // once when the Gateway has been logged out past the threshold outside its
 // documented restart windows (ADR 0019, "Alerting": nothing can reach IBKR
 // while it is logged out, and no unit has failed). One instance owns the check.
@@ -27,31 +28,61 @@ var newYork = func() *time.Location {
 // Tuesday 2024-01-02 in New York, outside every restart window.
 func tuesday(h, m int) time.Time { return time.Date(2024, time.January, 2, h, m, 0, 0, newYork) }
 
-const gatewayOut = "gateway: logged out: IBC saw the dialog 'Unrecognized Username or Password' and no 'Login has completed' since"
+const (
+	ibcRefused   = "host ibc[1]: detected dialog entitled: Unrecognized Username or Password; event=Opened"
+	ibcCompleted = "host ibc[1]: Login has completed"
+	ibcStopped   = "host gateway-start[1]: gateway-start: login retries stopped: 3 of 3 refused logins within the window"
+	linkLost     = "host adapter[2]: ibkr link state=connectivity-lost reason=gateway-lost-ibkr client_id=11 attempt=None code=2110"
+	linkUp       = "host adapter[2]: ibkr link state=connected reason=restored client_id=11 attempt=None code=1102"
+)
 
-// standInGateway is a gateway-check command whose answer the test sets.
+// stamp is a journal line's time, as journalctl -o short-iso writes it.
+func stamp(t time.Time, rest string) string { return t.Format("2006-01-02T15:04:05-0700") + " " + rest }
+
+// standInGateway is a journalctl whose journals the test sets: files named by
+// unit, filtered by -g as the real one does (exit 1 and "-- No entries --"
+// when nothing matches), a failure, and the hint journalctl prints, with a
+// zero status, when the user cannot see the journal.
 type standInGateway struct{ dir string }
 
 func newStandInGateway(t *testing.T) standInGateway {
 	t.Helper()
 	g := standInGateway{dir: t.TempDir()}
-	script := "#!/bin/sh\ncat '" + g.dir + "/message'\nif test -e '" + g.dir + "/out'; then exit 1; fi\nif test -e '" + g.dir + "/broken'; then exit 3; fi\nif test -e '" + g.dir + "/silent'; then exit 4; fi\n"
-	if err := os.WriteFile(filepath.Join(g.dir, "check.sh"), []byte(script), 0o700); err != nil {
+	script := `#!/bin/sh
+unit=""; pattern=""
+while [ $# -gt 0 ]; do case $1 in -u) unit=$2; shift;; -g) pattern=$2; shift;; esac; shift; done
+if [ -e '` + g.dir + `/fail' ]; then echo "Failed to open journal files" >&2; exit 1; fi
+if [ -e '` + g.dir + `/noaccess' ]; then echo "Hint: You are currently not seeing messages from other users and the system."; echo "-- No entries --"; exit 0; fi
+out=$(cat '` + g.dir + `'/"$unit" 2>/dev/null)
+out=$(printf '%s\n' "$out" | grep -E -- "$pattern")
+if [ -z "$out" ]; then echo "-- No entries --"; exit 1; fi
+printf '%s\n' "$out"
+`
+	if err := os.WriteFile(filepath.Join(g.dir, "journalctl"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	g.login()
 	return g
 }
 
-func (g standInGateway) path() string { return filepath.Join(g.dir, "check.sh") }
-func (g standInGateway) login() {
-	_ = os.Remove(filepath.Join(g.dir, "out"))
-	_ = os.WriteFile(filepath.Join(g.dir, "message"), []byte("gateway: logged in\n"), 0o600)
+func (g standInGateway) journalctl() string { return filepath.Join(g.dir, "journalctl") }
+func (g standInGateway) path() string       { return g.journalctl() }
+func (g standInGateway) write(unit string, lines ...string) {
+	_ = os.WriteFile(filepath.Join(g.dir, unit), []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }
-func (g standInGateway) logout() {
-	_ = os.WriteFile(filepath.Join(g.dir, "out"), nil, 0o600)
-	_ = os.WriteFile(filepath.Join(g.dir, "message"), []byte(gatewayOut+"\n"), 0o600)
+func (g standInGateway) ibc(lines ...string) { g.write("ti-gateway.service", lines...) }
+func (g standInGateway) adapter(lines ...string) {
+	g.write("ti-adapter-boost.service", lines...)
 }
+func (g standInGateway) flag(name string, on bool) {
+	if on {
+		_ = os.WriteFile(filepath.Join(g.dir, name), nil, 0o600)
+	} else {
+		_ = os.Remove(filepath.Join(g.dir, name))
+	}
+}
+func (g standInGateway) login()  { g.ibc("2024-01-01T00:00:00-0500 " + ibcCompleted) }
+func (g standInGateway) logout() { g.ibc("2024-01-01T00:00:00-0500 " + ibcRefused) }
 
 func gatewayRun(t *testing.T, r http.RoundTripper, dir, check, account string, at time.Time, extra ...string) error {
 	t.Helper()
@@ -70,7 +101,7 @@ func gatewayRunEnv(t *testing.T, r http.RoundTripper, dir, check, account string
 		environment[k] = v
 	}
 	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-repeat-interval", "30m",
-		"-account", account, "-gateway-check", check, "-gateway-owner", "boost"}
+		"-account", account, "-journalctl", check, "-gateway-adapters", "ti-adapter-boost.service", "-gateway-owner", "boost"}
 	args = append(args, extra...)
 	return run(args, env(environment), func() time.Time { return at }, &bytes.Buffer{}, &http.Client{Transport: r})
 }
@@ -213,16 +244,145 @@ func TestOnlyTheOwningInstanceRunsTheGatewayCheck(t *testing.T) {
 	}
 }
 
-func TestAGatewayCheckThatCannotRunFailsTheFiringAndPagesNoLogout(t *testing.T) {
+func TestAJournalThatCannotBeReadFailsTheFiringAndPagesNoLogout(t *testing.T) {
+	for name, set := range map[string]func(g standInGateway){
+		"journalctl fails":                func(g standInGateway) { g.flag("fail", true) },
+		"journalctl hints at lost access": func(g standInGateway) { g.flag("noaccess", true) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &relay{sent: map[string][]string{}}
+			g := newStandInGateway(t)
+			set(g)
+			err := gatewayRun(t, r, t.TempDir(), g.path(), "boost", tuesday(14, 0))
+			if err == nil || !strings.Contains(err.Error(), "gateway check") {
+				t.Fatalf("got %v, want an error naming the gateway check", err)
+			}
+			if gatewayPages(r) != 0 {
+				t.Fatal("a journal that could not be read paged a logout")
+			}
+		})
+	}
+}
+
+func TestAMissingJournalctlFailsTheFiring(t *testing.T) {
+	err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), filepath.Join(t.TempDir(), "none"), "boost", tuesday(14, 0))
+	if err == nil || !strings.Contains(err.Error(), "gateway check") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestTheRetryStopIsLoggedOutEvenAfterAnEarlierCompletedLogin(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
-	_ = os.WriteFile(filepath.Join(g.dir, "broken"), nil, 0o600)
-	err := gatewayRun(t, r, t.TempDir(), g.path(), "boost", tuesday(14, 0))
-	if err == nil || !strings.Contains(err.Error(), "gateway") {
-		t.Fatalf("a check that exits 3 gave %v, want an error naming the gateway check", err)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted), stamp(tuesday(9, 0), ibcStopped))
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if gatewayPages(r) != 0 {
-		t.Fatal("a check that could not run paged a logout")
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages for a stopped Gateway, want 1 per channel", gatewayPages(r))
+	}
+}
+
+// Silence in IBC's journal still lets the adapter's evidence page.
+func TestAdapterEvidenceIsExaminedWhenIBCsJournalHasNoLoginEvent(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc("2024-01-01T00:00:00-0500 host ibc[1]: some unrelated line")
+	g.adapter(stamp(tuesday(9, 0), linkLost))
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages, want 1 per channel for a link lost for 5 hours", gatewayPages(r))
+	}
+}
+
+// The link must have been lost without a connection since, for 3 hours: lost
+// at 06:00, restored at 08:00 and lost again at 09:55 is a 5-minute loss.
+func TestAdapterLossCountsOnlyAsOneContinuousLossOfThreeHours(t *testing.T) {
+	cases := map[string]struct {
+		lines []string
+		want  int
+	}{
+		"lost, restored, lost again": {[]string{stamp(tuesday(6, 0), linkLost), stamp(tuesday(8, 0), linkUp), stamp(tuesday(9, 55), linkLost)}, 0},
+		"lost for under 3h":          {[]string{stamp(tuesday(8, 31), linkLost)}, 0},
+		"lost 3h and still lost":     {[]string{stamp(tuesday(6, 0), linkLost), stamp(tuesday(7, 0), linkLost)}, 2},
+		"restored since":             {[]string{stamp(tuesday(5, 0), linkLost), stamp(tuesday(9, 59), linkUp)}, 0},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := &relay{sent: map[string][]string{}}
+			g := newStandInGateway(t)
+			g.adapter(c.lines...)
+			dir := t.TempDir()
+			for _, min := range []int{0, 5, 10, 15} {
+				if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(11, min)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := gatewayPages(r); got != c.want {
+				t.Fatalf("%d pages, want %d: %v", got, c.want, r.sent)
+			}
+		})
+	}
+}
+
+// systemd 255 and later write -o short-iso offsets with a colon.
+func TestAdapterLinesWithAColonInTheOffsetAreRead(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.adapter(tuesday(8, 0).Format("2006-01-02T15:04:05-07:00") + " " + linkLost)
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages, want 1 per channel", gatewayPages(r))
+	}
+}
+
+func TestAnAdapterJournalLineWithoutATimeFailsTheFiring(t *testing.T) {
+	g := newStandInGateway(t)
+	g.adapter("not-a-time " + linkLost)
+	if err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0)); err == nil {
+		t.Fatal("an adapter line with no time was accepted")
+	}
+}
+
+// A window that opens the previous evening: a restart configured just after
+// midnight has its window from 23:55.
+func TestARestartJustAfterMidnightHasItsWindowFromThePreviousEvening(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.logout()
+	dir := t.TempDir()
+	cfg := map[string]string{"TI_GATEWAY_RESTART_TIME": "12:00 AM"}
+	for _, at := range []time.Time{tuesday(23, 40), tuesday(23, 57)} {
+		if err := gatewayRunEnv(t, r, dir, g.path(), "boost", at, cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := gatewayPages(r); got != 0 {
+		t.Fatalf("paged %d times at 23:57, inside the window that opens at 23:55: %v", got, r.sent)
+	}
+}
+
+func TestAMissingTimeZoneFailsTheFiringInsteadOfGuessing(t *testing.T) {
+	old := loadNewYork
+	loadNewYork = func() (*time.Location, error) { return nil, errors.New("unknown time zone America/New_York") }
+	defer func() { loadNewYork = old }()
+	g := newStandInGateway(t)
+	err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0))
+	if err == nil || !strings.Contains(err.Error(), "time zone") {
+		t.Fatalf("got %v, want an error about the time zone data", err)
 	}
 }
 
@@ -321,21 +481,20 @@ func TestNoJournalEvidenceKeepsAnOpenOutageOpenAndPagesNothingWhenNoneIsOpen(t *
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
 	dir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(g.dir, "silent"), nil, 0o600)
+	g.ibc("2024-01-01T00:00:00-0500 host ibc[1]: some unrelated line")
 	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(9, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if gatewayPages(r) != 0 {
 		t.Fatal("no evidence and no open outage paged")
 	}
-	_ = os.Remove(filepath.Join(g.dir, "silent"))
 	g.logout()
 	for _, min := range []int{0, 5, 10} {
 		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_ = os.WriteFile(filepath.Join(g.dir, "silent"), nil, 0o600)
+	g.ibc("2024-01-01T00:00:00-0500 host ibc[1]: some unrelated line")
 	for _, min := range []int{15, 20} {
 		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
 			t.Fatal(err)
