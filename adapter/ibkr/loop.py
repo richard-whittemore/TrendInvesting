@@ -428,6 +428,13 @@ def _event_time_readable(payload, field):
     return at.tzinfo is not None
 
 
+def close_window(close):
+    """The earliest instant a Gateway's stamp counts as at the close: GATEWAY_CLOCK_TOLERANCE before it, since a
+    Gateway up to that slow passes its clock check and may stamp a 16:02 execution 15:58 (ADR 0019, amended
+    2026-10-28). Every at-or-after-close check on the Gateway's stamps or the journal uses it."""
+    return close - GATEWAY_CLOCK_TOLERANCE
+
+
 def _recorded_at_or_after(envelope, moment):
     """Whether a logged input's recorded time is at or after moment; True when it cannot be read (fail closed)."""
     try:
@@ -435,6 +442,12 @@ def _recorded_at_or_after(envelope, moment):
         return at.tzinfo is None or at >= moment
     except (KeyError, TypeError, ValueError):
         return True
+
+
+def _side_of_close(at, close):
+    """Which side of close a stamp from close_window(close) on is, for a reason to name."""
+    return "at or after the close" if at >= close else "within {} before the close".format(
+        _span(GATEWAY_CLOCK_TOLERANCE))
 
 
 def _stamp(at):
@@ -1146,15 +1159,19 @@ class AdapterLoop:
           proof (_morning_proof; the owner's decision of 2026-10-27, ADR
           0019 amended that day): before the next open, the Flex reader's
           executions proof covering the close to the reading's midnight with
-          nothing in it at or after the close, and no fill journalled since;
+          nothing in it at or after the close, and no fill journalled from
+          close_window(close) on (within 5 minutes before the close or after);
         - no open order for the account, of any client (working, pending or
           cancel-pending, snapshot.OPEN_STATUS), in the account read and in
           the last open-order list IBKR returned (broker);
-        - no execution in the account at or since the close in IBKR's list
-          (orders.collect_broker_orders), which shows other clients'
-          executions only when this client ID is Gateway's Master API client
-          ID; one stamped at the close's own second counts, since the engine
-          applies a fill stamped in a book's second to that book;
+        - no execution in the account stamped from close_window(close) on
+          (within 5 minutes before the close, a Gateway clock's tolerance,
+          or after it) in IBKR's list (orders.collect_broker_orders), which
+          shows other clients' executions only when this client ID is
+          Gateway's Master API client ID; one stamped at the close's own
+          second counts, since the engine applies a fill stamped in a book's
+          second to that book; on the session's own date, no fill journalled
+          from close_window(close) on either (_journal_reason);
         - every holding has an official close in the batch, so the account
           can be valued at the close, and IBKR's own net liquidation at the
           read is positive (the margin alarm's basis beside the valuation);
@@ -1202,18 +1219,26 @@ class AdapterLoop:
             # stamped in the book's second to that book (internal/reconcile
             # Classify), so a closing-auction fill stamped at the close is
             # one the close's snapshot must not already show.
-            # A Gateway up to GATEWAY_CLOCK_TOLERANCE slow passes its clock check, so an execution stamped within
-            # the tolerance before the close is taken as at it (ADR 0019, amended 2026-10-28).
-            since = [e for e in broker.executions if e.occurred_at >= close - GATEWAY_CLOCK_TOLERANCE]
+            # An execution stamped within the clock tolerance before the close is taken as at it (close_window).
+            since = [e for e in broker.executions if e.occurred_at >= close_window(close)]
             if since:
                 if gateway:
                     # The cause first: on a link whose clock is not believed, each execution is stamped no earlier
                     # than the adapter received it (orders.execution_report), so all of the day's are after the close.
                     reasons.insert(0, "{}; so IBKR's execution times on this link are not believed, and each is "
                                       "taken at the time the adapter received it if that is later".format(gateway))
-                reasons.append("IBKR reports {} execution(s) in the account since the close (or within {} before it, "
-                               "the Gateway clock's tolerance): {}".format(
-                                   len(since), _span(GATEWAY_CLOCK_TOLERANCE), ", ".join(e.exec_id for e in since)))
+                reasons.append("IBKR reports {} execution(s) in the account since the close, or within {} before "
+                               "it (a Gateway clock up to that slow passes its check): {}".format(
+                                   len(since), _span(GATEWAY_CLOCK_TOLERANCE),
+                                   ", ".join("{} ({})".format(e.exec_id, _side_of_close(e.occurred_at, close))
+                                             for e in since)))
+        if read_ny.date() == close_ny.date() and reading.as_of > close:
+            # The journal's stamps are the ones the engine applies on top of the close's book: one journalled after
+            # the close on an earlier link (a fast Gateway's, before its check) withholds a same-date reading too,
+            # though IBKR's own list now shows the execution before the close.
+            journal = self._journal_reason(close)
+            if journal:
+                reasons.append(journal)
         valuation = None
         try:
             valuation = close_valuation(reading, closes)
@@ -1251,10 +1276,11 @@ class AdapterLoop:
           calendar), so the account has not traded since;
         - the executions proof lists every execution from the session's day
           up to that midnight, and none at or after the close;
-        - IBKR's own list shows none at or after the close (checked with the
-          other conditions, _not_as_of_close);
+        - IBKR's own list shows none from close_window(close) on (checked
+          with the other conditions, _not_as_of_close);
         - the journal (the engine's durable log and the outbox) holds no fill
-          stamped at or after the close.
+          stamped from close_window(close) on: within 5 minutes before the
+          close or after it.
         """
         reasons = []
         read_ny = reading.as_of.astimezone(nyse_calendar.NEW_YORK)
@@ -1286,11 +1312,21 @@ class AdapterLoop:
             problem = gateway_zone_problem(text, "IBKR's execution time")
             if problem:
                 reasons.append(problem)
-        fills = self._journalled_fills_since(close)
-        if fills:
-            reasons.append("the journal records {} fill(s) stamped at or after the close, or with a time that cannot "
-                           "be compared with it: {}".format(len(fills), ", ".join(fills)))
+        journal = self._journal_reason(close)
+        if journal:
+            reasons.append(journal)
         return reasons
+
+    def _journal_reason(self, close):
+        """Why the journal shows the account traded at the close or after it ("" when it does not): the fills
+        _journalled_fills_since finds, each saying which side of the close it is."""
+        fills = self._journalled_fills_since(close)
+        if not fills:
+            return ""
+        return ("the journal records {} fill(s) after the close, within {} before it (a Gateway clock up to that slow "
+                "passes its check), or with a time that cannot be compared with it: {}; the journal keeps them, so "
+                "this session's reading stays withheld".format(len(fills), _span(GATEWAY_CLOCK_TOLERANCE),
+                                                               ", ".join(fills)))
 
     def _flex_proof(self, close, midnight):
         """(reasons, decisive): why the Flex reader's executions proof does not show that nothing executed in the
@@ -1325,13 +1361,13 @@ class AdapterLoop:
         return reasons, False
 
     def _journalled_fills_since(self, close):
-        """The fill IDs journalled stamped at or after close, or within GATEWAY_CLOCK_TOLERANCE before it (a Gateway
-        up to that slow passes its clock check; ADR 0019, amended 2026-10-28): in the outbox, this run's durable log, and the log of
+        """The fills journalled stamped from close_window(close) on (at or after the close, or within
+        GATEWAY_CLOCK_TOLERANCE before it), each named with its stamp and which of the two it is: in the outbox, this run's durable log, and the log of
         every earlier run its Run approvals chain back to, as the previous close's book reads them
         (book_basis.previous_close; relay.run_chain), so a fresh run hides no fill of the run before it.
 
         The walk stops after the first earlier run whose business (every input but its configuration and Run
-        approval) was all recorded strictly before close: each run before it ended earlier still. A run with no
+        approval) was all recorded strictly before close_window(close), the same boundary: each run before it ended earlier still. A run with no
         business is walked past. A chain that cannot be read is itself a reason (fail closed, AGENTS.md).
         """
         payloads = [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
@@ -1343,11 +1379,11 @@ class AdapterLoop:
                 # nothing else is walked past, never taken as ending before the close.
                 business = [e for e in inputs if e["type"] != RUN_APPROVED and not e["type"].endswith(
                     ".configuration")]
-                if n > 0 and business and not any(_recorded_at_or_after(e, close) for e in business):
+                if n > 0 and business and not any(_recorded_at_or_after(e, close_window(close)) for e in business):
                     break
         except ResolveRefused as refused:
             return ["the chain of runs' logs cannot be read, so their fills cannot be checked ({})".format(refused)]
-        found = []
+        found, seen = [], set()
         for payload in payloads:
             ident = str(payload.get("fill_id", "a fill with no ID")) if isinstance(payload, dict) else "a fill"
             try:
@@ -1358,8 +1394,9 @@ class AdapterLoop:
             if at.tzinfo is None:
                 # Fail closed (AGENTS.md): a time with no zone cannot be placed against the close.
                 found.append("{} (its time has no zone)".format(ident))
-            elif at >= close - GATEWAY_CLOCK_TOLERANCE and ident not in found:
-                found.append(ident)
+            elif at >= close_window(close) and ident not in seen:
+                seen.add(ident)
+                found.append("{} (stamped {}, {})".format(ident, _stamp(at), _side_of_close(at, close)))
         return found
 
     def _awaits_proof(self, close):

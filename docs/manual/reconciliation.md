@@ -691,9 +691,14 @@ when the Gateway's time is the later, by as much as the Gateway's clock is
 fast (hours, for a Gateway on another zone's clock). On an evening reading
 over such a link, an execution listed since the close is withheld with the
 Gateway's clock named first as the cause. Because a Gateway up to 5 minutes
-slow still passes the check, an execution or fill stamped within 5 minutes
-before the close (from 3:55 p.m.) is taken as at the close, and the reading
-is withheld. An
+slow still passes the check, an execution or fill stamped within five
+minutes before that session's close (from 3:55 p.m. on a normal day,
+12:55 p.m. on a 1 p.m. early close) is taken as at the close, and the
+reading is withheld; the reason names each one and says whether it is
+after the close or within those five minutes. A fill in the journal in
+that window keeps that session's reading withheld for good (the journal
+is never rewritten), on the evening reading as well as the next morning's.
+An
 execution at a time New York skipped when the clocks went forward stops the
 adapter (send the journal line to the developer). Any other zone, a
 connection time New York skipped, or a time it cannot read, withholds the

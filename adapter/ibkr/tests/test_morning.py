@@ -64,6 +64,18 @@ EARLY = date(2027, 11, 26)
 AFTER_EARLY = date(2027, 11, 29)
 
 
+def commit_at(engine, ident, recorded_at, kind="test.input", payload=None, version=1):
+    """An input committed to engine's durable log under ident, recorded at recorded_at (test_delivery.commit's)."""
+    import hashlib
+    payload = payload or {"input": ident}
+    raw = json.dumps(payload, separators=(",", ":"))
+    engine.decide({"id": ident, "type": kind, "envelope_version": 1, "schema_version": version,
+                   "event_time": recorded_at, "recorded_at": recorded_at,
+                   "sequence": engine.next_sequence, "source": "engine",
+                   "configuration_hash": engine.configuration_hash, "strategy_version": engine.strategy_version,
+                   "payload": payload, "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+
+
 def ny(day, hour, minute=0):
     return datetime(day.year, day.month, day.day, hour, minute, tzinfo=NEW_YORK)
 
@@ -304,6 +316,33 @@ class MorningTests(unittest.TestCase):
             loop.step()
         self.assert_withheld("journal", "0001f4e8.earlier.01.01")
 
+    def test_a_fill_within_the_tolerance_two_runs_back_is_found_past_a_run_with_business_in_it(self):
+        # For a 16:00 close, the oldest run's fill stamped 15:57 counts as at the close, and a run between them whose
+        # business was recorded at 15:58 is within the same window: the walk goes past it to the fill.
+        self.proof(FRIDAY_MORNING)
+        payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.window.01.01",
+                   "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                   "filled_at": "2027-01-14T20:57:00Z"}
+        commit_at(self.engine, "fill:window", "2027-01-14T20:57:00Z", kind=FILL_TYPE, payload=payload, version=5)
+        first = self.engine_log
+        middle = str(Path(self.dir.name) / (RUN + "-2.log"))
+        between = LoggedEngine(middle, approval=run_approval(ACCOUNT, previous_log=RUN + ".log",
+                                                             previous_log_final_hash=final_hash(first)))
+        commit_at(between, "between:business", "2027-01-14T20:58:00Z")
+        fresh = RUN + "-3"
+        self.engine_log = str(Path(self.dir.name) / (fresh + ".log"))
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, previous_log=RUN + "-2.log", previous_log_final_hash=final_hash(middle)))
+        self.folder = self.streams / fresh
+        write_stream(self.folder, THURSDAY, session_envelopes([THURSDAY], run=fresh))
+        self.fake.positions = [(ACCOUNT, contract(), Decimal("148"), 312.5)]
+        self.fake.summary = [(a, t, "99597.75" if t == "TotalCashValue" else v, c) for a, t, v, c in SUMMARY]
+        loop = self.loop()
+        loop.start()
+        for _ in range(40):
+            loop.step()
+        self.assert_withheld("journal", "0001f4e8.window.01.01", "within 5 minutes before the close")
+
     def test_a_fill_two_runs_back_is_found_past_an_empty_run(self):
         # A run between them with nothing but its configuration and approval says nothing about when it started:
         # the walk goes past it (book_basis.previous_close walks the same chain).
@@ -467,6 +506,54 @@ class MorningTests(unittest.TestCase):
         self.assertTrue(reason.startswith("IB Gateway's connection time '20270114 16:00:00 EST'"), reason)
         self.assertIn("taken at the time the adapter received", reason)
 
+    def test_the_journal_reason_says_which_side_of_the_close_each_fill_is_and_what_it_costs(self):
+        self.proof(FRIDAY_MORNING)
+        loop = self.loop()
+        loop.start()
+        close = nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc)
+        for ident, filled_at in (("0001f4e8.near.01.01", "2027-01-14T20:57:00Z"),
+                                 ("0001f4e8.after.01.01", "2027-01-14T21:30:00Z")):
+            payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": ident,
+                       "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                       "filled_at": filled_at}
+            loop.outbox.append({"id": "fill:" + ident, "event_type": FILL_TYPE, "schema_version": 1,
+                                "event_time": filled_at, "payload": payload})
+        found = loop._journalled_fills_since(close)
+        self.assertIn("0001f4e8.near.01.01 (stamped 2027-01-14T20:57:00Z, within 5 minutes before the close)", found)
+        self.assertIn("0001f4e8.after.01.01 (stamped 2027-01-14T21:30:00Z, at or after the close)", found)
+
+    def test_a_journalled_fill_in_the_window_withholds_the_session_for_good(self):
+        self.proof(FRIDAY_MORNING)
+        payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.near.01.01",
+                   "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                   "filled_at": "2027-01-14T20:57:00Z"}
+        commit_at(self.engine, "fill:near", "2027-01-14T20:57:00Z", kind=FILL_TYPE, payload=payload, version=5)
+        self.fake.positions = [(ACCOUNT, contract(), Decimal("148"), 312.5)]
+        self.fake.summary = [(a, t, "99597.75" if t == "TotalCashValue" else v, c) for a, t, v, c in SUMMARY]
+        self.deliver(THURSDAY)
+        reason = self.assert_withheld("0001f4e8.near.01.01 (stamped 2027-01-14T20:57:00Z, within 5 minutes before "
+                                      "the close)")
+        self.assertIn("the journal keeps them, so this session's reading stays withheld", reason)
+
+    def test_a_same_date_reading_finds_a_fill_journalled_after_the_close(self):
+        # A fill journalled on an unchecked link whose Gateway was fast is stamped after the close; IBKR re-lists it on
+        # a corrected link at its true time, before the close. The journal's stamp is the one the engine applies on top
+        # of the close's book, so a same-date reading that stood would count the fill twice.
+        self.at(ny(THURSDAY, 17, 0))
+        loop = self.loop()
+        loop.start()
+        self.assertEqual(loop._gateway_zone, "", "setup: the corrected link's check holds")
+        payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.fast.01.01",
+                   "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
+                   "filled_at": "2027-01-14T23:30:00Z"}
+        loop.outbox.append({"id": "fill:fast", "event_type": FILL_TYPE, "schema_version": 1,
+                            "event_time": "2027-01-14T23:30:00Z", "payload": payload})
+        self.fake.executions = [(contract(), execution(exec_id="0001f4e8.fast.01.01", order_id=0, perm_id=7676,
+                                                       order_ref="", client_id=0, time="20270114 15:30:00 EST"))]
+        self.deliver(THURSDAY, loop)
+        reason = self.assert_withheld("journal", "0001f4e8.fast.01.01")
+        self.assertNotIn("since the close", reason, "IBKR's own list shows it before the close")
+
     def test_a_same_date_reading_on_an_unchecked_link_with_no_execution_stands(self):
         # The clock matters only to the executions' times: with none listed, the account read stands for the close.
         self.at(ny(THURSDAY, 17, 0))
@@ -500,7 +587,8 @@ class MorningTests(unittest.TestCase):
         loop = self.loop()
         loop.start()
         close = nyse_calendar.session_close(THURSDAY).astimezone(timezone.utc)
-        for n, (filled_at, listed) in enumerate((("2027-01-14T20:58:00Z", True), ("2027-01-14T20:54:59Z", False))):
+        for n, (filled_at, listed) in enumerate((("2027-01-14T20:58:00Z", True), ("2027-01-14T20:55:00Z", True),
+                                                 ("2027-01-14T20:54:59Z", False))):
             ident = "0001f4e8.edge{}.01.01".format(n)
             payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": ident,
                        "instrument_id": "SPY", "side": "buy", "quantity": 1, "price": 401.25, "commission": 1.0,
