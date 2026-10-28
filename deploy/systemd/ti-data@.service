@@ -1,0 +1,62 @@
+[Unit]
+Description=Market-data step: record each day's settled session once and write momentum engine %i's compact stream
+# One instance per IRA (ti-data@trad-ira), beside Boost's ti-data.service,
+# which it leaves unchanged: the same morning job, run for one momentum
+# engine's run (adapter/marketdata/tidata.py, run_momentum;
+# docs/manual/market-data.md, "A job for the IRAs"). The two share the
+# recordings: a session either one recorded is not fetched again.
+After=network-online.target
+Wants=network-online.target
+# When this unit fails, ti-unit-failed@%n sends one urgent page through the
+# reporter's channels naming it, as for Boost's data job (ADR 0019,
+# "Alerting"; docs/manual/server.md, "A failed unit"). The free plan's early
+# 403 is a quiet exit 0, not a failure.
+OnFailure=ti-unit-failed@%n.service
+# No Condition: a missing /opt/trend-investing/bin/ti-data or universe-rank,
+# or a run.env naming a log that cannot be read, fails the unit with a
+# message, so the owner sees a failed unit, never a silent skip. An engine not
+# yet started (no run.env, no run log, no run stream folder) is a quiet
+# success: --run-env below.
+# The secrets rest on disk only encrypted; ti-unlock decrypts them after
+# each boot into a root-only tmpfs, and this unit loads its credential
+# from there. Until then systemd refuses to start it ("Assertion failed")
+# (ADR 0028; docs/manual/server.md, "Unlocking the
+# secrets after a boot").
+AssertPathExists=/run/trend-investing/secrets/secrets.env
+
+[Service]
+Type=oneshot
+# A run that hangs (a stalled fetch, a ranker that does not answer) is
+# stopped and shows as failed rather than staying "activating", which would
+# also make the timer skip every later firing.
+TimeoutStartSec=1h
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+Environment=TI_DATA_DIR=/var/lib/trend-investing/data
+# TI_RUN: the engine's current run, whose durable log is read for the run's
+# identity and the holdings that get their own bars. Optional here ("-"):
+# before the account's first run there is none, and --run-env below makes
+# that a quiet success, not a failure.
+EnvironmentFile=-/var/lib/trend-investing/engines/%i/run.env
+# MASSIVE_API_KEY, read from %d/secrets and never printed.
+LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
+# Records into TI_DATA_DIR and writes the day's stream to
+# ${TI_DATA_DIR}/streams/%i/${TI_RUN}/%i-<session>.jsonl. The ranker is the
+# Go engine's own (cmd/universe-rank, built by deploy/build-engine.sh and
+# installed by provision.sh), run with this instance's configuration.
+ExecStart=/opt/trend-investing/bin/ti-data --engine momentum --instance %i --ranker /opt/trend-investing/bin/universe-rank --run-env /var/lib/trend-investing/engines/%i/run.env --data ${TI_DATA_DIR} --streams ${TI_DATA_DIR}/streams --config /etc/trend-investing/engines/%i.config --engine-log /var/lib/trend-investing/engines/%i/${TI_RUN}.log --secrets-file %d/secrets --settle-minutes 60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/data
+ReadOnlyPaths=/var/lib/trend-investing/engines/%i
+# No instruction can come from this unit: it runs as ti-trader, the engine's
+# user, and reads data from outside, so the operator inboxes are hidden from
+# it, and nothing under the engines' state is writable (ProtectSystem=strict;
+# ADR 0026, kill-switch amendment; docs/manual/server.md).
+InaccessiblePaths=-/var/lib/trend-investing/engines/boost/operator -/var/lib/trend-investing/engines/trad-ira/operator -/var/lib/trend-investing/engines/roth-ira/operator
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

@@ -41,7 +41,7 @@ fi
 # the tools are built for.
 rehearsal_arch_matches "$goarch" "$(docker run --rm --platform "$platform" ubuntu:24.04 uname -m)"
 # The data step's file and the Go tools (the reporter, the dashboard,
-# operator and journal-query), installed by provision.sh from beside
+# operator, journal-query and universe-rank, the IRAs' data job's ranker), installed by provision.sh from beside
 # deploy/, and a durable log the engine wrote for the shipped Boost
 # configuration, which the rehearsal runs the data step and the reporter
 # against. The Go tools are built for the container's pinned platform, as
@@ -58,7 +58,7 @@ cp "$repo/cmd/engine/testdata/momentum-month.jsonl" "$dist/momentum-month.jsonl"
 (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
   -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=rehearsal" \
   -o "$dist/ti-engine" ./cmd/engine)
-for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query; do
+for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query universe-rank:universe-rank; do
   (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build -o "$dist/${tool#*:}" "./cmd/${tool%%:*}")
 done
 id=$(docker "${args[@]}" ubuntu:24.04 bash /deploy/rehearsal/inside.sh)

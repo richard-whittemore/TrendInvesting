@@ -1,0 +1,22 @@
+[Unit]
+Description=Run momentum engine %i's market-data step on weekday mornings, for the previous session
+
+[Timer]
+# 06:15, 07:15 and 08:15 New York on weekdays: Boost's mornings
+# (ti-data.timer, :05), ten minutes later, so Boost's job has recorded the
+# session's grouped bars and this one reuses them, and the two never fetch
+# at once at the free plan's 5 requests a minute. The free plan serves a
+# session only the next morning (docs/live-trading/lessons-2026-10.md L2);
+# an IRA decides on the first session of a month from the previous session's
+# closes, so the month-end universe and the ranked histories are written on
+# that morning, well before the adapter's 09:00 cutoff. A 403 at the first
+# two firings is a quiet wait; one that persists at the last is a failure
+# that pages (ti-data@.service). Persistent: a run missed while the server
+# was down runs at boot. adapter/marketdata/tests/test_tidata_momentum.py
+# checks every firing against every session and against Boost's.
+OnCalendar=Mon..Fri 6,7,8:15 America/New_York
+Persistent=true
+Unit=ti-data@%i.service
+
+[Install]
+WantedBy=timers.target

@@ -811,6 +811,23 @@ class DailyTest(unittest.TestCase):
             self.assertGreater(first, BASE)
 
 
+# The Boost stream's bytes for the Job fixture's warm-up and its first daily
+# file, as the Boost-only job wrote them before the job also wrote the
+# momentum engines' streams: Boost's path must not change by a byte.
+BOOST_WARM_UP_SHA256 = "a716c71c823a66828ba33fd3ff16ec252bb45566dd8d1da9e99ca1205657bd31"
+BOOST_DAILY_SHA256 = "01e90bc303fb846001f54929a2ed2752b6b759487499348e5390b99cf977f28f"
+
+
+class BoostBytesTest(unittest.TestCase):
+    def test_the_boost_warm_up_and_daily_files_are_the_recorded_bytes(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = Job(root)
+            self.assertEqual(job.main(after_settle(WARM), "--backfill-from", BASE.isoformat())[0], 0)
+            self.assertEqual(job.main(after_settle(D(2026, 3, 16)))[0], 0)
+            digest = lambda day: hashlib.sha256((job.stream_dir() / "boost-{}.jsonl".format(day)).read_bytes()).hexdigest()
+            self.assertEqual((digest(WARM), digest(D(2026, 3, 16))), (BOOST_WARM_UP_SHA256, BOOST_DAILY_SHA256))
+
+
 class ReverifyTest(unittest.TestCase):
     """Before a new file is written, every file already written for the run
     must still re-encode byte for byte; otherwise nothing is written."""

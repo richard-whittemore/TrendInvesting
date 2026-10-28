@@ -256,6 +256,34 @@ class MomentumMemoryBudgetTest(unittest.TestCase):
         self.check_peak("daily", peak)
         self.assertEqual(self.histories(out), {MOMENTUM_LAST.isoformat(): RANKED})
 
+    def test_the_iras_data_job_stays_inside_the_budget(self):
+        """The data job's own momentum run (ti-data --engine momentum) over the same recordings, with the Go
+        ranker it runs on the server: the warm-up, then the daily firing, which also checks the warm-up file
+        still re-encodes from its recordings, each inside MOMENTUM_BUDGET."""
+        from marketdata.tests.test_tidata_momentum import INSTANCE, MomentumJob
+        config = json.loads(self.config.read_text())
+        with tempfile.TemporaryDirectory() as root:
+            job = MomentumJob(root, data=self.data, config=config, sectors_get=_sectors_down)
+            for name, now, extra in (("job warm-up", after_settle(self.days[-2]), ("--backfill-from", MOMENTUM_BASE.isoformat())),
+                                     ("job daily", after_settle(self.days[-1]), ())):
+                tracemalloc.start()
+                try:
+                    tracemalloc.reset_peak()
+                    status, _, err = job.main(now, *extra, ranker_path=str(self.ranker))
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertEqual(status, 0, err)
+                self.check_peak(name, peak)
+            self.assertEqual(self.histories(job.path(MOMENTUM_LAST)), {MOMENTUM_LAST.isoformat(): RANKED})
+            self.assertEqual(sorted(os.listdir(job.stream_dir())),
+                             ["{}-{}.jsonl".format(INSTANCE, d) for d in self.days[-2:]])
+
+
+def _sectors_down(url):
+    """The fixture records its sector labels itself; the job's own fetch is refused, and it carries on."""
+    raise encode.MarketDataError("no sector source in this test")
+
 
 def record_stress_history(directory, days, names, broken=()):
     """Universe recordings of ``names`` for ``days``; each name in ``broken``

@@ -376,7 +376,8 @@ so a source that is down does not block one already saved.
 ## The daily data job
 
 On the server, one job does all of the above for the Boost engine every
-weekday, with no one at the keyboard: `ti-data` (`adapter/marketdata/tidata.py`,
+weekday, with no one at the keyboard (each IRA has its own instance of it:
+"A job for the IRAs", below): `ti-data` (`adapter/marketdata/tidata.py`,
 installed as `/opt/trend-investing/bin/ti-data` and run by `ti-data.service`).
 
 **When it runs.** At 06:05, 07:05 and 08:05 New York time, Monday to
@@ -810,6 +811,174 @@ carries on from them.
      Massive publishes, and the paper run waits while you decide.
   5. If the corrected figure falls inside a file already written, the run
      then stops at "A file already written differs" (above): start a new run.
+
+### A job for the IRAs
+
+The Traditional IRA's momentum engine gets its own instance of the same
+morning job: `ti-data@trad-ira.service`, fired by `ti-data@trad-ira.timer`
+(the Roth IRA's will be `ti-data@roth-ira` once it has a configuration).
+Boost's `ti-data.service` and its timer are unchanged, and so is every byte
+of Boost's stream (a test pins its bytes). The two jobs share the
+recordings folder: a session either one recorded is not fetched again.
+
+Why an instance per engine, not one job for all: each engine has its own
+`run.env` and run, so one unit could not load both; a failure of the IRA's
+job pages as `ti-data@trad-ira.service`, never as Boost's; and Boost's unit,
+its paging and its schedule did not have to change at all.
+
+**When it runs.** At 06:15, 07:15 and 08:15 New York time, Monday to
+Friday: Boost's three mornings, ten minutes later, so Boost's job has
+usually recorded the session's whole-market bars already and the IRA's job
+reuses them, and the two never ask Massive at the same time at the free
+plan's 5 requests a minute. Each firing reads the previous session (a test
+checks every firing of 2026 and 2027). The free plan serves a session only
+the next morning (`docs/live-trading/lessons-2026-10.md` L2), and an IRA
+decides on the first session of a month from the previous session's
+closes, so the month-end universe and the ranked stocks' histories are
+written that morning, before the adapter's 09:00 cutoff. A month whose last
+day is a holiday is read from the calendar: for May 2027 (Memorial Day is
+Monday the 31st) the job firing on Tuesday 1 June reads Friday the 28th,
+and the Go ranker calls it the decision session because the next session
+is in June (a test runs exactly this). A 403 at 06:15 or 07:15 is a quiet
+wait; one still there at 08:15 is a failure that pages, as for Boost.
+
+**What it does, in order.**
+
+1. Picks the latest settled session, as Boost's job does.
+2. Reads the IRA engine's durable log (the run named by `TI_RUN` in
+   `/var/lib/trend-investing/engines/trad-ira/run.env`) for the run's
+   configuration hash, strategy version and name, and refuses unless
+   `/etc/trend-investing/engines/trad-ira.config` holds the same momentum and
+   glide sections as the configuration the engine logged (the ranker reads
+   the file, so an edited file would rank another market). The
+   configuration must say `"universe_input": "compact"`.
+3. Reads from the same log **which stocks you hold**: the positions of the
+   engine's last account snapshot, or, before the first one, of the Run
+   approval's starting book, plus every stock filled since. Those get their
+   own daily bars (`--optional`); nothing else does. There is no flag to
+   name them, so a holding cannot be forgotten. A first run before its first
+   reading holds nothing.
+4. Records each session since the run's last file: the whole-market bars
+   once (skipped if Boost's job already recorded them; a cancelled session
+   recorded with `retract` is never asked for), and, for the latest session
+   only, its universe (the common-stock listing, written with the very bars
+   just recorded, so the two recordings agree) and its sector labels. A
+   sector source that is down is named in a warning line; the stream then
+   uses the newest labels within a week, or is refused (below). Then the
+   splits and dividends of the last two weeks, as Boost's job does.
+5. Checks the files already written that a newly recorded split or
+   dividend could reach (those ending on or after the start of the two-week
+   window), each encoded again alone, with the holdings its own bars name.
+   One that differs stops the job ("A file already written differs",
+   above). Older files are not re-encoded: no action dated before the
+   window is recorded, and re-encoding the whole market's history once per
+   file every morning would not finish before the open.
+6. Writes the compact stream for the new sessions, exactly what `encode
+   --ranker` writes for them (a test compares the bytes, on the recorded
+   fixture of the compact stream above): the calendar from the run's base,
+   SPY, IEF, SHY and the holdings' bars, the session's universe snapshot,
+   and on a month's last session the 500 ranked stocks' histories, to
+   `/var/lib/trend-investing/data/streams/trad-ira/<TI_RUN>/trad-ira-<YYYY-MM-DD>.jsonl`.
+   The ranker is `/opt/trend-investing/bin/universe-rank -config
+   /etc/trend-investing/engines/trad-ira.config`.
+
+**Memory.** The stream is the one-session-at-a-time path above, inside the
+same 64 MiB budget; a test runs this job's warm-up and daily firing, with
+the real Go ranker, on the two-year fixture of 2,000 stocks. On the server
+each new session has two recordings (Boost's whole-market bars and the
+universe), which are read together to check they agree: about 6 MB more at
+the real market's size, still inside the budget. The engine's durable log
+is read whole, as for Boost; an IRA's log grows with each day's universe
+snapshot (about half a megabyte a day), so that read must be bounded before
+months of IRA logs accumulate (measured with the three engines before the
+IRAs go live).
+
+**The one-time warm-up.** Once the IRA engine has been started for its run
+(so its durable log exists) and before its adapter delivers anything, run
+the warm-up once. Unlike Boost's configuration, the momentum configuration
+names no start date, so you choose the run's **base**, the first session of
+its history; every later file is adjusted from it. Use `2025-01-02`: Boost's
+warm-up has recorded every session since then, so only the days the IRA
+needs beyond them are fetched, and it leaves well over the 260 sessions a
+ranked stock's history needs before the first decision (and SPY's 200).
+Massive's free plan reaches back two years only, so a base for a later run
+must still lie within two years of the day its warm-up runs, unless its
+sessions are already recorded.
+
+```sh
+sudo systemd-run --unit=ti-warmup-ira --collect -p User=ti-trader -p Group=ti-trader \
+  -p LoadCredential=secrets:/run/trend-investing/secrets/secrets.env \
+  /opt/trend-investing/bin/ti-data --engine momentum --instance trad-ira \
+  --ranker /opt/trend-investing/bin/universe-rank --data /var/lib/trend-investing/data \
+  --config /etc/trend-investing/engines/trad-ira.config \
+  --engine-log /var/lib/trend-investing/engines/trad-ira/<TI_RUN>.log \
+  --backfill-from 2025-01-02
+```
+
+Follow it with `sudo journalctl -fu ti-warmup-ira` until `ti-warmup-ira.service:
+Deactivated successfully.`; the file it wrote is the last path in that
+journal. Until the warm-up has run, each morning firing of the run is
+refused with a message naming this command (and pages). Before the IRA
+engine's first run (no `run.env`) each firing waits quietly: `ti-data:
+waiting for the account's first run: ... (start the trad-ira engine once)`.
+
+**What can go wrong.** As for Boost's job (above), and also:
+
+- "it is not a momentum configuration", or "its universe_input is
+  'bars'": the IRA's file or its logged configuration is another
+  strategy's, or reads the bars stream; the job writes the compact stream
+  only.
+- "the momentum configuration ... is not the one the engine's durable log
+  ... holds": the file was edited after the engine started; put it back.
+- "the sector labels of ... were not recorded", then a refusal "no
+  sectors-iwv recording on or before ..." or "... more than 7 days before
+  ...": iShares or Nasdaq was down this morning and no labels from the past
+  week are recorded. Run `sudo systemctl start ti-data@trad-ira` again
+  before the session's next close; after that the sources serve only the
+  next day's file, and that session's universe stays unwritten (a month-end
+  then withholds the decision as `missing-universe`, [momentum
+  universe](momentum-universe.md)).
+- "the ranker refused" or "did not answer within 60 s": `universe-rank` is
+  missing, from another build, or given another configuration
+  ([momentum universe](momentum-universe.md), "What can go wrong").
+- `ConflictingActions` for any stock, not only SPY: the IRA's stream ranks
+  the whole market, so a revised dividend of any stock stops its job (the
+  quarantine steps above apply), while Boost's job carries on.
+- "--backfill-from ... is not the run's base": a warm-up date given again
+  later must be the run's own base.
+
+**Checking it the day it is installed.** Run these on the server right
+after installing the build, the same day, not the next morning
+(`docs/live-trading/lessons-2026-10.md` L10). With no IRA run started yet:
+
+```sh
+sudo systemctl start ti-data@trad-ira.service
+systemctl show -p Result --value ti-data@trad-ira.service          # success
+sudo journalctl -u ti-data@trad-ira.service -n 2 -o cat
+#   ti-data <commit>
+#   ti-data: waiting for the account's first run: /var/lib/trend-investing/engines/trad-ira/run.env is missing or empty (start the trad-ira engine once)
+systemctl list-timers ti-data@trad-ira.timer                        # NEXT: the next weekday 06:15, 07:15 or 08:15 New York
+/opt/trend-investing/bin/universe-rank -config /etc/trend-investing/engines/trad-ira.config </dev/null; echo $?   # 0, nothing printed
+```
+
+Once the IRA engine's run has started and its warm-up has run, the next
+firing writes the day's file:
+
+```sh
+sudo systemctl start ti-data@trad-ira.service
+sudo journalctl -u ti-data@trad-ira.service -n 1 -o cat
+#   /var/lib/trend-investing/data/streams/trad-ira/<TI_RUN>/trad-ira-<the previous session>.jsonl
+f=$(sudo journalctl -u ti-data@trad-ira.service -n 1 -o cat)
+sudo head -c 120 "$f"; echo                                         # {"id":"marketdata:calendar:<base>:...
+sudo grep -c '"type":"market.universe.snapshot"' "$f"               # 1
+sudo grep -o '"type":"market.bar.completed"' "$f" | wc -l           # 3 (IEF, SHY, SPY) plus one per holding
+sudo grep -c '"type":"market.close.history"' "$f"                   # 500 on the morning after a month's last session, else 0
+```
+
+The engine does not read that file yet: delivering it, after the morning
+account reading, is the IRA adapter's job (`ti-adapter-trad-ira`, not built
+yet), and the daily summary and dashboard do not show the IRA's data job
+yet either.
 
 ### What happens to the file
 
@@ -1265,3 +1434,19 @@ exits with status 1 and a message on stderr, for the scheduler to alert on.
   compact stream of the same recordings through two fresh momentum engines
   and requires identical decisions. The engine side is in the momentum
   universe chapter, [momentum-universe](momentum-universe.md).
+- The IRAs' data job: `test_tidata_momentum.py` (the job's warm-up and its
+  next morning's file byte for byte what `encode --ranker` writes, the
+  daily file the compact stream's recorded bytes, the retracted session
+  never fetched, a second firing fetching nothing; the holdings read from a
+  synthetic engine log: none, the last snapshot's, a fill since, the
+  starting book's, no flag; the latest session's universe recorded from the
+  same bars as its whole-market recording, its sector labels, a source
+  down; a holiday month-end decided by the real Go ranker; the instance
+  unit and its timer against Boost's), `test_memory.py`
+  (`test_the_iras_data_job_stays_inside_the_budget`: the job itself, with the
+  real ranker, on the two-year fixture), `BoostBytesTest` in
+  `test_tidata.py` (Boost's files keep their bytes), and the rehearsal
+  (`deploy/rehearse.sh`: the instance refused while the secrets are locked,
+  paging as `ti-data@trad-ira.service`, waiting before the first run, and a
+  warm-up and a second firing as its unit runs them, on synthetic
+  recordings, with the installed ranker).
