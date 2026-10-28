@@ -128,6 +128,12 @@ type hostGateway struct {
 	// taken the resolution: the next firing retries it and does not read the
 	// receipts that remain as an outage still open.
 	Resolving bool `json:"resolving,omitempty"`
+	// The Gateway unit as the previous firing saw it: its restart count, whether
+	// it was waiting to restart, and whether a start that keeps failing is what
+	// opened the outage.
+	Restarts     *int `json:"restarts,omitempty"`
+	Auto         bool `json:"auto_restart,omitempty"`
+	StartFailing bool `json:"start_failing,omitempty"`
 }
 
 func loadHostGateway(path string) (hostGateway, error) {
@@ -152,7 +158,7 @@ func loadHostGateway(path string) (hostGateway, error) {
 // seen in; it pages once the time passes gatewayPagesAfter outside a window,
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
-func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySchedule, senders []sender, setAside []channelFault, clock func() time.Time) error {
+func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, senders []sender, setAside []channelFault, clock func() time.Time) error {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -173,7 +179,30 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 	if err != nil {
 		return err
 	}
+	unit, err := sample()
+	if err != nil {
+		return err
+	}
 	out, said := ev.out, ev.said
+	// A start that keeps failing shows in systemd's restart count even when the
+	// journal says nothing: restarts risen by gatewayRestartsPage since the last
+	// firing, or waiting to restart at two firings in a row. The outage clears
+	// when the unit is active with no new restarts for a firing.
+	risen := h.Restarts != nil && unit.restarts-*h.Restarts >= gatewayRestartsPage
+	cannotStart := risen || (h.Auto && unit.auto)
+	switch {
+	case cannotStart:
+		out = true
+		if risen {
+			said += fmt.Sprintf(" ti-gateway.service keeps failing to start: its restart count rose from %d to %d since the last firing.", *h.Restarts, unit.restarts)
+		} else {
+			said += " ti-gateway.service has been waiting to restart (activating, auto-restart) at two firings in a row."
+		}
+	case h.StartFailing && unit.active && h.Restarts != nil && unit.restarts == *h.Restarts && !out:
+		ev.recoveredAt = now
+	}
+	r := unit.restarts
+	h.Restarts, h.Auto, h.StartFailing = &r, unit.auto, cannotStart
 	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
 	for _, k := range h.Keys {
 		seen[k] = true
@@ -185,7 +214,7 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Auto: h.Auto, StartFailing: h.StartFailing})
 		if err != nil {
 			return err
 		}

@@ -726,17 +726,22 @@ A start whose IBC command or display wrapper cannot be launched exits 70, which
 systemd retries every 30 seconds until the 3 are used (it counts). A renderer
 that cannot run, or whose output the journal will not take, stops the start
 before any attempt is counted (exit 70, or 75 for the journal): systemd retries
-it every 30 seconds without end and it never reaches 77, so a Gateway that stays
-down that way is paged by the health check after 10 minutes. The starter also
-writes a one-line marker, `/var/lib/ti-gateway/last-start-failure`, whenever it
-cannot start IBC, which the check reads as not logged in until a completed
-login (which removes it); that is what pages when the journal takes nothing on
-either stream, where the "cannot start IBC" line itself could not be recorded. Each such start
-logs "cannot start IBC", as does every exit that leaves the unit down without contacting IBKR (the renderer's 64, 65 and
-78). The health check reads that as logged out, and the reporter also samples
-`ti-gateway.service` as it does the engine and the adapter, so a unit that is
-failed and stays down pages at its next firing as a failed unit ("A failed
-unit").
+it every 30 seconds without end and it never reaches 77. A start that keeps
+failing is seen through systemd's restart count: every firing the reporter asks
+systemd for `ti-gateway.service`'s restart count and state (`systemctl show`),
+and counts the Gateway as logged out when the count has risen by 3 or more
+since the last firing (the unit restarts every 30 seconds, so a loop makes
+about ten), or the unit was waiting to restart (activating, auto-restart) at
+two firings in a row. The usual 10 minutes outside the restart windows then
+page you, and the outage clears when the unit is active with no new restarts
+for a firing. This does not depend on the journal, so the 10-minute promise
+holds even when the journal takes nothing; a single restart pages nothing.
+Each such start logs "cannot start IBC", as does every exit that leaves the
+unit down without contacting IBKR (the renderer's 64, 65 and 78); the health
+check reads that line as logged out when the journal works. The reporter also
+samples `ti-gateway.service` as it does the engine and the adapter, so a unit
+that is failed and stays down pages at its next firing as a failed unit ("A
+failed unit").
 
 **What you do when paged:**
 

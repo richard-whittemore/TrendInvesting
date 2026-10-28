@@ -23,9 +23,6 @@ RuntimeDirectory=ti-gateway
 RuntimeDirectoryMode=0700
 LogsDirectory=ti-gateway
 StateDirectory=ti-gateway
-# Enterable, not listable, by other users: the reporter reads the start-failure
-# marker here by name (the files in it keep their own modes).
-StateDirectoryMode=0711
 # Renders IBC's config.ini, then starts the gateway (see the script for why
 # the render is not an ExecStartPre).
 ExecStart=/usr/local/libexec/trend-investing/start-gateway.sh

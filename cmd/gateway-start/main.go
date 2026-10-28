@@ -84,7 +84,6 @@ type config struct {
 	DrainDeadline time.Duration  // how long output is read after the child ends
 	SinkTimeout   time.Duration  // how long one write to the journal may take before the run fails closed
 	Now           func() time.Time
-	MarkerFile    string   // written when IBC cannot be started, for the health check, even when the journal takes nothing
 	Warnings      []string // settings that were invalid, reported through the same bounded journal writes
 }
 
@@ -134,7 +133,6 @@ func configFromEnv(getenv func(string) string) (c config, warn []string) {
 	c = config{
 		Render:        []string{pick("TI_GATEWAY_RENDER", defaultRender)},
 		StateFile:     pick("TI_GATEWAY_STATE_FILE", defaultState),
-		MarkerFile:    pick("TI_GATEWAY_MARKER_FILE", filepath.Join(filepath.Dir(pick("TI_GATEWAY_STATE_FILE", defaultState)), "last-start-failure")),
 		Max:           intIn("TI_GATEWAY_LOGIN_MAX_FAILURES", 1, 9, defaultMax),
 		StopDeadline:  time.Duration(intIn("TI_GATEWAY_STOP_DEADLINE", 1, maxStopDeadline, int(defaultStop/time.Second))) * time.Second,
 		DrainDeadline: defaultDrain,
@@ -206,13 +204,9 @@ func syncFile(f *os.File) error { return f.Sync() }
 
 // writeDurable replaces path with data: written to a file beside it, synced,
 // renamed over it, and the directory synced, every error returned.
-func writeDurable(path string, data []byte) error { return writeDurableMode(path, data, 0o600) }
-
-// writeDurableMode is writeDurable with the file's mode: the marker the health
-// check reads is world-readable, the count is not.
-func writeDurableMode(path string, data []byte, mode os.FileMode) error {
+func writeDurable(path string, data []byte) error {
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -357,16 +351,9 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		say(stopPhrase+": "+format, a...)
 		return exitStopped
 	}
-	// cannot reports that IBC cannot be started: to the journal, and to a marker
-	// file beside the count that the health check reads, so the Gateway being
-	// down is seen even when the journal takes nothing on either stream.
-	cannot := func(format string, a ...any) {
-		msg := fmt.Sprintf("cannot start IBC: "+format, a...)
-		say("%s", msg)
-		if cfg.MarkerFile != "" {
-			_ = writeDurableMode(cfg.MarkerFile, []byte(fmt.Sprintf("%d %s\n", cfg.Now().Unix(), msg)), 0o644)
-		}
-	}
+	// cannot reports that IBC cannot be started, in the words the health check
+	// reads (cmd/reporter keys on "cannot start IBC") when the journal works.
+	cannot := func(format string, a ...any) { say("cannot start IBC: "+format, a...) }
 	for _, w := range cfg.Warnings {
 		say("%s", w)
 	}
@@ -477,9 +464,6 @@ func run(cfg config, stdout, stderr io.Writer) int {
 				if cfg.Accepted.MatchString(trimmed) {
 					if err := writeDurable(cfg.StateFile, nil); err != nil {
 						say("the login attempts could not be confirmed cleared after the accepted login (%v); the count may still hold the old attempts", err)
-					}
-					if cfg.MarkerFile != "" {
-						_ = os.Remove(cfg.MarkerFile)
 					}
 					relogin, seen = true, false
 				}

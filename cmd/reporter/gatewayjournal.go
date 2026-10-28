@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -126,7 +125,7 @@ func lineTime(l string) (time.Time, error) {
 }
 
 // gatewayJournalChecker reads IBC's journal and each adapter's.
-func gatewayJournalChecker(journalctl string, adapters []string, marker string) gatewayChecker {
+func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker {
 	return func(now time.Time) (gatewayEvidence, error) {
 		ibc, err := journalQuery(journalctl, gatewayUnit, ibcEvent)
 		if err != nil {
@@ -161,13 +160,6 @@ func gatewayJournalChecker(journalctl string, adapters []string, marker string) 
 				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) with no restoration since, for over %s: %s", unit, gatewayLinkLossAfter, line))
 			}
 		}
-		// gateway-start leaves a marker when it cannot start IBC, even when the
-		// journal took nothing: it counts until a completed login newer than it.
-		if said, at, err := startFailureMarker(marker); err != nil {
-			return gatewayEvidence{}, err
-		} else if said != "" && at.After(recovered) {
-			reasons = append(reasons, "gateway-start left a marker: "+said)
-		}
 		switch {
 		case len(reasons) > 0:
 			return gatewayEvidence{out: true, said: "gateway: logged out: " + strings.Join(reasons, "; "), recoveredAt: recovered}, nil
@@ -199,24 +191,56 @@ func lostSince(lines []string) (since time.Time, first string, restored time.Tim
 	return since, first, restored, nil
 }
 
-// startFailureMarker reads the file gateway-start leaves when it cannot start
-// IBC: its first field is the time, the rest what it said. No file is no
-// marker; a file that does not begin with a time is an error, not a silence.
-func startFailureMarker(path string) (said string, at time.Time, err error) {
-	if path == "" {
-		return "", time.Time{}, nil
+// gatewayUnitSample is what systemd says of ti-gateway.service: how many times
+// it has restarted, and whether it is active or waiting to restart.
+type gatewayUnitSample struct {
+	restarts     int
+	active, auto bool // ActiveState=active; activating (auto-restart)
+}
+
+// gatewayRestartsPage is how many restarts between two firings (5 minutes
+// apart) read as a start that keeps failing: the unit restarts 30 s after each
+// exit, so a loop makes about ten.
+const gatewayRestartsPage = 3
+
+// gatewayUnitSampler asks systemctl for the Gateway unit's restart count and
+// state. This is what sees a start that keeps failing when the journal takes
+// nothing. A systemctl that fails is an error, never a good sample.
+func gatewayUnitSampler(systemctl string) func() (gatewayUnitSample, error) {
+	return func() (gatewayUnitSample, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), gatewayCheckTimeout)
+		defer cancel()
+		//nolint:gosec // G204: the binary is the operator's -systemctl flag and the unit a fixed name.
+		cmd := exec.CommandContext(ctx, systemctl, "show", "-p", "NRestarts", "-p", "ActiveState", "-p", "SubState", gatewayUnit)
+		cmd.WaitDelay = gatewayCheckWaitDelay
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		raw, err := cmd.Output()
+		if err != nil {
+			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not ask systemd about %s: %w (it said: %s)", gatewayUnit, err, strings.TrimSpace(stderr.String()))
+		}
+		var s gatewayUnitSample
+		state, sub, seen := "", "", false
+		for _, l := range strings.Split(string(raw), "\n") {
+			k, v, _ := strings.Cut(strings.TrimSpace(l), "=")
+			switch k {
+			case "ActiveState":
+				state, seen = v, true
+			case "SubState":
+				sub = v
+			case "NRestarts":
+				n, err := strconv.Atoi(v)
+				if err != nil || n < 0 {
+					return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check read NRestarts=%q for %s, which is not a count", v, gatewayUnit)
+				}
+				s.restarts = n
+			}
+		}
+		if !seen {
+			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check got no ActiveState for %s from systemd", gatewayUnit)
+		}
+		s.active = state == "active"
+		s.auto = state == "activating" && sub == "auto-restart"
+		return s, nil
 	}
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", time.Time{}, nil
-	}
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("reporter: the gateway check could not read %s: %w", path, err)
-	}
-	field, rest, _ := strings.Cut(strings.TrimSpace(string(raw)), " ")
-	secs, perr := strconv.ParseInt(field, 10, 64)
-	if perr != nil {
-		return "", time.Time{}, fmt.Errorf("reporter: the gateway check found %s, which does not begin with a time", path)
-	}
-	return strings.TrimSpace(rest), time.Unix(secs, 0), nil
 }

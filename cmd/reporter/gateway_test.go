@@ -67,8 +67,26 @@ printf '%s\n' "$out"
 	if err := os.WriteFile(filepath.Join(g.dir, "journalctl"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// systemctl show -p NRestarts -p ActiveState -p SubState ti-gateway.service
+	systemctl := `#!/bin/sh
+d='` + g.dir + `'
+if [ -e "$d/systemctl-fail" ]; then echo "Failed to connect to bus" >&2; exit 1; fi
+echo "$@" >>"$d/systemctl-argv"
+echo "NRestarts=$(cat "$d/nrestarts" 2>/dev/null || echo 0)"
+echo "ActiveState=$(cat "$d/activestate" 2>/dev/null || echo active)"
+echo "SubState=$(cat "$d/substate" 2>/dev/null || echo running)"
+`
+	if err := os.WriteFile(filepath.Join(g.dir, "systemctl"), []byte(systemctl), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	g.login()
 	return g
+}
+
+func (g standInGateway) unit(restarts int, active, sub string) {
+	_ = os.WriteFile(filepath.Join(g.dir, "nrestarts"), []byte(fmt.Sprint(restarts)), 0o600)
+	_ = os.WriteFile(filepath.Join(g.dir, "activestate"), []byte(active), 0o600)
+	_ = os.WriteFile(filepath.Join(g.dir, "substate"), []byte(sub), 0o600)
 }
 
 func (g standInGateway) journalctl() string { return filepath.Join(g.dir, "journalctl") }
@@ -110,7 +128,7 @@ func gatewayRunEnv(t *testing.T, r http.RoundTripper, dir, check, account string
 		environment[k] = v
 	}
 	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-repeat-interval", "30m",
-		"-account", account, "-journalctl", check, "-gateway-adapters", "ti-adapter-boost.service", "-gateway-owner", "boost"}
+		"-account", account, "-journalctl", check, "-systemctl", filepath.Join(filepath.Dir(check), "systemctl"), "-gateway-adapters", "ti-adapter-boost.service", "-gateway-owner", "boost"}
 	args = append(args, extra...)
 	return run(args, env(environment), func() time.Time { return at }, &bytes.Buffer{}, &http.Client{Transport: r})
 }
@@ -841,59 +859,130 @@ func TestANewOutageDuringAPendingResolutionIsNotErasedWhenItsEvidenceRotatesAway
 	}
 }
 
-// gateway-start leaves a marker file when it cannot start IBC and the journal
-// takes nothing: the check reads it as not logged in, until a completed login
-// newer than it.
-func TestAMarkerOfAStartThatCouldNotLaunchIBCPagesWhenTheJournalHasNothingNewer(t *testing.T) {
+// A start that keeps failing is seen through systemd's restart count, even when
+// the journal has nothing newer than an old login.
+func TestARisingRestartCountPagesWhenTheJournalShowsNothingNew(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
-	g.ibc(stamp(tuesday(1, 0), ibcCompleted)) // the only thing the journal has: an old login
-	marker := filepath.Join(t.TempDir(), "last-start-failure")
-	if err := os.WriteFile(marker, []byte(fmt.Sprintf("%d gateway-start: cannot start IBC: the config renderer exited 78\n", tuesday(9, 0).Unix())), 0o644); err != nil {
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	g.unit(0, "active", "running")
+	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0)); err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	for _, min := range []int{0, 5, 11} {
-		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min), "-gateway-marker", marker); err != nil {
+	for i, min := range []int{5, 10, 16} {
+		g.unit(10*(i+1), "activating", "start")
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if gatewayPages(r) != 2 {
-		t.Fatalf("%d pages for a marker newer than the last login, want 1 per channel", gatewayPages(r))
+		t.Fatalf("%d pages for a unit restarting ten times between firings, want 1 per channel", gatewayPages(r))
 	}
 	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
-		if !strings.Contains(strings.Join(r.to(host), "\n"), "config renderer exited 78") {
-			t.Errorf("%s: the page does not say what the marker said", host)
+		if !strings.Contains(strings.Join(r.to(host), "\n"), "restart count") {
+			t.Errorf("%s: the page does not say the unit keeps failing to start", host)
 		}
 	}
 }
 
-func TestAMarkerOlderThanTheLastCompletedLoginIsIgnoredAndAMissingOneIsFine(t *testing.T) {
+func TestASingleRestartPagesNothing(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
-	g.ibc(stamp(tuesday(10, 0), ibcCompleted))
-	marker := filepath.Join(t.TempDir(), "last-start-failure")
-	_ = os.WriteFile(marker, []byte(fmt.Sprintf("%d gateway-start: cannot start IBC: old\n", tuesday(9, 0).Unix())), 0o644)
 	dir := t.TempDir()
-	for _, min := range []int{0, 5, 11} {
-		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min), "-gateway-marker", marker); err != nil {
+	g.unit(0, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
+	for _, min := range []int{5, 10, 16, 25} {
+		g.unit(1, "active", "running")
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	missing := filepath.Join(t.TempDir(), "none")
-	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 20), "-gateway-marker", missing); err != nil {
-		t.Fatal(err)
-	}
 	if gatewayPages(r) != 0 {
-		t.Fatalf("%d pages, want none", gatewayPages(r))
+		t.Fatalf("%d pages for one restart", gatewayPages(r))
 	}
 }
 
-func TestAMarkerThatIsNotATimeFailsTheFiring(t *testing.T) {
+func TestAUnitInAutoRestartAtTwoFiringsInARowPages(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
-	marker := filepath.Join(t.TempDir(), "last-start-failure")
-	_ = os.WriteFile(marker, []byte("garbage\n"), 0o644)
-	if err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0), "-gateway-marker", marker); err == nil {
-		t.Fatal("a marker with no time was accepted")
+	dir := t.TempDir()
+	g.unit(2, "activating", "auto-restart")
+	for _, min := range []int{0, 5, 10, 16} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages for a unit in auto-restart at consecutive firings, want 1 per channel", gatewayPages(r))
+	}
+}
+
+func TestAUnitSeenInAutoRestartAtOneFiringOnlyPagesNothing(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	dir := t.TempDir()
+	g.unit(1, "activating", "auto-restart")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
+	g.unit(1, "active", "running")
+	for _, min := range []int{5, 10, 16} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 0 {
+		t.Fatalf("%d pages", gatewayPages(r))
+	}
+}
+
+func TestARestartLoopInsideTheRestartWindowPagesNothingUntilItEnds(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	dir := t.TempDir()
+	at := func(h, m int) time.Time { return time.Date(2024, 1, 3, h, m, 0, 0, newYork) }
+	g.unit(0, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", time.Date(2024, 1, 2, 23, 40, 0, 0, newYork))
+	for i, c := range []time.Time{time.Date(2024, 1, 2, 23, 50, 0, 0, newYork), at(0, 10), at(0, 25)} {
+		g.unit(10*(i+1), "activating", "start")
+		if err := gatewayRun(t, r, dir, g.path(), "boost", c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 0 {
+		t.Fatalf("paged %d times inside the restart window", gatewayPages(r))
+	}
+}
+
+func TestTheRestartLoopClearsWhenTheUnitIsActiveWithNoNewRestarts(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	g.unit(0, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
+	for i, min := range []int{5, 10, 16} {
+		g.unit(10*(i+1), "activating", "start")
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	g.unit(30, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 20)) // the last restart's count, no new ones
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 25))
+	resolved := 0
+	for _, m := range r.to("events.pagerduty.test") {
+		if strings.Contains(m, `"event_action":"resolve"`) {
+			resolved++
+		}
+	}
+	if resolved != 1 {
+		t.Fatalf("%d resolves after the unit stayed active with no new restarts, want 1", resolved)
+	}
+}
+
+func TestASystemctlThatFailsFailsTheFiring(t *testing.T) {
+	g := newStandInGateway(t)
+	_ = os.WriteFile(filepath.Join(g.dir, "systemctl-fail"), nil, 0o600)
+	err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0))
+	if err == nil || !strings.Contains(err.Error(), "gateway check") {
+		t.Fatalf("got %v, want an error naming the gateway check", err)
 	}
 }
