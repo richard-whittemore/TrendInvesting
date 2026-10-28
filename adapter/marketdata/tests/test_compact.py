@@ -479,11 +479,17 @@ class ListedReadTest(unittest.TestCase):
     listed contents or a Conflict, never the replacement; sector recordings
     are read the same way."""
 
+    @classmethod
+    def setUpClass(cls):
+        # The clean stream once for the class; each test changes its own copy.
+        with tempfile.TemporaryDirectory() as d:
+            build_churn(d)
+            churn_stream(d, CHURN_FIRST, os.path.join(d, "clean.jsonl"))
+            cls.clean = Path(d, "clean.jsonl").read_bytes()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         build_churn(self.tmp.name)
-        self.clean = os.path.join(self.tmp.name, "clean.jsonl")
-        churn_stream(self.tmp.name, CHURN_FIRST, self.clean)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -532,9 +538,11 @@ class ListedReadTest(unittest.TestCase):
             try:
                 self.encode(self.armed_at_the_last_ranking(lambda: armed.append(True)), path)
             except encode.Conflict as e:
+                self.assertEqual(armed, [False])   # the replacement happened
                 self.assertIn(name, str(e))
                 return
-        self.assertEqual(Path(path).read_bytes(), Path(self.clean).read_bytes())
+        self.assertEqual(armed, [False])   # the replacement happened, as the file was read
+        self.assertEqual(Path(path).read_bytes(), self.clean)
 
     def latest_sector(self, kind):
         day = churn_days()[100]

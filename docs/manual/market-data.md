@@ -226,14 +226,18 @@ pins it).
 
 Every read uses the listing taken at the start, bar and sector recordings
 alike, and each file is opened and checked against the listing before it is
-read. A recording of a session inside the encode's span that arrives after
-the listing (the daily universe step finishing late, say, when `--asof` is
-that day) refuses the stream as missing ("no recording for trading day
-..."); encode again once it is recorded. Only a recording outside the span,
-or a second recording beside one the day already has, is ignored. One that
-disappears or is replaced while the step runs refuses the stream ("...
-disappeared during the encode" or "... changed during the encode"); run the
-encode again.
+read. A bar recording of a session inside the encode's span that arrives
+after the listing (the daily universe step finishing late, say, when
+`--asof` is that day) refuses the stream as missing ("no recording for
+trading day ..."); encode again once it is recorded. A bar recording outside
+the span, or a second one beside a recording the day already has, is
+ignored. A sector recording that arrives after the listing is ignored for
+this run: the newest listed one within 7 days is used, or, if there is none,
+the stream is refused ("no sectors-... recording on or before ..."). A
+listed recording replaced or removed before one of its reads refuses the
+stream ("... changed during the encode" or "... disappeared during the
+encode"); run the encode again. One replaced while it is open being read is
+read in its original form, the one listed.
 
 The budget is **64 MiB of Python memory** (the tracemalloc peak, the measure
 the Boost figures above use), for the warm-up and the daily firing alike,
@@ -1204,9 +1208,11 @@ exits with status 1 and a message on stderr, for the scheduler to alert on.
   or does not answer within 60 seconds. Refused, naming the session
   ("universe 2026-11-30: the ranker refused: ...").
 - **A bar or sector recording disappears or is replaced while `encode`
-  runs.** Refused ("... disappeared during the encode", "... changed during
-  the encode"); nothing is written. Encode again once the recordings are
-  settled. A recording that only appears meanwhile is not read.
+  runs.** Refused when it happens before one of the file's reads ("...
+  disappeared during the encode", "... changed during the encode"); nothing
+  is written. Encode again once the recordings are settled. A file replaced
+  while it is open being read is read as listed. A recording that only
+  appears meanwhile is not read (see "Memory the compact stream needs").
 - **A cancelled session has price recordings.** Refused: either the day
   traded or the retraction is wrong; find out which before encoding again.
 - **A retraction for a day that is not a session by the rules, without a
