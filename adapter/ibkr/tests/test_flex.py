@@ -59,6 +59,43 @@ class FakeFlex:
         return answer if isinstance(answer, bytes) else fixture(answer)
 
 
+class FakeClock:
+    """A steady clock that sleep moves on, so a reading's waits take no real time."""
+
+    def __init__(self):
+        self.now, self.slept = 1000.0, []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+class TimedFlex(FakeFlex):
+    """FakeFlex that notes the clock's time of every request, and answers a SendRequest from sends, in turn."""
+
+    def __init__(self, clock, sends=None, **kwargs):
+        super().__init__(**kwargs)
+        self.clock, self.times, self.sends = clock, [], list(sends or [])
+
+    def __call__(self, url, params):
+        self.times.append(self.clock())
+        if url == flex.SEND_REQUEST_URL and self.sends:
+            self.calls.append((url, dict(params)))
+            return fixture(self.sends.pop(0))
+        return super().__call__(url, params)
+
+
+def assert_within_rate(test, times):
+    """Every request at least a second after the one before, and never more than 10 in any 60 seconds."""
+    for before, after in zip(times, times[1:]):
+        test.assertGreaterEqual(after - before, flex.MIN_REQUEST_GAP)
+    for n, start in enumerate(times):
+        test.assertLessEqual(len([t for t in times[n:] if t < start + 60]), flex.REQUESTS_PER_MINUTE)
+
+
 def snapshot(engine, ident, as_of, net_liquidation):
     """A Boost account snapshot (account.snapshot version 3) committed to engine's durable log."""
     commit(engine, ident, kind="account.snapshot", version=3, payload={
@@ -165,11 +202,20 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "1009")
 
     def test_a_statement_still_generating_is_asked_for_again(self):
-        slept = []
+        clock = FakeClock()
         service = FakeFlex(statements=("get_in_progress.xml", "get_in_progress.xml", "statement.xml"))
-        self.assertEqual(flex.fetch_statement(TOKEN, QUERY, get=service, sleep=slept.append),
+        self.assertEqual(flex.fetch_statement(TOKEN, QUERY, get=service, sleep=clock.sleep, monotonic=clock),
                          fixture("statement.xml"))
-        self.assertEqual(slept, [flex.GENERATION_WAIT] * 2)
+        # The rate's own wait (a second after SendRequest) comes first; the generation waits after each poll.
+        self.assertEqual([s for s in clock.slept if s == flex.GENERATION_WAIT], [flex.GENERATION_WAIT] * 2)
+
+    def test_a_statement_still_generating_is_polled_within_ibkrs_rate_limits(self):
+        # IBKR's Flex Web Service: at most 1 request a second and 10 a minute per token (SendRequest), every
+        # GetStatement poll counted.
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=["get_in_progress.xml"] * 25 + ["statement.xml"])
+        flex.fetch_statement(TOKEN, QUERY, get=service, sleep=clock.sleep, monotonic=clock)
+        assert_within_rate(self, service.times)
 
     def test_a_statement_that_never_finishes_is_unavailable(self):
         service = FakeFlex(statements=["get_in_progress.xml"] * flex.GENERATION_ATTEMPTS)
@@ -1281,6 +1327,47 @@ class ExecutionsTests(ReadOnceHarness):
         self.assertEqual((proof["state"], proof["to_date"], proof["covered_until"]),
                          ("read", "20270115", "2027-01-15T05:00:00Z"))
 
+    def test_the_trades_query_waits_after_the_cash_query_and_both_keep_ibkrs_rate(self):
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(self.ledger), get=service,
+                                       sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING, err=self.out,
+                                       trades_query_id="654321"), self.out.getvalue())
+        sends = [n for n, (url, _) in enumerate(service.calls) if url == flex.SEND_REQUEST_URL]
+        self.assertGreaterEqual(service.times[sends[1]] - service.times[sends[1] - 1], flex.QUERY_GAP)
+        assert_within_rate(self, service.times)
+
+    def test_too_many_requests_is_retried_after_10_30_and_60_seconds(self):
+        # IBKR's error 1018 ("Too many requests have been made from this token"): wait and ask again.
+        clock = FakeClock()
+        service = TimedFlex(clock, sends=["send_ok.xml", "send_too_many.xml", "send_too_many.xml", "send_ok.xml"],
+                            statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(self.ledger), get=service,
+                                       sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING, err=self.out,
+                                       trades_query_id="654321"), self.out.getvalue())
+        self.assertEqual(self.proof()["state"], "read")
+        backoffs = [s for s in clock.slept if s in flex.RATE_BACKOFF]
+        self.assertEqual(backoffs, [10, 30])
+        assert_within_rate(self, service.times)
+
+    def test_too_many_requests_after_every_backoff_sets_the_proof_aside(self):
+        clock = FakeClock()
+        service = TimedFlex(clock, sends=["send_ok.xml"] + ["send_too_many.xml"] * 4,
+                            statements=("statement.xml",))
+        self.assertFalse(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(self.ledger), get=service,
+                                        sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING, err=self.out,
+                                        trades_query_id="654321"))
+        self.assert_proof_set_aside("1018")
+        self.assertEqual([s for s in clock.slept if s in flex.RATE_BACKOFF], [10, 30, 60])
+        self.assertEqual(len(self.records()), 2, "the cash ledger is still written")
+
+    def test_too_many_requests_while_polling_is_retried_too(self):
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=("send_too_many.xml", "statement.xml"))
+        self.assertEqual(flex.fetch_statement(TOKEN, QUERY, get=service, sleep=clock.sleep, monotonic=clock),
+                         fixture("statement.xml"))
+        self.assertIn(10, clock.slept)
+
     def test_a_proof_never_reaches_past_an_hour_before_it_was_asked_for(self):
         # IBKR: a new execution is typically in a newly generated Trade Confirmation report within 5 to 10 minutes.
         early = datetime(2027, 1, 15, 5, 30, tzinfo=timezone.utc)
@@ -1597,8 +1684,11 @@ class DeploymentTests(unittest.TestCase):
     def test_the_unit_outlasts_the_readers_worst_case(self):
         # For each of the two queries, SendRequest, then every GetStatement attempt, each to its request timeout,
         # and the waits between them.
-        worst = 2 * (flex.REQUEST_TIMEOUT * (1 + flex.GENERATION_ATTEMPTS)
-                     + flex.GENERATION_WAIT * (flex.GENERATION_ATTEMPTS - 1))
+        # A 1018 answer adds its backoff and one more request, at most len(RATE_BACKOFF) times a query; the
+        # trades query waits QUERY_GAP after the cash query; the rate's own waits are each under a minute.
+        per_query = (flex.REQUEST_TIMEOUT * (1 + flex.GENERATION_ATTEMPTS + len(flex.RATE_BACKOFF))
+                     + flex.GENERATION_WAIT * (flex.GENERATION_ATTEMPTS - 1) + sum(flex.RATE_BACKOFF))
+        worst = 2 * per_query + flex.QUERY_GAP
         minutes = int(re.search(r"(?m)^TimeoutStartSec=([0-9]+)min$", self.service).group(1))
         self.assertGreater(minutes * 60, worst)
 

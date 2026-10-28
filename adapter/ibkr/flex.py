@@ -196,7 +196,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ElementTree
-from collections import namedtuple
+from collections import deque, namedtuple
 from datetime import datetime, time as clock, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
@@ -258,13 +258,23 @@ REQUEST_TIMEOUT = 60
 # A statement IBKR is still generating (code 1019) is asked for again every
 # GENERATION_WAIT seconds, GENERATION_ATTEMPTS times in all. With each
 # request taking up to REQUEST_TIMEOUT, a reading's worst case is SendRequest
-# and every attempt to their timeout plus the waits (about 36 minutes), for
-# each query a reading asks for (two with a trades query); ti-flex@.service's
+# and every attempt to their timeout plus the waits, and up to three 1018
+# answers asked again after RATE_BACKOFF (about 41 minutes), for each query
+# a reading asks for (two with a trades query); ti-flex@.service's
 # TimeoutStartSec is above it, and a reading stopped
 # anyway leaves its status file saying "running" (read_once).
 GENERATION_WAIT = 10
 GENERATION_ATTEMPTS = 30
 GENERATING = "1019"
+# IBKR's Flex Web Service limits each token to 1 request a second and 10 a minute (SendRequest's reference), and
+# answers 1018 ("Too many requests have been made from this token") beyond them. Every request, SendRequest and each
+# GetStatement poll, waits for its turn (_Pacer); a 1018 is asked again after each of RATE_BACKOFF's waits, at most
+# that many times a query, before the reading is set aside. The trades query starts QUERY_GAP after the cash query.
+TOO_MANY_REQUESTS = "1018"
+MIN_REQUEST_GAP = 1.0
+REQUESTS_PER_MINUTE = 10
+RATE_BACKOFF = (10, 30, 60)
+QUERY_GAP = 5
 # IBKR's error codes that say the token, its account or the query is not
 # accepted: the owner's setup must change, so the reading is set aside as
 # rejected. Every other code is the service's own (busy, not ready, a
@@ -632,15 +642,53 @@ def _ask(get, url, params, step, token):
             getattr(err, "reason", None) and str(err.reason) or type(err).__name__, token))) from None
 
 
-def fetch_statement(token, query_id, get=_get, sleep=time.sleep, period=None):
+class _Pacer:
+    """Waits before each request until it keeps IBKR's per-token rate: MIN_REQUEST_GAP after the one before, and no
+    more than REQUESTS_PER_MINUTE in any 60 seconds. One pacer serves every request of a reading."""
+
+    def __init__(self, sleep, monotonic):
+        self._sleep, self._clock, self._sent = sleep, monotonic, deque()
+
+    def wait(self):
+        now = self._clock()
+        while self._sent and now - self._sent[0] >= 60:
+            self._sent.popleft()
+        delay = 0.0
+        if self._sent:
+            delay = max(delay, MIN_REQUEST_GAP - (now - self._sent[-1]))
+        if len(self._sent) >= REQUESTS_PER_MINUTE:
+            delay = max(delay, 60 - (now - self._sent[0]))
+        if delay > 0:
+            self._sleep(delay)
+            now = max(self._clock(), now + delay)
+        self._sent.append(now)
+        while len(self._sent) > REQUESTS_PER_MINUTE:
+            self._sent.popleft()
+
+
+def fetch_statement(token, query_id, get=_get, sleep=time.sleep, period=None, monotonic=time.monotonic, pacer=None):
     """The Flex query response (bytes) for query_id; FlexRejected or FlexUnavailable otherwise, never quoting token.
 
     period, when given, is (fromDate, toDate) as yyyyMMdd, sent as SendRequest's fd and td, which override the
     query's saved period (IBKR's Flex Web Service v3, SendRequest: "If fd is used, the td parameter is required")."""
+    pacer = pacer or _Pacer(sleep, monotonic)
+    backoff = list(RATE_BACKOFF)
+
+    def ask(url, params, step):
+        """One request, in its turn; a 1018 answer asked again after the next backoff while one is left."""
+        while True:
+            pacer.wait()
+            data = _ask(get, url, params, step, token)
+            answer = _answer(data, step)
+            if answer is not None and answer[1] == TOO_MANY_REQUESTS and backoff:
+                sleep(backoff.pop(0))
+                continue
+            return data, answer
+
     params = {"t": token, "q": query_id, "v": FLEX_VERSION}
     if period is not None:
         params["fd"], params["td"] = period
-    answer = _answer(_ask(get, SEND_REQUEST_URL, params, "SendRequest", token), "SendRequest")
+    _, answer = ask(SEND_REQUEST_URL, params, "SendRequest")
     if answer is None:
         raise FlexUnavailable(None, "its SendRequest answer is not a FlexStatementResponse")
     status, code, message, root = answer
@@ -655,8 +703,7 @@ def fetch_statement(token, query_id, get=_get, sleep=time.sleep, period=None):
     if not reference.isdigit():
         raise FlexUnavailable(None, "its SendRequest answer has no reference code")
     for attempt in range(GENERATION_ATTEMPTS):
-        data = _ask(get, url, {"t": token, "q": reference, "v": FLEX_VERSION}, "GetStatement", token)
-        answer = _answer(data, "GetStatement")
+        data, answer = ask(url, {"t": token, "q": reference, "v": FLEX_VERSION}, "GetStatement")
         if answer is None:
             return data
         _, code, message, _ = answer
@@ -1292,7 +1339,7 @@ def record_resolutions(ledger_path, decisions, wait=LOCK_WAIT, sleep=time.sleep)
 
 
 def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_get, sleep=time.sleep,
-              now=lambda: datetime.now(timezone.utc), err=None, trades_query_id=None):
+              now=lambda: datetime.now(timezone.utc), err=None, trades_query_id=None, monotonic=time.monotonic):
     """One reading (see the module): True when the statement was read, every new transfer written, every new cost
     written and the executions proof written read or none, False when the reader, its costs or its proof were set
     aside. Either way the status file beside ledger_path, the costs ledger's own beside it, and the executions proof,
@@ -1307,6 +1354,8 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
     coverage_path = ledger_path + COVERAGE_SUFFIX
     status = {"state": "read", "checked_at": checked_at}
     statement = approved_at = None
+    # One pacer for every request of the reading, both queries' (IBKR's per-token rate).
+    pacer = _Pacer(sleep, monotonic)
     with open(ledger_path + LOCK_SUFFIX, "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # Said first, so a reading stopped part way (its unit's timeout, a kill) leaves "running" with its time,
@@ -1320,7 +1369,8 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             ledger = read_ledger(ledger_path)
             coverage = read_coverage(coverage_path)
             resolutions = read_resolutions(ledger_path + RESOLUTIONS_SUFFIX)
-            statement = parse_statement(fetch_statement(token, query_id, get=get, sleep=sleep), account_id)
+            statement = parse_statement(fetch_statement(token, query_id, get=get, sleep=sleep, pacer=pacer),
+                                        account_id)
             approved_at, snapshots = read_chain(engine_log_path)
             _check_coverage(statement, coverage, approved_at, now().astimezone(NEW_YORK).date())
             written, skipped, date_only, resolved = new_movements(statement, ledger, approved_at, snapshots,
@@ -1380,13 +1430,13 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
         except OSError as unwritten:
             say("flex: the costs status cannot be written: " + str(unwritten))
             ok = False
-        proof = _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say)
+        proof = _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say, pacer)
         if _write_proof(ledger_path, json.dumps(proof, sort_keys=True) + "\n", say) or proof_unwritten:
             return False
     return ok and costs_status["state"] == "read" and proof["state"] != PROOF_SET_ASIDE
 
 
-def _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say):
+def _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say, pacer=None):
     """The executions proof of this reading (step 5 of the module): from the Trade Confirmation query when one is
     named, asked for now; "none" when none is named. A refusal sets the proof aside alone."""
     proof = {"checked_at": status["checked_at"], "account_id": account_id}
@@ -1397,11 +1447,12 @@ def _read_executions_once(status, trades_query_id, token, account_id, get, sleep
         say("flex: no executions proof: " + proof["reason"])
         return proof
     try:
+        sleep(QUERY_GAP)
         fetched_at = now()
         day = fetched_at.astimezone(NEW_YORK).date()
         asked = (_day_text(day - timedelta(days=TRADES_DAYS)), _day_text(day))
-        executions = parse_executions(fetch_statement(token, trades_query_id, get=get, sleep=sleep, period=asked),
-                                      account_id)
+        executions = parse_executions(fetch_statement(token, trades_query_id, get=get, sleep=sleep, period=asked,
+                                                      pacer=pacer), account_id)
         if executions is None:
             raise StatementRefused("the trades query's statement has no Trade Confirmations (TradeConfirms) section; "
                                    "it must be a Trade Confirmation Flex query (docs/manual/reconciliation.md)")

@@ -29,13 +29,15 @@ AssertPathExists=/run/trend-investing/secrets/accounts/%i.env
 Type=oneshot
 # Above the reader's worst case: for each of its two queries (the cash
 # query and the trades query), SendRequest and 30 GetStatement attempts,
-# each to its 60-second request timeout, and the 29 waits of 10 seconds
-# between them (flex.REQUEST_TIMEOUT, GENERATION_ATTEMPTS, GENERATION_WAIT;
-# about 36 minutes a query, 72 in all). A firing of the timer while a reading
+# each to its 60-second request timeout, the 29 waits of 10 seconds between
+# them, and up to three answers of IBKR's 1018 (too many requests) asked
+# again after 10, 30 and 60 seconds (flex.REQUEST_TIMEOUT,
+# GENERATION_ATTEMPTS, GENERATION_WAIT, RATE_BACKOFF; about 41 minutes a
+# query, 82 in all with the gap between them). A firing of the timer while a reading
 # still runs starts nothing. A reading that hangs past this is stopped and shows as
 # failed rather than staying "activating"; its status file then still says
 # "running" with the time it began, never the previous reading's "read".
-TimeoutStartSec=80min
+TimeoutStartSec=90min
 User=ti-trader
 Group=ti-trader
 Environment=TZ=America/New_York
