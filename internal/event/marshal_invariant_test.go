@@ -49,7 +49,7 @@ func marshalPayloads() []validatedPayload {
 		validTargetsDecidedSaleWorking(), validTargetsDecidedWatching(), validTargetsWithheld(), validOrderPlanned(),
 		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
 		validKillSwitch(), validBrokerSnapshot(), postCloseSnapshot(), readTimeSnapshot(), evidencedMark(), validMarginAlarm(), validSaleWithheld(), validSaleOrder(),
-		validOperatorRunApprovedSettled(), validOperatorRunApproved(), validOperatorRunApprovedInIncident(), validRebalanceCleared(), validRetired(),
+		validOperatorRunApprovedSettled(), validOperatorRunApproved(), validOperatorRunApprovedInIncident(), iraApprovalMidRebalance(), validRunApprovalAccepted(), validRebalanceCleared(), validRetired(),
 		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
 		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
 		validLimitOrderLifecycle(), validTargetWeightFill(), validOrderSkipped(),
@@ -159,7 +159,7 @@ func payloadLeaves(t *testing.T, v reflect.Value, path string, visit func(string
 			defer v.Set(reflect.Zero(v.Type()))
 		}
 		payloadLeaves(t, v.Elem(), path, visit)
-	case reflect.String, reflect.Int, reflect.Int64, reflect.Bool, reflect.Float64:
+	case reflect.String, reflect.Int, reflect.Int64, reflect.Uint64, reflect.Bool, reflect.Float64:
 		visit(path, v)
 	default:
 		t.Fatalf("%s: add property generation for %s", path, v.Type())
@@ -182,19 +182,26 @@ func requirePayloadMarshals(t *testing.T, p validatedPayload) {
 	}
 }
 
+// TestPayloadTimestampsRejectUnwritableTimes checks every timestamp leaf of
+// every payload type in the first fixture that reaches it: a type with two
+// shapes (a Boost and an IRA approval) has each shape's leaves checked in a
+// fixture of that shape, and a leaf no fixture reaches fails the test.
 func TestPayloadTimestampsRejectUnwritableTimes(t *testing.T) {
-	seen := make(map[reflect.Type]bool)
+	tested := map[string]bool{}
 	for _, p := range marshalPayloads() {
-		if seen[reflect.TypeOf(p)] {
-			continue
-		}
-		seen[reflect.TypeOf(p)] = true
 		requirePayloadMarshals(t, p)
 		v := payloadCopy(p)
 		payloadLeaves(t, v, v.Type().Name(), func(path string, field reflect.Value) {
 			if field.Type() != reflect.TypeFor[time.Time]() {
 				return
 			}
+			if _, seen := tested[path]; !seen {
+				tested[path] = false
+			}
+			if tested[path] || !leafReachable(payloadCopy(p), path) {
+				return
+			}
+			tested[path] = true
 			for _, kind := range []string{"year", "offset"} {
 				t.Run(path+"/"+kind, func(t *testing.T) {
 					candidate := payloadCopy(p)
@@ -225,6 +232,36 @@ func TestPayloadTimestampsRejectUnwritableTimes(t *testing.T) {
 			}
 		})
 	}
+	for path, done := range tested {
+		if !done {
+			t.Errorf("%s: no fixture reaches this timestamp; add one that does", path)
+		}
+	}
+}
+
+// leafReachable reports whether every pointer on path is set in v, so the
+// fixture v reaches the leaf path names.
+func leafReachable(v reflect.Value, path string) bool {
+	for _, part := range strings.Split(path, ".")[1:] {
+		name, _, _ := strings.Cut(part, "[")
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return false
+			}
+			v = v.Elem()
+		}
+		v = v.FieldByName(name)
+		if !v.IsValid() {
+			return false
+		}
+		if v.Kind() == reflect.Slice {
+			if v.Len() == 0 {
+				return false
+			}
+			v = v.Index(0)
+		}
+	}
+	return true
 }
 
 // leafByPath returns the leaf of v that payloadLeaves named path: the
@@ -354,6 +391,8 @@ func marshalBoundaries(t *testing.T, v reflect.Value) []any {
 		return []any{math.MinInt, -1, 0, 1, math.MaxInt}
 	case reflect.Int64:
 		return []any{int64(math.MinInt64), int64(-1), int64(0), int64(1), int64(math.MaxInt64)}
+	case reflect.Uint64:
+		return []any{uint64(0), uint64(1), uint64(math.MaxUint64)}
 	case reflect.Bool:
 		return []any{false, true}
 	default:
@@ -380,6 +419,8 @@ func marshalGeneratedValue(t *testing.T, v reflect.Value, bits uint64, year int1
 		return int(bits)
 	case reflect.Int64:
 		return int64(bits)
+	case reflect.Uint64:
+		return bits
 	case reflect.Bool:
 		return bits%2 == 0
 	default:

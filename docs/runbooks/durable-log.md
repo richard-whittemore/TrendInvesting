@@ -138,7 +138,12 @@ The engine reads its settings from
    the engine does not know, is refused. `boost.latched` is the state in
    force: the `latched_after` of the latest `strategy.targets.decided` in the
    previous log, or, if that run decided nothing, the latch its own approval
-   stated; the engine refuses any other value. `incident_id` names the
+   stated; the engine refuses any other value. An IRA's approval states
+   `"boost": null` and, in its place, `"momentum": {"rebalance_in_progress":
+   ...}`: the rebalance the previous log ends with in progress, or `null`
+   when none is, which the engine checks against that log the same way
+   (`docs/runbooks/missed-rebalance.md`, "A restart mid-rebalance").
+   `operator approve` writes the right one from the log. `incident_id` names the
    incident you are clearing, or is empty; it must be the ID of the incident
    the previous log ended in (the `incident_id` its own approval carried in
    force, or else the `id` of its first `strategy.engine.state` record out
@@ -236,7 +241,9 @@ whether it is the crashed run. The message says which case it is.
         ended in, under its ID. If that log ended in an incident, carry it
         Halted (or as the same state); never loosen it on a guess, and
         clear it only by that ID through the recorded recovery.
-      - `boost.latched` is the latch the last readable log ended with.
+      - `boost.latched` is the latch the last readable log ended with (for
+        an IRA, `momentum.rebalance_in_progress` is the rebalance it ended
+        with in progress, or `null`).
 
       The engine checks the approval against that log alone. The latch must
       be exactly the one it ended with. The incident must be the one it
@@ -294,7 +301,12 @@ Every `*.log` in the root of the account's state directory,
 run. A log whose content the engine cannot recover (ADR 0027 §5: a damaged file, an old
 log whose bytes rotted after it was superseded and still read back, or a stray file ending in
 `.log`; rot the disk reports as a read error is "A log that cannot be read") refuses every start, resume and fresh run alike, with a message
-ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
+ending "move `<name>`, unchanged, into `<state directory>/quarantine`". An
+IRA's log whose run refused the only approval it was given refuses a fresh
+run's approval the same way: "the rebalance in progress of `<name>` cannot be
+read back: its run refused its approval ... and accepted none: move `<name>`,
+unchanged, into the quarantine folder beside it, then ..." (the steps below,
+with step 3 as that message says).
 
 1. **Do not edit or delete the file.** It is recorded evidence (ADR 0018).
 2. **Move it, unchanged, into the quarantine folder** beside the logs:
@@ -326,7 +338,12 @@ ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
    aside, the latest run may be a different log. If the quarantined log was
    the crashed run itself, it cannot be resumed: start a fresh run from a
    reconciled baseline (ADR 0019's recovery procedure), with an approval
-   naming the latest run left in the directory.
+   naming the latest run left in the directory. For an IRA's log whose run
+   refused its approval, approve the run before it: the message names it
+   when the refused approval reads as this account's, else it is the latest
+   run left in the folder. If it was the account's first run, there is
+   none: start again as an IRA's first run (`operator approve -first-run
+   -strategy momentum`).
 
 ## A resume that does not reproduce its log
 

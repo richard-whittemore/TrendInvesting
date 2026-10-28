@@ -371,3 +371,35 @@ func TestRulesVersionDeclaresTheEndedSale(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheIRAApproval pins ADR 0016's same-rules-version
+// replay guarantee for a momentum run's approval (ADR 0026, point 5; ADR
+// 0027, amended 2026-10-17): a fresh IRA run reads operator.run.approved,
+// and one approved with a rebalance in progress withholds every decision as
+// rebalance-in-progress until the owner clears it, where 1.25.0 refused the
+// input. A journal holding one decides differently, so the build must not
+// claim 1.25.0 or earlier.
+func TestRulesVersionDeclaresTheIRAApproval(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0", "1.14.0", "1.15.0", "1.16.0", "1.17.0", "1.18.0", "1.19.0", "1.20.0", "1.21.0", "1.22.0", "1.23.0", "1.24.0", "1.25.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.25.0 once a momentum run reads its approval", targetweight.RulesVersion)
+		}
+	}
+}
+
+// TestRulesVersionDeclaresTheRecordedApprovalAcceptance pins ADR 0016's
+// same-rules-version replay guarantee for the record a momentum run makes
+// of the approval it accepted (strategy.run.approval-accepted; ADR 0027,
+// note of 2026-10-28), which 1.26.0 did not record. A journal holding one
+// decides differently, so the build must not claim 1.26.0 or earlier.
+func TestRulesVersionDeclaresTheRecordedApprovalAcceptance(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0", "1.14.0", "1.15.0", "1.16.0", "1.17.0", "1.18.0", "1.19.0", "1.20.0", "1.21.0", "1.22.0", "1.23.0", "1.24.0", "1.25.0", "1.26.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.26.0 once a momentum run records the approval it accepted", targetweight.RulesVersion)
+		}
+	}
+}

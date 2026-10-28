@@ -19,7 +19,8 @@ const Redacted = "[redacted]"
 // The patterns of what never goes into text bound for a place the owner does
 // not control the readers of (docs/live-trading/plan.md section 7: the public
 // text carries no balance; docs/manual/alerts-and-dashboard.md): an IBKR
-// account id (U or DU and digits, as the broker issues them), a GitHub token,
+// account id (U or DU and digits, as the broker issues them, and a paper
+// account's DU with letters among its digits, paperAccount), a GitHub token,
 // and a Tailscale host name or address (the 100.64.0.0/10 range), which name
 // the account or reach it; and a dollar figure (dollarFigure).
 var identifierPatterns = []*regexp.Regexp{
@@ -28,6 +29,21 @@ var identifierPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bgh[opsur]_[A-Za-z0-9]{20,}`),
 	regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9.-]*\.ts\.net\b`),
 	regexp.MustCompile(`\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b`),
+}
+
+// paperAccount is an IBKR paper account number with letters after DU
+// (DUX1234567), as adapter/ibkr/masking.py reads it: DU and five to nine
+// capitals and digits, at least one a digit (accountWithDigit), so a word
+// such as DURATION is left alone (docs/live-trading/lessons-2026-10.md L12: the IRAs' paper account
+// numbers never reach a public place).
+var paperAccount = regexp.MustCompile(`\bDU[A-Z0-9]{5,9}\b`)
+
+// accountWithDigit replaces a paperAccount match holding a digit.
+func accountWithDigit(m string) string {
+	if strings.ContainsAny(m[2:], "0123456789") {
+		return Redacted
+	}
+	return m
 }
 
 // dollarFigure is a dollar amount, removed whole before the other figures so
@@ -130,6 +146,7 @@ func (r Redactor) Identifiers(s string) string {
 	for _, w := range r.words {
 		s = replaceWord(s, w)
 	}
+	s = paperAccount.ReplaceAllStringFunc(s, accountWithDigit)
 	for _, p := range identifierPatterns {
 		s = p.ReplaceAllString(s, Redacted)
 	}

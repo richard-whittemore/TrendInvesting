@@ -16,14 +16,23 @@ The rule, the planner and the limits are built and tested in Go
 (`internal/targetweight/momentum`, `internal/targetweight/momentum_run.go`,
 `internal/orderplan`, `internal/risklimit`), and parity with the backtest
 was checked for the rule itself ([parity](parity.md); the glide path, the
-minimum lot and the IRA buy timing are not yet compared). **The IRAs cannot run yet**: the engine
-program refuses a momentum configuration (`cmd/engine/compose.go`: it
-composes the Boost target-weight strategy only), there is no IRA
-configuration file in `deploy/etc/engines/` (only the IRAs' account
-settings, `roth-ira.env` and `trad-ira.env`), there is no adapter service
-for an IRA (only `ti-adapter-boost`), and the daily data job writes only
-the Boost stream. So the "one IRA month" walk-through below stops before
-the engine.
+minimum lot and the IRA buy timing are not yet compared). **The
+Traditional IRA's engine starts on the server in dry-run** (since
+2026-10-28): the engine program composes a momentum configuration
+(`cmd/engine/compose.go`), `deploy/etc/engines/trad-ira.config` is its
+dry-run configuration (placeholders for the account and your birth month,
+which you name on the server), and a fresh IRA run is approved with the
+rebalance its previous run left in progress, or none, and holds until you
+clear it ([restart](restart.md); `docs/runbooks/missed-rebalance.md`). It is
+shown on a synthetic month only (below, "Starting the Traditional IRA's
+engine in dry-run"). **The IRAs cannot trade yet**: the daily data job writes
+only the Boost stream (the IRAs' job is the next slice), there is no adapter
+service for an IRA (only `ti-adapter-boost`), and the Roth IRA has no
+configuration. The configuration's hard limits (`max_orders_per_decision`
+40, `max_order_fraction` 0.6) and its cash rule and share quantity
+(`settled-cash`, `minimum-lot`: decisions D5 and D7) are dry-run values for
+you to confirm before paper. So the "one IRA month" walk-through below stops
+after the engine.
 
 ## What it is and why
 
@@ -201,7 +210,7 @@ order's shape, account and mode, not these limits (`adapter/ibkr/sender.py`).
 | --- | --- | --- | --- |
 | 1 | each session | The data step records the whole market, the sector labels, and SPY, IEF, SHY and every holding's bars ([market data](market-data.md)). | The commands are built; **no daily job runs them for the IRAs** |
 | 2 | last session of the month | `encode --ranker` writes the compact stream: bars for the named instruments, the universe snapshot, and the 500 ranked stocks' price histories ([momentum universe](momentum-universe.md)). | Built |
-| 3 | — | **Stops here today.** An IRA engine must be started from an IRA configuration, fed that stream together with IBKR's account snapshot and marks. The engine refuses a momentum configuration, no IRA configuration exists, and nothing merges the stream with IBKR's figures. | **Not built** |
+| 3 | — | An IRA engine is started from its own configuration and settings (`trad-ira.config`, `trad-ira.env`), in dry-run, and fed that stream together with IBKR's account snapshot and marks. | The engine starts on the server from its configuration and decides a synthetic month fed by `deploy/feed-month.py`. **Stops here today**: no daily job writes the IRAs' stream and nothing merges it with IBKR's figures (no IRA adapter) |
 | 4 | at the close | The engine decides the month and plans the sells, checked against the limits. | Built and tested on recorded inputs |
 | 5 | next session | The adapter sends the sells; when every sell has finished, the engine plans and releases the buys from the cash realised. | Engine side built. The adapter's sending, its real IBKR client and its paper switch are built and run for Boost only; no IRA adapter service exists |
 | 6 | after | Fills come back; the reporter and the dashboard show the month. | As for Boost ([boost](boost.md#one-boost-day-from-the-data-to-ibkr-and-back)) |
@@ -218,7 +227,7 @@ held positions and orders are unchanged. Until an IRA engine can run (see
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| The engine will not start, saying the configuration "names strategy_id "momentum", a target-weight strategy this engine does not compose" | Today the engine program runs Boost only. Nothing is recorded | Nothing: the IRAs are not ready to run ("Where this stands") |
+| The Traditional IRA's engine will not start, saying `glide birth value must be YYYY-MM with a month 01-12` | The shipped `trad-ira.config` names the placeholder `YYYY-MM`, never your birth month, so the engine refuses rather than decide from a made-up age. Nothing is recorded | Name your birth year and month on the server ("Starting the Traditional IRA's engine in dry-run", step 2) |
 | `ira-exposure`. Alert: `<account>: order refused (ira-exposure)` (urgent), its text naming the exposure after the order and the limit; then `<account>: engine degraded (risk-limit-breached)`, which repeats until you acknowledge it | The risk gate refused a buy that would have left the account's holdings, valued at the previous close, above `max_exposure` (at most 1: an IRA never borrows). Nothing was sent for it. The account is Degraded on that instrument: no buy goes, and the instrument is frozen | Compare holdings, cash and net liquidation at IBKR with the refusal's figures (`journal-query refusals`). Follow `docs/runbooks/halted-account.md`; the way out is a fresh run you approve ([restart](restart.md)) |
 | `insufficient-cash`. Alert: `<account>: order refused (insufficient-cash)` (urgent), naming the buy's worst-case cost and the cash available; then `<account>: engine degraded (risk-limit-breached)`, repeating until acknowledged | The gate refused a buy whose worst-case cost (its shares at the limit price plus the fee allowance) exceeds the cash still available after the buys released before it. The planner already scales buys to fit the budget, so this means the cash changed between the plan and the check. Degraded on that instrument | Check cash at IBKR against the last account snapshot. Follow `docs/runbooks/halted-account.md` |
 | `no-eligible-names`. Alert: `<account>: decision withheld (no-eligible-names)` (routine) | The month is withheld: no stock in the ranked 500 could be picked (every one short of history, with a gap, or without volatility), and none was skipped as unaffordable. The book is kept; nothing is ordered | Check the month's data step: the universe snapshot and the ranked stocks' price histories ([momentum universe](momentum-universe.md), [market data](market-data.md)). The next month decides as usual |
@@ -231,7 +240,61 @@ held positions and orders are unchanged. Until an IRA engine can run (see
 | The sells finish but `journal-query orders` shows smaller buys than planned, or a buy recorded as skipped | The buys were scaled down to fit the cash; a buy left with no share is recorded as skipped | Nothing; the next month decides afresh |
 | `journal-query orders` shows a sell failed or was cancelled part-filled | The buys wait for every sell to finish, then are budgeted from the cash actually raised; nothing is ever borrowed | Check the order at IBKR |
 | Any other refusal: `<account>: order refused (order-count)`, `(order-size)`, `(price-band)`, `(missing-mark)`, `(sell-exceeds-holding)`, `(broker-holding)`, `(stale-broker-snapshot)`, `(undecided-order)` or `(kill-switch)` | Refused; the state that follows (Degraded, Halted or none) is in the hard-limits table above. Explained in [states-and-kill-switch](states-and-kill-switch.md), "What can go wrong" | `docs/runbooks/halted-account.md` |
-| A fresh run started while a rebalance was working | The fresh run does not know the earlier run's working orders | Never start a fresh IRA run mid-rebalance (`docs/runbooks/missed-rebalance.md`) |
+| A fresh run started while a rebalance was working | `operator approve` states the rebalance in progress in the approval, the engine checks it against the previous log, and the fresh run sends nothing for it and withholds every month as `rebalance-in-progress` until you clear it (ADR 0026, point 5) | `docs/runbooks/missed-rebalance.md`, "A restart mid-rebalance" |
+
+## Starting the Traditional IRA's engine in dry-run
+
+Dry-run sends nothing to IBKR, ever. On the server, over Tailscale SSH, from
+the checkout, once the build with this slice is installed (`sudo ti-release
+<tag>`):
+
+1. `git pull`, then `sudo deploy/provision.sh services`. It installs
+   `/etc/trend-investing/engines/trad-ira.config` (there is none yet) and
+   keeps your `boost.config`, putting the shipped one beside it as
+   `boost.config.example`. Check: `sudo grep -c '"account_id": "joint"'
+   /etc/trend-investing/engines/boost.config` prints `0`.
+2. Name your birth year and month (the glide path counts your age from it;
+   the repository holds only `YYYY-MM`), and, if `accounts/trad-ira.env`
+   holds the IRA's paper number, the account, as Boost's step 1 does
+   (`docs/runbooks/first-dry-run-day.md`): `sudo sed -i
+   's/"birth": "YYYY-MM"/"birth": "1975-06"/'
+   /etc/trend-investing/engines/trad-ira.config` with your own year and
+   month. A dry-run may keep the placeholder account `trad-ira`; a paper run
+   may not. Never put either value in the repository.
+3. Write the run's start: `sudo -u ti-trader tee
+   /var/lib/trend-investing/engines/trad-ira/run.env` with
+   `TI_RUN=demo-<today>`, `TI_AS_OF=2025-01-02T21:00:00Z` (the synthetic
+   month's first close) and an empty `TI_RESTART_ARGS=`.
+4. `sudo systemctl start ti-engine@trad-ira`, then `sudo journalctl -u
+   ti-engine@trad-ira -n 3` shows `listening on /run/ti-engine-trad-ira/engine.sock`.
+5. Replay the synthetic month (`cmd/engine/testdata/momentum-month.jsonl`,
+   invented prices only) as the adapter would: `sudo install -m 0644
+   cmd/engine/testdata/momentum-month.jsonl deploy/feed-month.py /tmp/`, then
+   `sudo -u ti-trader python3 /tmp/feed-month.py --socket
+   /run/ti-engine-trad-ira/engine.sock --log
+   /var/lib/trend-investing/engines/trad-ira/demo-<today>.log --config
+   /etc/trend-investing/engines/trad-ira.config --month
+   /tmp/momentum-month.jsonl`. Expect one line,
+   `2025-01-31T21:00:00Z strategy.targets.decided withheld histories-missing`:
+   the month's decision is recorded withheld, since the real rule wants 200
+   SPY closes and the 500 ranked stocks' histories a month does not hold,
+   and nothing is planned or sent. It prints no account number, and it
+   refuses, before connecting, a configuration or a log that is not
+   dry-run, or a log of another account: invented prices must never become
+   a paper or live account's facts.
+6. `sudo systemctl stop ti-engine@trad-ira`, then `sudo journalctl -u
+   ti-engine@trad-ira -n 3` shows `wrote .../demo-<today>.journal`: the run
+   stopped cleanly. `sudo grep -c '"withheld_reason":"histories-missing"'
+   /var/lib/trend-investing/engines/trad-ira/demo-<today>.log` prints `1`:
+   the durable log holds the withheld month, and `sudo -u ti-trader
+   journal-query orders` on it lists no order.
+7. Move the demo's `demo-<today>.log`, `.journal` and `run.env` unchanged into
+   `/var/lib/trend-investing/engines/trad-ira/demo/` (the engine reads only
+   the folder's root), so the IRA's real first run is a first run, not a
+   fresh run after the demo.
+
+The same steps are rehearsed in a container by `deploy/rehearse.sh`, and in
+`cmd/engine` by `TestTheShippedIRAConfigurationRecordsTheMonthWithheld`.
 
 ## What backs this
 
@@ -256,6 +319,31 @@ held positions and orders are unchanged. Until an IRA engine can run (see
   for parity: `TestBacktestBookKeepsTiesInInputOrderAndLeavesNoSectorUncapped`,
   `TestBacktestBookWeightsAZeroVolatilityAsOne`,
   `TestBacktestTrendTreatsAShortHistoryAsRiskOnAndDropsMissingCloses`.
+- The engine program and the approval, in `cmd/engine`:
+  `TestAMomentumConfigurationIsComposed`,
+  `TestADryRunEngineDecidesASyntheticIRAMonthAndStopsCleanly`,
+  `TestTheMomentumMonthFixtureIsTheGeneratedOne`,
+  `TestAMomentumRunInLiveModeIsRefused`,
+  `TestTheShippedIRAConfigurationRecordsTheMonthWithheld`,
+  `TestTheTradIRAEngineStartsAsItsUnitStartsIt`,
+  `TestAFreshIRARunStartsOnlyFromTheRebalanceItsPreviousLogEndsWith`,
+  `TestAMomentumFirstRunRefusesABoostShapedApproval`; in
+  `internal/targetweight`: `TestAFreshIRARunMidRebalanceHoldsUntilCleared`,
+  `TestAClearanceMustNameTheRebalanceTheApprovalStated`,
+  `TestAMomentumRunReadsOnlyAnIRAApproval`, `TestBoostRefusesAnIRAApproval`,
+  `TestAFreshIRARunResumesTheIncidentItsApprovalCarries`,
+  `TestAMomentumRunRecordsTheApprovalItAccepted`,
+  `TestRulesVersionDeclaresTheIRAApproval`; in `internal/restart`:
+  `TestTheRebalanceInProgressIsReadFromTheLog`,
+  `TestTheEngineRefusesAnApprovalOfAnotherRebalance`,
+  `TestRecoveryReadsTheApprovalTheRunAccepted`,
+  `TestRecoveryReadsRecordsNotTheRunningBuildsRules`,
+  `TestAnAcceptanceThatCannotBeReadBackIsRefused`; in `internal/event`:
+  `TestARunRecordsTheApprovalItAccepted`,
+  `TestAnIRAApprovalStatesTheRebalanceInProgress`,
+  `TestDecodeAnIRAApprovalRequiresTheRebalanceKey`; in `cmd/operator`:
+  `TestAnIRAApprovalStatesTheRebalanceInProgress`; provisioning:
+  `deploy/rehearsal/test-engine-configs.sh` and `deploy/rehearse.sh`.
 - The run, in `internal/targetweight`:
   `TestMomentumRunDecidesOnTheLastSessionOfEachMonth`,
   `TestMomentumBuysAtOnceWithoutSellsThenSellsFirst`,

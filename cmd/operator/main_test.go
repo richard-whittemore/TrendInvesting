@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -14,6 +17,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/operator"
 	"github.com/richard-whittemore/TrendInvesting/internal/restart"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 const at = "2026-10-17T14:30:05Z"
@@ -884,5 +888,137 @@ func TestTheAdaptersSettlementLineIsOneTheApprovalReads(t *testing.T) {
 	}
 	if s.Log != "engine.log" || s.InputID != "session:1" || s.Evidence != event.NeverSentUnmarked || s.Retirement.ClientOrderID != "tw-paper-1" || s.Retirement.Quantity != 9 {
 		t.Errorf("read %+v", s)
+	}
+}
+
+// momentumLog writes a paper IRA's durable log at path, recorded by the
+// real momentum handler over cmd/engine's synthetic month (invented prices
+// only) with no venue reporting on its orders, so the log ends with the
+// month's buys working; it returns the orders released.
+func momentumLog(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile("../engine/testdata/momentum-dry-run.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg event.TargetWeightConfigurationPayload
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Mode, cfg.AccountID = event.TradingModePaper, "DUIRA"
+	asOf := time.Date(2025, time.January, 2, 21, 0, 0, 0, time.UTC)
+	const version = "momentum/1.26.0/test"
+	h, err := targetweight.New(version, cfg, targetweight.Options{DecideFrom: asOf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	log, err := journal.CreateLog(file, journal.NewLogHeader(h.ConfigurationHash(), version))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := journal.NewDurableRecorder(h, log, 1<<20)
+	var sequence uint64
+	apply := func(id, eventType string, schema uint32, at time.Time, payload json.RawMessage) {
+		sequence++
+		if _, err := recorder.Apply(context.Background(), event.Envelope{ID: id, Type: eventType, SchemaVersion: schema, EnvelopeVersion: event.CurrentEnvelopeVersion,
+			EventTime: at, RecordedAt: at, Sequence: sequence, Source: "test", StrategyVersion: version, ConfigurationHash: h.ConfigurationHash(),
+			PayloadHash: event.HashPayload(payload), Payload: payload}); err != nil {
+			t.Fatalf("apply %s: %v", id, err)
+		}
+	}
+	apply("configuration:"+h.ConfigurationHash(), event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, asOf, encoded(t, cfg))
+	month, err := os.ReadFile("../engine/testdata/momentum-month.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range bytes.Split(bytes.TrimSpace(month), []byte("\n")) {
+		var in struct {
+			Type          string          `json:"type"`
+			SchemaVersion uint32          `json:"schema_version"`
+			ID            string          `json:"id"`
+			EventTime     time.Time       `json:"event_time"`
+			Payload       json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(line, &in); err != nil {
+			t.Fatal(err)
+		}
+		apply(in.ID, in.Type, in.SchemaVersion, in.EventTime, bytes.ReplaceAll(in.Payload, []byte(`"account_id":"trad-ira"`), []byte(`"account_id":"DUIRA"`)))
+	}
+	var orders []string
+	for _, e := range recorder.Entries() {
+		if e.Kind == journal.KindDecision && e.Envelope.Type == event.OrderReleasedEventType {
+			var p event.OrderReleasedPayload
+			if err := json.Unmarshal(e.Envelope.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			orders = append(orders, p.ClientOrderID)
+		}
+	}
+	if len(orders) == 0 {
+		t.Fatal("setup: the month released no order")
+	}
+	sort.Strings(orders)
+	return orders
+}
+
+// TestAnIRAApprovalStatesTheRebalanceInProgress: from a momentum run's log
+// the tool writes an IRA approval: no latch, the rebalance the log ends
+// with in progress (ADR 0026, point 5), and says that the fresh run sends
+// nothing for it until the owner clears it, naming the clearance to record.
+func TestAnIRAApprovalStatesTheRebalanceInProgress(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "run-1.log")
+	orders := momentumLog(t, logPath)
+	path := filepath.Join(dir, "approval.json")
+	out, err := invoke(t, "approve", "-log", logPath, "-account", "DUIRA", "-by", "owner", "-out", path, "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil {
+		t.Fatalf("the engine would refuse the approval: %v", err)
+	}
+	const decision = "targets-decided:DUIRA:2025-01-31T21:00:00Z"
+	r := p.Momentum
+	if p.Boost.Latched != nil || r == nil || r.RebalanceInProgress == nil || r.RebalanceInProgress.Phase != event.RebalancePhaseBuysWorking ||
+		r.RebalanceInProgress.DecisionID != decision || strings.Join(r.RebalanceInProgress.ClientOrderIDs, ",") != strings.Join(orders, ",") {
+		t.Fatalf("approval %s", raw)
+	}
+	for _, want := range []string{"mid-rebalance", decision, orders[0], "operator rebalance-cleared", "-orders " + strings.Join(orders, ",")} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printed %q, want it to say %q", out, want)
+		}
+	}
+	if strings.Contains(out, "latched") {
+		t.Errorf("printed %q: an IRA has no latch", out)
+	}
+}
+
+// TestAnIRAFirstRunsApprovalStatesNoRebalance: -strategy momentum writes an
+// IRA's first-run approval: the starting book and no rebalance in progress.
+func TestAnIRAFirstRunsApprovalStatesNoRebalance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "first.json")
+	if _, err := invoke(t, "approve", "-first-run", "-strategy", "momentum", "-account", "DUIRA", "-by", "owner", "-positions", "", "-cash", "10000", "-currency", "USD", "-out", path, "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil || !p.FirstRun() || p.Momentum == nil || p.Momentum.RebalanceInProgress != nil || p.Boost.Latched != nil {
+		t.Fatalf("approval %s, %v", raw, err)
+	}
+	if _, err := invoke(t, "approve", "-first-run", "-strategy", "turtle", "-account", "DUIRA", "-by", "owner", "-positions", "", "-cash", "1", "-currency", "USD", "-out", path+"2", "-at", at); err == nil || !strings.Contains(err.Error(), "-strategy") {
+		t.Errorf("an unknown -strategy: %v", err)
 	}
 }

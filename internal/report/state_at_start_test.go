@@ -647,3 +647,29 @@ func TestARetirementOfAnOrderIBKRListedLeavesItsRejectionCounted(t *testing.T) {
 		t.Errorf("the retirement of an order IBKR listed was applied, and its rejection not counted: %+v", a)
 	}
 }
+
+// TestAnApprovalOfEveryVersionAnEngineRecordedIsRead: the server's logs hold
+// approvals an earlier build recorded, at schema version 5 among them, so
+// the reporter reads each version an engine has recorded, the current one
+// included (ADR 0015).
+func TestAnApprovalOfEveryVersionAnEngineRecordedIsRead(t *testing.T) {
+	for version := uint32(1); version <= event.OperatorRunApprovedSchemaVersion; version++ {
+		s := newStream(t)
+		p := approvalOf("run-0.log", "sha256:"+strings.Repeat("0", 64))
+		if version < 3 {
+			// Versions 1 and 2 hold no starting book key.
+			s.add(event.OperatorRunApprovedEventType, version, "operator-run-approved:x", day(0), map[string]any{
+				"account_id": "joint", "previous_log": "run-0.log", "previous_log_final_hash": "sha256:" + strings.Repeat("0", 64),
+				"incident_id": "", "approved_by": "owner", "approved_at": day(0), "boost": map[string]any{"latched": false}, "incident_in_force": nil,
+			})
+		} else {
+			s.add(event.OperatorRunApprovedEventType, version, "operator-run-approved:x", day(0), *p)
+		}
+		if _, err := report.Alerts(s.out); err != nil {
+			t.Errorf("alerts over an approval at schema version %d: %v", version, err)
+		}
+		if _, _, err := report.StateAtStartAlert(s.out, nil); err != nil {
+			t.Errorf("an approval at schema version %d: %v", version, err)
+		}
+	}
+}

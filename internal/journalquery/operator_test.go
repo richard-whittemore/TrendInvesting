@@ -165,3 +165,32 @@ func TestAnIncidentInForceShowsItsCashScope(t *testing.T) {
 		}
 	}
 }
+
+// TestAnIRAApprovalListsItsRebalanceInProgress: an IRA approval states no
+// latch; the query lists the rebalance in progress it carries, or none
+// (ADR 0026, point 5).
+func TestAnIRAApprovalListsItsRebalanceInProgress(t *testing.T) {
+	d := at(time.March, 2)
+	ira := func(rebalance any) map[string]any {
+		return map[string]any{
+			"account_id": "A", "previous_log": "run-1.log", "previous_log_final_hash": "sha256:" + strings.Repeat("0", 64),
+			"incident_id": "", "approved_by": "owner", "approved_at": d, "boost": nil, "incident_in_force": nil, "starting_book": nil,
+			"momentum": map[string]any{"rebalance_in_progress": rebalance},
+		}
+	}
+	working := map[string]any{"decision_id": "targets-decided:A:2026-02-27T21:00:00Z", "decision_time": "2026-02-27T21:00:00Z", "phase": event.RebalancePhaseSellsWorking, "client_order_ids": []string{"A-1", "A-2"}}
+	table, err := journalquery.Operator([]journalquery.Journal{load(t, "ira.journal", build(t,
+		rec{journal.KindInput, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, d, ira(nil)},
+		rec{journal.KindInput, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, d, ira(working)}))}, journalquery.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{
+		"after run-1.log, no rebalance in progress; no incident",
+		"after run-1.log, rebalance targets-decided:A:2026-02-27T21:00:00Z in progress (sells-working: A-1;A-2); no incident",
+	} {
+		if len(table.Rows) != 2 || cell(table, i, "action") != want {
+			t.Errorf("rows %v, want row %d: %s", table.Rows, i, want)
+		}
+	}
+}

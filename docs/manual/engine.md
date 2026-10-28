@@ -237,11 +237,10 @@ Read them with `journalctl -u ti-engine@<instance> -n 20`.
 | `-mode X does not match the configuration's mode "Y"` | Refuses: the mode is part of the hashed configuration. | Make `TI_MODE` in `/etc/trend-investing/engines/<instance>.env` match the configuration's `mode`. Both are repository files: change them in the repository and run `provision.sh`; a changed configuration is a new run. |
 | `-mode live is refused until the limited-live gate` | Refuses: no live order goes out before that gate. | Nothing. Use dry-run or paper ([paper trading](paper-trading.md)). |
 | `the configuration in ... is invalid: ... mode paper names account "...", but an IBKR paper account ID begins "DU"` (or the reverse for live) | Refuses: a paper run is bound to a paper account and a live run to a live one. | Correct the configuration's `account_id` or `mode` in the repository, then provision. |
-| `the configuration in ... names strategy_id "momentum", a target-weight strategy this engine does not compose` | Refuses: this program runs Boost only; the IRAs' momentum strategy has no engine composition yet. | Nothing; the IRA engines have no configuration on the server ([momentum](momentum.md)). |
 | `read the configuration`, `decode the target-weight configuration in ...`, or `the configuration in ... is invalid` | Refuses: the file is missing, is not JSON, has a key the engine does not know, or breaks a rule (each broken rule is listed). | Fix the configuration in the repository and provision it again. |
 | `-mode is required`, `-mode must be one of ...`, `-socket is required`, `-config is required`, `-out is required`, `-as-of is required` or `-log is required in -mode ...` | Refuses: there is no default for any of these. The service file always passes them, so on the server this means `run.env` or the account's `.env` lacks a value. | Fill in `TI_RUN`, `TI_AS_OF` (and `TI_MODE` in the `.env`) as the durable log runbook says. |
 | The unit fails at once and `systemctl status` says `Failed to load environment files` | The engine never ran: `run.env` is missing. The unit requires it and does not guess. | Write `/var/lib/trend-investing/engines/<instance>/run.env` (`docs/runbooks/durable-log.md`, "Restarting an engine"). |
-| `systemctl status` says the unit was skipped because a condition was not met | The engine never ran: the binary, the account's `.env` or its `.config` is not installed. | Run `deploy/build-engine.sh`, then `deploy/provision.sh`. For an IRA this is expected: it has no configuration. |
+| `systemctl status` says the unit was skipped because a condition was not met | The engine never ran: the binary, the account's `.env` or its `.config` is not installed. | Run `deploy/build-engine.sh`, then `deploy/provision.sh`. For the Roth IRA this is expected: it has no configuration yet. |
 | `-as-of must be an RFC 3339 time` or `-as-of must be nonzero` | Refuses. | Write `TI_AS_OF` as `2026-10-20T20:00:00Z`, say. |
 | `-log and -out both name ...` | Refuses: the log and the journal must be two files. | Nothing on the server (the unit names them `<TI_RUN>.log` and `<TI_RUN>.journal`). |
 | `-log names ...` or `-out names ..., the instance lock an engine holds in the folder of -log` | Refuses before it writes anything: the log or the journal would be `engine.lock`, the file the engine locks for as long as it runs, so the journal could never be installed when it stops. | Nothing on the server (`TI_RUN` names `<TI_RUN>.log` and `<TI_RUN>.journal`); by hand, choose another file name. |
@@ -328,7 +327,11 @@ it sells again, sized from the 14 shares held.
   `TestTheAccountMustMatchTheMode`,
   `TestAnUnstampedBuildRefusesEveryModeButBacktest`,
   `TestTheMakefileStampsTheBuildTheEngineRecords`,
-  `TestTheServiceFileStartsTheEngineWithExplicitSettings`; in
+  `TestTheServiceFileStartsTheEngineWithExplicitSettings`, and for the
+  IRAs `TestAMomentumConfigurationIsComposed`,
+  `TestADryRunEngineDecidesASyntheticIRAMonthAndStopsCleanly`,
+  `TestAMomentumRunInLiveModeIsRefused`,
+  `TestTheTradIRAEngineStartsAsItsUnitStartsIt`; in
   `cmd/boost-demo`: `TestTheDemoDrivesTheRealEngineInDryRun`.
 
 ## Not built yet
@@ -347,8 +350,12 @@ it sells again, sized from the 14 shares held.
   unexplained cash. The
   ones at every start, reconnect and delivery are built
   ([reconciliation](reconciliation.md), "What is not built yet").
-- The IRAs: this program refuses a momentum configuration (`compose.go`), and
-  no IRA configuration exists ([momentum](momentum.md)).
+- The IRAs' daily stream, adapter and reporter: the engine composes a
+  momentum configuration and the Traditional IRA's engine starts on the
+  server in dry-run from `trad-ira.config`, decided so far on a synthetic
+  month only; no daily job writes the IRAs' stream, no adapter feeds an IRA
+  engine, and the Roth IRA has no configuration ([momentum](momentum.md),
+  "Where this stands").
 
 Re-delivery of released orders after a restart is built: see
 [re-delivery](redelivery.md). The README's
