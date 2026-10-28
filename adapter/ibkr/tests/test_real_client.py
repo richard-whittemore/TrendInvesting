@@ -65,11 +65,15 @@ class _EClient:
     # Set to a threading.Event to make the reader ignore its socket closing
     # until the event is set, as a reader stuck in a callback does.
     run_gate = None
+    # What the connect handshake leaves in connTime: ibapi reads it with
+    # comm.read_fields, which splits the socket's bytes on NUL, so it is bytes.
+    conn_time = b"20261028 02:02:05 EST"
 
     def __init__(self, wrapper):
         self.wrapper = wrapper
         self.requests = []
         self.conn = None
+        self.connTime = None
         self._stopped = threading.Event()
 
     def connect(self, host, port, clientId):
@@ -80,6 +84,7 @@ class _EClient:
             _EClient.after_connect()
         # The socket is open now, whatever happened while connect was blocked.
         self.conn = _Conn()
+        self.connTime = _EClient.conn_time
         self._stopped.clear()
 
     def run(self):
@@ -97,7 +102,11 @@ class _EClient:
         if self.conn is not None:
             self.conn.socket = None
         self.conn = None
+        self.connTime = None
         self._stopped.set()
+
+    def twsConnectionTime(self):
+        return self.connTime
 
     def reqCurrentTime(self):
         self.requests.append(("reqCurrentTime",))
@@ -254,6 +263,7 @@ class ForwardingTests(unittest.TestCase):
     def tearDown(self):
         _EClient.connect_gate = None
         _EClient.after_connect = None
+        _EClient.conn_time = b"20261028 02:02:05 EST"
         if _EClient.run_gate is not None:
             _EClient.run_gate.set()
         _EClient.run_gate = None
@@ -273,6 +283,29 @@ class ForwardingTests(unittest.TestCase):
         inbox = Recorder()
         client.connect("127.0.0.1", 4002, 11, inbox, 1.0)
         return client, inbox
+
+    def test_the_connection_time_ibapi_keeps_as_bytes_is_given_as_text(self):
+        # ibapi's handshake keeps the time as the socket's bytes; the zone check
+        # reads text, so a bytes time withheld every morning reading.
+        client, _ = self.build(False)
+        self.assertEqual(client.connection_time(), "20261028 02:02:05 EST")
+        client.disconnect()
+        self.assertIsNone(client.connection_time())
+
+    def test_a_connection_time_already_text_is_given_unchanged(self):
+        _EClient.conn_time = "20261028 02:02:05 EST"
+        client, _ = self.build(False)
+        self.assertEqual(client.connection_time(), "20261028 02:02:05 EST")
+
+    def test_a_connection_time_that_is_not_ascii_text_is_none(self):
+        # Fail closed (AGENTS.md): bytes that are not plain text, or no time at
+        # all, give None, which the zone check refuses.
+        for raw in (b"20261028 02:02:05 \xff\xfeEST", b"20261028 02:02:05 \xc3\xa9", "20261028 02:02:05 \u00e9",
+                    None, 20261028):
+            with self.subTest(raw=raw):
+                _EClient.conn_time = raw
+                client, _ = self.build(False)
+                self.assertIsNone(client.connection_time())
 
     def test_a_late_callback_from_an_old_session_never_reaches_the_new_one(self):
         client, old_inbox = self.build(False)

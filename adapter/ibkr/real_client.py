@@ -490,12 +490,25 @@ class IbapiClient(TWSApi):
 
     def connection_time(self):
         """IB Gateway's connection time for this session, as ibapi keeps it from the connect handshake
-        (EClient.twsConnectionTime), or None with no session or a value that is not text."""
+        (EClient.twsConnectionTime), as text; None with no session or a value that is not ASCII text.
+
+        ibapi's handshake reads the time with comm.read_fields, which splits
+        the socket's bytes, so it keeps bytes, not text; they are decoded here,
+        strictly as ASCII, the only place the adapter reads EClient state
+        rather than a decoded EWrapper callback. Bytes or text that are not
+        ASCII, or any other value, give None, which
+        loop.gateway_zone_problem refuses (AGENTS.md: fail closed).
+        """
         client = self._client
         if client is None or not client.isConnected():
             return None
         text = client.twsConnectionTime()
-        return text if isinstance(text, str) else None
+        if isinstance(text, bytes):
+            try:
+                return text.decode("ascii")
+            except UnicodeDecodeError:
+                return None
+        return text if isinstance(text, str) and text.isascii() else None
 
     def can_place_orders(self):
         """Whether this client may place orders: the sending switch, the paper gate's last check (AGENTS.md rule 5).
