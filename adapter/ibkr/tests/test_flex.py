@@ -1430,6 +1430,79 @@ class ExecutionsTests(ReadOnceHarness):
         self.assertEqual(proof["state"], "set-aside")
         self.assertIn("another Flex reader", proof["reason"])
 
+    def read_instance(self, ledger, clock, service, **kwargs):
+        return flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(ledger), get=service, sleep=clock.sleep,
+                              monotonic=clock, now=kwargs.pop("now", lambda: self.MORNING), err=self.out,
+                              trades_query_id="654321", **kwargs)
+
+    def test_a_reader_killed_after_a_request_still_makes_the_next_wait(self):
+        # Another account's reader asked IBKR at 05:30:00 and was killed before its cooldown: its record of that
+        # request, beside its own ledger, makes this reading wait out the rest of the minute first.
+        other = self.instance("trad-ira")
+        Path(str(other.parent / flex.TOKEN_RECORD_NAME)).write_text(json.dumps(
+            {"last_request": "2027-01-15T10:30:00Z"}) + "\n")
+        ledger = self.instance("boost")
+        clock = FakeClock()
+        start = clock()
+        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(self.read_instance(ledger, clock, service), self.out.getvalue())
+        self.assertGreaterEqual(service.times[0] - start, flex.TOKEN_COOLDOWN)
+
+    def test_each_request_is_recorded_beside_the_readers_own_ledger(self):
+        ledger = self.instance("boost")
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(self.read_instance(ledger, clock, service))
+        record = json.loads(Path(str(ledger.parent / flex.TOKEN_RECORD_NAME)).read_text())
+        self.assertEqual(record, {"last_request": "2027-01-15T10:30:00Z"})
+
+    def test_an_unreadable_record_means_no_wait_and_says_so(self):
+        other = self.instance("trad-ira")
+        Path(str(other.parent / flex.TOKEN_RECORD_NAME)).write_text("not json")
+        ledger = self.instance("boost")
+        clock = FakeClock()
+        start = clock()
+        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(self.read_instance(ledger, clock, service))
+        self.assertLess(service.times[0] - start, flex.TOKEN_COOLDOWN)
+        self.assertIn("cannot be read", self.out.getvalue())
+
+    def test_a_root_that_cannot_be_opened_is_set_aside_at_once_with_its_error(self):
+        ledger = self.instance("roth-ira")
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=("statement.xml",))
+        with unittest.mock.patch.object(flex, "_open_root", side_effect=PermissionError(13, "Permission denied")):
+            self.assertFalse(self.read_instance(ledger, clock, service))
+        self.assertLess(sum(clock.slept), flex.TOKEN_LOCK_POLL)
+        status = json.loads(Path(str(ledger) + flex.STATUS_SUFFIX).read_text())
+        self.assertIn("Permission denied", status["reason"])
+        self.assertNotIn("another Flex reader", status["reason"])
+        self.assertEqual(service.calls, [])
+
+    def test_the_token_is_released_when_a_reading_fails_with_an_error(self):
+        ledger = self.instance("boost")
+        clock = FakeClock()
+
+        def broken(url, params):
+            raise RuntimeError("a defect")
+        with self.assertRaises(RuntimeError):
+            self.read_instance(ledger, clock, broken)
+        root = os.open(str(ledger.parent.parent), os.O_RDONLY)
+        self.addCleanup(os.close, root)
+        fcntl.flock(root, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises if the lock was left held
+        fcntl.flock(root, fcntl.LOCK_UN)
+
+    def test_a_token_wait_that_times_out_says_only_that(self):
+        ledger = self.instance("roth-ira")
+        root = os.open(str(ledger.parent.parent), os.O_RDONLY)
+        self.addCleanup(os.close, root)
+        fcntl.flock(root, fcntl.LOCK_EX)
+        clock = FakeClock()
+        self.assertFalse(self.read_instance(ledger, clock, TimedFlex(clock)))
+        said = self.out.getvalue()
+        self.assertIn("another Flex reader", said)
+        self.assertNotIn("no Trade Confirmation query is named", said)
+
     def test_a_proof_never_reaches_past_an_hour_before_it_was_asked_for(self):
         # IBKR: a new execution is typically in a newly generated Trade Confirmation report within 5 to 10 minutes.
         early = datetime(2027, 1, 15, 5, 30, tzinfo=timezone.utc)

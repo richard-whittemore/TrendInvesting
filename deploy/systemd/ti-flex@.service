@@ -62,8 +62,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Its cash ledger, its costs ledger (costs.jsonl) and its executions proof
-# (executions.json, read by the adapter), in the same folder, and
+# Its cash ledger, its costs ledger (costs.jsonl), its executions proof
+# (executions.json, read by the adapter) and its record of its last request
+# to IBKR (token-last-request.json, read by every account's reader under
+# /var/lib/trend-investing/flex, which they read and hold the Flex token's
+# lock on, never write), in the same folder, and
 # beside them the status, coverage, resolutions and lock files and the .tmp
 # each whole-file write renames over its file, and nothing else.
 ReadWritePaths=/var/lib/trend-investing/flex/%i

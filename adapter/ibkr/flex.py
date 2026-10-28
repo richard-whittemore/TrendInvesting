@@ -284,6 +284,8 @@ TOKEN_LOCK_WAIT = 240
 TOKEN_LOCK_POLL = 5
 # A second past the minute the rate is measured over, so no request of the next holder's is inside it.
 TOKEN_COOLDOWN = 61
+# Each reader's record of its last request, beside its own ledger (_TokenLock).
+TOKEN_RECORD_NAME = "token-last-request.json"
 # IBKR's error codes that say the token, its account or the query is not
 # accepted: the owner's setup must change, so the reading is set aside as
 # rejected. Every other code is the service's own (busy, not ready, a
@@ -655,8 +657,10 @@ class _Pacer:
     """Waits before each request until it keeps IBKR's per-token rate: MIN_REQUEST_GAP after the one before, and no
     more than REQUESTS_PER_MINUTE in any 60 seconds. One pacer serves every request of a reading."""
 
-    def __init__(self, sleep, monotonic):
+    def __init__(self, sleep, monotonic, on_sent=None):
         self._sleep, self._clock, self._sent = sleep, monotonic, deque()
+        # Called after each request is let go, with nothing: the token's record of it (_TokenLock.record).
+        self.on_sent = on_sent
 
     @property
     def last(self):
@@ -681,6 +685,8 @@ class _Pacer:
         self._sent.append(now)
         while len(self._sent) > REQUESTS_PER_MINUTE:
             self._sent.popleft()
+        if self.on_sent is not None:
+            self.on_sent()
 
 
 def token_root(ledger_path):
@@ -688,41 +694,107 @@ def token_root(ledger_path):
     return os.path.dirname(os.path.dirname(os.path.abspath(ledger_path)))
 
 
-class _TokenLock:
-    """The one Flex token's turn across every account's reader (TOKEN_LOCK_WAIT, TOKEN_COOLDOWN)."""
+def _open_root(root):
+    """The Flex state root opened for its lock (a directory opened to read: its flock needs no write)."""
+    return os.open(root, os.O_RDONLY)
 
-    def __init__(self, ledger_path, sleep, monotonic):
-        self._root, self._sleep, self._clock, self._fd = token_root(ledger_path), sleep, monotonic, None
+
+class _TokenLock:
+    """The one Flex token's turn across every account's reader (TOKEN_LOCK_WAIT, TOKEN_COOLDOWN).
+
+    Each reader records the time of its last request (TOKEN_RECORD_NAME, beside its own ledger, the one folder it
+    may write); a reader that takes the token reads every account's record under the root and waits out what is
+    left of TOKEN_COOLDOWN after the latest before its first request, so a reader killed straight after a request
+    still leaves its minute to the next. A record missing or not as written counts as none, and is said."""
+
+    def __init__(self, ledger_path, sleep, monotonic, now, say):
+        self._root, self._sleep, self._clock, self._now, self._say = (token_root(ledger_path), sleep, monotonic,
+                                                                      now, say)
+        self._record = os.path.join(os.path.dirname(os.path.abspath(ledger_path)), TOKEN_RECORD_NAME)
+        self._fd, self._unrecorded = None, False
 
     def acquire(self):
-        """True once held; False after TOKEN_LOCK_WAIT, or when the root cannot be opened (fail closed)."""
+        """(held, why): True and None once held, its cooldown waited out; False and why otherwise: another reader
+        holding it for TOKEN_LOCK_WAIT (TOKEN_BUSY), or the root that cannot be opened or locked, at once."""
         try:
-            fd = os.open(self._root, os.O_RDONLY)
-        except OSError:
-            return False
+            fd = _open_root(self._root)
+        except OSError as err:
+            return False, "the Flex state root {} cannot be opened for the token lock ({}), so this reading asked " \
+                          "IBKR nothing".format(self._root, err.strerror or err)
         deadline = self._clock() + TOKEN_LOCK_WAIT
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self._fd = fd
-                return True
+                break
             except BlockingIOError:
                 if self._clock() >= deadline:
                     os.close(fd)
-                    return False
+                    return False, TOKEN_BUSY
                 self._sleep(TOKEN_LOCK_POLL)
-
-    def release(self, pacer):
-        """Hold on until TOKEN_COOLDOWN after the last request, then let the next reader have the token."""
-        if self._fd is None:
-            return
-        if pacer.last is not None:
-            wait = min(max(TOKEN_COOLDOWN - (self._clock() - pacer.last), 0.0), float(TOKEN_COOLDOWN))  # bounded
+            except OSError as err:
+                os.close(fd)
+                return False, "the Flex state root {} cannot be locked ({}), so this reading asked IBKR " \
+                              "nothing".format(self._root, err.strerror or err)
+        self._fd = fd
+        last = self._latest_record()
+        if last is not None:
+            elapsed = (self._now() - last).total_seconds()
+            wait = min(max(TOKEN_COOLDOWN - elapsed, 0.0), float(TOKEN_COOLDOWN))
             if wait > 0:
                 self._sleep(wait)
-        fcntl.flock(self._fd, fcntl.LOCK_UN)
-        os.close(self._fd)
-        self._fd = None
+        return True, None
+
+    def _latest_record(self):
+        """The latest request time any account's reader recorded under the root, or None."""
+        latest = None
+        try:
+            names = sorted(os.listdir(self._root))
+        except OSError as err:
+            self._say("flex: the Flex token's request records cannot be listed ({}); no wait for them".format(
+                err.strerror or err))
+            return None
+        for name in names:
+            path = os.path.join(self._root, name, TOKEN_RECORD_NAME)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    record = json.load(f)
+                at = _strict_stamp(record["last_request"]) if isinstance(record, dict) else None
+                if at is None or set(record) != {"last_request"}:
+                    raise ValueError("its fields")
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, KeyError, TypeError, UnicodeDecodeError):
+                self._say("flex: the Flex token's request record {} cannot be read; it is taken as none".format(path))
+                continue
+            latest = at if latest is None or at > latest else latest
+        return latest
+
+    def record(self):
+        """Note now as the time of this reader's last request, whole and synced; a failure is said once."""
+        try:
+            _write_whole(self._record, json.dumps({"last_request": _stamp(self._now())}) + "\n")
+        except OSError as err:
+            if not self._unrecorded:
+                self._unrecorded = True
+                self._say("flex: the Flex token's request record {} cannot be written ({})".format(
+                    self._record, err.strerror or err))
+
+    def release(self, pacer):
+        """Hold on until TOKEN_COOLDOWN after the last request, then let the next reader have the token; the
+        descriptor is closed whatever happens."""
+        if self._fd is None:
+            return
+        try:
+            if pacer.last is not None:
+                wait = min(max(TOKEN_COOLDOWN - (self._clock() - pacer.last), 0.0), float(TOKEN_COOLDOWN))
+                if wait > 0:
+                    self._sleep(wait)
+        finally:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
 
 
 TOKEN_BUSY = ("another Flex reader on this server held the Flex token for {} seconds (every account's reader "
@@ -1429,80 +1501,86 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
         # a proof that cannot be written never stops the cash reading (step 5 of the module).
         proof_unwritten = _write_proof(ledger_path, _unfinished_proof(checked_at, account_id), say)
         _write_whole(status_path, _running(checked_at))
-        token_lock = _TokenLock(ledger_path, sleep, monotonic)
-        held = token_lock.acquire()
+        token_lock = _TokenLock(ledger_path, sleep, monotonic, now, say)
+        pacer.on_sent = token_lock.record
+        # The token is let go however the reading ends, its cooldown kept (step 5 of the module).
         try:
-            if not held:
-                raise FlexUnavailable(None, TOKEN_BUSY)
-            ledger = read_ledger(ledger_path)
-            coverage = read_coverage(coverage_path)
-            resolutions = read_resolutions(ledger_path + RESOLUTIONS_SUFFIX)
-            statement = parse_statement(fetch_statement(token, query_id, get=get, sleep=sleep, pacer=pacer),
-                                        account_id)
-            approved_at, snapshots = read_chain(engine_log_path)
-            _check_coverage(statement, coverage, approved_at, now().astimezone(NEW_YORK).date())
-            written, skipped, date_only, resolved = new_movements(statement, ledger, approved_at, snapshots,
-                                                                  resolutions)
-            for transaction_id in resolved:
-                say("flex: transfer {} placed by the owner's recorded decision ({})".format(
-                    transaction_id, resolutions[transaction_id]))
-            for transaction_id, why in skipped:
-                say("flex: transfer {} not written: {}".format(transaction_id, why))
-            for transaction_id in date_only:
-                say("flex: transfer {} is dated by day alone on the first run's approval day, so taken as after "
-                    "the approval and written".format(transaction_id))
-            out_of_order = [r for r in written if "note" in r]
-            for record in out_of_order:
-                say("flex: transfer {} written with the note: {}".format(record["payload"]["transaction_id"],
-                                                                        record["note"]))
-            unknown = {}
-            for posting in statement.postings:
-                if posting.kind == OTHER:
-                    unknown[posting.ibkr_type] = unknown.get(posting.ibkr_type, 0) + 1
-            for ibkr_type, count in sorted(unknown.items()):
-                say("flex: {} posting(s) of type {!r}, which the reader does not classify, not written".format(
-                    count, ibkr_type))
-            if written:
-                kept = ""
-                if ledger:
-                    with open(ledger_path, encoding="utf-8") as f:
-                        kept = f.read()
-                _write_whole(ledger_path, kept + "".join(_line(r) for r in written))
-            # After the ledger: a reading stopped between the two leaves the period behind, which only asks the
-            # next reading to cover more, and a transfer written twice is never possible (its ID is in the ledger).
-            # The statement's last day is read again by the next one (see the module).
-            covered_to = _covered_to(statement, coverage)
-            _write_whole(coverage_path, json.dumps({"from_date": statement.from_date, "covered_to": covered_to},
-                                                   sort_keys=True) + "\n")
-            status.update(written=len(written), period=[statement.from_date, statement.to_date],
-                          covered_to=covered_to, postings=len(statement.postings), in_first_book=len(skipped),
-                          date_only_on_approval_day=len(date_only), resolved=len(resolved),
-                          out_of_order=len(out_of_order), unknown_types=unknown)
-            say("flex: read {} postings for {} to {}; wrote {} cash movement(s)".format(
-                len(statement.postings), statement.from_date, statement.to_date, len(written)))
-            ok = True
-        except (StatementRefused, FlexRejected, FlexUnavailable, ResolveRefused, OSError) as refused:
-            # Each sets the reader aside, named; anything else is a defect and stops the command.
-            status.update(_set_aside(refused, token, account_id))
-            if isinstance(refused, AmbiguousTransfer):
-                status["ambiguous"] = sorted(refused.ids)
-            say("flex: set aside: " + status["reason"])
-            ok = False
-        _write_whole(status_path, json.dumps(status, sort_keys=True) + "\n")
-        # The costs after the cash ledger, its period and its status are final, and in their own step, so a cost
-        # IBKR restates, a costs line not as written or a costs status that cannot be written never stops a
-        # transfer being recorded (ADR 0019: a pending cash read becomes Degraded).
-        costs_status = _read_costs_once(statement, approved_at, status, costs_file, now, say, token, account_id)
-        try:
-            _write_whole(costs_file + STATUS_SUFFIX, json.dumps(costs_status, sort_keys=True) + "\n")
-        except OSError as unwritten:
-            say("flex: the costs status cannot be written: " + str(unwritten))
-            ok = False
-        proof = _read_executions_once(status, trades_query_id if held else None, token, account_id, get, sleep, now,
-                                      say, pacer)
-        if not held:
-            proof.update(state=PROOF_SET_ASIDE, code=None, reason=TOKEN_BUSY)
-        token_lock.release(pacer)
+            held, busy = token_lock.acquire()
+            try:
+                if not held:
+                    raise FlexUnavailable(None, busy)
+                ledger = read_ledger(ledger_path)
+                coverage = read_coverage(coverage_path)
+                resolutions = read_resolutions(ledger_path + RESOLUTIONS_SUFFIX)
+                statement = parse_statement(fetch_statement(token, query_id, get=get, sleep=sleep, pacer=pacer),
+                                            account_id)
+                approved_at, snapshots = read_chain(engine_log_path)
+                _check_coverage(statement, coverage, approved_at, now().astimezone(NEW_YORK).date())
+                written, skipped, date_only, resolved = new_movements(statement, ledger, approved_at, snapshots,
+                                                                      resolutions)
+                for transaction_id in resolved:
+                    say("flex: transfer {} placed by the owner's recorded decision ({})".format(
+                        transaction_id, resolutions[transaction_id]))
+                for transaction_id, why in skipped:
+                    say("flex: transfer {} not written: {}".format(transaction_id, why))
+                for transaction_id in date_only:
+                    say("flex: transfer {} is dated by day alone on the first run's approval day, so taken as after "
+                        "the approval and written".format(transaction_id))
+                out_of_order = [r for r in written if "note" in r]
+                for record in out_of_order:
+                    say("flex: transfer {} written with the note: {}".format(record["payload"]["transaction_id"],
+                                                                            record["note"]))
+                unknown = {}
+                for posting in statement.postings:
+                    if posting.kind == OTHER:
+                        unknown[posting.ibkr_type] = unknown.get(posting.ibkr_type, 0) + 1
+                for ibkr_type, count in sorted(unknown.items()):
+                    say("flex: {} posting(s) of type {!r}, which the reader does not classify, not written".format(
+                        count, ibkr_type))
+                if written:
+                    kept = ""
+                    if ledger:
+                        with open(ledger_path, encoding="utf-8") as f:
+                            kept = f.read()
+                    _write_whole(ledger_path, kept + "".join(_line(r) for r in written))
+                # After the ledger: a reading stopped between the two leaves the period behind, which only asks the
+                # next reading to cover more, and a transfer written twice is never possible (its ID is in the ledger).
+                # The statement's last day is read again by the next one (see the module).
+                covered_to = _covered_to(statement, coverage)
+                _write_whole(coverage_path, json.dumps({"from_date": statement.from_date, "covered_to": covered_to},
+                                                       sort_keys=True) + "\n")
+                status.update(written=len(written), period=[statement.from_date, statement.to_date],
+                              covered_to=covered_to, postings=len(statement.postings), in_first_book=len(skipped),
+                              date_only_on_approval_day=len(date_only), resolved=len(resolved),
+                              out_of_order=len(out_of_order), unknown_types=unknown)
+                say("flex: read {} postings for {} to {}; wrote {} cash movement(s)".format(
+                    len(statement.postings), statement.from_date, statement.to_date, len(written)))
+                ok = True
+            except (StatementRefused, FlexRejected, FlexUnavailable, ResolveRefused, OSError) as refused:
+                # Each sets the reader aside, named; anything else is a defect and stops the command.
+                status.update(_set_aside(refused, token, account_id))
+                if isinstance(refused, AmbiguousTransfer):
+                    status["ambiguous"] = sorted(refused.ids)
+                say("flex: set aside: " + status["reason"])
+                ok = False
+            _write_whole(status_path, json.dumps(status, sort_keys=True) + "\n")
+            # The costs after the cash ledger, its period and its status are final, and in their own step, so a cost
+            # IBKR restates, a costs line not as written or a costs status that cannot be written never stops a
+            # transfer being recorded (ADR 0019: a pending cash read becomes Degraded).
+            costs_status = _read_costs_once(statement, approved_at, status, costs_file, now, say, token, account_id)
+            try:
+                _write_whole(costs_file + STATUS_SUFFIX, json.dumps(costs_status, sort_keys=True) + "\n")
+            except OSError as unwritten:
+                say("flex: the costs status cannot be written: " + str(unwritten))
+                ok = False
+            if held:
+                proof = _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say, pacer)
+            else:
+                proof = {"state": PROOF_SET_ASIDE, "checked_at": checked_at, "account_id": account_id, "code": None,
+                         "reason": busy}
+                say("flex: executions proof set aside: " + busy)
+        finally:
+            token_lock.release(pacer)
         if _write_proof(ledger_path, json.dumps(proof, sort_keys=True) + "\n", say) or proof_unwritten:
             return False
     return ok and costs_status["state"] == "read" and proof["state"] != PROOF_SET_ASIDE
