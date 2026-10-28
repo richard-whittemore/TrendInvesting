@@ -20,26 +20,29 @@
 // search only, its page being a script). That is the Client Portal login; IBKR
 // publishes no separate figure for the Gateway's API login, so the same is
 // assumed. The owner's own failed web attempts count against it too, so the
-// bound is 3 refused logins within 24 hours.
+// bound is 3 attempts within 24 hours.
 //
-// The count is a file of epoch-second lines, one per exec of IBC since the
-// last accepted login: each is written, file and directory synced, BEFORE IBC
-// is launched, so a crash between the login and the parse of its refusal still
-// counts. A start where no line of IBC's is ever read (xvfb-run without
-// ibcstart.sh) gives its attempt back. A completed login, or the prompt for the
-// second factor (IBKR has accepted the credentials), resets the count to ONE
-// reserved attempt, on disk, for a relogin IBC may make by itself (the nightly
-// or Sunday restart): its refusal is already counted if this program dies
-// before reading it. IBC's output goes to the journal one line at a time,
-// synchronously, after the count is settled; a journal that takes nothing for
-// SinkTimeout fails the run closed (77) rather than queueing or dropping
-// anything. A count that cannot be read, trusted or written fails closed: the
-// program exits 77 without launching IBC, since an unknown history cannot
-// authorise another try. Exit codes: 75 = a refused login was seen and the
-// bound is not reached (the unit restarts); 77 = retries stopped, always saying
-// "login retries stopped" for the health check to recognise (the unit does not
-// restart); the renderer's own codes (64, 65, 78) are passed on; otherwise
-// IBC's own status.
+// The count is a file of epoch-second lines, one per attempt in the last 24
+// hours. Every exec of IBC is one attempt, written to disk (file and directory
+// synced) BEFORE IBC starts, whether or not it got as far as a login; a
+// completed login, or the prompt for the second factor (IBKR has accepted the
+// credentials), clears them. A refusal after such a login in the same run (the
+// nightly or Sunday restart, a second-factor relogin) is a new attempt, written
+// when it is seen; if this program dies between seeing it and writing it the
+// next start counts anyway, so the bound is loose by at most one. At 3 attempts
+// the program exits 77. A count that cannot be read, trusted or written fails
+// closed the same way, without launching IBC.
+//
+// Every write to the journal is bounded. A journal that errs, writes short or
+// takes nothing for SinkTimeout stops IBC and exits 75, so the unit starts
+// again: the bound above does not depend on the journal, so this heals.
+//
+// Exit codes: 75 = stop IBC and start again (a refusal below the bound, or a
+// journal that failed); 77 = retries stopped, always saying "login retries
+// stopped" for the health check to recognise (the unit does not restart); 70 =
+// IBC could not be started (restarted); the renderer's own codes (64, 65, 78)
+// are passed on, each with a "cannot start IBC" line; otherwise IBC's own
+// status.
 package main
 
 import (
@@ -81,6 +84,7 @@ type config struct {
 	DrainDeadline time.Duration  // how long output is read after the child ends
 	SinkTimeout   time.Duration  // how long one write to the journal may take before the run fails closed
 	Now           func() time.Time
+	Warnings      []string // settings that were invalid, reported through the same bounded journal writes
 }
 
 const (
@@ -232,16 +236,54 @@ func writeDurable(path string, data []byte) error {
 	return syncFile(dir)
 }
 
-// lockedWriter serialises writes from the output reader and the main flow.
-type lockedWriter struct {
-	mu sync.Mutex
-	w  io.Writer
+// journal is where this program and IBC's output are written: every write has
+// a bound, so a journal that takes nothing cannot hold the starter, and a write
+// that errs, or is short, or misses the bound is reported to the caller.
+type journal struct {
+	mu      sync.Mutex // one write at a time to the underlying writer
+	w       io.Writer
+	timeout time.Duration
+	dead    atomic.Bool
 }
 
-func (l *lockedWriter) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.w.Write(p)
+// write returns an error when the journal failed this line; once it has missed
+// the bound it is not tried again (a blocked write would still be in flight).
+func (j *journal) write(text string) error {
+	if j.dead.Load() {
+		return errors.New("the journal is not taking output")
+	}
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		n, err := io.WriteString(j.w, text)
+		done <- result{n, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return r.err
+		}
+		if r.n < len(text) {
+			return io.ErrShortWrite
+		}
+		return nil
+	case <-time.After(j.timeout):
+		j.dead.Store(true)
+		return fmt.Errorf("the journal took nothing for %s", j.timeout)
+	}
+}
+
+// boundedWriter lets a child's output (the renderer's) go through a journal.
+type boundedWriter struct{ j *journal }
+
+func (b boundedWriter) Write(p []byte) (int, error) {
+	_ = b.j.write(string(p))
+	return len(p), nil
 }
 
 type verdict struct {
@@ -270,42 +312,32 @@ func (s *verdictState) get() *verdict {
 	return s.v
 }
 
+// run starts IBC and supervises it. The rule in one sentence: every exec of
+// IBC is one attempt, written to disk before it starts, and a completed login
+// clears them; a refusal after a completed login in the same run is a new
+// attempt, written when it is seen.
 func run(cfg config, stdout, stderr io.Writer) int {
-	errw := &lockedWriter{w: stderr}
-	// say reports to the journal too, with the same bound: a journal that takes
-	// nothing must not hold the exit, and after one refusal it is not tried again.
-	var sayDead atomic.Bool
-	say := func(format string, a ...any) {
-		if sayDead.Load() {
-			return
-		}
-		msg := fmt.Sprintf("gateway-start: "+format+"\n", a...)
-		done := make(chan struct{})
-		go func() {
-			_, _ = io.WriteString(errw, msg)
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(cfg.SinkTimeout):
-			sayDead.Store(true)
-		}
-	}
-	stopped := func(format string, a ...any) int {
-		say(stopPhrase+": "+format, a...)
-		return exitStopped
-	}
 	if cfg.Accepted == nil {
 		cfg.Accepted = regexp.MustCompile(defaultAccepted)
 	}
 	if cfg.SinkTimeout <= 0 {
 		cfg.SinkTimeout = defaultSink
 	}
+	out := &journal{w: stdout, timeout: cfg.SinkTimeout}
+	errj := &journal{w: stderr, timeout: cfg.SinkTimeout}
+	say := func(format string, a ...any) { _ = errj.write(fmt.Sprintf("gateway-start: "+format+"\n", a...)) }
+	stopped := func(format string, a ...any) int {
+		say(stopPhrase+": "+format, a...)
+		return exitStopped
+	}
+	for _, w := range cfg.Warnings {
+		say("%s", w)
+	}
 
 	if len(cfg.Render) > 0 {
 		//nolint:gosec // G204: the renderer is the unit's own installed script (TI_GATEWAY_RENDER only in the rehearsal), with no argument from outside.
 		r := exec.Command(cfg.Render[0], cfg.Render[1:]...)
-		r.Stdout, r.Stderr = stdout, errw
+		r.Stdout, r.Stderr = boundedWriter{out}, boundedWriter{errj}
 		if err := r.Run(); err != nil {
 			var ee *exec.ExitError
 			if errors.As(err, &ee) && ee.ExitCode() > 0 {
@@ -331,25 +363,20 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	if n >= cfg.Max {
 		return stopped("%d login attempts within the last %d hours without an accepted login; not starting IBC so the IBKR login cannot be locked. Check the paper login on the IBKR website, then delete %s and start the unit", n, int(cfg.Window/time.Hour), cfg.StateFile)
 	}
-	// The attempt is recorded before IBC is launched. A count that cannot be
-	// written cannot bound anything.
-	if err := writeDurable(cfg.StateFile, append(raw, []byte(strconv.FormatInt(cfg.Now().Unix(), 10)+"\n")...)); err != nil {
+	attempt := func(existing []byte) []byte {
+		return append(existing, []byte(strconv.FormatInt(cfg.Now().Unix(), 10)+"\n")...)
+	}
+	// The attempt is on disk before IBC starts. A count that cannot be written
+	// cannot bound anything.
+	if err := writeDurable(cfg.StateFile, attempt(raw)); err != nil {
 		return stopped("%s cannot be written (%v), so login attempts could not be counted; not starting IBC so the IBKR login cannot be locked", cfg.StateFile, err)
 	}
-
 	say("starting IBC (login attempt %d of %d within the window)", n+1, cfg.Max)
-	// Only an exec of IBC that actually ran is an attempt: a start that fails
-	// before it gives its count back.
-	giveBack := func() int {
-		if err := writeDurable(cfg.StateFile, raw); err != nil {
-			return stopped("the attempt of a start that never ran IBC could not be given back (%v), so the count may be one too high; not starting IBC", err)
-		}
-		return exitInternal
-	}
+
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		say("cannot start IBC: no pipe for its output: %v", err)
-		return giveBack()
+		return exitInternal
 	}
 	//nolint:gosec // G204: IBC's command is built from the unit's environment (GATEWAY_MAJOR, RUNTIME_DIRECTORY) or TI_GATEWAY_IBC in the rehearsal, never from IBC's output.
 	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)
@@ -358,7 +385,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		_ = pr.Close()
 		_ = pw.Close()
 		say("cannot start IBC: %v", err)
-		return giveBack()
+		return exitInternal
 	}
 	_ = pw.Close()
 
@@ -371,35 +398,12 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		final.set(v)
 		once.Do(func() { close(stopCh) })
 	}
-	// IBC has run once any of its lines has been read; a child that ends before
-	// that (xvfb-run without IBC) gives its attempt back.
-	var proved atomic.Bool
-	// toJournal writes one line to the journal, synchronously, and fails the
-	// run closed when the journal stops taking output: nothing is queued, so
-	// nothing is dropped or grows, and the count is already on disk.
-	sinkDead := false
-	toJournal := func(text string) {
-		if sinkDead {
-			return
-		}
-		done := make(chan struct{})
-		go func() {
-			_, _ = io.WriteString(stdout, text)
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(cfg.SinkTimeout):
-			sinkDead = true
-			stop(verdict{exitStopped, stopPhrase + ": the journal has not taken IBC's output for " + cfg.SinkTimeout.String() + ", so what IBC reports cannot be recorded; stopping IBC and not retrying"})
-		}
-	}
 
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
 		br := bufio.NewReaderSize(pr, maxLine)
-		seen := false
+		seen, relogin := false, false
 		for {
 			line, err := br.ReadSlice('\n')
 			if errors.Is(err, bufio.ErrBufferFull) {
@@ -411,37 +415,39 @@ func run(cfg config, stdout, stderr io.Writer) int {
 			if len(line) > 0 {
 				text := string(line)
 				trimmed := strings.TrimRight(text, "\r\n")
-				accepted, refused := cfg.Accepted.MatchString(trimmed), cfg.Pattern.MatchString(trimmed)
-				if accepted || refused || strings.Contains(trimmed, "IBC: ") {
-					proved.Store(true)
-				}
-				// The count is settled on disk BEFORE the line is passed on or
-				// any decision is taken.
-				if accepted {
-					// IBKR accepted the login. One attempt stays reserved, on disk,
-					// for a relogin IBC may make by itself (the nightly or Sunday
-					// restart, a second-factor relogin): its refusal is counted
-					// even if this process dies before reading it.
-					if err := writeDurable(cfg.StateFile, []byte(strconv.FormatInt(cfg.Now().Unix(), 10)+"\n")); err != nil {
-						say("the login attempts could not be confirmed reset after the accepted login (%v); the count may be the old one or the reserved one", err)
+				// The count is settled on disk BEFORE the line goes to the journal
+				// or any decision is taken.
+				if cfg.Accepted.MatchString(trimmed) {
+					if err := writeDurable(cfg.StateFile, nil); err != nil {
+						say("the login attempts could not be confirmed cleared after the accepted login (%v); the count may still hold the old attempts", err)
 					}
-					seen = false
+					relogin, seen = true, false
 				}
-				if !seen && refused {
+				if !seen && cfg.Pattern.MatchString(trimmed) {
 					seen = true
-					count, _, cerr := loadCount(cfg.StateFile, cfg.Now(), cfg.Window)
+					count, existing, cerr := loadCount(cfg.StateFile, cfg.Now(), cfg.Window)
+					if cerr == nil && relogin {
+						// IBC logged in again by itself and was refused: its own attempt.
+						cerr = writeDurable(cfg.StateFile, attempt(existing))
+						count++
+					}
 					switch {
 					case cerr != nil:
-						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": the login count cannot be read (%v); stopping IBC and not retrying", cerr)})
+						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": the login count cannot be kept (%v); stopping IBC and not retrying", cerr)})
 					case count >= cfg.Max:
 						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": %d of %d login attempts within the window were refused; stopping IBC and not retrying", count, cfg.Max)})
 					default:
 						stop(verdict{exitRetry, fmt.Sprintf("IBC reports a refused login (attempt %d of %d within the window); stopping IBC so the unit starts it again", count, cfg.Max)})
 					}
 				}
-				toJournal(text)
-				if !strings.HasSuffix(text, "\n") {
-					toJournal("\n")
+				werr := out.write(text)
+				if werr == nil && !strings.HasSuffix(text, "\n") {
+					werr = out.write("\n")
+				}
+				if werr != nil {
+					// The bound on attempts does not depend on the journal, so a
+					// journal that fails is a restartable stop, which heals.
+					stop(verdict{exitRetry, fmt.Sprintf("the journal is not taking IBC's output (%v), so what IBC reports cannot be recorded; stopping IBC so the unit starts it again", werr)})
 				}
 			}
 			if err != nil {
@@ -497,13 +503,13 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	}
 
 	// Everything IBC wrote is read: the pipe's buffered data first, then an end
-	// at EOF, or at the deadline when an orphan of IBC still holds the pipe
-	// (the attempt was counted before launch, so what an orphan writes later
-	// cannot lift the bound).
+	// at EOF, or at the deadline when an orphan of IBC still holds the pipe.
+	// The reader may be inside a journal write, which the sink bound limits, so
+	// the wait covers one such write too.
 	_ = pr.SetReadDeadline(time.Now().Add(cfg.DrainDeadline))
 	select {
 	case <-readerDone:
-	case <-time.After(cfg.DrainDeadline + 2*time.Second):
+	case <-time.After(cfg.DrainDeadline + cfg.SinkTimeout + 2*time.Second):
 		stop(verdict{exitStopped, stopPhrase + ": the output reader did not finish; the refusal may be unseen, so not retrying"})
 	}
 	_ = pr.Close()
@@ -511,14 +517,6 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	if v := final.get(); v != nil {
 		say("%s", v.msg)
 		return v.code
-	}
-	if !proved.Load() {
-		// The child ended without one line of IBC's: IBC never ran (xvfb-run
-		// without ibcstart.sh), so this start was no login attempt.
-		if code := giveBack(); code != exitInternal {
-			return code
-		}
-		say("cannot start IBC: the child ended without IBC having run; the attempt was given back")
 	}
 	var ee *exec.ExitError
 	switch {
@@ -539,8 +537,6 @@ func run(cfg config, stdout, stderr io.Writer) int {
 
 func main() {
 	cfg, warn := configFromEnv(os.Getenv)
-	for _, w := range warn {
-		_, _ = fmt.Fprintln(os.Stderr, "gateway-start:", w)
-	}
+	cfg.Warnings = warn
 	os.Exit(run(cfg, os.Stdout, os.Stderr))
 }

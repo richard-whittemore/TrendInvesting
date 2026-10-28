@@ -164,9 +164,8 @@ func TestACompletedLoginEmptiesTheCount(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, want IBC's own 0", code)
 	}
-	// One attempt stays reserved for a relogin IBC may make by itself.
-	if got := r.counter(); len(got) != 1 {
-		t.Fatalf("count %v after a completed login, want the 1 reserved", got)
+	if got := r.counter(); len(got) != 0 {
+		t.Fatalf("count %v after a completed login, want empty", got)
 	}
 }
 
@@ -324,8 +323,8 @@ func TestASecondFactorPromptClearsTheCount(t *testing.T) {
 	r := newRig(t)
 	r.seed(r.now.Add(-time.Hour), r.now.Add(-2*time.Hour))
 	code, _ := r.run(r.cfg(`echo "IBC: detected dialog entitled: Second Factor Authentication; event=Opened"; exit 1`))
-	if code != 1 || len(r.counter()) != 1 {
-		t.Fatalf("exit %d with count %v, want IBC's 1 and the 1 reserved", code, r.counter())
+	if code != 1 || len(r.counter()) != 0 {
+		t.Fatalf("exit %d with count %v, want IBC's 1 and an empty count", code, r.counter())
 	}
 }
 
@@ -361,24 +360,6 @@ func TestEveryMessageAtTheBoundSaysTheCheckedPhrase(t *testing.T) {
 	_, out := r.run(r.cfg(`echo "` + refusal + `"; exit 0`))
 	if !strings.Contains(out, "login retries stopped") {
 		t.Fatalf("%s", out)
-	}
-}
-
-// Only an exec of IBC that actually ran is an attempt: a start that fails
-// before launching IBC gives its count back, so a persistent start failure
-// never turns into a permanent stop.
-func TestAStartThatNeverRanIBCGivesItsAttemptBack(t *testing.T) {
-	r := newRig(t)
-	r.seed(r.now.Add(-time.Hour))
-	c := r.cfg(`exit 0`)
-	c.Command = []string{filepath.Join(r.dir, "missing")}
-	for i := 0; i < 5; i++ {
-		if code, out := r.run(c); code != 70 {
-			t.Fatalf("start %d: exit %d, want 70 every time: %s", i+1, code, out)
-		}
-	}
-	if got := len(r.counter()); got != 1 {
-		t.Fatalf("%d attempts after five starts that never ran IBC, want the 1 seeded", got)
 	}
 }
 
@@ -437,48 +418,9 @@ func TestEveryExitThatLeavesTheUnitDownSaysCannotStartIBC(t *testing.T) {
 	}
 }
 
-// A relogin by IBC itself, after an accepted login, is reserved before IBC can
-// make it: the counter is never empty while IBC runs, so a crash before the
-// refusal is read still counts.
-func TestAnAcceptedLoginLeavesAnAttemptReservedForARelogin(t *testing.T) {
-	r := newRig(t)
-	marker := filepath.Join(r.dir, "reserved")
-	code, _ := r.run(r.cfg(`echo "IBC: Login has completed"; sleep 1; if [ -s ` + r.state + ` ]; then echo yes >` + marker + `; fi; exit 0`))
-	if code != 0 {
-		t.Fatalf("exit %d", code)
-	}
-	if raw, _ := os.ReadFile(marker); !strings.Contains(string(raw), "yes") {
-		t.Fatal("the counter was empty after the accepted login: a relogin's refusal would go uncounted across a crash")
-	}
-}
-
-// xvfb-run ran but IBC never did (ibcstart.sh missing): no IBC line proves a
-// login was submitted, so the attempt is given back.
-func TestAWrapperThatExitsBeforeIBCRunsGivesTheAttemptBack(t *testing.T) {
-	r := newRig(t)
-	r.seed(r.now.Add(-time.Hour))
-	for i := 0; i < 5; i++ {
-		code, _ := r.run(r.cfg(`echo "xvfb-run: error: /opt/ibc/scripts/ibcstart.sh: No such file or directory" >&2; exit 127`))
-		if code != 127 {
-			t.Fatalf("start %d: exit %d, want the wrapper's 127 each time", i+1, code)
-		}
-	}
-	if got := len(r.counter()); got != 1 {
-		t.Fatalf("%d attempts after five wrapper failures, want the 1 seeded", got)
-	}
-}
-
-func TestAnIBCLineProvesALoginWasSubmittedSoAnExitKeepsTheAttempt(t *testing.T) {
-	r := newRig(t)
-	code, _ := r.run(r.cfg(`echo "IBC: Starting Gateway"; exit 1`))
-	if code != 1 || len(r.counter()) != 1 {
-		t.Fatalf("exit %d with %d attempts, want 1 and 1", code, len(r.counter()))
-	}
-}
-
 // A journal that stops draining fails the run closed (the count is already
 // on disk): nothing is queued, nothing is dropped.
-func TestAStuckJournalFailsTheRunClosedWithTheCountOnDisk(t *testing.T) {
+func TestAStuckJournalStopsIBCAndAsksForARestartWithTheCountOnDisk(t *testing.T) {
 	r := newRig(t)
 	b := blockedWriter{release: make(chan struct{})}
 	defer close(b.release)
@@ -488,8 +430,8 @@ func TestAStuckJournalFailsTheRunClosedWithTheCountOnDisk(t *testing.T) {
 	go func() { done <- run(c, b, &bytes.Buffer{}) }()
 	select {
 	case code := <-done:
-		if code != 77 || len(r.counter()) != 1 {
-			t.Fatalf("exit %d with %d attempts, want 77 with 1", code, len(r.counter()))
+		if code != 75 || len(r.counter()) != 1 {
+			t.Fatalf("exit %d with %d attempts, want 75 (restartable) with 1", code, len(r.counter()))
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("a stuck journal held the run")
@@ -532,7 +474,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestTheExecutableWithAJournalNobodyReadsExits77WithTheCountOnDisk(t *testing.T) {
+func TestTheExecutableWithAJournalNobodyReadsExits75WithTheCountOnDisk(t *testing.T) {
 	r := newRig(t)
 	script := filepath.Join(r.dir, "ibc.sh")
 	body := "#!/bin/sh\nhead -c 400000 /dev/zero | tr '\\0' x | fold -w 200\necho \"" + refusal + "\"\nsleep 60\n"
@@ -561,8 +503,8 @@ func TestTheExecutableWithAJournalNobodyReadsExits77WithTheCountOnDisk(t *testin
 	select {
 	case err := <-done:
 		var ee *exec.ExitError
-		if !errors.As(err, &ee) || ee.ExitCode() != 77 {
-			t.Fatalf("exit %v, want 77", err)
+		if !errors.As(err, &ee) || ee.ExitCode() != 75 {
+			t.Fatalf("exit %v, want 75", err)
 		}
 	case <-time.After(60 * time.Second):
 		_ = cmd.Process.Kill()
@@ -570,5 +512,114 @@ func TestTheExecutableWithAJournalNobodyReadsExits77WithTheCountOnDisk(t *testin
 	}
 	if got := len(r.counter()); got != 1 {
 		t.Fatalf("%d attempts on disk, want 1", got)
+	}
+}
+
+// Every exec costs an attempt, whether or not IBC got as far as a login: a
+// start that fails, or a wrapper that ends before IBC, spends one. Simple and
+// fail-closed; the page says "attempts".
+func TestEveryExecCostsAnAttemptEvenWhenIBCNeverRan(t *testing.T) {
+	r := newRig(t)
+	r.seed(r.now.Add(-time.Hour))
+	c := r.cfg(`echo "xvfb-run: error: ibcstart.sh: No such file or directory" >&2; exit 127`)
+	for i, want := range []int{127, 127, 77} {
+		if code, out := r.run(c); code != want {
+			t.Fatalf("start %d: exit %d, want %d: %s", i+1, code, want, out)
+		}
+	}
+	c.Command = []string{filepath.Join(r.dir, "missing")}
+	r2 := newRig(t)
+	c.StateFile = r2.state
+	for i, want := range []int{70, 70, 70, 77} {
+		if code, out := r2.run(c); code != want {
+			t.Fatalf("missing command, start %d: exit %d, want %d: %s", i+1, code, want, out)
+		}
+	}
+}
+
+// A write that errs, or takes only part of a line, is a failed journal.
+type failingWriter struct{ short bool }
+
+func (w failingWriter) Write(p []byte) (int, error) {
+	if w.short {
+		return len(p) / 2, nil
+	}
+	return 0, errors.New("broken pipe")
+}
+
+func TestAJournalWriteThatErrsOrIsShortStopsIBCAndAsksForARestart(t *testing.T) {
+	for name, w := range map[string]failingWriter{"error": {}, "short write": {short: true}} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			code := run(r.cfg(`echo "IBC: Starting Gateway"; sleep 30`), w, &bytes.Buffer{})
+			if code != 75 {
+				t.Fatalf("exit %d, want 75", code)
+			}
+		})
+	}
+}
+
+// A journal that is slow (not stuck) when IBC exits does not turn a
+// restartable exit into a permanent stop: the drain waits out the sink bound.
+type slowOnce struct {
+	mu   sync.Mutex
+	done bool
+}
+
+func (w *slowOnce) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	first := !w.done
+	w.done = true
+	w.mu.Unlock()
+	if first {
+		time.Sleep(3 * time.Second)
+	}
+	return len(p), nil
+}
+
+func TestASlowJournalAtExitDoesNotTurnARestartIntoAStop(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`echo "IBC: second factor timed out"; exit 3`)
+	c.DrainDeadline, c.SinkTimeout = time.Second, 10*time.Second
+	if code := run(c, &slowOnce{}, &bytes.Buffer{}); code != 3 {
+		t.Fatalf("exit %d, want IBC's own 3", code)
+	}
+}
+
+// A refusal after an accepted login in the same run is its own attempt,
+// recorded when it is seen with its own time.
+func TestAReloginsRefusalIsRecordedAtTheTimeItIsSeen(t *testing.T) {
+	r := newRig(t)
+	times := []time.Time{r.now, r.now.Add(time.Hour)}
+	i := 0
+	c := r.cfg(`echo "IBC: Login has completed"; sleep 1; echo "` + refusal + `"; sleep 30`)
+	c.Now = func() time.Time { // the start, then everything after it an hour later
+		defer func() {
+			if i < len(times)-1 {
+				i++
+			}
+		}()
+		return times[i]
+	}
+	code, _ := r.run(c)
+	got := r.counter()
+	if code != 75 || len(got) != 1 || got[0] != strconv.FormatInt(times[1].Unix(), 10) {
+		t.Fatalf("exit %d, count %v, want 75 and one attempt at the refusal's time %d", code, got, times[1].Unix())
+	}
+}
+
+func TestTheStartersWarningsAreBoundedByTheSink(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`exit 0`)
+	c.Warnings = []string{"TI_GATEWAY_STOP_DEADLINE=\"x\" is not a whole number"}
+	c.SinkTimeout = time.Second
+	b := blockedWriter{release: make(chan struct{})}
+	defer close(b.release)
+	done := make(chan int, 1)
+	go func() { done <- run(c, &bytes.Buffer{}, b) }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("a journal that takes nothing held the starter at its warnings")
 	}
 }

@@ -773,3 +773,39 @@ func TestANewOutageWhileAResolveIsPendingPagesEveryChannelAtOnce(t *testing.T) {
 		}
 	}
 }
+
+// A brief second outage that recovers inside its grace period does not discard
+// the first outage's pending resolution: it is retried at the recovery.
+func TestABriefSecondOutageDoesNotDiscardAPendingResolution(t *testing.T) {
+	f := &refusingResolve{relay: &relay{sent: map[string][]string{}}}
+	g := newStandInGateway(t)
+	g.logout()
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.ibc(stamp(tuesday(14, 12), ibcCompleted))
+	_ = gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, 15)) // the resolve fails
+	g.ibc(stamp(tuesday(14, 16), ibcCompleted), stamp(tuesday(14, 17), ibcRefused))
+	if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, 20)); err != nil { // out again, in its grace
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.allow = true
+	f.mu.Unlock()
+	g.ibc(stamp(tuesday(14, 21), ibcCompleted))
+	if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, 25)); err != nil {
+		t.Fatal(err)
+	}
+	resolved := 0
+	for _, m := range f.to("events.pagerduty.test") {
+		if strings.Contains(m, `"event_action":"resolve"`) {
+			resolved++
+		}
+	}
+	if resolved != 1 {
+		t.Fatalf("%d resolves, want the pending one delivered at the recovery", resolved)
+	}
+}

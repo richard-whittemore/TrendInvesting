@@ -230,13 +230,6 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 		h.Resolving = deliveredAnywhere(seen, key)
 		return errors.Join(resolveErr, record())
 	}
-	if h.Resolving {
-		// A new outage while an earlier recovery is still being resolved: the
-		// channel that never took that resolution would otherwise hold a
-		// receipt for the old incident and stay silent, so the receipts go.
-		forgetAlert(key, map[string]bool{}, seen, sent, repeats)
-		h.Resolving = false
-	}
 	if h.Since == nil {
 		t := now
 		h.Since = &t
@@ -246,6 +239,14 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 	}
 	if sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter {
 		return nil
+	}
+	if h.Resolving {
+		// The new outage is due its page while an earlier recovery's resolution
+		// is still pending: the channel that never took that resolution holds a
+		// receipt for the old incident and would stay silent, so the receipts go
+		// now. Until here a recovery still retries the pending resolution.
+		forgetAlert(key, map[string]bool{}, seen, sent, repeats)
+		h.Resolving = false
 	}
 	return deliver(senders, report.GatewayLoggedOutAlert(host, *h.Since, now, said), seen, sent, repeats, now, gatewayRemindEvery, record)
 }
