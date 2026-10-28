@@ -19,7 +19,7 @@ arrives as a changed openOrder, which needs the order this adapter sent to
 compare against, and there is no sending path yet.
 """
 from collections import deque, namedtuple
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -154,14 +154,11 @@ def order_key(client_id, order_id, perm_id):
 # New York's zone, and the names IB Gateway gives its time in when its login is on New York time: a zone name, or
 # an Eastern label (an abbreviation or its long name). IBKR's label does not follow daylight saving time (IB Gateway
 # 10.50 on TZ=America/New_York gave "EST" at 09:49:19 EDT on 2026-10-28), so none is taken to say which season it is:
-# each is read on New York's clock once the Gateway's clock is shown to be New York's at its connect
-# (loop.gateway_clock_problem), and until then at the latest instant its label allows (ADR 0019, amended 2026-10-28).
+# each is read on New York's clock, and an execution's time is believed only once the Gateway's clock is shown to be
+# New York's at its connect (loop.gateway_clock_problem; ADR 0019, amended 2026-10-28).
 NEW_YORK = ZoneInfo("America/New_York")
 NEW_YORK_ZONES = frozenset(("US/Eastern", "America/New_York", "EST5EDT"))
-# Each Eastern label, and the fixed offset a Gateway's clock may be on while it gives that label.
-EASTERN_LABEL_OFFSETS = {"EST": timezone(timedelta(hours=-5)), "Eastern Standard Time": timezone(timedelta(hours=-5)),
-                         "EDT": timezone(timedelta(hours=-4)), "Eastern Daylight Time": timezone(timedelta(hours=-4))}
-EASTERN_LABELS = frozenset(EASTERN_LABEL_OFFSETS)
+EASTERN_LABELS = frozenset(("EST", "EDT", "Eastern Standard Time", "Eastern Daylight Time"))
 
 
 def new_york_instants(local):
@@ -182,7 +179,13 @@ def gateway_clock_trusted(conn):
     return offset is not None and conn.now_utc().astimezone(NEW_YORK).utcoffset() == offset
 
 
-def parse_execution_time(text, clock_trusted=False):
+def unverified_receipt(conn):
+    """conn's receipt time (Connection.now_utc) while its Gateway's clock is not shown to be New York's
+    (gateway_clock_trusted), for execution_report to stamp an execution with; None while it is."""
+    return None if gateway_clock_trusted(conn) else conn.now_utc()
+
+
+def parse_execution_time(text):
     """Read IBKR's execution time ("YYYYMMDD HH:MM:SS Zone") as a UTC datetime.
 
     A time without a zone is refused: it is in whatever zone the Gateway's
@@ -190,13 +193,10 @@ def parse_execution_time(text, clock_trusted=False):
     or an Eastern label (NEW_YORK_ZONES, EASTERN_LABELS) is read on New
     York's clock whatever the label's season, at the later reading of the
     hour repeated when daylight saving time ends; a time New York skipped
-    when the clocks went forward is refused. Until the Gateway's clock is
-    shown to be New York's (clock_trusted, gateway_clock_trusted), an
-    Eastern label is read at the later of that and its fixed offset (EST
-    UTC-5, EDT UTC-4): a Gateway on fixed EST in summer stamps a fill after
-    the close before it, and no check of the close may miss it (ADR 0019,
-    amended 2026-10-28; AGENTS.md: fail closed). Any other zone is read as
+    when the clocks went forward is refused. Any other zone is read as
     named, and the morning reading withholds on it (loop.gateway_zone_problem).
+    The reading is the Gateway's clock: execution_report believes it only on
+    a link whose clock check holds.
     """
     parts = text.split(None, 2) if isinstance(text, str) else []
     if len(parts) != 3:
@@ -210,9 +210,7 @@ def parse_execution_time(text, clock_trusted=False):
             raise ValueError("execution time {!r} names an unknown zone".format(text)) from None
         return local.replace(tzinfo=zone).astimezone(timezone.utc)
     try:
-        instants = list(new_york_instants(local))
-        if not clock_trusted and name in EASTERN_LABEL_OFFSETS:
-            instants.append(local.replace(tzinfo=EASTERN_LABEL_OFFSETS[name]).astimezone(timezone.utc))
+        instants = new_york_instants(local)
     except ValueError:
         raise ValueError("execution time {!r} is a time that did not happen in New York (the clocks went forward "
                          "over it)".format(text)) from None
@@ -238,7 +236,14 @@ def open_order_record(order_id, contract, order, order_state):
         ibkr_status=getattr(order_state, "status", None))
 
 
-def execution_report(contract, execution, clock_trusted=False):
+def execution_report(contract, execution, received_at=None):
+    """IBKR's execution as an ExecutionReport. Its time is checked (parse_execution_time) and, given received_at, the
+    adapter's own receipt time on a link whose Gateway clock is not shown to be New York's (gateway_clock_trusted), the
+    later of the two stands for when it happened: no reading of a clock that failed its check bounds the instant (a
+    Gateway an hour slow in winter stamps a 16:30 execution "15:30:00 EST"), but nothing executes after the adapter
+    hears of it, so no check of the close can take one after it for one before (ADR 0019, amended 2026-10-28;
+    AGENTS.md: fail closed)."""
+    occurred_at = parse_execution_time(execution.time)
     return ExecutionReport(
         account_id=execution.acctNumber, exec_id=execution.execId, client_id=execution.clientId,
         broker_order_id=execution.orderId, perm_id=execution.permId,
@@ -247,7 +252,7 @@ def execution_report(contract, execution, clock_trusted=False):
         shares=to_decimal(execution.shares, "shares"), price=to_decimal(execution.price, "price"),
         cum_qty=to_decimal(execution.cumQty, "cumQty"),
         avg_price=to_decimal(execution.avgPrice, "avgPrice"),
-        time=execution.time, occurred_at=parse_execution_time(execution.time, clock_trusted))
+        time=execution.time, occurred_at=occurred_at if received_at is None else max(occurred_at, received_at))
 
 
 class OrderTracker:
@@ -271,12 +276,13 @@ class OrderTracker:
     same report free to be recorded.
     """
 
-    def __init__(self, account_id, client_id, sink, clock_trusted=lambda: False):
+    def __init__(self, account_id, client_id, sink, unverified_receipt=lambda: None):
         self.account_id = account_id
         self.client_id = client_id
         self._sink = sink
-        # Whether IB Gateway's clock is shown to be New York's (gateway_clock_trusted), read as each execution arrives.
-        self._clock_trusted = clock_trusted
+        # The adapter's receipt time while IB Gateway's clock is not shown to be New York's, None while it is
+        # (execution_report), read as each execution arrives.
+        self._unverified_receipt = unverified_receipt
         self._client_ids = {}
         self._foreign = set()
         self._held = {}
@@ -396,7 +402,7 @@ class OrderTracker:
     def _on_exec_details(self, req_id, contract, execution):
         if execution.acctNumber != self.account_id or execution.execId in self._executions:
             return
-        report = execution_report(contract, execution, self._clock_trusted())
+        report = execution_report(contract, execution, self._unverified_receipt())
         self._sink(report)
         self._executions.add(execution.execId)
 
@@ -444,7 +450,7 @@ def collect_broker_orders(conn):
                 key = order_key(record.client_id, record.broker_order_id, record.perm_id)
                 open_orders[key] = record
         elif name == "exec_details" and args[0] == exec_req:
-            report = execution_report(args[1], args[2], gateway_clock_trusted(conn))
+            report = execution_report(args[1], args[2], unverified_receipt(conn))
             if report.account_id == account:
                 executions[report.exec_id] = report
         elif name == "exec_details_end" and args[0] == exec_req:

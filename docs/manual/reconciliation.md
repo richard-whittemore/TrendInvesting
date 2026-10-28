@@ -682,9 +682,11 @@ change is not trusted after it, and withholds the morning reading until it
 connects again (the Gateway's nightly restart does that). Every
 execution's time must be in one of the same zones (the clocks are not
 compared: an execution can be hours old). While the link's check holds it
-is read on New York's clock whatever its label; until then, an `EST` or
-`EDT` time is read at the later of New York's clock and the label's fixed
-offset, so a fill after the close is never recorded as one before it. An
+is read on New York's clock whatever its label; until then, the adapter
+records it at the time it heard of it (or the Gateway's time, if later),
+so a fill after the close is never recorded as one before it, even by a
+Gateway whose clock is slow. A fill recorded that way may carry a time a
+little later than it happened. An
 execution at a time New York skipped when the clocks went forward stops the
 adapter (send the journal line to the developer). Any other zone, a
 connection time New York skipped, or a time it cannot read, withholds the

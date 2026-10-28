@@ -182,7 +182,7 @@ from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReadin
 from orders import (EASTERN_LABELS, NEW_YORK, NEW_YORK_ZONES, OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete,
                     OpenOrdersUnsettled, OrderTracker, agrees_with_account, collect_broker_orders,
                     collect_settled_broker_orders, gateway_clock_trusted, match_on_reconnect, new_york_instants,
-                    order_key)
+                    order_key, unverified_receipt)
 from relay import (LOG_INPUT, OUTBOX_SUFFIX, RUN_APPROVED, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
                    Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
                    run_logs)
@@ -577,7 +577,7 @@ class AdapterLoop:
             journalled=self._journalled(chain), acknowledged=self.pending.acknowledged_corrections(),
             late_fills=self.pending.acknowledged_late_fills())
         self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record,
-                                    clock_trusted=lambda: gateway_clock_trusted(self.conn))
+                                    unverified_receipt=lambda: unverified_receipt(self.conn))
         self.conn.subscribe(self.tracker.on_event)
         self.conn.subscribe(self._count_execution)
         self.conn.connect_with_backoff()
@@ -636,7 +636,7 @@ class AdapterLoop:
             self._gateway_zone = gateway_clock_problem(self._api.connection_time(), self.conn.connected_at,
                                                        self._now())
             if not self._gateway_zone:
-                # Executions read from here on are read on New York's clock (orders.gateway_clock_trusted).
+                # Executions read from here on are stamped as the Gateway gives them (orders.execution_report).
                 self.conn.gateway_clock_offset = self.conn.connected_at.astimezone(NEW_YORK).utcoffset()
         except Exception as err:  # any failure to read it is a zone not known (fail closed)
             self._gateway_zone = "IB Gateway's connection time could not be read ({})".format(type(err).__name__)

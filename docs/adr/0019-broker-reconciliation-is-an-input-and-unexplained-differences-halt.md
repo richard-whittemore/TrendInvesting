@@ -1316,14 +1316,18 @@ the label:
   executions' times, are New York's. While the link's check holds, an
   execution under any New York name or Eastern label is read on New York's
   clock. Until it holds (before the reconcile, after a failed check, or
-  after New York's clocks changed), an Eastern label is read at the latest
-  instant it allows: the later of New York's clock and the label's fixed
-  offset (EST UTC-5, EDT UTC-4), so a fill a Gateway on fixed EST stamps
-  "15:30 EST" in summer (20:30 UTC, after the close) is journalled after
-  the close, and no later reading of the journal, on a link set right, can
-  take it for one before. In the hour repeated when daylight saving time
-  ends, the later reading is taken (no session trades then, Sunday 01:00 to
-  02:00 New York).
+  after New York's clocks changed), no reading of the Gateway's clock
+  bounds the instant (a Gateway an hour slow in winter stamps a 16:30
+  execution "15:30:00 EST", 20:30 UTC by any reading of its label, before
+  the 21:00 UTC close), so the execution is stamped with the later of that
+  reading and the adapter's own receipt time: nothing executes after the
+  adapter hears of it, so the stamp is never earlier than the execution.
+  That stamp is the one the same-day check, the journal (`filled_at`) and
+  every later reading of the journal, on a link set right, compare with the
+  close: a fill recorded on an unchecked link can never pass for one before
+  the close. In the hour repeated when daylight saving time ends, the later
+  reading is taken (no session trades then, Sunday 01:00 to 02:00 New
+  York).
 
 What changes where: the IBKR adapter only (`loop.py`, `orders.py`,
 `connection.py`). The engine, its schemas and its rules are unchanged; no

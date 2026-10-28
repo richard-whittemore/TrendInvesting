@@ -415,14 +415,14 @@ class MorningTests(unittest.TestCase):
         loop = self.loop()
         loop.start()
         self.assertEqual(loop.conn.gateway_clock_offset, timedelta(hours=-4))
-        self.assertTrue(loop.tracker._clock_trusted(), "the tracker reads executions on New York's clock")
+        self.assertIsNone(loop.tracker._unverified_receipt(), "the tracker believes the Gateway's execution times")
         self.fake.tws_connection_time = "20261028 08:49:19 EST"
         self.fake.drop()
         for _ in range(10):
             loop.step()
         self.assertTrue(loop.ready(), "setup: reconnected and reconciled")
         self.assertIsNone(loop.conn.gateway_clock_offset)
-        self.assertFalse(loop.tracker._clock_trusted(), "nor once the check fails")
+        self.assertEqual(loop.tracker._unverified_receipt(), self.now, "nor once the check fails: its receipt time")
 
     def test_a_clock_checked_before_new_yorks_clocks_change_is_not_trusted_after(self):
         # A Gateway on fixed EST matches New York's clock until the clocks go forward (2027-03-14): a link that
@@ -441,16 +441,39 @@ class MorningTests(unittest.TestCase):
         self.assertIn("New York's clocks changed", loop._gateway_zone)
         self.assertIsNone(loop.conn.gateway_clock_offset)
 
-    def test_an_execution_on_a_link_whose_clock_check_failed_withholds(self):
+    def test_a_morning_reading_on_a_link_whose_clock_check_failed_withholds_on_the_connection_time(self):
         self.proof(FRIDAY_MORNING)
         self.fake.tws_connection_time = "20270115 07:05:00 EST"
         loop = self.loop()
         loop.start()
-        ex = execution(exec_id="0007.clock.01.01", order_id=0, perm_id=7373, order_ref="", client_id=0,
-                       time="20270114 10:00:01 EST")
-        loop._count_execution(SimpleNamespace(name="exec_details", args=(-1, contract(), ex)))
         self.deliver(THURSDAY, loop)
         self.assert_withheld("IB Gateway's connection time '20270115 07:05:00 EST'", "60 minutes behind")
+
+    def test_an_execution_on_a_link_whose_clock_failed_its_check_is_never_before_the_close(self):
+        # A Gateway an hour slow in winter stamps a 16:30 New York execution "15:30:00 EST": every reading of its
+        # label is 20:30Z, before the 21:00Z close. On a link whose clock check failed, the adapter's own receipt time
+        # (an upper bound on when it happened) stands for it, so a same-date reading finds it after the close (ADR
+        # 0019, amended 2026-10-28; AGENTS.md: fail closed). Read as the Gateway gave it, this fails.
+        self.at(ny(THURSDAY, 17, 0))
+        self.fake.tws_connection_time = "20270114 16:00:00 EST"
+        loop = self.loop()
+        loop.start()
+        self.assertIn("60 minutes behind", loop._gateway_zone, "setup: the check failed")
+        self.fake.executions = [(contract(), execution(exec_id="0008.slow.01.01", order_id=0, perm_id=7474,
+                                                       order_ref="", client_id=0, time="20270114 15:30:00 EST"))]
+        self.deliver(THURSDAY, loop)
+        self.assert_withheld("since the close", "0008.slow.01.01")
+
+    def test_the_same_execution_on_a_link_whose_clock_holds_is_read_as_the_gateway_gave_it(self):
+        # The control: with the check passed, "15:30:00 EST" is 20:30Z, before the close, and not listed after it.
+        self.at(ny(THURSDAY, 17, 0))
+        loop = self.loop()
+        loop.start()
+        self.assertEqual(loop._gateway_zone, "")
+        self.fake.executions = [(contract(), execution(exec_id="0008.slow.01.01", order_id=0, perm_id=7474,
+                                                       order_ref="", client_id=0, time="20270114 15:30:00 EST"))]
+        self.deliver(THURSDAY, loop)
+        self.assertNotIn("0008.slow.01.01", self.broker()["not_as_of_close"])
 
     def test_the_connection_time_is_compared_with_the_adapters_clock_within_the_tolerance(self):
         from loop import GATEWAY_CLOCK_TOLERANCE, gateway_clock_problem
