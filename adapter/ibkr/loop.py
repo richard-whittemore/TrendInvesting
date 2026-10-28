@@ -435,10 +435,23 @@ def close_window(close):
     return close - GATEWAY_CLOCK_TOLERANCE
 
 
-def _stood_for_a_close(envelope, close):
-    """Whether a logged input is a broker snapshot the engine committed stamped as of a close no later than close
-    (its reading stood for that close; _journal_fills stops behind it)."""
-    if envelope.get("type") != BROKER_SNAPSHOT_TYPE:
+def _book_stated_by(approval, close):
+    """Whether a run's approval states a starting book the owner approved no later than close (_journal_fills stops
+    behind it)."""
+    if not isinstance(approval, dict) or not isinstance(approval.get("starting_book"), dict):
+        return False
+    try:
+        at = datetime.fromisoformat(str(approval["approved_at"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return at.tzinfo is not None and at <= close
+
+
+def _stood_for_a_close(envelope, close, checked):
+    """Whether a logged input is a broker snapshot the engine committed stamped as of a close no later than close,
+    one of checked, the snapshots whose readings ran the journal check of the close window (its reading stood for that
+    close under that check; _journal_fills stops behind it)."""
+    if envelope.get("type") != BROKER_SNAPSHOT_TYPE or envelope.get("id") not in checked:
         return False
     payload = envelope.get("payload")
     if not isinstance(payload, dict) or payload.get("as_of_close") is not True:
@@ -1378,19 +1391,26 @@ class AdapterLoop:
         When a run's business was recorded proves nothing of the stamps of the runs behind it: a fill read on a link
         whose Gateway clock was not believed is stamped with the later of the Gateway's reading and its receipt
         (orders.execution_report), and a fast Gateway's reading can be hours after the fill was recorded. The walk
-        stops instead after the first run, newest first, holding a broker snapshot the engine committed stamped as of
-        a close: that reading stood only because this same check, reading every run behind it, found no fill stamped
-        from that close's window on, so every fill behind it is stamped before that earlier close's window and so
-        before this one's (ADR 0019, amended 2026-10-28). A chain that cannot be read up to that run is a reason, given
-        with the fills found before it (fail closed, AGENTS.md).
+        stops instead after the first run, newest first, that either
+        - holds a broker snapshot the engine committed stamped as of a close, whose reading this adapter recorded
+          under this same check (Deliverer.journal_checked_snapshots): it stood only because the check, reading every
+          run behind it, found no fill stamped from that close's window on, so every fill behind it is stamped before
+          that earlier close's window and so before this one's; a snapshot an earlier adapter recorded bounds
+          nothing; or
+        - was approved, no later than close, with a starting book the owner stated (ADR 0027): the account at the
+          approval, which every fill of the runs behind it is in, each made before it and so before the close. A
+          fresh run so approved is the way past a log that cannot be restored.
+        (ADR 0019, amended 2026-10-28.) A chain that cannot be read up to that run is a reason, given with the fills
+        found before it (fail closed, AGENTS.md).
         """
         payloads = [e["payload"] for e in self.outbox.load() if e["event_type"] == FILL_TYPE]
+        checked = self.delivery.journal_checked_snapshots() if self.delivery is not None else frozenset()
         refused = ""
         try:
-            for _, groups, _ in run_chain(self._engine_log_path):
+            for _, groups, approval in run_chain(self._engine_log_path):
                 inputs = [envelope for group in groups for _, kind, envelope in group if kind == LOG_INPUT]
                 payloads += [e["payload"] for e in inputs if e["type"] == FILL_TYPE]
-                if any(_stood_for_a_close(e, close) for e in inputs):
+                if any(_stood_for_a_close(e, close, checked) for e in inputs) or _book_stated_by(approval, close):
                     break
         except ResolveRefused as err:
             refused = "the chain of runs' logs cannot be read, so their fills cannot be checked ({})".format(err)

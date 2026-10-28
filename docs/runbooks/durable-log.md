@@ -310,8 +310,11 @@ ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
    adapter still reads a superseded log through the chain of Run approvals
    when it is one of those its manual says to keep ([paper
    trading](../manual/paper-trading.md), "cannot read the engine's durable
-   log"): quarantining such a log stops the adapter or withholds the
-   session's reading until a fresh run's reading stands for a close.
+   log"): quarantining such a log stops the adapter or withholds every
+   session's reading after it. The way past it is a fresh run approved
+   with the starting book read from IBKR's statement (`operator approve
+   -log <latest run>.log -positions ... -cash ... -currency USD`): the adapter reads no
+   log behind that run.
 3. **Decide the restart again** ("Restarting an engine"): with the file set
    aside, the latest run may be a different log. If the quarantined log was
    the crashed run itself, it cannot be resumed: start a fresh run from a

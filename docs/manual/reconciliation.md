@@ -699,13 +699,20 @@ after the close or within those five minutes. A fill in the journal in
 that window keeps that session's reading withheld for good (the journal
 is never rewritten), on the evening reading as well as the next morning's.
 The check reads the earlier runs' logs back through the chain of approvals
-as far as the newest run holding a reading that stood for a close (a
-broker snapshot stamped as of a close): that reading's own check already
-covered every log behind it. A log it needs and cannot read withholds that
-session's reading too, and the session stays withheld once the reading is
-sent; put the log back before the next session's reading. A log the
-comparison with the previous close also needs stops the adapter instead
-("cannot read the engine's durable log", [paper trading](paper-trading.md)).
+as far as the newest run holding a reading that stood for a close under
+this check (a broker snapshot stamped as of a close, recorded by this
+version of the adapter), or approved with a starting book you stated:
+that reading's own check, or your stated book, already covers every log
+behind it. Until the first such reading after this version is installed,
+it reads back to the account's first run. A log it needs and cannot read
+withholds that session's reading too, and the session stays withheld once
+the reading is sent; put the log back before the next session's reading.
+If it cannot be put back, start a fresh run approved with the starting
+book you read from IBKR's statement (`operator approve -log <latest
+run>.log -positions ... -cash ... -currency USD`, [operator](operator.md)): the walk stops
+at that run. A log the comparison with the previous close also needs stops
+the adapter instead ("cannot read the engine's durable log", [paper
+trading](paper-trading.md)).
 An
 execution at a time New York skipped when the clocks went forward stops the
 adapter (send the journal line to the developer). Any other zone, a

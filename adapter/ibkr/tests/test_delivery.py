@@ -476,6 +476,10 @@ class DeliveryTests(unittest.TestCase):
                      json.dumps({"batches": [{"run": RUN, "snapshot": "s", "files": [], "state": "queued"}]}),
                      json.dumps({"batches": [{"run": RUN, "snapshot": "s", "state": "maybe",
                                               "files": [{"name": "boost-2027-01-14.jsonl", "sha256": "0" * 64,
+                                                         "lines": 2}]}]}),
+                     json.dumps({"batches": [{"run": RUN, "snapshot": "s", "state": "queued",
+                                              "journal_checked": "something-else",
+                                              "files": [{"name": "boost-2027-01-14.jsonl", "sha256": "0" * 64,
                                                          "lines": 2}]}]})):
             with self.subTest(text):
                 Path(self.pending + DELIVERED_SUFFIX).write_text(text)
@@ -485,6 +489,23 @@ class DeliveryTests(unittest.TestCase):
                     loop.step()
                 loop.close()
                 self.assertEqual(self.types(), [])
+
+    def test_every_batch_is_recorded_as_journal_checked_and_an_earlier_adapters_batch_is_read_unmarked(self):
+        # A batch this adapter records ran the journal check of the close window (ADR 0019, amended 2026-10-28); an
+        # earlier adapter's carries no mark, is still read, and bounds nothing (loop._journal_fills).
+        from delivery import DeliveryRecord, JOURNAL_CHECKED
+        record = DeliveryRecord(self.pending + DELIVERED_SUFFIX)
+        record.begin({"run": RUN, "snapshot": "legacy", "files": [{"name": "boost-2027-01-13.jsonl",
+                                                                  "sha256": "0" * 64, "lines": 1}]})
+        record.mark_queued()
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop.start()
+        self.settle(loop)
+        batches = record.load()
+        self.assertNotIn("journal_checked", batches[0])
+        self.assertEqual(batches[-1]["journal_checked"], JOURNAL_CHECKED)
+        self.assertEqual(loop.delivery.journal_checked_snapshots(), frozenset([batches[-1]["snapshot"]]))
 
     def test_an_earlier_runs_stream_left_in_the_outbox_is_struck_off_unsent(self):
         # The owner started a fresh run before the last run's stream was

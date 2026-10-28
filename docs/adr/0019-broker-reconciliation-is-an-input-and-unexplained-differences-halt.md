@@ -1335,16 +1335,22 @@ the label:
   Gateway's stamps (the same-day list and the journalled fills) takes one
   stamped within the tolerance before the close as at the close. When a
   run's business was recorded proves nothing of the stamps of the runs
-  behind it, since a fast Gateway's stamp on an unchecked link can be hours
-  after the fill was recorded. The journal check's walk back through the
-  chain stops instead after the newest run holding a broker snapshot the
-  engine committed stamped as of a close: that reading stood only because
-  the same check, reading every run behind it, found no fill stamped from
-  that close's window on, so every fill behind it is stamped before this
-  close's window too. A log the walk needs and cannot read withholds the
-  reading, with any fills found before it; logs behind that run may be
-  archived. (A snapshot committed before this rule, by a same-day reading
-  that did not yet check the journal, is taken as the same bound.) A same-day reading checks the
+  behind it: a fast Gateway's stamp on an unchecked link can be hours
+  after the fill was recorded. So the journal check's walk back through the
+  chain stops only after the newest run that either holds a broker
+  snapshot the engine committed stamped as of a close whose reading ran
+  this same check (the adapter marks every batch it records so,
+  `journal_checked` in its delivery record): that reading stood only
+  because the check, reading every run behind it, found no fill stamped
+  from that close's window on, so every fill behind it is stamped before
+  this close's window too; or was approved, no later than the close, with
+  a starting book the owner stated (ADR 0027), the account at the
+  approval, which every fill behind it is in. A snapshot an earlier adapter recorded carries no mark and
+  bounds nothing, so the first walks after the change read to the chain's
+  first run. A log the walk needs and cannot read withholds the reading,
+  with any fills found before it; logs behind the bound may be archived.
+  A log lost for good is passed by a fresh run approved with the starting
+  book read from IBKR's statement. A same-day reading checks the
   journal's fills too, not only IBKR's re-read list: a fill journalled
   after the close on an earlier link (a fast Gateway's, before its check)
   is the stamp the engine applies on top of the close's book, though IBKR
@@ -1357,5 +1363,6 @@ the label:
   until the link connects again (an open residual).
 
 What changes where: the IBKR adapter only (`loop.py`, `orders.py`,
-`connection.py`). The engine, its schemas and its rules are unchanged; no
-RulesVersion change.
+`connection.py`, and `delivery.py`'s record, whose batches now carry
+`journal_checked`; an earlier record is still read). The engine, its
+schemas and its rules are unchanged; no RulesVersion change.
