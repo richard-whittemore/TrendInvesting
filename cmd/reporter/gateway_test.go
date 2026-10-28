@@ -72,6 +72,7 @@ printf '%s\n' "$out"
 d='` + g.dir + `'
 if [ -e "$d/systemctl-fail" ]; then echo "Failed to connect to bus" >&2; exit 1; fi
 echo "$@" >>"$d/systemctl-argv"
+if [ -e "$d/systemctl-raw" ]; then cat "$d/systemctl-raw"; exit 0; fi
 echo "NRestarts=$(cat "$d/nrestarts" 2>/dev/null || echo 0)"
 echo "ActiveState=$(cat "$d/activestate" 2>/dev/null || echo active)"
 echo "SubState=$(cat "$d/substate" 2>/dev/null || echo running)"
@@ -935,21 +936,29 @@ func TestAUnitSeenInAutoRestartAtOneFiringOnlyPagesNothing(t *testing.T) {
 	}
 }
 
-func TestARestartLoopInsideTheRestartWindowPagesNothingUntilItEnds(t *testing.T) {
+func TestARestartLoopInsideTheRestartWindowPagesAfterTheWindowEndsPlusGrace(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
 	dir := t.TempDir()
 	at := func(h, m int) time.Time { return time.Date(2024, 1, 3, h, m, 0, 0, newYork) }
 	g.unit(0, "active", "running")
 	_ = gatewayRun(t, r, dir, g.path(), "boost", time.Date(2024, 1, 2, 23, 40, 0, 0, newYork))
-	for i, c := range []time.Time{time.Date(2024, 1, 2, 23, 50, 0, 0, newYork), at(0, 10), at(0, 25)} {
+	times := []time.Time{time.Date(2024, 1, 2, 23, 50, 0, 0, newYork), at(0, 10), at(0, 25), at(0, 35)}
+	for i, c := range times {
 		g.unit(10*(i+1), "activating", "start")
 		if err := gatewayRun(t, r, dir, g.path(), "boost", c); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if gatewayPages(r) != 0 {
-		t.Fatalf("paged %d times inside the restart window", gatewayPages(r))
+		t.Fatalf("paged %d times inside the window or within its grace", gatewayPages(r))
+	}
+	g.unit(50, "activating", "start")
+	if err := gatewayRun(t, r, dir, g.path(), "boost", at(0, 41)); err != nil {
+		t.Fatal(err)
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages after the window's end plus the grace, want 1 per channel", gatewayPages(r))
 	}
 }
 
@@ -984,5 +993,140 @@ func TestASystemctlThatFailsFailsTheFiring(t *testing.T) {
 	err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0))
 	if err == nil || !strings.Contains(err.Error(), "gateway check") {
 		t.Fatalf("got %v, want an error naming the gateway check", err)
+	}
+}
+
+// The loop ends partway through an interval: the firing that sees one more
+// restart does not strand the outage, and two quiet firings close it.
+func TestALoopThatEndsPartwayStillClosesAfterTwoQuietFirings(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	g.unit(0, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
+	for i, min := range []int{5, 10, 16} {
+		g.unit(10*(i+1), "activating", "start")
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	resolves := func() int {
+		n := 0
+		for _, m := range r.to("events.pagerduty.test") {
+			if strings.Contains(m, `"event_action":"resolve"`) {
+				n++
+			}
+		}
+		return n
+	}
+	g.unit(31, "active", "running") // one more restart before it settled
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 20))
+	g.unit(31, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 25))
+	if resolves() != 0 {
+		t.Fatal("the outage closed after one quiet firing")
+	}
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 30))
+	if resolves() != 1 {
+		t.Fatalf("%d resolves after two quiet firings, want 1", resolves())
+	}
+}
+
+// A slow loop (one restart per firing, at two firings in a row) is a failing
+// start; a single restart is not.
+func TestASlowLoopOfOneRestartPerFiringPages(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	g.unit(0, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
+	for i, min := range []int{5, 10, 16, 21} {
+		g.unit(i+1, "activating", "start")
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages for a restart at every firing, want 1 per channel", gatewayPages(r))
+	}
+}
+
+// An active unit with no new restarts closes only an outage the restart rule
+// opened; it never resolves one the journal evidenced, even after that
+// evidence has rotated away.
+func TestAnActiveUnitDoesNotResolveAnOutageTheJournalEvidenced(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.logout() // a refusal: the journal evidences the outage
+	dir := t.TempDir()
+	g.unit(0, "active", "running")
+	for _, min := range []int{0, 5, 10, 16} {
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages, want 1 per channel", gatewayPages(r))
+	}
+	// A restart loop appears and ends, while the journal's evidence rotates to an old login.
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	for i, min := range []int{20, 25} {
+		g.unit(10*(i+1), "activating", "start")
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	g.unit(20, "active", "running")
+	for _, min := range []int{30, 35, 40, 45} {
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	for _, m := range r.to("events.pagerduty.test") {
+		if strings.Contains(m, `"event_action":"resolve"`) {
+			t.Fatal("an outage the journal had evidenced was resolved by an active unit with no new restarts")
+		}
+	}
+}
+
+// The sampler fails the firing on output it cannot trust, never writing a
+// baseline of invented zeros.
+func TestTheSamplerRejectsOutputItCannotTrust(t *testing.T) {
+	for name, raw := range map[string]string{
+		"no NRestarts":      "ActiveState=active\nSubState=running\n",
+		"no SubState":       "NRestarts=0\nActiveState=active\n",
+		"empty ActiveState": "NRestarts=0\nActiveState=\nSubState=running\n",
+		"unknown state":     "NRestarts=0\nActiveState=confused\nSubState=running\n",
+		"NRestarts a word":  "NRestarts=many\nActiveState=active\nSubState=running\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newStandInGateway(t)
+			_ = os.WriteFile(filepath.Join(g.dir, "systemctl-raw"), []byte(raw), 0o600)
+			err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0))
+			if err == nil || !strings.Contains(err.Error(), "gateway check") {
+				t.Fatalf("got %v, want an error naming the gateway check", err)
+			}
+		})
+	}
+}
+
+// A systemctl that fails does not suppress a page the journal evidences: the
+// page goes out, and the failure is the firing's error.
+func TestASystemctlFailureDoesNotSuppressAJournalEvidencedPage(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.logout()
+	_ = os.WriteFile(filepath.Join(g.dir, "systemctl-fail"), nil, 0o600)
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10, 16} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err == nil {
+			t.Fatal("a failing systemctl was not the firing's error")
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages with systemctl failing, want 1 per channel from the journal's evidence", gatewayPages(r))
+	}
+}
+
+// A unit file written for the previous build still passes -gateway-marker,
+// which is accepted and ignored, so a binary installed alone still runs.
+func TestAnOldUnitFilesMarkerFlagIsAcceptedAndIgnored(t *testing.T) {
+	g := newStandInGateway(t)
+	if err := gatewayRun(t, &relay{sent: map[string][]string{}}, t.TempDir(), g.path(), "boost", tuesday(14, 0), "-gateway-marker", "/var/lib/ti-gateway/last-start-failure"); err != nil {
+		t.Fatalf("the old argv was refused: %v", err)
 	}
 }

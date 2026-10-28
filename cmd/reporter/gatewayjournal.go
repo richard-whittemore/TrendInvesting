@@ -198,10 +198,22 @@ type gatewayUnitSample struct {
 	active, auto bool // ActiveState=active; activating (auto-restart)
 }
 
-// gatewayRestartsPage is how many restarts between two firings (5 minutes
-// apart) read as a start that keeps failing: the unit restarts 30 s after each
-// exit, so a loop makes about ten.
+// A start is failing when NRestarts rose by at least gatewayRestartsPage since
+// the last firing, OR by at least 1 at two firings in a row, OR the unit was
+// activating (auto-restart) at two firings in a row. The unit restarts 30 s
+// after each exit, so a fast loop makes about ten restarts per firing and a
+// slow one (a journal that takes minutes to time out) one per firing. The
+// stance is fail closed: a Gateway that does not stay up is not trusted to be
+// logged in (docs/manual/server.md, "The Gateway is logged out"; ADR 0019,
+// "Alerting": an alert is a safety requirement).
 const gatewayRestartsPage = 3
+
+// A restart-opened outage closes after this many consecutive firings with the
+// unit active and no new restarts.
+const gatewayQuietToClose = 2
+
+// knownActiveStates are the ActiveState values systemd defines.
+var knownActiveStates = map[string]bool{"active": true, "activating": true, "inactive": true, "failed": true, "deactivating": true, "reloading": true, "maintenance": true, "refreshing": true}
 
 // gatewayUnitSampler asks systemctl for the Gateway unit's restart count and
 // state. This is what sees a start that keeps failing when the journal takes
@@ -220,12 +232,13 @@ func gatewayUnitSampler(systemctl string) func() (gatewayUnitSample, error) {
 			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not ask systemd about %s: %w (it said: %s)", gatewayUnit, err, strings.TrimSpace(stderr.String()))
 		}
 		var s gatewayUnitSample
-		state, sub, seen := "", "", false
+		state, sub := "", ""
+		haveRestarts := false
 		for _, l := range strings.Split(string(raw), "\n") {
 			k, v, _ := strings.Cut(strings.TrimSpace(l), "=")
 			switch k {
 			case "ActiveState":
-				state, seen = v, true
+				state = v
 			case "SubState":
 				sub = v
 			case "NRestarts":
@@ -233,11 +246,11 @@ func gatewayUnitSampler(systemctl string) func() (gatewayUnitSample, error) {
 				if err != nil || n < 0 {
 					return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check read NRestarts=%q for %s, which is not a count", v, gatewayUnit)
 				}
-				s.restarts = n
+				s.restarts, haveRestarts = n, true
 			}
 		}
-		if !seen {
-			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check got no ActiveState for %s from systemd", gatewayUnit)
+		if !haveRestarts || sub == "" || !knownActiveStates[state] {
+			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not trust what systemd said of %s (NRestarts present: %v, SubState %q, ActiveState %q)", gatewayUnit, haveRestarts, sub, state)
 		}
 		s.active = state == "active"
 		s.auto = state == "activating" && sub == "auto-restart"

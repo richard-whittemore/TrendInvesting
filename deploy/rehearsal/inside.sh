@@ -371,6 +371,8 @@ cat >"$sysd/systemctl" <<SH
 #!/bin/sh
 echo "\$*" >>$sysd/calls
 echo ActiveState=active
+echo NRestarts=0
+echo SubState=running
 echo InvocationID=0123456789abcdef0123456789abcdef
 SH
 chmod 0755 "$sysd/systemctl"

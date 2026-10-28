@@ -133,7 +133,10 @@ type hostGateway struct {
 	// opened the outage.
 	Restarts     *int `json:"restarts,omitempty"`
 	Auto         bool `json:"auto_restart,omitempty"`
-	StartFailing bool `json:"start_failing,omitempty"`
+	Rose         bool `json:"rose,omitempty"`          // restarts rose at the previous firing
+	StartFailing bool `json:"start_failing,omitempty"` // a failing start is open, until it closes
+	Quiet        int  `json:"quiet,omitempty"`         // consecutive quiet firings while StartFailing
+	RestartOnly  bool `json:"restart_only,omitempty"`  // the outage was opened by the restart rule alone
 }
 
 func loadHostGateway(path string) (hostGateway, error) {
@@ -158,7 +161,7 @@ func loadHostGateway(path string) (hostGateway, error) {
 // seen in; it pages once the time passes gatewayPagesAfter outside a window,
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
-func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, senders []sender, setAside []channelFault, clock func() time.Time) error {
+func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, senders []sender, setAside []channelFault, clock func() time.Time) (retErr error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -179,30 +182,59 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	if err != nil {
 		return err
 	}
-	unit, err := sample()
-	if err != nil {
-		return err
-	}
+	// A systemctl that fails does not suppress what the journal evidences: the
+	// page is decided and delivered below on the journal alone, and the failure
+	// is then the firing's error.
+	unit, sampleErr := sample()
+	defer func() { retErr = errors.Join(retErr, sampleErr) }()
 	out, said := ev.out, ev.said
-	// A start that keeps failing shows in systemd's restart count even when the
-	// journal says nothing: restarts risen by gatewayRestartsPage since the last
-	// firing, or waiting to restart at two firings in a row. The outage clears
-	// when the unit is active with no new restarts for a firing.
-	risen := h.Restarts != nil && unit.restarts-*h.Restarts >= gatewayRestartsPage
-	cannotStart := risen || (h.Auto && unit.auto)
-	switch {
-	case cannotStart:
-		out = true
-		if risen {
-			said += fmt.Sprintf(" ti-gateway.service keeps failing to start: its restart count rose from %d to %d since the last firing.", *h.Restarts, unit.restarts)
-		} else {
-			said += " ti-gateway.service has been waiting to restart (activating, auto-restart) at two firings in a row."
+	restartOut, restartClosed := false, false
+	if sampleErr == nil {
+		delta := 0
+		if h.Restarts != nil && unit.restarts > *h.Restarts {
+			delta = unit.restarts - *h.Restarts
 		}
-	case h.StartFailing && unit.active && h.Restarts != nil && unit.restarts == *h.Restarts && !out:
+		risen := delta >= gatewayRestartsPage
+		slow := delta >= 1 && h.Rose
+		waiting := h.Auto && unit.auto
+		switch {
+		case risen || slow || waiting:
+			restartOut, h.StartFailing, h.Quiet = true, true, 0
+			switch {
+			case risen:
+				said += fmt.Sprintf(" ti-gateway.service keeps failing to start: its restart count rose by %d since the last firing.", delta)
+			case slow:
+				said += " ti-gateway.service restarted at two firings in a row."
+			default:
+				said += " ti-gateway.service has been waiting to restart (activating, auto-restart) at two firings in a row."
+			}
+		case h.StartFailing:
+			if unit.active && delta == 0 {
+				h.Quiet++
+			} else {
+				h.Quiet = 0
+			}
+			if h.Quiet >= gatewayQuietToClose {
+				h.StartFailing, h.Quiet, restartClosed = false, 0, true
+			} else {
+				restartOut = true
+				said += " ti-gateway.service keeps failing to start: the loop has not yet been quiet for two firings."
+			}
+		}
+		r := unit.restarts
+		h.Restarts, h.Auto, h.Rose = &r, unit.auto, delta >= 1
+	}
+	out = out || restartOut
+	// Only an outage the restart rule opened alone is closed by the unit being
+	// quiet: the journal's evidence is closed only by a completed login or a
+	// restoration newer than the outage's start. With a silent journal the
+	// reporter can only tell that the start loop has ended.
+	if ev.out {
+		h.RestartOnly = false
+	}
+	if restartClosed && !ev.out && h.RestartOnly {
 		ev.recoveredAt = now
 	}
-	r := unit.restarts
-	h.Restarts, h.Auto, h.StartFailing = &r, unit.auto, cannotStart
 	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
 	for _, k := range h.Keys {
 		seen[k] = true
@@ -214,7 +246,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Auto: h.Auto, StartFailing: h.StartFailing})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Auto: h.Auto, Rose: h.Rose, StartFailing: h.StartFailing, Quiet: h.Quiet, RestartOnly: h.RestartOnly})
 		if err != nil {
 			return err
 		}
@@ -245,7 +277,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		}
 	}
 	if !out {
-		h.Since = nil
+		h.Since, h.RestartOnly = nil, false
 		if !deliveredAnywhere(seen, key) {
 			h.Resolving = false
 			return record()
@@ -265,6 +297,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	if h.Since == nil {
 		t := now
 		h.Since = &t
+		h.RestartOnly = !ev.out && restartOut
 	}
 	if err := record(); err != nil {
 		return err

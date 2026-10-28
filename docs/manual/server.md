@@ -731,11 +731,18 @@ failing is seen through systemd's restart count: every firing the reporter asks
 systemd for `ti-gateway.service`'s restart count and state (`systemctl show`),
 and counts the Gateway as logged out when the count has risen by 3 or more
 since the last firing (the unit restarts every 30 seconds, so a loop makes
-about ten), or the unit was waiting to restart (activating, auto-restart) at
-two firings in a row. The usual 10 minutes outside the restart windows then
-page you, and the outage clears when the unit is active with no new restarts
-for a firing. This does not depend on the journal, so the 10-minute promise
-holds even when the journal takes nothing; a single restart pages nothing.
+about ten), or has risen by 1 or more at two firings in a row (a slow loop),
+or the unit was waiting to restart (activating, auto-restart) at two firings
+in a row. The usual 10 minutes outside the restart windows then page you. Such
+an outage closes after two firings in a row with the unit active and no new
+restarts; with a silent journal that is all the reporter can tell, namely
+that the start loop has ended, not that IBKR has accepted the login. An outage
+the journal evidences (a refused login, a login screen, a lost link) is never
+closed that way: it needs a completed login or a restored link newer than its
+start. This does not depend on the journal, so the 10-minute promise holds
+even when the journal takes nothing; a single restart pages nothing. If
+`systemctl` itself fails, a page the journal evidences still goes out and the
+failure is the firing's error.
 Each such start logs "cannot start IBC", as does every exit that leaves the
 unit down without contacting IBKR (the renderer's 64, 65 and 78); the health
 check reads that line as logged out when the journal works. The reporter also
