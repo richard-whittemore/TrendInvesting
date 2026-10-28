@@ -1368,6 +1368,16 @@ class ExecutionsTests(ReadOnceHarness):
                          fixture("statement.xml"))
         self.assertIn(10, clock.slept)
 
+    def test_a_holiday_reading_ending_a_session_earlier_than_the_session_before_is_set_aside(self):
+        # Monday 2027-01-18 (a holiday): td's last session is Friday 2027-01-15; a statement ending Thursday
+        # 2027-01-14 leaves Friday out, so IBKR ignored the dates asked for.
+        holiday = datetime(2027, 1, 18, 10, 30, tzinfo=timezone.utc)
+        xml = fixture("trade_confirms.xml").replace(b'fromDate="20270108" toDate="20270115"',
+                                                    b'fromDate="20270111" toDate="20270114"')
+        cash = self.statement(("900000101", "20270114", "2500"), period=("20261219", "20270117"))
+        self.assertFalse(self.read_trades(now=holiday, service=FakeFlex(statements=(cash, xml))))
+        self.assert_proof_set_aside("IBKR ignored the requested dates", "20270111", "20270118", "20270114")
+
     def test_a_proof_never_reaches_past_an_hour_before_it_was_asked_for(self):
         # IBKR: a new execution is typically in a newly generated Trade Confirmation report within 5 to 10 minutes.
         early = datetime(2027, 1, 15, 5, 30, tzinfo=timezone.utc)
