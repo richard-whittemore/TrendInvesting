@@ -181,7 +181,8 @@ from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReadin
                       nyse_calendar, run_name)
 from orders import (EASTERN_LABELS, NEW_YORK, NEW_YORK_ZONES, OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete,
                     OpenOrdersUnsettled, OrderTracker, agrees_with_account, collect_broker_orders,
-                    collect_settled_broker_orders, match_on_reconnect, order_key)
+                    collect_settled_broker_orders, gateway_clock_trusted, match_on_reconnect, new_york_instants,
+                    order_key)
 from relay import (LOG_INPUT, OUTBOX_SUFFIX, RUN_APPROVED, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
                    Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
                    run_logs)
@@ -293,19 +294,16 @@ def _new_york_readings(text, what):
                 "Gateway's own zone, so the midnight its list starts at is not New York's; {}".format(
                     what, text, zone, _SET_NEW_YORK)), ()
     try:
-        readings = tuple(sorted({local.replace(tzinfo=NEW_YORK, fold=fold).astimezone(timezone.utc)
-                                 for fold in (0, 1)}))
-        # A wall-clock time New York skipped (the hour the clocks go forward) does not come back from UTC as
-        # itself: the text is no New York reading at all. The repeated autumn hour does, at either reading.
-        back = readings[0].astimezone(NEW_YORK).replace(tzinfo=None)
-    except (OverflowError, ValueError, OSError) as err:
+        # A wall-clock time New York skipped (the hour the clocks go forward) is no New York reading at all; the
+        # repeated autumn hour is, at either reading (orders.new_york_instants).
+        return "", new_york_instants(local)
+    except ValueError:
+        return ("{} {!r} is a time that did not happen in New York (the clocks went forward over it), so it "
+                "is not a New York reading".format(what, text)), ()
+    except (OverflowError, OSError) as err:
         # Fail closed (AGENTS.md): a time the calendar cannot place is no New York reading.
         return ("{} {!r} cannot be placed in New York's calendar ({}), so it is not a New York "
                 "reading".format(what, text, type(err).__name__)), ()
-    if back != local:
-        return ("{} {!r} is a time that did not happen in New York (the clocks went forward over it), so it "
-                "is not a New York reading".format(what, text)), ()
-    return "", readings
 
 
 def gateway_zone_problem(text, what="IBKR's execution time"):
@@ -324,14 +322,38 @@ def _span(delta):
     return "{} minutes".format(minutes) + (" {} seconds".format(seconds) if seconds else "")
 
 
-def gateway_clock_problem(text, connected_at, what="IB Gateway's connection time"):
+def _utc_offset(at):
+    offset = at.astimezone(NEW_YORK).utcoffset()
+    sign, offset = ("-", -offset) if offset < timedelta(0) else ("+", offset)
+    hours, rest = divmod(int(offset.total_seconds()), 3600)
+    return "UTC{}{:02d}:{:02d}".format(sign, hours, rest // 60)
+
+
+def clock_change_problem(connected_at, now):
+    """Why IB Gateway's clock, checked when the link connected at connected_at, is not known to be New York's at
+    now: New York's clocks changed between them ("" when they did not). A Gateway on fixed EST matches New York's
+    clock until the clocks go forward, so a link kept (or restored by Gateway, 1101/1102) with no new handshake across
+    the change is trusted again only once it connects again (ADR 0019, amended 2026-10-28)."""
+    if connected_at is None or now is None:
+        return ""
+    before, after = connected_at.astimezone(NEW_YORK).utcoffset(), now.astimezone(NEW_YORK).utcoffset()
+    if before == after:
+        return ""
+    return ("New York's clocks changed ({} to {}) since IB Gateway's clock was checked when the link connected ({}), "
+            "so it is not known to be on New York time until the link connects again".format(
+                _utc_offset(connected_at), _utc_offset(now),
+                connected_at.astimezone(NEW_YORK).strftime("%Y-%m-%d %H:%M:%S %Z")))
+
+
+def gateway_clock_problem(text, connected_at, now=None, what="IB Gateway's connection time"):
     """Why text, the session's connection time IB Gateway gave at the handshake (TWS API EClient.twsConnectionTime,
     "YYYYMMDD HH:MM:SS Zone" in the Gateway's own zone), does not show its clock on New York time; "" when it does.
 
     It must be a New York reading (_new_york_readings), and one of the instants it can stand for must be within
     GATEWAY_CLOCK_TOLERANCE of connected_at, the adapter's own clock when the link connected (Connection.connected_at;
     ADR 0019, amended 2026-10-28): that one is taken, so the clock settles the hour repeated when daylight saving
-    time ends, and with none so near, or no connected_at, it is a problem quoting the text as given.
+    time ends, and with none so near, or no connected_at, it is a problem quoting the text as given. With now, the
+    check holds only while New York is at the UTC offset it was at connected_at (clock_change_problem).
     """
     problem, readings = _new_york_readings(text, what)
     if problem:
@@ -341,7 +363,7 @@ def gateway_clock_problem(text, connected_at, what="IB Gateway's connection time
                 "Gateway's clock is not known to be on New York time".format(what, text))
     off = min((at - connected_at for at in readings), key=abs)
     if abs(off) <= GATEWAY_CLOCK_TOLERANCE:
-        return ""
+        return clock_change_problem(connected_at, now)
     return ("{} {!r}, read on New York's clock, is {} {} the adapter's clock when it connected ({}), more than the "
             "{} allowed: the Gateway is not on New York time; {}".format(
                 what, text, _span(off), "ahead of" if off > timedelta(0) else "behind",
@@ -554,7 +576,8 @@ class AdapterLoop:
             held_path=self._pending_path + HELD_SUFFIX, owns_lock=self.relay.holds, ready=self.ready,
             journalled=self._journalled(chain), acknowledged=self.pending.acknowledged_corrections(),
             late_fills=self.pending.acknowledged_late_fills())
-        self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record)
+        self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record,
+                                    clock_trusted=lambda: gateway_clock_trusted(self.conn))
         self.conn.subscribe(self.tracker.on_event)
         self.conn.subscribe(self._count_execution)
         self.conn.connect_with_backoff()
@@ -569,6 +592,14 @@ class AdapterLoop:
             else:
                 self.conn.pump(self._poll)
         self._settle_waiting()
+
+    def _gateway_problem(self):
+        """Why IB Gateway's clock is not known to be New York's now ("" when it is): its reconcile's check
+        (gateway_clock_problem), or New York's clocks having changed since (clock_change_problem)."""
+        if self._gateway_zone or gateway_clock_trusted(self.conn):
+            return self._gateway_zone
+        return (clock_change_problem(self.conn.connected_at, self._now())
+                or "IB Gateway's clock has not been checked on this link")
 
     def _session(self):
         """Today's session date (New York) as the loop was given it, or None for the relay's own default."""
@@ -600,8 +631,13 @@ class AdapterLoop:
         2026-10-27 and 2026-10-28).
         """
         self._execution_zones = set()
+        self.conn.gateway_clock_offset = None
         try:
-            self._gateway_zone = gateway_clock_problem(self._api.connection_time(), self.conn.connected_at)
+            self._gateway_zone = gateway_clock_problem(self._api.connection_time(), self.conn.connected_at,
+                                                       self._now())
+            if not self._gateway_zone:
+                # Executions read from here on are read on New York's clock (orders.gateway_clock_trusted).
+                self.conn.gateway_clock_offset = self.conn.connected_at.astimezone(NEW_YORK).utcoffset()
         except Exception as err:  # any failure to read it is a zone not known (fail closed)
             self._gateway_zone = "IB Gateway's connection time could not be read ({})".format(type(err).__name__)
         if self._gateway_zone:
@@ -1233,8 +1269,9 @@ class AdapterLoop:
         now = self._now().astimezone(nyse_calendar.NEW_YORK)
         self._proof_retryable = (bool(proof) and not decisive and self._cash_ledger is not None and now > close
                                  and now.date() != day and now.time() < PROOF_WAIT_UNTIL)
-        if self._gateway_zone:
-            reasons.append(self._gateway_zone)
+        gateway = self._gateway_problem()
+        if gateway:
+            reasons.append(gateway)
         # Each execution time is checked as the connection time is, quoted as IBKR gave it.
         for text in sorted(self._execution_zones, key=repr):
             problem = gateway_zone_problem(text, "IBKR's execution time")

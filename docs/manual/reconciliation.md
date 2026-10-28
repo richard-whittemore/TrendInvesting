@@ -676,10 +676,18 @@ is an hour off in summer, and one in another zone is hours off; either
 withholds the morning reading, and the message says how far off it was and
 which way (for example `60 minutes 3 seconds behind`). In the hour repeated
 when the clocks go back, the reading that matches the adapter's clock is
-taken. Every execution's time must be in one of the same zones (the
-clocks are not compared: an execution can be hours old), and is read on
-New York's clock whatever its label. Any other zone, a time New York skipped
-when the clocks went forward, or a time it cannot read, withholds the
+taken. The check holds only until New York's clocks next change: a link
+that stays up (or that the Gateway restores without reconnecting) across a
+change is not trusted after it, and withholds the morning reading until it
+connects again (the Gateway's nightly restart does that). Every
+execution's time must be in one of the same zones (the clocks are not
+compared: an execution can be hours old). While the link's check holds it
+is read on New York's clock whatever its label; until then, an `EST` or
+`EDT` time is read at the later of New York's clock and the label's fixed
+offset, so a fill after the close is never recorded as one before it. An
+execution at a time New York skipped when the clocks went forward stops the
+adapter (send the journal line to the developer). Any other zone, a
+connection time New York skipped, or a time it cannot read, withholds the
 morning reading, the page and `journalctl -u ti-adapter-boost` quoting the
 Gateway's text exactly as it gave it (send that to the developer if it is
 New York time in a form not listed here); once the

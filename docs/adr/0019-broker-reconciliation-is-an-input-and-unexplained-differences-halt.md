@@ -1292,10 +1292,11 @@ the label:
 
 - A connection or execution time's zone stands when it is a New York zone
   name (`US/Eastern`, `America/New_York`, `EST5EDT`) or an Eastern label
-  (`EST`, `EDT`, `Eastern Standard Time`, `Eastern Daylight Time`), and its
-  date and time are read on New York's clock (`America/New_York`) whatever
-  the label; a local time New York skipped when the clocks went forward, a
-  time not of the shape, or any other zone, withholds as before.
+  (`EST`, `EDT`, `Eastern Standard Time`, `Eastern Daylight Time`), with no
+  season check on the label; a local time New York skipped when the clocks
+  went forward, a time not of the shape, or any other zone, withholds as
+  before, and an execution reported at a skipped time is refused outright
+  (the adapter stops rather than invent its instant).
 - The connection time, read so, must be within 5 minutes of the adapter's
   own (NTP-synced) clock when the link's handshake completed (the time is
   recorded at the handshake, so a link Gateway restores with no new
@@ -1304,11 +1305,25 @@ the label:
   hours off: both withhold, the reason saying how far off and which way. In
   the hour repeated when daylight saving time ends, the reading within the
   tolerance is taken; with neither within it, the reading is withheld.
+- The check holds only while New York is at the UTC offset it was at when
+  the link connected: a Gateway on fixed EST matches New York's clock until
+  the clocks go forward, so a link kept, or restored by Gateway (1101/1102)
+  with no new handshake, across a change of New York's clocks is not
+  trusted after it, and a morning reading on it is withheld until the link
+  connects again.
 - An execution time is not compared with the clock (it may be hours old):
-  the connection time's check is what shows the Gateway's clock, and so its
-  executions' times, are New York's. Its UTC reading takes the earlier
-  reading of the repeated autumn hour (no session trades then, Sunday 01:00
-  to 02:00 New York).
+  the connection's check is what shows the Gateway's clock, and so its
+  executions' times, are New York's. While the link's check holds, an
+  execution under any New York name or Eastern label is read on New York's
+  clock. Until it holds (before the reconcile, after a failed check, or
+  after New York's clocks changed), an Eastern label is read at the latest
+  instant it allows: the later of New York's clock and the label's fixed
+  offset (EST UTC-5, EDT UTC-4), so a fill a Gateway on fixed EST stamps
+  "15:30 EST" in summer (20:30 UTC, after the close) is journalled after
+  the close, and no later reading of the journal, on a link set right, can
+  take it for one before. In the hour repeated when daylight saving time
+  ends, the later reading is taken (no session trades then, Sunday 01:00 to
+  02:00 New York).
 
 What changes where: the IBKR adapter only (`loop.py`, `orders.py`,
 `connection.py`). The engine, its schemas and its rules are unchanged; no

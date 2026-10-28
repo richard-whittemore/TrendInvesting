@@ -231,6 +231,8 @@ class FakeTWS(TWSApi):
         callbacks.get = get
         if behaviour == "ok":
             self.connected = True
+            # One connection time per session, as IB Gateway gives it: the server time at its handshake.
+            self._session_started = self.server_time
             # IBKR names the login's accounts as the session starts.
             callbacks.managed_accounts(",".join(self.managed_accounts))
             callbacks.next_valid_id(self.next_order_id)
@@ -443,11 +445,12 @@ class FakeTWS(TWSApi):
         return self.can_place
 
     def connection_time(self):
-        """The session's connection time as IB Gateway gives it (tws_connection_time; New York's zone unless set)."""
+        """The session's connection time as IB Gateway gives it (tws_connection_time; by default the server time at the
+        session's handshake, on New York's clock)."""
         if not self.connected:
             return None
         if self.tws_connection_time is GATEWAY_CLOCK:
-            return datetime.fromtimestamp(self.server_time, NEW_YORK).strftime("%Y%m%d %H:%M:%S US/Eastern")
+            return datetime.fromtimestamp(self._session_started, NEW_YORK).strftime("%Y%m%d %H:%M:%S US/Eastern")
         return self.tws_connection_time
 
     def place_order(self, order_id, contract_, order_):

@@ -156,6 +156,11 @@ class Connection:
         # keeps its handshake (loop.gateway_clock_problem; ADR 0019, amended
         # 2026-10-28).
         self.connected_at = None
+        # New York's UTC offset when the current link connected, set by its
+        # reconcile once IB Gateway's clock is shown to be New York's, None
+        # until then (orders.gateway_clock_trusted; ADR 0019, amended
+        # 2026-10-28).
+        self.gateway_clock_offset = None
         # The reason the link was last reported down (disconnected, or
         # Gateway losing IBKR's servers), for a stop that names why the
         # link kept going; None again once a connect succeeds.
@@ -542,6 +547,7 @@ class Connection:
         self.inbox = Inbox()
         self._pending.clear()
         self.connected_at = None
+        self.gateway_clock_offset = None
         self.managed_accounts = frozenset()
         self._probe_sent_at = None
         self._last_probe_at = None

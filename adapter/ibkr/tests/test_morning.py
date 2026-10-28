@@ -399,6 +399,59 @@ class MorningTests(unittest.TestCase):
         loop.reconcile()
         self.assertEqual(loop._gateway_zone, "")
 
+    def test_a_gateway_that_kept_its_connection_time_is_trusted_at_a_later_reconcile(self):
+        # The fake Gateway, like IB Gateway, gives one connection time per session, however late it is asked.
+        self.at(datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc))
+        loop = self.loop()
+        loop.start()
+        self.at(datetime(2026, 10, 28, 15, 49, 22, tzinfo=timezone.utc))
+        loop.reconcile()
+        self.assertEqual(loop._gateway_zone, "")
+
+    def test_a_passed_clock_check_marks_the_link_and_a_failed_one_clears_it(self):
+        from datetime import timedelta
+        self.at(datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc))
+        self.fake.tws_connection_time = "20261028 09:49:19 EST"
+        loop = self.loop()
+        loop.start()
+        self.assertEqual(loop.conn.gateway_clock_offset, timedelta(hours=-4))
+        self.assertTrue(loop.tracker._clock_trusted(), "the tracker reads executions on New York's clock")
+        self.fake.tws_connection_time = "20261028 08:49:19 EST"
+        self.fake.drop()
+        for _ in range(10):
+            loop.step()
+        self.assertTrue(loop.ready(), "setup: reconnected and reconciled")
+        self.assertIsNone(loop.conn.gateway_clock_offset)
+        self.assertFalse(loop.tracker._clock_trusted(), "nor once the check fails")
+
+    def test_a_clock_checked_before_new_yorks_clocks_change_is_not_trusted_after(self):
+        # A Gateway on fixed EST matches New York's clock until the clocks go forward (2027-03-14): a link that
+        # connected before then, kept or restored by Gateway (1101/1102) with no new handshake, is not trusted after.
+        from datetime import timedelta
+        self.at(datetime(2027, 3, 12, 14, 0, tzinfo=timezone.utc))
+        self.fake.tws_connection_time = "20270312 09:00:00 EST"
+        loop = self.loop()
+        loop.start()
+        self.assertEqual((loop._gateway_zone, loop.conn.gateway_clock_offset), ("", timedelta(hours=-5)))
+        self.at(datetime(2027, 3, 15, 12, 5, tzinfo=timezone.utc))
+        problem = loop._gateway_problem()
+        for text in ("New York's clocks changed", "UTC-05:00", "UTC-04:00", "connects again"):
+            self.assertIn(text, problem)
+        loop.reconcile()
+        self.assertIn("New York's clocks changed", loop._gateway_zone)
+        self.assertIsNone(loop.conn.gateway_clock_offset)
+
+    def test_an_execution_on_a_link_whose_clock_check_failed_withholds(self):
+        self.proof(FRIDAY_MORNING)
+        self.fake.tws_connection_time = "20270115 07:05:00 EST"
+        loop = self.loop()
+        loop.start()
+        ex = execution(exec_id="0007.clock.01.01", order_id=0, perm_id=7373, order_ref="", client_id=0,
+                       time="20270114 10:00:01 EST")
+        loop._count_execution(SimpleNamespace(name="exec_details", args=(-1, contract(), ex)))
+        self.deliver(THURSDAY, loop)
+        self.assert_withheld("IB Gateway's connection time '20270115 07:05:00 EST'", "60 minutes behind")
+
     def test_the_connection_time_is_compared_with_the_adapters_clock_within_the_tolerance(self):
         from loop import GATEWAY_CLOCK_TOLERANCE, gateway_clock_problem
         from datetime import timedelta
