@@ -1813,7 +1813,8 @@ class DeploymentTests(unittest.TestCase):
         requests = 1 + flex.GENERATION_ATTEMPTS + len(flex.RATE_BACKOFF)
         per_query = (flex.REQUEST_TIMEOUT * requests + flex.GENERATION_WAIT * (flex.GENERATION_ATTEMPTS - 1)
                      + sum(flex.RATE_BACKOFF) + flex.MIN_REQUEST_GAP * requests)
-        # The wait for the token, the gap between the queries and the minute held after the last request.
+        # The wait for the token, the fixed minute its holder waits before its first request, and the gap between
+        # the queries.
         worst = flex.TOKEN_LOCK_WAIT + 2 * per_query + flex.QUERY_GAP + flex.TOKEN_COOLDOWN
         minutes = int(re.search(r"(?m)^TimeoutStartSec=([0-9]+)min$", self.service).group(1))
         self.assertGreater(minutes * 60, worst)

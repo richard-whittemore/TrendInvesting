@@ -278,8 +278,8 @@ QUERY_GAP = 5
 # Every account's reader uses the one Flex token, so one reading at a time holds it: an exclusive flock on the Flex
 # state root (the folder holding each account's ledger folder; token_root), taken after the account's own lock and
 # held for the whole reading. Its holder waits TOKEN_COOLDOWN on the steady clock before its first request, so its
-# requests never share a minute with the holder's before it, even one killed straight after a request. A reading waits for it at most TOKEN_LOCK_WAIT, asking every TOKEN_LOCK_POLL, then
-# sets itself aside, asking IBKR nothing.
+# requests never share a minute with the holder's before it, even one killed straight after a request. A reading
+# waits for it at most TOKEN_LOCK_WAIT, asking every TOKEN_LOCK_POLL, then sets itself aside, asking IBKR nothing.
 TOKEN_LOCK_WAIT = 240
 TOKEN_LOCK_POLL = 5
 # A second past the minute the rate is measured over, so no request of the next holder's is inside it.
@@ -658,7 +658,6 @@ class _Pacer:
     def __init__(self, sleep, monotonic):
         self._sleep, self._clock, self._sent = sleep, monotonic, deque()
 
-
     def wait(self):
         now = self._clock()
         while self._sent and now - self._sent[0] >= 60:
@@ -674,8 +673,8 @@ class _Pacer:
         if delay > 0:
             self._sleep(delay)
             now = max(self._clock(), now + delay)
-        self._sent.append(now)
         # Taken just before the request goes, with nothing between: the time the rate is measured from.
+        self._sent.append(now)
         while len(self._sent) > REQUESTS_PER_MINUTE:
             self._sent.popleft()
 
