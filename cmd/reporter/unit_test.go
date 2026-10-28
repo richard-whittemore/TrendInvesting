@@ -151,7 +151,8 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		case "ReadWritePaths":
 			readWrite = d.value
 		case "EnvironmentFile":
-			if strings.TrimPrefix(d.value, "-") != "/var/lib/trend-investing/engines/%i/run.env" {
+			// The Gateway's own settings give the Gateway check its restart windows.
+			if f := strings.TrimPrefix(d.value, "-"); f != "/etc/trend-investing/gateway.env" && f != "/var/lib/trend-investing/engines/%i/run.env" {
 				t.Errorf("EnvironmentFile=%s, want the engine's run.env, which names the current run", d.value)
 			}
 		case "LoadCredential":

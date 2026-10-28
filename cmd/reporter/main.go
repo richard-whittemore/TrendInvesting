@@ -418,7 +418,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		if path == "" {
 			path = filepath.Join(filepath.Dir(*statePath), "host-gateway.json")
 		}
-		if err := gatewayStep(path, *gatewayCheck, hostName(), senders, setAside, now); err != nil {
+		if sched, err := gatewayScheduleFrom(getenv); err != nil {
+			failures = append(failures, err)
+		} else if err := gatewayStep(path, *gatewayCheck, hostName(), sched, senders, setAside, now); err != nil {
 			failures = append(failures, err)
 		}
 	}

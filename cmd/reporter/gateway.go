@@ -25,35 +25,104 @@ var (
 )
 
 const (
-	// gatewayPagesAfter is how long the Gateway must be seen logged out,
-	// outside its restart windows, before it pages: three timer periods'
-	// worth of margin over a login that is merely slow (ADR 0019, "Alerting").
+	// gatewayPagesAfter is how long the Gateway must be logged out, counted
+	// from the end of any restart window, before it pages: two timer periods
+	// (5 minutes each) of margin over a login that is merely slow (ADR 0019,
+	// "Alerting").
 	gatewayPagesAfter = 10 * time.Minute
 	// gatewayRemindEvery is the reminder interval while it stays logged out.
 	gatewayRemindEvery = time.Hour
 )
 
-// inGatewayRestartWindow reports whether t falls in a time the Gateway is
-// documented to be logging in again: the nightly restart at 11:45 PM
-// (23:40 to 00:30) and the Sunday 09:00 cold restart, which waits for the
-// phone prompt (08:55 to 09:30), New York time (deploy/libexec/render-ibc-config.sh).
-// The threshold counts from the window's end.
-func inGatewayRestartWindow(t time.Time) bool {
-	loc, err := time.LoadLocation("America/New_York")
+// gatewaySchedule is when the Gateway is documented to log in again: the
+// nightly restart (TI_GATEWAY_RESTART_TIME, 12-hour clock, default 11:45 PM)
+// and the Sunday cold restart (TI_GATEWAY_COLD_RESTART, 24-hour, default
+// 09:00), both New York time, read from the same settings the IBC render uses
+// (deploy/libexec/render-ibc-config.sh). Being logged out near them pages
+// nothing; the grace counts from the window's end.
+type gatewaySchedule struct{ nightly, cold int } // minutes after midnight
+
+// The window around a restart: it opens gatewayWindowLead before it, and
+// closes after the nightly restart's login (the Gateway restarts, then logs in
+// and may wait on the phone) or the Sunday cold restart's, which waits on the
+// phone prompt.
+const (
+	gatewayWindowLead        = 5 * time.Minute
+	gatewayNightlyWindowTail = 45 * time.Minute
+	gatewayColdWindowTail    = 30 * time.Minute
+)
+
+func gatewayScheduleFrom(getenv func(string) string) (gatewaySchedule, error) {
+	pick := func(name, fallback string) string {
+		if v := getenv(name); v != "" {
+			return v
+		}
+		return fallback
+	}
+	nightly, err := time.Parse("3:04 PM", pick("TI_GATEWAY_RESTART_TIME", "11:45 PM"))
 	if err != nil {
-		return false
+		return gatewaySchedule{}, fmt.Errorf("reporter: TI_GATEWAY_RESTART_TIME must be HH:MM AM/PM, as IBC's AutoRestartTime is: %w", err)
 	}
-	t = t.In(loc)
-	mins := t.Hour()*60 + t.Minute()
-	if mins >= 23*60+40 || mins < 30 {
-		return true
+	cold, err := time.Parse("15:04", pick("TI_GATEWAY_COLD_RESTART", "09:00"))
+	if err != nil {
+		return gatewaySchedule{}, fmt.Errorf("reporter: TI_GATEWAY_COLD_RESTART must be HH:MM on a 24-hour clock, as IBC's ColdRestartTime is: %w", err)
 	}
-	return t.Weekday() == time.Sunday && mins >= 8*60+55 && mins < 9*60+30
+	return gatewaySchedule{nightly: nightly.Hour()*60 + nightly.Minute(), cold: cold.Hour()*60 + cold.Minute()}, nil
 }
 
-// runGatewayCheck runs the check: out is true for exit 1. Any other failure,
-// a missing command or a timeout is an error, not a logout.
-func runGatewayCheck(command string) (out bool, said string, err error) {
+type gatewayWindow struct{ start, end time.Time }
+
+// windows returns every restart window that can touch [from, to].
+func (s gatewaySchedule) windows(from, to time.Time) []gatewayWindow {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		loc = time.UTC
+	}
+	from, to = from.In(loc), to.In(loc)
+	var out []gatewayWindow
+	for d := time.Date(from.Year(), from.Month(), from.Day()-1, 0, 0, 0, 0, loc); !d.After(to); d = d.AddDate(0, 0, 1) {
+		at := func(mins int) time.Time { return time.Date(d.Year(), d.Month(), d.Day(), mins/60, mins%60, 0, 0, loc) }
+		n := at(s.nightly)
+		out = append(out, gatewayWindow{n.Add(-gatewayWindowLead), n.Add(gatewayNightlyWindowTail)})
+		if d.Weekday() == time.Sunday {
+			c := at(s.cold)
+			out = append(out, gatewayWindow{c.Add(-gatewayWindowLead), c.Add(gatewayColdWindowTail)})
+		}
+	}
+	return out
+}
+
+// inWindow reports whether t is inside a restart window.
+func (s gatewaySchedule) inWindow(t time.Time) bool {
+	for _, w := range s.windows(t, t) {
+		if !t.Before(w.start) && t.Before(w.end) {
+			return true
+		}
+	}
+	return false
+}
+
+// graceFrom is when the page threshold starts counting for an outage seen
+// since: that time, or the end of the latest restart window the outage
+// overlaps, whichever is later.
+func (s gatewaySchedule) graceFrom(since, now time.Time) time.Time {
+	from := since
+	for _, w := range s.windows(since, now) {
+		if w.end.After(from) && w.start.Before(now) && w.end.After(since) {
+			from = w.end
+		}
+	}
+	return from
+}
+
+// gatewayNoEvidenceExit is the check's exit status for a readable journal that
+// holds no login event (rotated, or aged out): neither logged in nor out.
+const gatewayNoEvidenceExit = 4
+
+// runGatewayCheck runs the check: out is true for exit 1, silent for exit 4
+// (no evidence). Any other failure, a missing command or a timeout is an
+// error, not a logout.
+func runGatewayCheck(command string) (out, silent bool, said string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gatewayCheckTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, command)
@@ -68,13 +137,15 @@ func runGatewayCheck(command string) (out bool, said string, err error) {
 	var exit *exec.ExitError
 	switch {
 	case runErr == nil:
-		return false, said, nil
+		return false, false, said, nil
 	case ctx.Err() != nil:
-		return false, said, fmt.Errorf("reporter: the gateway check timed out after %s", gatewayCheckTimeout)
+		return false, false, said, fmt.Errorf("reporter: the gateway check timed out after %s", gatewayCheckTimeout)
 	case errors.As(runErr, &exit) && exit.ExitCode() == 1:
-		return true, said, nil
+		return true, false, said, nil
+	case errors.As(runErr, &exit) && exit.ExitCode() == gatewayNoEvidenceExit:
+		return false, true, said, nil
 	default:
-		return false, said, fmt.Errorf("reporter: the gateway check could not tell: %w (it said: %s)", runErr, said)
+		return false, false, said, fmt.Errorf("reporter: the gateway check could not tell: %w (it said: %s)", runErr, said)
 	}
 }
 
@@ -107,7 +178,7 @@ func loadHostGateway(path string) (hostGateway, error) {
 // seen in; it pages once the time passes gatewayPagesAfter outside a window,
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
-func gatewayStep(path, command, host string, senders []sender, setAside []channelFault, clock func() time.Time) error {
+func gatewayStep(path, command, host string, sched gatewaySchedule, senders []sender, setAside []channelFault, clock func() time.Time) error {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -123,7 +194,7 @@ func gatewayStep(path, command, host string, senders []sender, setAside []channe
 	if err != nil {
 		return err
 	}
-	out, said, err := runGatewayCheck(command)
+	out, silent, said, err := runGatewayCheck(command)
 	if err != nil {
 		return err
 	}
@@ -151,6 +222,16 @@ func gatewayStep(path, command, host string, senders []sender, setAside []channe
 		}
 	}
 	key := report.GatewayKey(host)
+	// A journal with no login event proves nothing about a login: while an
+	// outage is open it stays open, and none is opened from silence.
+	if silent && (h.Since != nil || deliveredAnywhere(seen, key)) {
+		out = true
+		said = "no login event is left in the journal to show a recovery (it rotated, or the last event aged out); still treated as logged out since the earlier check. " + said
+		if h.Since == nil {
+			t := now
+			h.Since = &t
+		}
+	}
 	if !out {
 		h.Since = nil
 		if !deliveredAnywhere(seen, key) {
@@ -167,15 +248,14 @@ func gatewayStep(path, command, host string, senders []sender, setAside []channe
 		forgetAlert(key, keep, seen, sent, repeats)
 		return errors.Join(resolveErr, record())
 	}
-	paged := deliveredAnywhere(seen, key)
-	if h.Since == nil || (!paged && inGatewayRestartWindow(now)) {
+	if h.Since == nil {
 		t := now
 		h.Since = &t
 	}
 	if err := record(); err != nil {
 		return err
 	}
-	if inGatewayRestartWindow(now) || now.Sub(*h.Since) < gatewayPagesAfter {
+	if sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter {
 		return nil
 	}
 	return deliver(senders, report.GatewayLoggedOutAlert(host, *h.Since, now, said), seen, sent, repeats, now, gatewayRemindEvery, record)

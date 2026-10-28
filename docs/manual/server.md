@@ -649,33 +649,54 @@ has failed to tell you. Two things now cover it.
 **You are paged.** The reporter of the `boost` account (the one instance that
 owns the check, so three accounts do not page three times) runs
 `/usr/local/libexec/trend-investing/gateway-check.sh` every 5 minutes. It
-reads the Gateway's journal (`journalctl -u ti-gateway`) and the adapter's: the
-Gateway counts as logged out when IBC's newest login event is a refused-login
-dialog, the retry stop below, or a login screen with no `Login has completed`
-after it, or when the adapter's newest link event is the loss of IBKR's
-servers (codes 1100/2110). Logged out for more than 10 minutes, outside the
-documented restart windows, pages you once: Pushover, your own ntfy and the
-private alerts repository, titled `<host>: IB Gateway is logged out`, with
-what the check saw and these steps. It is repeated every hour while it lasts,
-and resolved (the PagerDuty incident, if used, is closed, and the next outage
-pages anew) when a check finds the Gateway logged in. The windows, New York
-time, in which being logged out pages nothing: 23:40 to 00:30 every night
-(the 11:45 PM restart) and 08:55 to 09:30 on Sundays (the 09:00 cold restart
-and its phone prompt). The 10 minutes count from the end of a window, so a
-login still refused at 00:30 pages by about 00:45. The record is
-`host-gateway.json` in `/var/lib/trend-investing/reports/`.
+reads the Gateway's journal (`journalctl -u ti-gateway`) and the adapter's.
+The Gateway counts as logged out when IBC's newest login event is a
+refused-login dialog, the retry stop below, or a login screen with no `Login
+has completed` after it. It also counts when the adapter has reported IBKR's
+servers lost (codes 1100/2110) for over 3 hours: IBKR's own scheduled server
+resets and weekend maintenance drop that link for shorter spells while the
+Gateway is perfectly logged in, so a shorter loss alone pages nothing; a
+login failure shows in IBC's journal at once. A check that cannot read the
+journal (`journalctl` missing or failing) fails the reporter's firing, which
+pages as a failed unit; it never counts as logged in. A readable journal with
+no login event at all (a fresh server, or the evidence rotated away) opens no
+page, and an outage already open stays open: only a completed login closes it.
 
-**The retry is bounded.** IBC 3.24.2 has no setting for a refused login. The
-Gateway's start script watches IBC's output for the refused-login dialog,
-stops IBC (its own process, nothing else) and lets systemd start it again 30
-seconds later. IBKR locks a login after 10 consecutive failed attempts within
-24 hours, so the script allows 3 refused logins within 24 hours: after the
-third it stops the unit and does not restart it (exit code 77), and a start
-while those 3 still count refuses at once with "login retries stopped"
-without touching IBKR. A completed login (`Login has completed`) resets the
-count. The count is the file `/var/lib/ti-gateway/login-failures`. Failed
-logins you make on IBKR's website, or with the wrong paper password
-elsewhere, count against IBKR's 10 too, which is why the program stops at 3.
+Logged out for more than 10 minutes, counted from the end of any restart
+window, pages you once: Pushover, your own ntfy and the private alerts
+repository, titled `<host>: IB Gateway is logged out`, with what the check saw
+and these steps. It is repeated every hour while it lasts, and resolved (the
+PagerDuty incident, if used, is closed, and the next outage pages anew) when a
+check finds the Gateway logged in. The windows in which being logged out
+pages nothing follow the restart times in `/etc/trend-investing/gateway.env`
+(`TI_GATEWAY_RESTART_TIME`, default 11:45 PM, and `TI_GATEWAY_COLD_RESTART`,
+default 09:00 on Sundays; New York time): from 5 minutes before the nightly
+restart to 45 minutes after it (23:40 to 00:30 by default) and from 5 minutes
+before the Sunday cold restart to 30 minutes after it (08:55 to 09:30), where
+the phone prompt waits. So a login still refused at 00:30 pages at 00:40. The
+record is `host-gateway.json` in `/var/lib/trend-investing/reports/`.
+
+**The retry is bounded.** IBC 3.24.2 has no setting for a refused login: its
+user guide and `config.ini` cover only the second-factor timeouts and
+`LoginDialogDisplayTimeout`. The Gateway's start script reads IBC's output for
+the refused-login dialog, counts the first one of each run, stops its own
+`xvfb-run` process (SIGTERM, then SIGKILL after 15 seconds; systemd ends the
+rest of the unit's processes when the script exits) and lets systemd start it
+again 30 seconds later. IBKR's documentation says "After ten failed login
+attempts in 24 hours, your Portal log in will be disabled" (IBKR Guides, "Log
+In and Log Out", ibkrguides.com/clientportal/gettingstarted/login.htm; the
+FAQ "Troubleshooting client portal login failures", article 1132, says the
+same). That is the Client Portal login; IBKR publishes no separate figure for
+the Gateway's, so the program assumes the same. It allows 3 refused logins
+within 24 hours: after the third it stops the unit and does not restart it
+(exit code 77), and a start while those 3 still count refuses at once with
+"login retries stopped" without touching IBKR. A counter file it cannot read,
+trust (not a plain list of times) or write also refuses, since an unknown
+history cannot authorise another try. A completed login (`Login has
+completed`) resets the count. The count is the file
+`/var/lib/ti-gateway/login-failures`. Failed logins you make on IBKR's
+website, or with the wrong paper password elsewhere, count against IBKR's 10
+too, which is why the program stops at 3.
 
 **What you do when paged:**
 
@@ -687,7 +708,7 @@ elsewhere, count against IBKR's 10 too, which is why the program stops at 3.
    website, another Gateway): a second session makes IBKR log the Gateway
    out. Log out of those.
 3. `sudo rm -f /var/lib/ti-gateway/login-failures` if the page or the
-   journal says retries stopped, then `sudo systemctl restart ti-gateway` and
+   journal says retries stopped or the count cannot be trusted, then `sudo systemctl restart ti-gateway` and
    approve the phone prompt if one comes. Check `journalctl -u ti-gateway`
    shows `Login has completed`. The page resolves within 5 minutes.
 

@@ -29,6 +29,10 @@ Group=ti-trader
 Environment=TZ=America/New_York
 Environment=TI_STATE_DIR=/var/lib/trend-investing/engines/%i
 Environment=TI_REPORTS_DIR=/var/lib/trend-investing/reports
+# The Gateway's configured restart times (TI_GATEWAY_RESTART_TIME,
+# TI_GATEWAY_COLD_RESTART), the same file the IBC render reads, give the
+# Gateway check its restart windows.
+EnvironmentFile=-/etc/trend-investing/gateway.env
 # The adapters whose link events the Gateway check reads (gateway-check.sh).
 Environment=TI_GATEWAY_ADAPTER_UNITS=ti-adapter-boost.service
 # TI_RUN: the engine's current run, whose durable log is read. systemd reads
