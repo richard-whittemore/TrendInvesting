@@ -437,21 +437,42 @@ func TestAnyUnacceptedApprovalRefusesWhateverItNames(t *testing.T) {
 	}
 }
 
-// TestARefusedFirstRunsApprovalNamesTheWayToStartAgain: when the run that
-// refused its approval was the account's first, there is no run before it:
-// the refusal says to set the log aside and start again as a first run.
-// A fresh run's refused approval names the run before it.
-func TestARefusedFirstRunsApprovalNamesTheWayToStartAgain(t *testing.T) {
-	approval := func(previous string) journal.Entry {
-		return recorded(t, journal.KindInput, "operator-run-approved:x", event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion,
-			map[string]any{"account_id": iraLogAccount, "previous_log": previous})
+// TestARefusedApprovalIsEvidenceOnlyWhenItReads: when the run that refused
+// its approval was the account's first, there is no run before it, and the
+// refusal says to start again as an IRA's first run; it names the run
+// before only from an approval that decodes as an approval and names the
+// log's own account; any other, such as one naming another account and a
+// log of its own, gives both ways back, never a run nobody showed exists.
+func TestARefusedApprovalIsEvidenceOnlyWhenItReads(t *testing.T) {
+	valid := func(account, previous string) journal.Entry {
+		p := event.OperatorRunApprovedPayload{AccountID: account, PreviousLog: previous, PreviousLogFinalHash: "sha256:" + strings.Repeat("b", 64),
+			ApprovedBy: "owner", ApprovedAt: time.Date(2025, time.January, 2, 14, 0, 0, 0, time.UTC), Momentum: &event.MomentumStateInForce{}}
+		return recorded(t, journal.KindInput, "operator-run-approved:x", event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, p)
 	}
-	_, err := restart.RebalanceAtEnd(recordedLog(t, approval("")), "run-1.log")
-	if err == nil || !strings.Contains(err.Error(), "operator approve -first-run") || strings.Contains(err.Error(), "run before it") {
-		t.Errorf("a refused first run's approval: %v, want it to name starting again with operator approve -first-run", err)
+	_, err := restart.RebalanceAtEnd(recordedLog(t, valid("DUOTHER", "missing.log")), "run-1.log")
+	if err == nil || strings.Contains(err.Error(), "missing.log") || !strings.Contains(err.Error(), "-first-run") {
+		t.Errorf("another account's refused approval: %v, want both ways back and no named run", err)
 	}
-	_, err = restart.RebalanceAtEnd(recordedLog(t, approval("run-0.log")), "run-1.log")
+	_, err = restart.RebalanceAtEnd(recordedLog(t, valid(iraLogAccount, "run-0.log")), "run-1.log")
 	if err == nil || !strings.Contains(err.Error(), "run-0.log") || strings.Contains(err.Error(), "-first-run") {
-		t.Errorf("a refused fresh run's approval: %v, want it to name the run before it, run-0.log", err)
+		t.Errorf("the account's own refused approval: %v, want it to name run-0.log", err)
+	}
+	first := valid(iraLogAccount, "")
+	first.Envelope.Payload = json.RawMessage(strings.Replace(string(first.Envelope.Payload), `"starting_book":null`, `"starting_book":{"positions":[],"total_cash":1,"currency":"USD"}`, 1))
+	first.Envelope.Payload = json.RawMessage(strings.Replace(string(first.Envelope.Payload), `"previous_log_final_hash":"sha256:`+strings.Repeat("b", 64)+`"`, `"previous_log_final_hash":""`, 1))
+	_, err = restart.RebalanceAtEnd(recordedLog(t, first), "run-1.log")
+	if err == nil || !strings.Contains(err.Error(), "operator approve -first-run -strategy momentum") || strings.Contains(err.Error(), "run before it") {
+		t.Errorf("the account's own refused first-run approval: %v, want operator approve -first-run -strategy momentum", err)
+	}
+}
+
+// TestABoostLogIsNotReadAsAnIRAs: a Boost log in an IRA's folder is refused
+// as not a momentum run's, not as one whose run refused its approval.
+func TestABoostLogIsNotReadAsAnIRAs(t *testing.T) {
+	boost := recorded(t, journal.KindInput, "configuration:boost", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion,
+		map[string]string{"strategy_id": event.TargetWeightStrategyBoost, "account_id": iraLogAccount})
+	err := restart.CheckRebalanceInProgress([]journal.Entry{boost}, event.OperatorRunApprovedPayload{AccountID: iraLogAccount, Momentum: &event.MomentumStateInForce{}}, "run-1.log")
+	if err == nil || !strings.Contains(err.Error(), "not a momentum run's") {
+		t.Errorf("a Boost log: %v, want a refusal saying it is not a momentum run's", err)
 	}
 }

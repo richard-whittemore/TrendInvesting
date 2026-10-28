@@ -163,12 +163,11 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 			// one, which clears it (above). Whatever account it names, or
 			// fails to name, and whether or not it decodes: the run had
 			// accepted no approval, so its state is not known from the log.
-			var p struct {
-				PreviousLog *string `json:"previous_log"`
-			}
+			// Its previous log is evidence of the way back only when it reads
+			// as an approval of this log's own account; any other gives both.
 			refused, refusedPrevious = env.ID, nil
-			if json.Unmarshal(env.Payload, &p) == nil {
-				refusedPrevious = p.PreviousLog
+			if p, err := event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion); err == nil && p.AccountID == accountID {
+				refusedPrevious = &p.PreviousLog
 			}
 		}
 		// The venue's reports, retirements and clearances the run was sent;
@@ -209,10 +208,10 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 		// approval named is not known to be carried, nor to be ended, so the
 		// state in force is the run's before it, or, for an account's first
 		// run, none was ever carried (ADR 0026, point 5).
-		next := "approve the run before it, or, if it was the account's first run, start again as a first run with `operator approve -first-run`"
+		next := "approve the run before it, or, if it was the account's first run, start again as a first run with `operator approve -first-run -strategy momentum`"
 		switch {
 		case refusedPrevious != nil && *refusedPrevious == "":
-			next = "it was the account's first run, so start again as a first run with `operator approve -first-run`"
+			next = "it was the account's first run, so start again as a first run with `operator approve -first-run -strategy momentum`"
 		case refusedPrevious != nil:
 			next = fmt.Sprintf("approve the run before it, %s", *refusedPrevious)
 		}
@@ -254,6 +253,9 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 // no momentum state, is refused for a momentum log. logName names the
 // approved log in a refusal.
 func CheckRebalanceInProgress(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
+	if !IsMomentumLog(entries) {
+		return fmt.Errorf("engine: %s is not a momentum run's log: its configuration names another strategy, so it is not this IRA's run; set it aside, unchanged, if it does not belong in this folder (docs/runbooks/durable-log.md, \"An unrecoverable log\")", logName)
+	}
 	if approval.Momentum == nil {
 		return fmt.Errorf("engine: %s is a momentum run's, but the approval is Boost-shaped: it states Boost's latch and no rebalance in progress; approve it with `operator approve -log %s`, which states the rebalance in progress or none (ADR 0026, point 5)", logName, logName)
 	}

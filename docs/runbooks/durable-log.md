@@ -324,9 +324,11 @@ with step 3 as that message says).
    the crashed run itself, it cannot be resumed: start a fresh run from a
    reconciled baseline (ADR 0019's recovery procedure), with an approval
    naming the latest run left in the directory. For an IRA's log whose run
-   refused its approval, approve the run before it, which the message
-   names; if it was the account's first run, there is none: start again as
-   a first run (`operator approve -first-run`).
+   refused its approval, approve the run before it: the message names it
+   when the refused approval reads as this account's, else it is the latest
+   run left in the folder. If it was the account's first run, there is
+   none: start again as an IRA's first run (`operator approve -first-run
+   -strategy momentum`).
 
 ## A resume that does not reproduce its log
 

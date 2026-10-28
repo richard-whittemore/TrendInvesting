@@ -486,7 +486,10 @@ owner clears it. So:
   the approval ("cannot be read back"), never reads as no rebalance in
   progress; so does a log whose run refused the approval it was given and
   accepted none, since the rebalance that approval named was never carried
-  and the state in force is the run's before it. An approval stating none where one is, or one the
+  and the state in force is the run's before it, or, when that run was the
+  account's first, there is none and the account starts again as a first
+  run (`operator approve -first-run -strategy momentum`). An approval
+  stating none where one is, or one the
   log does not hold, is refused, and so is a Boost-shaped approval for a
   momentum configuration, or an IRA one for Boost. When the approved log is
   a start cut short and no earlier run holds more, its own configuration is
