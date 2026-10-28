@@ -205,6 +205,7 @@ grep -qx 'ReadOnlyApi=yes' "$run/config.ini" || fail "read-only API not rendered
 grep -qx 'AutoRestartTime=11:45 PM' "$run/config.ini" || fail "nightly restart not rendered"
 grep -qx 'ColdRestartTime=09:00' "$run/config.ini" || fail "Sunday cold restart not rendered"
 grep -qx 'ReloginAfterSecondFactorAuthenticationTimeout=yes' "$run/config.ini" || fail "2FA relogin not rendered"
+grep -qx 'LoginDialogDisplayTimeout=60' "$run/config.ini" || fail "login dialog timeout not rendered"
 grep -qx 'AcceptIncomingConnectionAction=reject' "$run/config.ini" || fail "incoming API connections are not rejected"
 grep -qx 'TrustedTwsApiClientIPs=' "$run/config.ini" || fail "trusted API client addresses not empty"
 if grep -rqF fakePW /etc/trend-investing /var/log 2>/dev/null; then fail "fake secret found on disk outside the runtime dir"; fi
@@ -225,7 +226,7 @@ status=0
 CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run GATEWAY_MAJOR=1050 \
   /usr/local/libexec/trend-investing/start-gateway.sh >/dev/null 2>&1 || status=$?
 test "$status" = 78 || fail "start-gateway exited $status on an empty login, want 78"
-grep -qx 'RestartPreventExitStatus=64 65 78' /etc/systemd/system/ti-gateway.service || fail "ti-gateway restarts on a configuration exit"
+grep -qx 'RestartPreventExitStatus=64 65 77 78' /etc/systemd/system/ti-gateway.service || fail "ti-gateway restarts on a configuration exit"
 pass "an empty login stops the gateway with 78, which the unit does not restart on"
 
 # The data step is installed and runs under the server's python3. Given a

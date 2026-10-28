@@ -32,8 +32,10 @@ Restart=always
 RestartSec=30
 # Except on the renderer's configuration exits: 78 = the login file is not
 # filled in yet (owner step), 64 = it holds an unknown key or value, 65 = the
-# IBC template lacks a key. None fixes itself, so do not loop on them.
-RestartPreventExitStatus=64 65 78
+# IBC template lacks a key; and 77 = the bound on refused logins is reached
+# (start-gateway.sh), where another try risks IBKR locking the login. None
+# fixes itself, so do not loop on them. 75 (one refused login) restarts.
+RestartPreventExitStatus=64 65 77 78
 TimeoutStopSec=60
 NoNewPrivileges=true
 PrivateTmp=true

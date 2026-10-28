@@ -1677,6 +1677,7 @@ name; the other words in angle brackets are filled in by the reporter.
 | `<account>: order <id> not acknowledged` | urgent | [order lifecycle](order-lifecycle.md) |
 | `<account>: order <id> acknowledged` | routine | [order lifecycle](order-lifecycle.md) |
 | `<host>: the server's clock failed its check` (the server's name, not an account's) | urgent | this chapter, below, and [server](server.md), "The clock" |
+| `<host>: IB Gateway is logged out` (the server's name) | urgent, repeated hourly | [server](server.md), "The Gateway is logged out" |
 | `<host>: <unit> failed` (the server's name and the failed unit's, such as `ti-adapter-boost.service`) | urgent | this chapter, below, and [server](server.md), "A failed unit"; the engine's and adapter's chapters have a row for their own unit |
 | `<account>: daily summary <date>` | routine | this chapter, "What the summary shows, and its limits" |
 

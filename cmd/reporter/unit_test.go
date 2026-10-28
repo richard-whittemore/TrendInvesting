@@ -203,6 +203,14 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		// The server's script is not on this machine: a stand-in that passes.
 		args[i+1] = newStandInCheck(t).path()
 	}
+	if i := indexOf(args, "-gateway-check"); i < 0 || i+1 >= len(args) || args[i+1] != "/usr/local/libexec/trend-investing/gateway-check.sh" {
+		t.Errorf("ExecStart %v does not run the installed gateway check", args)
+	} else {
+		args[i+1] = newStandInGateway(t).path()
+	}
+	if i := indexOf(args, "-gateway-owner"); i < 0 || i+1 >= len(args) || args[i+1] != "boost" {
+		t.Errorf("ExecStart %v does not name boost as the gateway check's owner", args)
+	}
 	if indexOf(args, "-summary") < 0 {
 		t.Errorf("ExecStart %v does not send the daily summary", args)
 	}

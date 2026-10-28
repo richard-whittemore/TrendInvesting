@@ -51,7 +51,7 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 
 | Unit | What it does | When it runs | Today |
 | --- | --- | --- | --- |
-| `ti-gateway.service` | IB Gateway under IBC, logged in to IBKR | Starts at boot (enabled). Restarts itself 30 seconds after IBC exits (for example when the weekly phone approval times out), except when the login file is empty or malformed (a wrong password is not caught: see the table below). IBC restarts the Gateway nightly at 11:45 PM and logs in again from cold every Sunday at 09:00 (`/etc/trend-investing/gateway.env`) | Installed; not yet run against a real IBKR login |
+| `ti-gateway.service` | IB Gateway under IBC, logged in to IBKR | Starts at boot (enabled). Restarts itself 30 seconds after IBC exits (for example when the weekly phone approval times out), except when the login file is empty or malformed, or after 3 refused logins within 24 hours ("The Gateway is logged out"). IBC restarts the Gateway nightly at 11:45 PM and logs in again from cold every Sunday at 09:00 (`/etc/trend-investing/gateway.env`) | Installed; not yet run against a real IBKR login |
 | `ti-data.timer` and `ti-data.service` | The daily data job: records the day's market data from Massive and writes the Boost engine's input ([market data](market-data.md), "The daily data job") | Monday to Friday at 06:05, 07:05 and 08:05, for the previous session: Massive's free plan serves a session's prices only the next morning, and the adapter's morning reading stands for the session's close only with the Flex reader's executions proof, else the session is withheld ([market data](market-data.md), "The free plan's timing"; [reconciliation](reconciliation.md), "The executions proof"). A 403 at the first two firings is a quiet wait; one that persists at 08:05 fails the unit and pages you ("The free plan's timing" in [market data](market-data.md)). A firing missed while the server was off runs when it starts again. A run is stopped after an hour | Built and installed by `provision.sh services` when `dist/ti-data` is beside `deploy/`. Until the Boost engine has been started once (no `run.env` and no run log in its folder) a firing waits quietly and succeeds; it refuses, and the unit fails, for a real fault, including a `run.env` lost after a run (a run log or a run stream folder is the sign) ("The reporter before the first run", below) |
 | `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. The IRA instances are skipped: they have no configuration file |
 | `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; only Boost's timer is enabled, since the IRA engines have no configuration yet | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, until the engine has been started once it logs that it is waiting for the account's first run, skips only the reading of the log, and otherwise runs as usual ("The reporter before the first run", below); it fails, with a message, until the `secrets.env` entries below are filled in |
@@ -638,6 +638,59 @@ ends with the last check's time and result ([alerts and
 dashboard](alerts-and-dashboard.md), "Alerts this chapter explains"). Running it
 by hand is how you confirm the fix.
 
+## The Gateway is logged out
+
+IB Gateway can sit logged out of IBKR while its unit still shows `active`:
+the nightly restart at 11:45 PM logs in again, IBKR sometimes answers a login
+that worked minutes before with "Unrecognized Username or Password", and IBC
+leaves that dialog open for hours. Nothing reaches IBKR meanwhile, and no unit
+has failed to tell you. Two things now cover it.
+
+**You are paged.** The reporter of the `boost` account (the one instance that
+owns the check, so three accounts do not page three times) runs
+`/usr/local/libexec/trend-investing/gateway-check.sh` every 5 minutes. It
+reads the Gateway's journal (`journalctl -u ti-gateway`) and the adapter's: the
+Gateway counts as logged out when IBC's newest login event is a refused-login
+dialog, the retry stop below, or a login screen with no `Login has completed`
+after it, or when the adapter's newest link event is the loss of IBKR's
+servers (codes 1100/2110). Logged out for more than 10 minutes, outside the
+documented restart windows, pages you once: Pushover, your own ntfy and the
+private alerts repository, titled `<host>: IB Gateway is logged out`, with
+what the check saw and these steps. It is repeated every hour while it lasts,
+and resolved (the PagerDuty incident, if used, is closed, and the next outage
+pages anew) when a check finds the Gateway logged in. The windows, New York
+time, in which being logged out pages nothing: 23:40 to 00:30 every night
+(the 11:45 PM restart) and 08:55 to 09:30 on Sundays (the 09:00 cold restart
+and its phone prompt). The 10 minutes count from the end of a window, so a
+login still refused at 00:30 pages by about 00:45. The record is
+`host-gateway.json` in `/var/lib/trend-investing/reports/`.
+
+**The retry is bounded.** IBC 3.24.2 has no setting for a refused login. The
+Gateway's start script watches IBC's output for the refused-login dialog,
+stops IBC (its own process, nothing else) and lets systemd start it again 30
+seconds later. IBKR locks a login after 10 consecutive failed attempts within
+24 hours, so the script allows 3 refused logins within 24 hours: after the
+third it stops the unit and does not restart it (exit code 77), and a start
+while those 3 still count refuses at once with "login retries stopped"
+without touching IBKR. A completed login (`Login has completed`) resets the
+count. The count is the file `/var/lib/ti-gateway/login-failures`. Failed
+logins you make on IBKR's website, or with the wrong paper password
+elsewhere, count against IBKR's 10 too, which is why the program stops at 3.
+
+**What you do when paged:**
+
+1. Log in to the paper account on IBKR's website. If that is refused, the
+   password changed or the login is locked: fix it there (IBKR phones, not
+   this program), and `sudo ti-secrets edit ibkr-login.env` if the password
+   changed.
+2. Never stay logged in anywhere else with the paper username (the app, the
+   website, another Gateway): a second session makes IBKR log the Gateway
+   out. Log out of those.
+3. `sudo rm -f /var/lib/ti-gateway/login-failures` if the page or the
+   journal says retries stopped, then `sudo systemctl restart ti-gateway` and
+   approve the phone prompt if one comes. Check `journalctl -u ti-gateway`
+   shows `Login has completed`. The page resolves within 5 minutes.
+
 ## Closing the Gateway's ports to your other devices
 
 Tailscale lets every device on your tailnet reach every port on the server
@@ -874,7 +927,8 @@ stop, not after two sessions of silence.
 | `provision.sh services` stops with "verification failed, nothing replaced and no plain text removed", or with "both exist and differ" | The plain-text file is kept and no encrypted copy replaces anything | For the first, run it again; if it keeps failing, see `journalctl` and the disk space. For the second, keep the right one as the message says, then run it again |
 | The Sunday phone prompt is missed | IBC exits, the unit starts it again after 30 seconds, and a new prompt arrives each time; nothing reaches IBKR meanwhile | Approve the next prompt (`docs/runbooks/gateway-login.md`) |
 | `ti-gateway` failed and stays down; `journalctl -u ti-gateway` names the login file | The login file is empty, or holds an unknown key or value (for example a trading mode other than `paper` or `live`). The unit does not restart on these, because none fixes itself | Fill it in or correct it with `sudo ti-secrets edit ibkr-login.env`, then `sudo systemctl start ti-gateway` (`docs/runbooks/gateway-login.md`) |
-| The IBKR password is wrong | That check does not catch it: if IBC exits, the unit starts it again every 30 seconds, and repeated failed logins can make IBKR lock the login | Stop the Gateway at once (`sudo systemctl stop ti-gateway`), correct the file, start it again (`docs/runbooks/gateway-login.md`) |
+| `<host>: IB Gateway is logged out` (or `journalctl -u ti-gateway` says "Unrecognized Username or Password" or "login retries stopped") | IBKR refused the login, typically after the nightly restart, and IBC left the dialog open. The start script stops IBC and systemd starts it again, at most 3 refused logins within 24 hours (IBKR locks at 10); then the unit stops with exit 77 and stays down. You are paged after 10 minutes outside the restart windows, then hourly | "The Gateway is logged out", above: check the paper login on IBKR's website, log out of any other session with the paper username, delete `/var/lib/ti-gateway/login-failures`, `sudo systemctl restart ti-gateway` |
+| The IBKR password is wrong | The refused login is retried at most twice (3 attempts in all), then the unit stops, so IBKR cannot lock the login; you are paged | Correct the file (`sudo ti-secrets edit ibkr-login.env`), delete `/var/lib/ti-gateway/login-failures`, start it again (`docs/runbooks/gateway-login.md`) |
 | The journal of `ti-data` or `ti-reporter@boost` says "waiting for the account's first run" (the unit is not failed) | No engine run has been started, so there is nothing to record or report. The data job writes nothing; the reporter sends no alert and, if nothing else is wrong, pings the heartbeat. Nothing is paged ("The reporter before the first run", below) | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine") |
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |
 | `ti-engine@<instance>` or `ti-adapter-boost` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the IRA engines have no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
