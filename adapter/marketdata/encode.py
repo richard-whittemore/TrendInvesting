@@ -264,16 +264,25 @@ def list_recordings(directory):
 
 
 def _read_listed(directory, name, listing):
-    """record.read of a file in ``listing``, refused as a Conflict when it
-    has disappeared or been replaced since the listing was taken."""
+    """record.read of a file in ``listing``: the file is opened first, and
+    the open file's identity is checked against the listing before it is
+    read and again after, so what is read is the listed recording or a
+    Conflict, never a replacement (one that has disappeared or been replaced
+    since the listing was taken)."""
     path = os.path.join(directory, name)
     try:
-        st = os.stat(path)
+        f = open(path)
     except FileNotFoundError:
         raise Conflict("{} disappeared during the encode".format(name)) from None
-    if (st.st_ino, st.st_size, st.st_mtime_ns) != listing[name]:
-        raise Conflict("{} changed during the encode".format(name))
-    return record.read(path)
+    with f:
+        def check():
+            st = os.fstat(f.fileno())
+            if (st.st_ino, st.st_size, st.st_mtime_ns) != listing[name]:
+                raise Conflict("{} changed during the encode".format(name))
+        check()
+        rec = record.read_open(f, path)
+        check()
+    return rec
 
 
 def iter_sessions(directory, first, last, retracted=(), tickers=None, listing=None):
@@ -362,11 +371,14 @@ def _universe_rows(directory, day, rec, max_age_days, named, listing=None):
         types[sym] = kind
     if not types:
         raise MissingData("universe {} has no reference tickers".format(day))
-    paths = None if listing is None else lambda kind: [os.path.join(directory, n) for n in listing
-                                                       if n.startswith(kind + "_")]
-    labels = sectors.labels(
-        sectors.latest(directory, "sectors-iwv", day, max_age_days, paths=paths and paths("sectors-iwv")),
-        sectors.latest(directory, "sectors-nasdaq", day, max_age_days, paths=paths and paths("sectors-nasdaq")))
+    def latest(kind):
+        if listing is None:
+            return sectors.latest(directory, kind, day, max_age_days)
+        # The recordings listed for the whole encode, read as iter_sessions reads them.
+        return sectors.latest(directory, kind, day, max_age_days,
+                              paths=[os.path.join(directory, n) for n in listing if n.startswith(kind + "_")],
+                              read=lambda path: _read_listed(directory, os.path.basename(path), listing))
+    labels = sectors.labels(latest("sectors-iwv"), latest("sectors-nasdaq"))
     rows, skipped = {}, {}
     for b in rec["bars"]:
         sym = b.get("T")
@@ -984,7 +996,9 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
                 needs[ticker].append((index[window[0]], index[day]))
         else:
             del answers[day]
-    reach = min([first] + [days[spans[0][0]] for spans in needs.values()])
+    # A later decision may ask for a longer window than an earlier one, so a
+    # name's closes are needed from the earliest start of all its windows.
+    reach = min([first] + [days[min(a for a, _ in spans)] for spans in needs.values()])
     del kept, span
 
     def emit():

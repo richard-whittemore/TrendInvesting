@@ -122,12 +122,18 @@ NAMED = ("IEF", "SHY", "SPY")
 # churns), small per-ticker figures, and the span's split and dividend rows.
 # It does not grow with the history beyond those rows. One budget holds at
 # the real market's size: this 2,000-name fixture peaks at ~13 MB and a
-# one-off run on 10,000 names measured ~43 MB, both under it. Every
-# instrument of every session held at once, as before, peaked at ~2.3 GB here.
+# one-off run on 10,000 names measured ~43 MB (FIXTURE_PEAK_MB, REAL_PEAK_MB),
+# both under it. Every instrument of every session held at once, as before,
+# peaked at ~2.3 GB here.
 MOMENTUM_BUDGET = 64 * 1024 * 1024
-# The fixture's own ceiling, so a regression that would push the real size past
-# MOMENTUM_BUDGET (a peak twice the fixture's) fails here first.
-FIXTURE_BUDGET = 32 * 1024 * 1024
+# Measured peaks (tracemalloc, MB): this fixture over two years, and the same
+# two years at the real market's 10,000 instruments (measured once, by hand).
+FIXTURE_PEAK_MB, REAL_PEAK_MB = 13.2, 43.2
+# The fixture's own ceiling: MOMENTUM_BUDGET scaled by the fixture's share of
+# the real peak, in whole MiB rounded down (19 MiB). A regression that grows
+# the peak in proportion past MOMENTUM_BUDGET at the real size (about 1.5x)
+# grows the fixture past this first, so it fails here.
+FIXTURE_BUDGET = int(MOMENTUM_BUDGET * FIXTURE_PEAK_MB / REAL_PEAK_MB) // (1024 * 1024) * 1024 * 1024
 
 
 def momentum_bar(ticker, n, i):

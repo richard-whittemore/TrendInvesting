@@ -257,11 +257,12 @@ def record_sectors(directory, session, get=http_get, now=_now, settle=SETTLE):
     return [record.write(directory, rec) for rec in fetched]
 
 
-def latest(directory, kind, session, max_age_days=7, paths=None):
+def latest(directory, kind, session, max_age_days=7, paths=None, read=None):
     """The newest ``kind`` recording dated on or before ``session`` and no
     more than ``max_age_days`` before it. Raises MissingData otherwise.
     ``paths``, if given, are the ``kind`` recordings to choose from instead
-    of the folder's own listing (a listing taken once for a whole encode)."""
+    of the folder's own listing, and ``read`` reads the one chosen (a listing
+    taken once for a whole encode, and its checked read)."""
     best = None
     for path in glob.glob(os.path.join(directory, kind + "_*.json")) if paths is None else paths:
         day = dt.date.fromisoformat(os.path.basename(path)[len(kind) + 1:-len(".json")])
@@ -272,7 +273,7 @@ def latest(directory, kind, session, max_age_days=7, paths=None):
     if (session - best[0]).days > max_age_days:
         raise MissingData("the latest {} recording, {}, is more than {} days before {}".format(
             kind, best[0], max_age_days, session))
-    rec = record.read(best[1])
+    rec = (read or record.read)(best[1])
     try:
         fetched = dt.datetime.strptime(rec.get("fetched_at"), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
     except (TypeError, ValueError):

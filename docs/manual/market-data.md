@@ -224,11 +224,16 @@ last decision that needs them is written. The stream is byte for byte the
 one the step wrote before it read this way (a recorded fixture in the tests
 pins it).
 
-Every read uses the listing taken at the start: a recording written while
-the step runs (the daily universe step finishing late, say) is left for the
-next run, and one that disappears or is replaced while the step runs
-refuses the stream ("... disappeared during the encode" or "... changed
-during the encode"); run the encode again.
+Every read uses the listing taken at the start, bar and sector recordings
+alike, and each file is opened and checked against the listing before it is
+read. A recording of a session inside the encode's span that arrives after
+the listing (the daily universe step finishing late, say, when `--asof` is
+that day) refuses the stream as missing ("no recording for trading day
+..."); encode again once it is recorded. Only a recording outside the span,
+or a second recording beside one the day already has, is ignored. One that
+disappears or is replaced while the step runs refuses the stream ("...
+disappeared during the encode" or "... changed during the encode"); run the
+encode again.
 
 The budget is **64 MiB of Python memory** (the tracemalloc peak, the measure
 the Boost figures above use), for the warm-up and the daily firing alike,
@@ -239,8 +244,10 @@ and 500 stocks ranked; `make check` runs them over two years (502 sessions,
 months (291 sessions) in about half the time. Over two years the warm-up
 peaks at about 13 MB and the daily firing at about 13 MB, where reading
 every session at once peaked at about 2.3 GB and 1.15 GB; the test also
-holds the fixture under 32 MiB, so a regression that doubles the peak fails
-before the real size would pass 64 MiB. Measured once on made-up sessions
+holds the two-year fixture under 19 MiB, the 64 MiB budget scaled by the
+fixture's share of the real-size peak (13.2 MB of 43.2 MB), so a regression
+that grows the peak in proportion past 64 MiB at the real size (about 1.5x)
+fails on the fixture first. Measured once on made-up sessions
 of 10,000 instruments over the same two years, the warm-up and the daily
 firing each peak at about 43 MB of Python memory, and about 90 MB and 96 MB
 for the whole process: both the test's ~13 MB and the real size's ~43 MB
@@ -1244,7 +1251,7 @@ exits with status 1 and a message on stderr, for the scheduler to alert on.
   window, recordings changed while it runs, an overflowing adjusted close,
   and a ranker that refuses or hangs), `test_memory.py`
   (`MomentumMemoryBudgetTest`: the momentum warm-up and daily firing inside
-  the 64 MiB budget, and the fixture inside 32 MiB, on 2,000-stock sessions,
+  the 64 MiB budget, and the fixture inside 19 MiB, on 2,000-stock sessions,
   every history its whole window; `MomentumStressMemoryTest`: bad bars for
   half the market every session, and a ranked set that changes completely
   every month, each adding under 1 MiB), and with the real Go ranker the Go validators and

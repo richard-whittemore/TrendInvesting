@@ -473,6 +473,113 @@ class FrozenRecordingsTest(unittest.TestCase):
         self.assertIn(name, str(caught.exception))
 
 
+class ListedReadTest(unittest.TestCase):
+    """Each listed recording is opened first and its open file checked
+    against the listing, so a file replaced as it is read gives either the
+    listed contents or a Conflict, never the replacement; sector recordings
+    are read the same way."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        build_churn(self.tmp.name)
+        self.clean = os.path.join(self.tmp.name, "clean.jsonl")
+        churn_stream(self.tmp.name, CHURN_FIRST, self.clean)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def encode(self, ranker, path):
+        envelopes = encode.iter_encode(self.tmp.name, CHURN_FIRST, CHURN_LAST, IDENTITY, required=["SPY", "IEF"],
+                                       optional=["C01"], base=CHURN_FIRST, ranker=ranker)
+        encode.write_stream(path, envelopes)
+
+    def replace(self, name):
+        path = os.path.join(self.tmp.name, name)
+        rec = record.read(path)
+        os.remove(path)
+        if "bars" in rec:
+            next(b for b in rec["bars"] if b["T"] == "SPY")["c"] += 1.0   # a named bar, written as it is read
+        else:
+            rec["as_of"] = rec.get("as_of", "") + " "   # a sector recording, written again
+        record.write(self.tmp.name, rec)
+
+    def armed_at_the_last_ranking(self, action):
+        def rank(requests):
+            if requests[-1]["universe"]["session"] == CHURN_LAST.isoformat():
+                action()
+            return churn_ranker(requests)
+        return rank
+
+    def test_a_bar_recording_replaced_as_it_is_read_is_never_read_as_the_replacement(self):
+        name = "universe_{}.json".format(churn_days()[100])
+        target = os.path.join(self.tmp.name, name)
+        armed, real_stat, real_fstat = [], os.stat, os.fstat
+        original = real_stat(target).st_ino
+
+        def after(result):
+            if armed and armed[0] and result.st_ino == original:
+                armed[0] = False
+                self.replace(name)
+            return result
+
+        def stat(path, *a, **kw):
+            return after(real_stat(path, *a, **kw))
+
+        def fstat(fd):
+            return after(real_fstat(fd))
+        path = os.path.join(self.tmp.name, "raced.jsonl")
+        with mock.patch("marketdata.encode.os.stat", stat), mock.patch("marketdata.encode.os.fstat", fstat):
+            try:
+                self.encode(self.armed_at_the_last_ranking(lambda: armed.append(True)), path)
+            except encode.Conflict as e:
+                self.assertIn(name, str(e))
+                return
+        self.assertEqual(Path(path).read_bytes(), Path(self.clean).read_bytes())
+
+    def latest_sector(self, kind):
+        day = churn_days()[100]
+        names = sorted(n for n in os.listdir(self.tmp.name)
+                       if n.startswith(kind + "_") and n[len(kind) + 1:-5] <= day.isoformat())
+        return names[-1]
+
+    def test_a_sector_recording_replaced_during_the_encode_refuses_the_stream(self):
+        name = self.latest_sector("sectors-iwv")
+        with self.assertRaises(encode.Conflict) as caught:
+            self.encode(self.armed_at_the_last_ranking(lambda: self.replace(name)),
+                        os.path.join(self.tmp.name, "sector-replaced.jsonl"))
+        self.assertIn(name, str(caught.exception))
+
+    def test_a_sector_recording_removed_during_the_encode_refuses_the_stream(self):
+        name = self.latest_sector("sectors-nasdaq")
+        with self.assertRaises(encode.Conflict) as caught:
+            self.encode(self.armed_at_the_last_ranking(lambda: os.remove(os.path.join(self.tmp.name, name))),
+                        os.path.join(self.tmp.name, "sector-removed.jsonl"))
+        self.assertIn(name, str(caught.exception))
+
+
+class LongerLaterWindowTest(unittest.TestCase):
+    """A name's closes are kept from the earliest start of all its windows,
+    not only its first decision's: a later decision may ask for a longer
+    window."""
+
+    def test_a_later_longer_window_is_held_whole_in_a_stream_that_starts_late(self):
+        def ranker(requests):
+            out = churn_ranker(requests)
+            for a in out:
+                a["window"] = 5 if a["session"].startswith("2026-03") else CHURN_WINDOW
+            return out
+        with tempfile.TemporaryDirectory() as d:
+            build_churn(d)
+            late, whole = (encode.encode(d, first, CHURN_LAST, IDENTITY, required=["SPY", "IEF"], optional=["C01"],
+                                         base=CHURN_FIRST, ranker=ranker)
+                           for first in (D(2026, 3, 2), CHURN_FIRST))
+            late, whole = list(late), list(whole)
+        april = lambda stream: {e["payload"]["instrument_id"]: e["payload"] for e in of(stream, HISTORY)
+                                if e["payload"]["session"] == "2026-04-30"}
+        self.assertEqual(len(april(late)["C00"]["closes"]), CHURN_WINDOW)
+        self.assertEqual(april(late), april(whole))
+
+
 class RankerRefusalTest(unittest.TestCase):
     """A ranker that refuses, or does not answer in time, refuses the stream
     with the session it was asked about."""

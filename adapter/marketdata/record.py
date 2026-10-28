@@ -100,7 +100,13 @@ def write(directory, record):
 
 def read(path):
     with open(path) as f:
-        doc = json.load(f)
+        return read_open(f, path)
+
+
+def read_open(f, path):
+    """The record in the open file ``f`` (named ``path`` for errors), checked
+    against its digest as read does."""
+    doc = json.load(f)
     digest = hashlib.sha256(_canonical(doc["record"]).encode()).hexdigest()
     if digest != doc.get("sha256"):
         raise Corrupt(path)
