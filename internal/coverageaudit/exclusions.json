@@ -906,6 +906,13 @@
       "reason": "risklimit.Gate.RestoreIncidentState refuses a state that is not degraded or halted, a degraded state with no scope, a halted one with a scope, and a degraded state on a Halted gate; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses the first three (TestAnApprovalStatesTheIncidentsRestrictions), and the gate is Normal here because Apply refuses an approval read after any input but the configuration, so no recorded state can precede it (TestAnApprovalIsTheFirstInputAfterTheConfiguration), and a second approval (TestApprovalInputRules)."
     },
     {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "(*momentumRun).applyApproval",
+      "statement": "return nil, fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.RestoreIncidentState refuses a state that is not degraded or halted, a degraded state with no scope, a halted one with a scope, and a degraded state on a Halted gate; OperatorRunApprovedPayload.Validate, run by decodeApproval above, refuses the first three (TestAnApprovalStatesTheIncidentsRestrictions), and the gate is Normal here because Apply refuses an approval read after any input but the configuration, so no recorded state can precede it (TestAMomentumRunReadsOnlyAnIRAApproval)."
+    },
+    {
       "file": "internal/targetweight/handler.go",
       "function": "New",
       "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",

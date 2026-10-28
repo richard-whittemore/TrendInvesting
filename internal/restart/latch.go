@@ -16,6 +16,9 @@ import (
 // log's approval is read at the schema version it was recorded at (ADR 0015).
 // logName names the approved log in a refusal.
 func CheckApprovedLatch(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
+	if approval.Boost.Latched == nil {
+		return fmt.Errorf("engine: %s is a Boost run's, but the approval states an IRA's momentum state and no latch; the latch in force is restored, never assumed (ADR 0026, point 5)", logName)
+	}
 	stated := *approval.Boost.Latched
 	latched, from, found, err := latchAtEnd(entries, logName)
 	switch {
@@ -46,6 +49,10 @@ func latchAtEnd(entries []journal.Entry, logName string) (latched bool, from eve
 			previous, err := event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion)
 			if err != nil {
 				return false, env, false, fmt.Errorf("engine: %s in %s: %w", env.ID, logName, err)
+			}
+			if previous.Boost.Latched == nil {
+				// An IRA approval states no latch; it starts none.
+				return false, env, false, nil
 			}
 			return *previous.Boost.Latched, env, true, nil
 		}

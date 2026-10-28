@@ -450,3 +450,55 @@ stated by the owner instead:
   the adapter's comparison walks it to its end, however old the runs, while
   its reconciliation of IBKR's lists still reads only the runs those lists
   can show (relay.run_logs).
+
+## Note (2026-10-28): an IRA's approval states its rebalance in progress
+
+The approval's "state in force" was Boost's latch. A momentum run (an IRA)
+has no latch; what a fresh run of it cannot recompute is the rebalance in
+progress, which ADR 0026, point 5 says a restart sends nothing for until the
+owner clears it. So:
+
+- **`operator.run.approved` schema version 6** adds `momentum`, stated by an
+  IRA's approval only: `{"rebalance_in_progress": null}` when the approved
+  log ends with every order terminal, or the rebalance's decision ID,
+  decision time, phase (`sells-working`: its sells working and its buys never
+  planned; `buys-working`: every sell terminal and its buys working) and
+  every order not terminal. An IRA's approval states `"boost": null`; a Boost
+  approval states no `momentum` key and is otherwise unchanged. An approval
+  states one strategy's state, never both. Versions 1 to 5 stay readable and
+  state no momentum state.
+- **The run records what it accepted.** Accepting an IRA approval, the
+  momentum run records a decision, `strategy.run.approval-accepted` (schema
+  version 1), naming the approval input it accepted (its ID and sequence),
+  the account, and the rebalance it carries in (`null` when none). An
+  approval it refuses records nothing, and the log commits a refused input
+  with no mark of the refusal, so this record is the only evidence of
+  acceptance.
+- **The engine checks it** against the approved log before it starts, from
+  recorded facts only, never by recomputing the run under the running
+  build's rules (section 6 refuses that for a resume, and a fresh run is
+  often an upgrade): the rebalance the last acceptance record carries in,
+  until a clearance the run read names it and exactly its orders; else the
+  orders the run released, and the venue's reports, retirements and
+  clearances on them, read by the rule the momentum run and the reporter
+  read orders by (`event.OrderReports`). A record it cannot decode or
+  validate, or holds at a schema version the build does not read, refuses
+  the approval ("cannot be read back"), never reads as no rebalance in
+  progress; so does a log whose run refused the approval it was given and
+  accepted none, since the rebalance that approval named was never carried
+  and the state in force is the run's before it, or, when that run was the
+  account's first, there is none and the account starts again as a first
+  run (`operator approve -first-run -strategy momentum`). An approval
+  stating none where one is, or one the
+  log does not hold, is refused, and so is a Boost-shaped approval for a
+  momentum configuration, or an IRA one for Boost. When the approved log is
+  a start cut short and no earlier run holds more, its own configuration is
+  the state (no rebalance in progress); in `-mode paper` or `live` that
+  start is resumed with its first run's approval, and an approval stating
+  no starting book is refused.
+- **The fresh run holds**: it withholds every decision as
+  `rebalance-in-progress`, planning nothing, until the owner's
+  `operator.rebalance.cleared` names that rebalance and exactly its orders;
+  the next decision time then decides afresh (target-weight rules version
+  1.27.0). `operator approve` reads the strategy from the log and writes
+  either shape; `-first-run -strategy momentum` writes an IRA's first run's.

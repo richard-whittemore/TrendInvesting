@@ -208,7 +208,7 @@ nyse_calendar = marketdata_module("nyse_calendar")
 CASH_MOVEMENT = ("account.cash-movement", 2)   # internal/event CashMovementTransferVersion
 COST = ("account.cost", 1)                      # internal/event CostSchemaVersion
 ACCOUNT_SNAPSHOT = ("account.snapshot", 3)      # internal/event AccountSnapshotPositionsVersion
-FIRST_RUN_APPROVAL_VERSIONS = (3, 4, 5)         # the operator.run.approved versions that state the starting book
+FIRST_RUN_APPROVAL_VERSIONS = (3, 4, 5, 6)      # the operator.run.approved versions that state the starting book
 # internal/event EquityBeforeNextSnapshotLessAmount and EquityBeforeSameDaySnapshotLessAmount.
 NEXT_SNAPSHOT_LESS_AMOUNT = "next-snapshot-less-amount"
 SAME_DAY_SNAPSHOT_LESS_AMOUNT = "same-day-snapshot-less-amount"

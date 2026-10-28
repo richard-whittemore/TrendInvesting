@@ -29,6 +29,10 @@ type composition struct {
 	// accountID is the account a target-weight configuration names; empty
 	// for a Turtle configuration.
 	accountID string
+	// strategyID is the target-weight strategy the configuration names
+	// (boost or momentum), whose state in force an approval must state;
+	// empty for a Turtle configuration.
+	strategyID string
 }
 
 // configurationKind is the one field read before a configuration is decoded:
@@ -41,19 +45,16 @@ type configurationKind struct {
 
 // compose reads the configuration at path and composes its strategy:
 //
-//   - a Boost configuration (strategy_id "boost"), the one target-weight
-//     strategy composed here, gets the target-weight handler, which plans
-//     each decision's orders and passes
-//     them through the risk gate (internal/targetweight, internal/orderplan,
-//     internal/risklimit; ADR 0026). Its first session decided is asOf:
-//     sessions before it only feed the indicators, and asOf is the
-//     configuration input's own time, so a replay reads it back from the
-//     journal;
-//   - a momentum configuration (strategy_id "momentum") is refused: it is a
-//     target-weight strategy this command does not compose, never a Turtle
-//     configuration;
+//   - a target-weight configuration (strategy_id "boost" for the joint
+//     account, "momentum" for an IRA) gets the target-weight handler, which
+//     decides that strategy, plans each decision's orders and passes them
+//     through the risk gate (internal/targetweight, internal/orderplan,
+//     internal/risklimit; ADR 0026, points 1 to 3 and 6). Its first session
+//     decided is asOf: sessions before it only feed the indicators, and
+//     asOf is the configuration input's own time, so a replay reads it back
+//     from the journal;
 //   - any other is the Turtle reducer (internal/strategy), as cmd/backtest
-//     composes it.
+//     composes it (AGENTS.md rule 4: the two share no rule and no state).
 func compose(path, build string, asOf time.Time) (composition, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -64,11 +65,8 @@ func compose(path, build string, asOf time.Time) (composition, error) {
 		return composition{}, fmt.Errorf("engine: decode the configuration in %s: %w", path, err)
 	}
 	switch kind.StrategyID {
-	case event.TargetWeightStrategyBoost:
+	case event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum:
 		return composeTargetWeight(path, raw, build, asOf)
-	case event.TargetWeightStrategyMomentum:
-		return composition{}, fmt.Errorf("engine: the configuration in %s names strategy_id %q, a target-weight strategy this engine does not compose: of the target-weight strategies it composes %q only",
-			path, kind.StrategyID, event.TargetWeightStrategyBoost)
 	}
 	return composeTurtle(path, build, asOf)
 }
@@ -129,7 +127,7 @@ func composeTargetWeight(path string, raw []byte, build string, asOf time.Time) 
 	}
 	return composition{
 		handler: handler, configurationHash: hash, strategyVersion: strategyVersion,
-		configEnvelope: envelope, mode: cfg.Mode, accountID: cfg.AccountID,
+		configEnvelope: envelope, mode: cfg.Mode, accountID: cfg.AccountID, strategyID: cfg.StrategyID,
 	}, nil
 }
 

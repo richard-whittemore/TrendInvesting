@@ -446,6 +446,25 @@ run-2026-10-20.log ends with Boost latched false; the approval carries incident 
 wrote <file>: start the fresh run with -approval <file> (docs/runbooks/durable-log.md, "Restarting an engine")
 ```
 
+For an IRA (the log is a momentum run's), the approval states no latch: it
+states the rebalance the log ends with in progress, read from the log's
+orders and the run's record of the approval it accepted, or that none is
+(`operator.run.approved` schema version 6; ADR 0026, point 5). A restart
+mid-rebalance sends nothing for that decision time until you clear it, so a
+log that ends mid-rebalance prints the rebalance, its phase (`sells-working`:
+its sells were working and its buys never planned; `buys-working`: its buys
+were working) and the clearance to record once you have dealt with each order
+at IBKR:
+
+```
+run-2026-10-30.log ends mid-rebalance: targets-decided:<account>:2026-10-30T20:00:00Z, decided at 2026-10-30T20:00:00Z, sells-working, orders <id>, <id> not terminal; the fresh run sends nothing for it, and decides no later month, until you deal with each order at IBKR and clear it with `operator rebalance-cleared -decision targets-decided:<account>:2026-10-30T20:00:00Z -orders <id>,<id>` (docs/runbooks/missed-rebalance.md)
+```
+
+The engine checks the approval's rebalance against the log before it starts
+([restart](restart.md), "Starting a fresh run"). An IRA's first run is
+approved with `operator approve -first-run -strategy momentum ...` (the
+default `-strategy` is `boost`); a dry-run first run needs no approval.
+
 If the kill switch was engaged when the previous run ended, it also says so:
 a fresh run starts with the switch released, so record it again with
 `operator kill-switch -state engaged` before you start the engine. The
@@ -498,8 +517,10 @@ operator approve -first-run -account <IBKR account> -by owner \
   -out /var/lib/trend-investing/engines/boost/first-run-approval.json
 ```
 
-(`-positions ""` when the account holds nothing). It prints the book and the
-next step. The cash is IBKR's `TotalCashValue` in USD, the currency the
+(`-positions ""` when the account holds nothing). For an IRA, add
+`-strategy momentum` (the default is `boost`), with the IRA's instance in
+`-out` (`engines/trad-ira/...`): the approval then states no rebalance in
+progress in place of Boost's latch. It prints the book and the next step. The cash is IBKR's `TotalCashValue` in USD, the currency the
 adapter reads IBKR's cash in: any other `-currency` is refused. A first
 run has no incident to clear, so `-clear-incident` with `-first-run` is
 refused too. Approve right after you read the book: the approval's time is
@@ -590,6 +611,8 @@ When the tool refuses, it writes nothing; run it again once fixed.
 | `restart: the approval is refused` followed, on the next line, by `invalid operator run approved payload: account id is required` (or `approved by is required`, one line each when both are missing); for a first run, one line: `operator: invalid operator run approved payload: account id is required` (or `approved by is required`) (`approve`) | Nothing written: `-account` or `-by` missing | Add `-account` or `-by` |
 | `restart: the adapter's settlement of order <id> as never sent is refused: <log> does not bear it out: ...`, `restart: the adapter's settlement of order <id> as never sent names input <input>, but in <log> input <other> released it ...`, or `restart: <file> line <n> is not a settlement as the adapter writes one: ...` (`approve -never-sent`) | Nothing written: a settlement retires a sale only when the log bears it out, since a sale that was sent must never be tried again | Do not edit the file. Check IBKR for the order named: if IBKR shows it, it was sent, so, with the adapter stopped, mark it sent (`relay.py resolve PENDING_FILE ID --sent --reason "what IBKR shows"`) and run `settle-ended-run` again, which withdraws its line; otherwise check that `-log` is the run `settle-ended-run` was given, and run that command again. A file with a torn last line is repaired by running `settle-ended-run` again ([re-delivery](redelivery.md)) |
 | `engine: decode <id> in <log>: ...` (`approve`) | Nothing written: a record the approval depends on cannot be read | Treat the log as damaged: `docs/runbooks/durable-log.md` |
+| `engine: the rebalance in progress of <log> cannot be read back: ...` (`approve`, an IRA's log) | Nothing written: a record the IRA's rebalance in progress is read from cannot be read, or the run refused its only approval and accepted none, so the state in force is not that log's | For a refused approval: move the log, unchanged, into the quarantine folder beside it (`docs/runbooks/durable-log.md`, "An unrecoverable log"), then approve the run before it (the message names it when the refused approval reads as this account's, else the latest run left in the folder), or, after an account's first run, start again with `operator approve -first-run -strategy momentum`. Otherwise treat the log as damaged: `docs/runbooks/durable-log.md` |
+| `engine: <log> is not a momentum run's log: its configuration names strategy "...", so it is not this IRA's run` (the engine's refusal of an IRA approval at its start) | The run does not start: the latest log in the IRA's folder is another strategy's | If the log does not belong in this folder, move it, unchanged, into the quarantine folder beside it (`docs/runbooks/durable-log.md`, "An unrecoverable log"), then write the approval from the IRA's own latest log |
 | `operator: <file> already exists; an approval is evidence and is never overwritten (ADR 0018)` | Nothing written | Choose a new `-out` name |
 | The approval prints `the kill switch was engaged when it ended; a fresh run starts with it released ...` | The approval is written; the fresh run will start with the switch off | Record `operator kill-switch -state engaged` before starting the engine |
 
@@ -718,8 +741,11 @@ the owner's decision of 2026-10-22 (ADR 0026, point 2, "Boost", amended
 
 ## Not built yet
 
-- The momentum engines in the running program: only Boost is composed, so a
-  rebalance clearance has nothing to act on yet.
+- An IRA engine fed by real data: the Traditional IRA's engine runs in
+  dry-run on a synthetic month only, since no daily job writes the IRAs'
+  stream and no adapter feeds an IRA engine ([momentum](momentum.md),
+  "Where this stands"). A rebalance clearance acts on an IRA run today,
+  including a rebalance a fresh run's approval carried in.
 - Acknowledgements in `journal-query operator`: use the `.delivered` marker
   in the engine's notes folder.
 - A day-trade counter for the margin account (counted by hand for now: see

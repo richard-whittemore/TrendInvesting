@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The engine's service file and the settings it reads, as provisioned.
@@ -337,5 +339,96 @@ func TestNoNetworkFacingUnitCanWriteAnInstruction(t *testing.T) {
 	}
 	if want := "-" + engines + "/%i/operator"; !slices.Contains(readOnly, want) {
 		t.Errorf("the engine unit's ReadOnlyPaths=%v does not name %s", readOnly, want)
+	}
+}
+
+// TestTheTradIRAEngineStartsAsItsUnitStartsIt: the traditional IRA's engine
+// starts from its own settings (trad-ira.env, its TI_MODE dry-run until the
+// paper gate) and its own configuration, a momentum one in dry-run, as the
+// unit starts it. The shipped configuration names placeholders, never the
+// owner's account or birth month (ADR 0026, point 8): its birth placeholder
+// refuses to start, so the engine never decides an IRA from a made-up age,
+// and once both are substituted on the server, as the runbook does, the
+// engine starts and writes its durable log.
+func TestTheTradIRAEngineStartsAsItsUnitStartsIt(t *testing.T) {
+	const instance = "trad-ira"
+	env := map[string]string{}
+	var execStart string
+	for _, d := range unitDirectives(t, unitPath) {
+		switch {
+		case d.section != "[Service]":
+		case d.key == "Environment":
+			key, value, _ := strings.Cut(d.value, "=")
+			env[key] = value
+		case d.key == "ExecStart":
+			execStart = d.value
+		}
+	}
+	for key, value := range readAssignments(t, "../../deploy/etc/engines/"+instance+".env") {
+		env[key] = value
+	}
+	for key, value := range readAssignments(t, runEnvExample) {
+		env[key] = value
+	}
+	if env["TI_MODE"] != modeDryRun || env["TI_ACCOUNT"] != instance {
+		t.Fatalf("trad-ira.env declares TI_MODE=%q TI_ACCOUNT=%q, want dry-run for %s until the paper gate", env["TI_MODE"], env["TI_ACCOUNT"], instance)
+	}
+	shipped := "../../deploy/etc/engines/" + instance + ".config"
+	cfg := boostConfiguration(t, shipped)
+	if cfg.StrategyID != "momentum" || cfg.Mode != modeDryRun || cfg.AccountID != instance || cfg.Glide.Birth != "YYYY-MM" {
+		t.Fatalf("the shipped %s names strategy %q, mode %q, account %q, birth %q; want a dry-run momentum configuration naming only placeholders", shipped, cfg.StrategyID, cfg.Mode, cfg.AccountID, cfg.Glide.Birth)
+	}
+	start := func(config string) error {
+		root := t.TempDir()
+		state, flexDir := filepath.Join(root, "engines", instance), filepath.Join(root, "flex", instance)
+		for _, d := range []string{state, flexDir} {
+			if err := os.MkdirAll(d, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}
+		run := map[string]string{}
+		for k, v := range env {
+			run[k] = v
+		}
+		run["TI_CONFIG"], run["TI_STATE_DIR"], run["TI_FLEX_DIR"] = config, state, flexDir
+		socketDir := shortSocketDir(t)
+		args := expandExecStart(execStart, map[string]string{"%i": instance, "%t": socketDir}, run)
+		makeOperatorInbox(t, filepath.Join(state, "operator"))
+		if err := os.Mkdir(filepath.Dir(args[indexOf(args, "-socket")+1]), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		ready := newReadySignal()
+		errs := make(chan error, 1)
+		go func() { errs <- parseAndRunWithBuild(ctx, args[1:], ready, "test-build") }()
+		select {
+		case err := <-errs:
+			return err
+		case <-ready.ready:
+			cancel()
+			if err := <-errs; err != nil {
+				return err
+			}
+		}
+		if _, err := os.Stat(filepath.Join(state, run["TI_RUN"]+".log")); err != nil {
+			t.Errorf("the unit's engine wrote no durable log in its state directory: %v", err)
+		}
+		return nil
+	}
+	if err := start(shipped); err == nil || !strings.Contains(err.Error(), "birth") {
+		t.Fatalf("the shipped trad-ira.config, its birth a placeholder: %v, want a refusal naming the birth", err)
+	}
+	cfg.AccountID, cfg.Glide.Birth = "DUIRA0001", "1975-06"
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	named := filepath.Join(t.TempDir(), instance+".config")
+	if err := os.WriteFile(named, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := start(named); err != nil {
+		t.Fatalf("trad-ira.config with its account and birth named: %v", err)
 	}
 }

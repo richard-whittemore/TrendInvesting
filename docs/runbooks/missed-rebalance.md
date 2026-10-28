@@ -57,9 +57,24 @@ the next decision time. Buy by hand if you want the targets sooner.
 
 A crash is resumed from the durable log and carries on where it was (ADR
 0027). A fresh run (you stopped the engine, a reboot, a new build) starts with
-no record of the previous run's orders, so it would decide at its first
-decision time as if none were working. So **never start a fresh run of an IRA
-while a rebalance is in progress**: wait for every order to finish, or
-cancel them at IBKR and record the clearance in the old run before stopping
-it. (The momentum engines are not in the running program yet; this rule
-holds from when they are.)
+no record of the previous run's orders, so the engine holds it instead: a
+restart mid-rebalance sends nothing for that decision time until you clear it
+(ADR 0026, point 5).
+
+1. Write the approval with `operator approve -log <the latest log>`. If that
+   log ends mid-rebalance, the approval states the rebalance, its phase and
+   its orders not finished, and the tool prints them and the clearance to
+   record ([operator](../manual/operator.md), "An approval"). The engine
+   refuses an approval that states none, or another rebalance, so the fresh
+   run cannot start as if nothing were working.
+2. Start the fresh run with that approval. Every month it decides is
+   withheld as `rebalance-in-progress`, nothing planned, while the rebalance
+   stands.
+3. At IBKR, cancel each order still working, or confirm it finished, then
+   record the clearance the tool printed (`operator rebalance-cleared
+   -decision <decision> -orders <id,...>`), naming exactly those orders. The
+   next decision time decides afresh from IBKR's holdings.
+
+Better still, when you can choose the moment, stop an IRA's engine only once
+every order of the rebalance has finished: then the approval states none in
+progress and nothing is held.

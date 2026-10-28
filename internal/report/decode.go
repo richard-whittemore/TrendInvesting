@@ -107,7 +107,7 @@ var (
 	// A fresh run's approval, for the incident it carries in force: version
 	// 1, which could not state a cash scope, each later one, and the current
 	// version.
-	approvalVersions = []uint32{1, 2, 3, 4, event.OperatorRunApprovedSchemaVersion}
+	approvalVersions = []uint32{1, 2, 3, 4, 5, event.OperatorRunApprovedSchemaVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }

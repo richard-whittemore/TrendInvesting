@@ -18,8 +18,13 @@ import (
 // approval states, and what the operator is told before approving.
 type EndState struct {
 	// Latched is Boost's latch in force (CheckApprovedLatch; ADR 0026,
-	// point 5), false for a log that never decided.
+	// point 5), false for a log that never decided and for a momentum log.
 	Latched bool
+	// Momentum is whether the log is a momentum run's (IsMomentumLog), and
+	// Rebalance the rebalance it ends with in progress, nil when none
+	// (RebalanceAtEnd; ADR 0026, point 5).
+	Momentum  bool
+	Rebalance *event.RebalanceInProgress
 	// IncidentID, State and Scope are the incident the log ends in, its
 	// engine state and, Degraded, the instruments it freezes, strictly
 	// ascending (CheckIncidentInForce); all empty for a log that ended
@@ -82,7 +87,16 @@ type PendingCashRead struct {
 func ReadEndState(entries []journal.Entry, accountID, logName string, settlements ...event.NeverSentSettlement) (EndState, error) {
 	var end EndState
 	var err error
-	if end.Latched, _, _, err = latchAtEnd(entries, logName); err != nil {
+	if end.Momentum = IsMomentumLog(entries); end.Momentum {
+		var account string
+		end.Rebalance, account, err = rebalanceOfAccount(entries, logName)
+		switch {
+		case err != nil:
+			return EndState{}, err
+		case account != accountID:
+			return EndState{}, fmt.Errorf("engine: %s is the run of %q, not of %q", logName, account, accountID)
+		}
+	} else if end.Latched, _, _, err = latchAtEnd(entries, logName); err != nil {
 		return EndState{}, err
 	}
 	if end.IncidentID, end.State, end.Scope, end.ScopeCash, err = incidentAtEnd(entries, logName); err != nil {
@@ -411,7 +425,8 @@ type ApprovalRequest struct {
 }
 
 // ProposeApproval builds the approval of a fresh run after a log ending in
-// end: Boost's latch in force, and either the incident end holds carried in
+// end: Boost's latch in force, or for a momentum log the rebalance in
+// progress or none, and either the incident end holds carried in
 // force with its state, scope (instruments and cash components) and sale
 // attempt, with the adapter's settlements of its never-sent sales as their
 // evidence, or, when the owner clears it, that incident cleared by its ID and
@@ -427,6 +442,11 @@ func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprov
 	p := event.OperatorRunApprovedPayload{
 		AccountID: req.AccountID, PreviousLog: req.PreviousLog, PreviousLogFinalHash: req.PreviousLogFinalHash,
 		ApprovedBy: req.ApprovedBy, ApprovedAt: req.ApprovedAt, Boost: event.BoostStateInForce{Latched: new(end.Latched)},
+	}
+	if end.Momentum {
+		// An IRA's state in force is its rebalance in progress, or none
+		// (ADR 0026, point 5); it has no latch.
+		p.Boost, p.Momentum = event.BoostStateInForce{}, &event.MomentumStateInForce{RebalanceInProgress: end.Rebalance}
 	}
 	switch {
 	case req.SaleAttempted && req.ClearIncident != "":

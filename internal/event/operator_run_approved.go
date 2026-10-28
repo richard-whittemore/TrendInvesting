@@ -34,10 +34,12 @@ const OperatorRunApprovedEventType = "operator.run.approved"
 // incident in force's retired sale attempts
 // (IncidentInForce.SaleRetiredAttempts), omitted when none; version 5 adds
 // the adapter's settlements of the incident's never-sent sales
-// (IncidentInForce.SaleSettlements), omitted when none;
-// DecodeRecordedOperatorRunApproved reads each (ADR 0015: a payload's shape
-// is versioned).
-const OperatorRunApprovedSchemaVersion uint32 = 5
+// (IncidentInForce.SaleSettlements), omitted when none; version 6 adds an
+// IRA's momentum state in force (Momentum), the rebalance in progress or
+// none, stated by an IRA approval in place of Boost's latch and omitted by a
+// Boost approval; DecodeRecordedOperatorRunApproved reads each (ADR 0015: a
+// payload's shape is versioned).
+const OperatorRunApprovedSchemaVersion uint32 = 6
 
 // recordHashPattern is a journal record hash as the chain writes it (ADR
 // 0017): "sha256:" and 64 lower-case hex digits.
@@ -59,8 +61,14 @@ type OperatorRunApprovedPayload struct {
 	IncidentID string    `json:"incident_id"`
 	ApprovedBy string    `json:"approved_by"`
 	ApprovedAt time.Time `json:"approved_at"`
-	// Boost is the state in force the fresh run starts from.
+	// Boost is a Boost run's state in force the fresh run starts from; null
+	// in an IRA approval, which states Momentum instead.
 	Boost BoostStateInForce `json:"boost"`
+	// Momentum is an IRA run's state in force (schema version 6): the
+	// rebalance in progress the approved log ends with, or none. It is left
+	// out of a Boost approval, so a Boost approval's file is the one an
+	// earlier build wrote; an approval states exactly one of the two.
+	Momentum *MomentumStateInForce `json:"momentum,omitempty"`
 	// IncidentInForce is the incident the previous run ended in and the
 	// fresh run continues, with whether its one sale back to 98% was
 	// attempted; nil (JSON null) when there is none. It is never the
@@ -124,6 +132,79 @@ func (p OperatorRunApprovedPayload) FirstRun() bool {
 // "not latched", which would turn the boost off unasked.
 type BoostStateInForce struct {
 	Latched *bool `json:"latched"`
+}
+
+// MarshalJSON encodes a Boost state stating no latch, an IRA approval's, as
+// null rather than as a latch of null, which the decoder would read as a
+// Boost approval that forgot its latch.
+func (b BoostStateInForce) MarshalJSON() ([]byte, error) {
+	if b.Latched == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(struct {
+		Latched *bool `json:"latched"`
+	}{b.Latched})
+}
+
+// MomentumStateInForce is an IRA's state that a fresh run cannot recompute
+// from bars: the rebalance in progress when the approved log ended (ADR
+// 0026, point 5: "Every planned, released and sent order, and the IRA phase
+// (sells sent, buys pending)"). RebalanceInProgress is required, null when
+// none: no rebalance is taken as finished by its absence.
+type MomentumStateInForce struct {
+	RebalanceInProgress *RebalanceInProgress `json:"rebalance_in_progress"`
+}
+
+// The IRA phases a rebalance in progress can end a run in (ADR 0026, point
+// 2, "IRA execution": the buys are planned only once every sell is
+// terminal): its sells working and its buys pending, never planned; or every
+// sell terminal and its buys working.
+const (
+	RebalancePhaseSellsWorking = "sells-working"
+	RebalancePhaseBuysWorking  = "buys-working"
+)
+
+// RebalanceInProgress is one rebalance whose orders were not all terminal
+// when the approved log ended. A fresh run sends nothing for it, and decides
+// no later rebalance, until the owner clears exactly these orders
+// (operator.rebalance.cleared; ADR 0026, point 5: "A restart mid-rebalance
+// sends nothing for that decision time until the owner clears it").
+type RebalanceInProgress struct {
+	// DecisionID is the rebalance's strategy.targets.decided envelope ID,
+	// the tag its orders carry; DecisionTime that decision's time.
+	DecisionID   string    `json:"decision_id"`
+	DecisionTime time.Time `json:"decision_time"`
+	// Phase is RebalancePhaseSellsWorking or RebalancePhaseBuysWorking.
+	Phase string `json:"phase"`
+	// ClientOrderIDs are, strictly ascending, every order of the rebalance
+	// not terminal when the log ended.
+	ClientOrderIDs []string `json:"client_order_ids"`
+}
+
+// Validate checks the decision, its time, the phase and the orders.
+func (r RebalanceInProgress) Validate() error {
+	var errs []error
+	if r.DecisionID == "" {
+		errs = append(errs, errors.New("rebalance in progress: decision id is required"))
+	}
+	errs = append(errs, requiredTime("rebalance in progress: decision time", r.DecisionTime)...)
+	if r.Phase != RebalancePhaseSellsWorking && r.Phase != RebalancePhaseBuysWorking {
+		errs = append(errs, fmt.Errorf("rebalance in progress: phase %q is not %q or %q", r.Phase, RebalancePhaseSellsWorking, RebalancePhaseBuysWorking))
+	}
+	if len(r.ClientOrderIDs) == 0 {
+		errs = append(errs, errors.New("rebalance in progress: client order ids are required: every order not terminal is named"))
+	}
+	errs = append(errs, ascendingIDs("rebalance in progress: client order id", r.ClientOrderIDs)...)
+	return errors.Join(errs...)
+}
+
+// StrategyID names the target-weight strategy whose state in force the
+// approval states: momentum for an IRA approval, else Boost.
+func (p OperatorRunApprovedPayload) StrategyID() string {
+	if p.Momentum != nil {
+		return TargetWeightStrategyMomentum
+	}
+	return TargetWeightStrategyBoost
 }
 
 // IncidentInForce is one incident's state that a fresh run cannot recompute
@@ -200,7 +281,12 @@ func (p OperatorRunApprovedPayload) Validate() error {
 		errs = append(errs, errors.New("approved by is required"))
 	}
 	errs = append(errs, requiredTime("approved at", p.ApprovedAt)...)
-	if p.Boost.Latched == nil {
+	switch {
+	case p.Momentum != nil && p.Boost.Latched != nil:
+		errs = append(errs, errors.New("the approval states Boost's latch and an IRA's momentum state: it states the state in force of one strategy only"))
+	case p.Momentum != nil:
+		errs = append(errs, p.momentumErrors()...)
+	case p.Boost.Latched == nil:
 		errs = append(errs, errors.New("boost latched is required: the latch in force is stated, never assumed (ADR 0026, point 5)"))
 	}
 	if in := p.IncidentInForce; in != nil {
@@ -240,6 +326,26 @@ func (p OperatorRunApprovedPayload) Validate() error {
 		return fmt.Errorf("invalid operator run approved payload: %w", err)
 	}
 	return nil
+}
+
+// momentumErrors checks an IRA approval's momentum state: a rebalance in
+// progress it states is valid, a first run has none, and an incident in
+// force states no sale back to 98%, which only Boost's margin account has
+// (ADR 0019, amended 2026-10-15; ADR 0026, point 4).
+func (p OperatorRunApprovedPayload) momentumErrors() []error {
+	var errs []error
+	if r := p.Momentum.RebalanceInProgress; r != nil {
+		if err := r.Validate(); err != nil {
+			errs = append(errs, err)
+		}
+		if p.FirstRun() {
+			errs = append(errs, errors.New("a first run's approval states no rebalance in progress: no earlier run released an order"))
+		}
+	}
+	if in := p.IncidentInForce; in != nil && (in.SaleAttempted != nil && *in.SaleAttempted || in.SaleClientOrderID != "" || in.SaleRetiredAttempts != 0 || len(in.SaleSettlements) > 0) {
+		errs = append(errs, errors.New("incident in force: an IRA has no sale back to 98%, so its approval states the sale not attempted, with no order, retirement or settlement"))
+	}
+	return errs
 }
 
 // settlementErrors checks the incident in force's settlements of never-sent
@@ -288,14 +394,15 @@ func (p OperatorRunApprovedPayload) firstRunErrors() []error {
 }
 
 // ValidateSchema checks p under the schema version it was recorded at (ADR
-// 0015), then validates it. Version 1 could not state an incident's cash
-// scope, so a payload naming one is refused under it; version 2 holds it
-// (that the key was stated, null included, is checked where the raw JSON is
-// read, in DecodeRecordedOperatorRunApproved); versions 1 and 2 cannot state
-// a starting book, which version 3 may (ADR 0027, amended 2026-10-18);
-// versions 1 to 3 cannot state an incident's retired sale attempts, which
-// version 4 may; versions 1 to 4 cannot carry an incident's settlements of
-// never-sent sales, which version 5 may; any other version is refused.
+// 0015), then validates it. Each version holds every field of the ones
+// before it: version 1 could not state an incident's cash scope, so a
+// payload naming one is refused under it; version 2 holds it (that the key
+// was stated, null included, is checked where the raw JSON is read, in
+// DecodeRecordedOperatorRunApproved); version 3 adds a starting book (ADR
+// 0027, amended 2026-10-18), version 4 an incident's retired sale attempts,
+// version 5 its settlements of never-sent sales, and version 6 an IRA's
+// momentum state (ADR 0027, note of 2026-10-28), each refused under an
+// earlier version; any other version is refused.
 func (p OperatorRunApprovedPayload) ValidateSchema(version uint32) error {
 	if version < 1 || version > OperatorRunApprovedSchemaVersion {
 		return fmt.Errorf("the approval's schema version %d is not one this build reads (1 to %d; ADR 0015)", version, OperatorRunApprovedSchemaVersion)
@@ -310,6 +417,8 @@ func (p OperatorRunApprovedPayload) ValidateSchema(version uint32) error {
 		return fmt.Errorf("a schema version %d approval cannot state incident_in_force.sale_retired_attempts; version %d states it", version, retiredAttemptsVersion)
 	case version < settlementsVersion && in != nil && len(in.SaleSettlements) > 0:
 		return fmt.Errorf("a schema version %d approval cannot state incident_in_force.sale_settlements; version %d states them", version, settlementsVersion)
+	case version < momentumVersion && p.Momentum != nil:
+		return fmt.Errorf("a schema version %d approval cannot state a %s state; version %d states it", version, momentumKey, momentumVersion)
 	}
 	return p.Validate()
 }
@@ -321,7 +430,19 @@ const (
 	startingBookVersion    uint32 = 3
 	retiredAttemptsVersion uint32 = 4
 	settlementsVersion     uint32 = 5
+	momentumVersion        uint32 = 6
 )
+
+// momentumKey is an IRA approval's momentum state, a key from schema
+// version 6, left out of a Boost approval; rebalanceKey is the key it must
+// state, null when no rebalance is in progress, and rebalanceKeys the keys a
+// stated rebalance must state.
+const (
+	momentumKey  = "momentum"
+	rebalanceKey = "rebalance_in_progress"
+)
+
+var rebalanceKeys = []string{"decision_id", "decision_time", "phase", "client_order_ids"}
 
 // approvalKeys are the keys an approval file must state, null included: a
 // key left out is refused rather than read as its zero value.
@@ -345,6 +466,39 @@ var incidentKeys = []string{"incident_id", "state", "scope_instrument_ids", "sal
 // version 2.
 const incidentCashKey = "scope_cash_components"
 
+// checkMomentumKeys checks an approval's stated momentum key: only from
+// schema version 6, an object, stating its rebalance in progress, null when
+// none, and every key of a rebalance it states.
+func checkMomentumKeys(raw json.RawMessage, schemaVersion uint32) error {
+	if schemaVersion < momentumVersion {
+		return fmt.Errorf("a schema version %d approval cannot state %s; version %d states it", schemaVersion, momentumKey, momentumVersion)
+	}
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &state); err != nil || state == nil {
+		return fmt.Errorf("decode the approval's %s: it must be an object stating %s, null when no rebalance is in progress", momentumKey, rebalanceKey)
+	}
+	value, ok := state[rebalanceKey]
+	if !ok {
+		return fmt.Errorf("the approval states no %s.%s; it is required, null when no rebalance is in progress (ADR 0026, point 5)", momentumKey, rebalanceKey)
+	}
+	var rebalance map[string]json.RawMessage
+	if err := json.Unmarshal(value, &rebalance); err != nil {
+		return fmt.Errorf("decode the approval's %s.%s: it must be an object or null: %w", momentumKey, rebalanceKey, err)
+	}
+	var missing []string
+	if rebalance != nil {
+		for _, key := range rebalanceKeys {
+			if _, ok := rebalance[key]; !ok {
+				missing = append(missing, momentumKey+"."+rebalanceKey+"."+key)
+			}
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("the approval states no %s; a rebalance in progress states its decision, time, phase and orders", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // DecodeOperatorRunApproved decodes and validates an approval written
 // outside the engine, at the current schema version. Every key must be
 // present, an unknown key is refused, and the input is one JSON value, so a
@@ -357,13 +511,16 @@ func DecodeOperatorRunApproved(raw []byte) (OperatorRunApprovedPayload, error) {
 // DecodeRecordedOperatorRunApproved decodes and validates an approval
 // recorded at schemaVersion, as DecodeOperatorRunApproved does: version 1
 // could not state an incident's cash scope, so it is read with none and may
-// not name one; versions 2 to 4 must state it; versions 3 and 4 must also
+// not name one; versions 2 to 6 must state it; versions 3 to 6 must also
 // state the starting_book key, null when the approval states no book, and a
 // book it states must state its positions, total_cash and currency, none
-// null, while versions 1 and 2 may not state the key; only versions 4 and 5
-// may state an incident's sale_retired_attempts, and only version 5 its
-// sale_settlements, each of which may be left out as none (ValidateSchema);
-// any other version is refused (ADR 0015).
+// null, while versions 1 and 2 may not state the key; versions 4 to 6 may
+// state an incident's sale_retired_attempts, versions 5 and 6 its
+// sale_settlements, each of which may be left out as none; only version 6
+// may state the momentum key, an IRA approval's, which must state its
+// rebalance_in_progress, null when none, and every key of a rebalance it
+// states (checkMomentumKeys; ValidateSchema); any other version is refused
+// (ADR 0015).
 func DecodeRecordedOperatorRunApproved(raw []byte, schemaVersion uint32) (OperatorRunApprovedPayload, error) {
 	if schemaVersion < 1 || schemaVersion > OperatorRunApprovedSchemaVersion {
 		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval's schema version %d is not one this build reads (1 to %d; ADR 0015)", schemaVersion, OperatorRunApprovedSchemaVersion)
@@ -387,6 +544,11 @@ func DecodeRecordedOperatorRunApproved(raw []byte, schemaVersion uint32) (Operat
 	}
 	if len(missing) > 0 {
 		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval states no %s; every key is required, null where there is none", strings.Join(missing, ", "))
+	}
+	if raw, statesMomentum := keys[momentumKey]; statesMomentum {
+		if err := checkMomentumKeys(raw, schemaVersion); err != nil {
+			return OperatorRunApprovedPayload{}, err
+		}
 	}
 	if statesBook {
 		var book map[string]json.RawMessage
