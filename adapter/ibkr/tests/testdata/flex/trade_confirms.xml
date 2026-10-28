@@ -2,7 +2,7 @@
 <!-- A synthetic Trade Confirmation Flex statement: made-up account, symbols, prices and IDs, never a real one. -->
 <FlexQueryResponse queryName="synthetic-trades" type="TCF">
   <FlexStatements count="1">
-    <FlexStatement accountId="DU0000001" fromDate="20270109" toDate="20270115" period="LastNCalendarDays" whenGenerated="20270115;053000">
+    <FlexStatement accountId="DU0000001" fromDate="20270108" toDate="20270115" period="Today" whenGenerated="20270115;053000">
       <TradeConfirms>
         <TradeConfirm accountId="DU0000001" symbol="SPY" quantity="4" tradePrice="400.5" dateTime="20270114;101500" tradeID="700000201" execID="0001f4e8.0001.01.01" levelOfDetail="EXECUTION"/>
         <TradeConfirm accountId="DU0000001" symbol="SPY" quantity="4" tradePrice="400.5" dateTime="20270114;101500" tradeID="700000201" levelOfDetail="ORDER"/>

@@ -58,6 +58,7 @@ FRIDAY_MORNING = date(2027, 1, 15)
 FRIDAY = date(2027, 1, 22)
 MONDAY = date(2027, 1, 25)
 BEFORE_HOLIDAY = date(2027, 1, 15)
+HOLIDAY = date(2027, 1, 18)
 AFTER_HOLIDAY = date(2027, 1, 19)
 EARLY = date(2027, 11, 26)
 AFTER_EARLY = date(2027, 11, 29)
@@ -549,6 +550,19 @@ class MorningTests(unittest.TestCase):
         self.proof(AFTER_HOLIDAY)
         self.deliver(BEFORE_HOLIDAY)
         self.assert_as_of_close(BEFORE_HOLIDAY)
+
+    def test_a_holiday_mornings_proof_ending_on_the_session_before_waits_then_withholds(self):
+        # The holiday's firing (Monday 2027-01-18): the Flex reader's statement ends on Friday, the session before,
+        # so it covers only to Friday's start; Friday's file delivered that morning waits for a proof that reaches
+        # the holiday's midnight, and at 09:00 is withheld.
+        self.at(ny(HOLIDAY, 8, 5))
+        self.proof(BEFORE_HOLIDAY, fetched=ny(HOLIDAY, 5, 30), from_day=date(2027, 1, 11))
+        loop = self.deliver(BEFORE_HOLIDAY)
+        self.assertEqual(self.sent(BROKER_SNAPSHOT_TYPE), [], "the batch waits for a proof that reaches midnight")
+        self.at(ny(HOLIDAY, 9, 0))
+        for _ in range(40):
+            loop.step()
+        self.assert_withheld("2027-01-15T05:00:00Z", "2027-01-18T05:00:00Z")
 
     def test_a_holidays_proof_does_not_cover_the_day_after_it(self):
         self.at(ny(AFTER_HOLIDAY, 9, 0))

@@ -7,6 +7,7 @@ account, amounts and IDs, never a real statement. No network: the Flex Web
 Service is a fake that answers from the files in testdata/flex.
 """
 import fcntl
+import os
 import http.server
 import io
 import json
@@ -57,6 +58,43 @@ class FakeFlex:
             return fixture(self.send)
         answer = self.statements.pop(0)
         return answer if isinstance(answer, bytes) else fixture(answer)
+
+
+class FakeClock:
+    """A steady clock that sleep moves on, so a reading's waits take no real time."""
+
+    def __init__(self):
+        self.now, self.slept = 1000.0, []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+class TimedFlex(FakeFlex):
+    """FakeFlex that notes the clock's time of every request, and answers a SendRequest from sends, in turn."""
+
+    def __init__(self, clock, sends=None, **kwargs):
+        super().__init__(**kwargs)
+        self.clock, self.times, self.sends = clock, [], list(sends or [])
+
+    def __call__(self, url, params):
+        self.times.append(self.clock())
+        if url == flex.SEND_REQUEST_URL and self.sends:
+            self.calls.append((url, dict(params)))
+            return fixture(self.sends.pop(0))
+        return super().__call__(url, params)
+
+
+def assert_within_rate(test, times):
+    """Every request at least a second after the one before, and never more than 10 in any 60 seconds."""
+    for before, after in zip(times, times[1:]):
+        test.assertGreaterEqual(after - before, flex.MIN_REQUEST_GAP)
+    for n, start in enumerate(times):
+        test.assertLessEqual(len([t for t in times[n:] if t < start + 60]), flex.REQUESTS_PER_MINUTE)
 
 
 def snapshot(engine, ident, as_of, net_liquidation):
@@ -165,11 +203,38 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "1009")
 
     def test_a_statement_still_generating_is_asked_for_again(self):
-        slept = []
+        clock = FakeClock()
         service = FakeFlex(statements=("get_in_progress.xml", "get_in_progress.xml", "statement.xml"))
-        self.assertEqual(flex.fetch_statement(TOKEN, QUERY, get=service, sleep=slept.append),
+        self.assertEqual(flex.fetch_statement(TOKEN, QUERY, get=service, sleep=clock.sleep, monotonic=clock),
                          fixture("statement.xml"))
-        self.assertEqual(slept, [flex.GENERATION_WAIT] * 2)
+        # The rate's own wait (a second after SendRequest) comes first; the generation waits after each poll.
+        self.assertEqual([s for s in clock.slept if s == flex.GENERATION_WAIT], [flex.GENERATION_WAIT] * 2)
+
+    def test_a_statement_still_generating_is_polled_within_ibkrs_rate_limits(self):
+        # IBKR's Flex Web Service: at most 1 request a second and 10 a minute per token (SendRequest), every
+        # GetStatement poll counted.
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=["get_in_progress.xml"] * 25 + ["statement.xml"])
+        flex.fetch_statement(TOKEN, QUERY, get=service, sleep=clock.sleep, monotonic=clock)
+        assert_within_rate(self, service.times)
+
+    def test_a_clock_stepping_back_never_makes_a_wait_longer_than_a_minute(self):
+        clock = FakeClock()
+        pacer = flex._Pacer(clock.sleep, clock)
+        pacer.wait()
+        clock.now -= 100000  # the steady clock should never do this; a wait must still stay bounded
+        pacer.wait()
+        for _ in range(12):
+            pacer.wait()
+        self.assertTrue(all(0 <= s <= 60 for s in clock.slept), clock.slept)
+
+    def test_a_clock_jumping_forward_makes_no_wait_and_never_a_negative_one(self):
+        clock = FakeClock()
+        pacer = flex._Pacer(clock.sleep, clock)
+        pacer.wait()
+        clock.now += 100000
+        pacer.wait()
+        self.assertEqual(clock.slept, [])
 
     def test_a_statement_that_never_finishes_is_unavailable(self):
         service = FakeFlex(statements=["get_in_progress.xml"] * flex.GENERATION_ATTEMPTS)
@@ -1227,7 +1292,7 @@ class ExecutionsTests(ReadOnceHarness):
         self.assertEqual(asked, [QUERY, "654321"])
         proof = self.proof()
         self.assertEqual((proof["state"], proof["query"], proof["section"], proof["from_date"], proof["to_date"]),
-                         ("read", "trades", "TradeConfirms", "20270109", "20270115"))
+                         ("read", "trades", "TradeConfirms", "20270108", "20270115"))
         self.assertEqual(proof["account_id"], ACCOUNT, "the account the statement was checked against")
         self.assertEqual(proof["fetched_at"], "2027-01-15T10:30:00Z")
         # A statement lists every execution only up to the start of its last day (an execution late in an
@@ -1237,6 +1302,195 @@ class ExecutionsTests(ReadOnceHarness):
                                                {"id": "700000201", "at": "2027-01-14T15:15:00Z"}],
                          "every row counts, an order's row too: a proof can only be stricter for it")
         self.assertEqual(len(self.records()), 2, "the cash ledger is written as before")
+
+    def test_the_trades_query_is_asked_for_the_last_seven_days_and_the_cash_query_for_its_own_period(self):
+        # The portal fixes a Trade Confirmation query's period at Today, so the reader asks for the 7 New York
+        # calendar days before its own day through that day (Flex Web Service v3 SendRequest fd and td).
+        service = FakeFlex(statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(self.read_trades(service=service), self.out.getvalue())
+        sent = [params for url, params in service.calls if url == flex.SEND_REQUEST_URL]
+        self.assertEqual([(p.get("q"), p.get("fd"), p.get("td")) for p in sent],
+                         [(QUERY, None, None), ("654321", "20270108", "20270115")])
+
+    def test_a_statement_that_ignored_the_requested_dates_is_set_aside(self):
+        # IBKR answering with the query's saved period (Today) instead of the dates asked for.
+        today = fixture("trade_confirms.xml").replace(b'fromDate="20270108"', b'fromDate="20270115"')
+        self.assertFalse(self.read_trades(today))
+        self.assert_proof_set_aside("IBKR ignored the requested dates", "20270108", "20270115")
+
+    def test_a_statement_ending_before_the_requested_day_is_set_aside(self):
+        early = fixture("trade_confirms.xml").replace(b'toDate="20270115"', b'toDate="20270114"')
+        self.assertFalse(self.read_trades(early))
+        self.assert_proof_set_aside("IBKR ignored the requested dates")
+
+    def test_a_requested_start_on_a_holiday_may_begin_at_the_next_session(self):
+        # Monday 2027-01-25: seven days before is Martin Luther King Jr. Day; a statement from the session after it
+        # still covers every day the request does that held a session.
+        monday = datetime(2027, 1, 25, 10, 30, tzinfo=timezone.utc)
+        xml = fixture("trade_confirms.xml").replace(b'fromDate="20270108" toDate="20270115"',
+                                                    b'fromDate="20270119" toDate="20270125"')
+        cash = self.statement(("900000101", "20270114", "2500"), period=("20261226", "20270124"))
+        self.assertTrue(self.read_trades(now=monday, service=FakeFlex(statements=(cash, xml))), self.out.getvalue())
+        self.assertEqual(self.proof()["from_date"], "20270119")
+
+    def test_a_holiday_reading_ending_on_the_session_before_covers_only_to_that_sessions_start(self):
+        # Monday 2027-01-18 (Martin Luther King Jr. Day): td is the holiday and IBKR's statement ends on Friday, the
+        # session before. That is the period asked for (no session in between), so the proof is read, but it lists
+        # every execution only up to the start of Friday: Friday's evening is not proven.
+        holiday = datetime(2027, 1, 18, 10, 30, tzinfo=timezone.utc)
+        xml = fixture("trade_confirms.xml").replace(b'fromDate="20270108" toDate="20270115"',
+                                                    b'fromDate="20270111" toDate="20270115"')
+        cash = self.statement(("900000101", "20270114", "2500"), period=("20261219", "20270117"))
+        self.assertTrue(self.read_trades(now=holiday, service=FakeFlex(statements=(cash, xml))), self.out.getvalue())
+        proof = self.proof()
+        self.assertEqual((proof["state"], proof["to_date"], proof["covered_until"]),
+                         ("read", "20270115", "2027-01-15T05:00:00Z"))
+
+    def test_the_trades_query_waits_after_the_cash_query_and_both_keep_ibkrs_rate(self):
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(self.ledger), get=service,
+                                       sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING, err=self.out,
+                                       trades_query_id="654321"), self.out.getvalue())
+        sends = [n for n, (url, _) in enumerate(service.calls) if url == flex.SEND_REQUEST_URL]
+        self.assertGreaterEqual(service.times[sends[1]] - service.times[sends[1] - 1], flex.QUERY_GAP)
+        assert_within_rate(self, service.times)
+
+    def test_too_many_requests_is_retried_after_10_30_and_60_seconds(self):
+        # IBKR's error 1018 ("Too many requests have been made from this token"): wait and ask again.
+        clock = FakeClock()
+        service = TimedFlex(clock, sends=["send_ok.xml", "send_too_many.xml", "send_too_many.xml", "send_ok.xml"],
+                            statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(self.ledger), get=service,
+                                       sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING, err=self.out,
+                                       trades_query_id="654321"), self.out.getvalue())
+        self.assertEqual(self.proof()["state"], "read")
+        backoffs = [s for s in clock.slept if s in flex.RATE_BACKOFF]
+        self.assertEqual(backoffs, [10, 30])
+        assert_within_rate(self, service.times)
+
+    def test_too_many_requests_after_every_backoff_sets_the_proof_aside(self):
+        clock = FakeClock()
+        service = TimedFlex(clock, sends=["send_ok.xml"] + ["send_too_many.xml"] * 4,
+                            statements=("statement.xml",))
+        self.assertFalse(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(self.ledger), get=service,
+                                        sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING, err=self.out,
+                                        trades_query_id="654321"))
+        self.assert_proof_set_aside("1018")
+        self.assertEqual([s for s in clock.slept if s in flex.RATE_BACKOFF], [10, 30, 60])
+        self.assertEqual(len(self.records()), 2, "the cash ledger is still written")
+
+    def test_too_many_requests_while_polling_is_retried_too(self):
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=("send_too_many.xml", "statement.xml"))
+        self.assertEqual(flex.fetch_statement(TOKEN, QUERY, get=service, sleep=clock.sleep, monotonic=clock),
+                         fixture("statement.xml"))
+        self.assertIn(10, clock.slept)
+
+    def test_a_holiday_reading_ending_a_session_earlier_than_the_session_before_is_set_aside(self):
+        # Monday 2027-01-18 (a holiday): td's last session is Friday 2027-01-15; a statement ending Thursday
+        # 2027-01-14 leaves Friday out, so IBKR ignored the dates asked for.
+        holiday = datetime(2027, 1, 18, 10, 30, tzinfo=timezone.utc)
+        xml = fixture("trade_confirms.xml").replace(b'fromDate="20270108" toDate="20270115"',
+                                                    b'fromDate="20270111" toDate="20270114"')
+        cash = self.statement(("900000101", "20270114", "2500"), period=("20261219", "20270117"))
+        self.assertFalse(self.read_trades(now=holiday, service=FakeFlex(statements=(cash, xml))))
+        self.assert_proof_set_aside("IBKR ignored the requested dates", "20270111", "20270118", "20270114")
+
+    def instance(self, name):
+        """A second account's ledger folder beside this one, under the same Flex state root."""
+        folder = self.dir / "root" / name
+        folder.mkdir(parents=True)
+        return folder / "cash-movements.jsonl"
+
+    def test_two_readers_sharing_the_token_keep_ibkrs_rate_together(self):
+        # Every account's reader uses the one Flex token: one holds the token for its whole reading, and the next
+        # starts its requests only once a minute has passed since the last one, so the two streams together keep
+        # 1 request a second and 10 a minute.
+        clock = FakeClock()
+        times = []
+        for name in ("boost", "trad-ira"):
+            ledger = self.instance(name)
+            service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+            service.times = times
+            self.assertTrue(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(ledger), get=service,
+                                           sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING,
+                                           err=self.out, trades_query_id="654321"), self.out.getvalue())
+        self.assertEqual(len(times), 8)
+        assert_within_rate(self, times)
+
+    def test_a_reader_waits_for_the_token_then_sets_itself_aside(self):
+        ledger = self.instance("roth-ira")
+        root = os.open(str(ledger.parent.parent), os.O_RDONLY)
+        self.addCleanup(os.close, root)
+        fcntl.flock(root, fcntl.LOCK_EX)  # another account's reader holds the token
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+        self.assertFalse(flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(ledger), get=service,
+                                        sleep=clock.sleep, monotonic=clock, now=lambda: self.MORNING, err=self.out,
+                                        trades_query_id="654321"))
+        self.assertEqual(service.calls, [], "nothing is asked of IBKR without the token")
+        self.assertGreaterEqual(sum(clock.slept), flex.TOKEN_LOCK_WAIT)
+        status = json.loads(Path(str(ledger) + flex.STATUS_SUFFIX).read_text())
+        self.assertEqual(status["state"], "set-aside")
+        self.assertIn("another Flex reader", status["reason"])
+        proof = json.loads(Path(flex.executions_path(str(ledger))).read_text())
+        self.assertEqual(proof["state"], "set-aside")
+        self.assertIn("another Flex reader", proof["reason"])
+
+    def read_instance(self, ledger, clock, service, **kwargs):
+        return flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(ledger), get=service, sleep=clock.sleep,
+                              monotonic=clock, now=kwargs.pop("now", lambda: self.MORNING), err=self.out,
+                              trades_query_id="654321", **kwargs)
+
+    def test_the_first_request_comes_a_full_minute_after_the_token_is_taken(self):
+        # The holder before may have been killed straight after a request, leaving no cooldown of its own: every
+        # reader waits TOKEN_COOLDOWN on the steady clock once it holds the token, whatever came before.
+        ledger = self.instance("boost")
+        clock = FakeClock()
+        start = clock()
+        service = TimedFlex(clock, statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(self.read_instance(ledger, clock, service), self.out.getvalue())
+        self.assertGreaterEqual(service.times[0] - start, flex.TOKEN_COOLDOWN)
+        self.assertEqual(clock.slept[0], flex.TOKEN_COOLDOWN)
+        self.assertFalse(any(p.name == "token-last-request.json" for p in ledger.parent.parent.rglob("*")),
+                         "no request record is kept")
+
+    def test_a_root_that_cannot_be_opened_is_set_aside_at_once_with_its_error(self):
+        ledger = self.instance("roth-ira")
+        clock = FakeClock()
+        service = TimedFlex(clock, statements=("statement.xml",))
+        with unittest.mock.patch.object(flex, "_open_root", side_effect=PermissionError(13, "Permission denied")):
+            self.assertFalse(self.read_instance(ledger, clock, service))
+        self.assertLess(sum(clock.slept), flex.TOKEN_LOCK_POLL)
+        status = json.loads(Path(str(ledger) + flex.STATUS_SUFFIX).read_text())
+        self.assertIn("Permission denied", status["reason"])
+        self.assertNotIn("another Flex reader", status["reason"])
+        self.assertEqual(service.calls, [])
+
+    def test_the_token_is_released_when_a_reading_fails_with_an_error(self):
+        ledger = self.instance("boost")
+        clock = FakeClock()
+
+        def broken(url, params):
+            raise RuntimeError("a defect")
+        with self.assertRaises(RuntimeError):
+            self.read_instance(ledger, clock, broken)
+        root = os.open(str(ledger.parent.parent), os.O_RDONLY)
+        self.addCleanup(os.close, root)
+        fcntl.flock(root, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises if the lock was left held
+        fcntl.flock(root, fcntl.LOCK_UN)
+
+    def test_a_token_wait_that_times_out_says_only_that(self):
+        ledger = self.instance("roth-ira")
+        root = os.open(str(ledger.parent.parent), os.O_RDONLY)
+        self.addCleanup(os.close, root)
+        fcntl.flock(root, fcntl.LOCK_EX)
+        clock = FakeClock()
+        self.assertFalse(self.read_instance(ledger, clock, TimedFlex(clock)))
+        said = self.out.getvalue()
+        self.assertIn("another Flex reader", said)
+        self.assertNotIn("no Trade Confirmation query is named", said)
 
     def test_a_proof_never_reaches_past_an_hour_before_it_was_asked_for(self):
         # IBKR: a new execution is typically in a newly generated Trade Confirmation report within 5 to 10 minutes.
@@ -1388,7 +1642,7 @@ class ExecutionsTests(ReadOnceHarness):
         self.read_trades(confirms(("700000301", "20270114;163000")))
         proof = flex.read_executions(flex.executions_path(str(self.ledger)), ACCOUNT)
         self.assertEqual(proof.covered_until, datetime(2027, 1, 15, 5, 0, tzinfo=timezone.utc))
-        self.assertEqual(proof.from_day, date(2027, 1, 9))
+        self.assertEqual(proof.from_day, date(2027, 1, 8))
         self.assertEqual(proof.executions, [("700000301", datetime(2027, 1, 14, 21, 30, tzinfo=timezone.utc))])
 
     def test_the_proof_reader_refuses_a_file_not_as_written(self):
@@ -1554,8 +1808,14 @@ class DeploymentTests(unittest.TestCase):
     def test_the_unit_outlasts_the_readers_worst_case(self):
         # For each of the two queries, SendRequest, then every GetStatement attempt, each to its request timeout,
         # and the waits between them.
-        worst = 2 * (flex.REQUEST_TIMEOUT * (1 + flex.GENERATION_ATTEMPTS)
-                     + flex.GENERATION_WAIT * (flex.GENERATION_ATTEMPTS - 1))
+        # A 1018 answer adds its backoff and one more request, at most len(RATE_BACKOFF) times a query; the
+        # trades query waits QUERY_GAP after the cash query; the rate's own waits are each under a minute.
+        requests = 1 + flex.GENERATION_ATTEMPTS + len(flex.RATE_BACKOFF)
+        per_query = (flex.REQUEST_TIMEOUT * requests + flex.GENERATION_WAIT * (flex.GENERATION_ATTEMPTS - 1)
+                     + sum(flex.RATE_BACKOFF) + flex.MIN_REQUEST_GAP * requests)
+        # The wait for the token, the fixed minute its holder waits before its first request, and the gap between
+        # the queries.
+        worst = flex.TOKEN_LOCK_WAIT + 2 * per_query + flex.QUERY_GAP + flex.TOKEN_COOLDOWN
         minutes = int(re.search(r"(?m)^TimeoutStartSec=([0-9]+)min$", self.service).group(1))
         self.assertGreater(minutes * 60, worst)
 
