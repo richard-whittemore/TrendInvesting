@@ -119,6 +119,10 @@ install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/engines/bo
 install -d -o ti-operator -g ti-trader -m 0750 /var/lib/trend-investing/engines/boost/operator
 install -D -m 0755 /dev/null /usr/local/libexec/trend-investing/clock-check.sh
 printf '#!/bin/sh\nexit 0\n' >/usr/local/libexec/trend-investing/clock-check.sh
+# provision.sh services installs the real Gateway check; here a stand-in that
+# says logged in, so the reporter's -gateway-check runs as the unit has it.
+install -D -m 0755 /dev/null /usr/local/libexec/trend-investing/gateway-check.sh
+printf '#!/bin/sh\necho "gateway: logged in"\n' >/usr/local/libexec/trend-investing/gateway-check.sh
 for b in ti-data ti-reporter ti-dashboard operator journal-query; do
   case $b in
     operator | journal-query) install -D -m 0755 "/dist/$b" "/opt/trend-investing/bin/$b" && ln -sfn "/opt/trend-investing/bin/$b" "/usr/local/bin/$b" ;;
