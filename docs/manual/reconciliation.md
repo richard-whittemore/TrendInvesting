@@ -705,13 +705,18 @@ earlier proof in place in these cases only:
   which the journal says.
 
 The adapter still checks any proof's account, period, fetch time and
-coverage, so an earlier proof covers only the days it was read for. Whether IBKR's *Last N Calendar Days* period includes the day
-it is run on is not in IBKR's documentation: after the first morning
-reading, `sudo cat /var/lib/trend-investing/flex/boost/executions.json`
-should show `to_date` as that day and `covered_until` as that day's
-midnight (05:00 or 04:00 UTC). If `to_date` is the day before, tell the
-developer: the adapter then withholds every session (it fails closed), and
-the query needs another period.
+coverage, so an earlier proof covers only the days it was read for.
+
+**The trades query's dates.** The portal fixes a Trade Confirmation query's
+period at *Today*, so the reader asks IBKR for the dates itself each
+reading: the 7 New York calendar days before its own day through that day
+(the Flex Web Service's `fd` and `td`). If the statement IBKR returns does
+not cover them, the proof says `"set-aside"` with "IBKR ignored the
+requested dates" and the two periods, and the unit fails. After the first
+morning reading, `sudo cat /var/lib/trend-investing/flex/boost/executions.json`
+should show `from_date` a week back, `to_date` as that day and
+`covered_until` as that day's midnight (05:00 or 04:00 UTC); tell the
+developer if it does not.
 
 **What you set up once, in IBKR's Client Portal.** These steps, menu names
 and formats are from IBKR's documentation, not yet verified against a live
@@ -744,10 +749,11 @@ developer.
    **Performance & Reports → Flex Queries → Trade Confirmation Flex Query →
    +**. Give it a name, tick **Trade Confirmations** and, inside it, select
    all fields (or at least Account ID, Symbol, Quantity, Date/Time, Trade
-   ID, Exec ID, Level of Detail). Set **Format** to XML, **Period** to *Last
-   N Calendar Days* with N = 7 (it must reach back past a long weekend to
-   the session it proves), and leave the date format (`yyyyMMdd`), the time
-   format (`HHmmss`) and the separator (`;`) at their defaults. Save it,
+   ID, Exec ID, Level of Detail). Set **Format** to XML. The **Period** is
+   greyed out at *Today*: leave it, the reader asks IBKR for the last 7 days
+   itself (above, "The trades query's dates"). Leave the date format
+   (`yyyyMMdd`), the time format (`HHmmss`) and the separator (`;`) at
+   their defaults. Save it,
    note its **Query ID**, and put it in the secrets file beside the others:
    `sudo ti-secrets edit secrets.env`, the line
    `TI_IBKR_FLEX_TRADES_QUERY_ID=`. The same Flex token reads it. Adding a

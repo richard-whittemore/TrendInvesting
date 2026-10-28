@@ -1227,7 +1227,7 @@ class ExecutionsTests(ReadOnceHarness):
         self.assertEqual(asked, [QUERY, "654321"])
         proof = self.proof()
         self.assertEqual((proof["state"], proof["query"], proof["section"], proof["from_date"], proof["to_date"]),
-                         ("read", "trades", "TradeConfirms", "20270109", "20270115"))
+                         ("read", "trades", "TradeConfirms", "20270108", "20270115"))
         self.assertEqual(proof["account_id"], ACCOUNT, "the account the statement was checked against")
         self.assertEqual(proof["fetched_at"], "2027-01-15T10:30:00Z")
         # A statement lists every execution only up to the start of its last day (an execution late in an
@@ -1237,6 +1237,36 @@ class ExecutionsTests(ReadOnceHarness):
                                                {"id": "700000201", "at": "2027-01-14T15:15:00Z"}],
                          "every row counts, an order's row too: a proof can only be stricter for it")
         self.assertEqual(len(self.records()), 2, "the cash ledger is written as before")
+
+    def test_the_trades_query_is_asked_for_the_last_seven_days_and_the_cash_query_for_its_own_period(self):
+        # The portal fixes a Trade Confirmation query's period at Today, so the reader asks for the 7 New York
+        # calendar days before its own day through that day (Flex Web Service v3 SendRequest fd and td).
+        service = FakeFlex(statements=("statement.xml", "trade_confirms.xml"))
+        self.assertTrue(self.read_trades(service=service), self.out.getvalue())
+        sent = [params for url, params in service.calls if url == flex.SEND_REQUEST_URL]
+        self.assertEqual([(p.get("q"), p.get("fd"), p.get("td")) for p in sent],
+                         [(QUERY, None, None), ("654321", "20270108", "20270115")])
+
+    def test_a_statement_that_ignored_the_requested_dates_is_set_aside(self):
+        # IBKR answering with the query's saved period (Today) instead of the dates asked for.
+        today = fixture("trade_confirms.xml").replace(b'fromDate="20270108"', b'fromDate="20270115"')
+        self.assertFalse(self.read_trades(today))
+        self.assert_proof_set_aside("IBKR ignored the requested dates", "20270108", "20270115")
+
+    def test_a_statement_ending_before_the_requested_day_is_set_aside(self):
+        early = fixture("trade_confirms.xml").replace(b'toDate="20270115"', b'toDate="20270114"')
+        self.assertFalse(self.read_trades(early))
+        self.assert_proof_set_aside("IBKR ignored the requested dates")
+
+    def test_a_requested_start_on_a_holiday_may_begin_at_the_next_session(self):
+        # Monday 2027-01-25: seven days before is Martin Luther King Jr. Day; a statement from the session after it
+        # still covers every day the request does that held a session.
+        monday = datetime(2027, 1, 25, 10, 30, tzinfo=timezone.utc)
+        xml = fixture("trade_confirms.xml").replace(b'fromDate="20270108" toDate="20270115"',
+                                                    b'fromDate="20270119" toDate="20270125"')
+        cash = self.statement(("900000101", "20270114", "2500"), period=("20261226", "20270124"))
+        self.assertTrue(self.read_trades(now=monday, service=FakeFlex(statements=(cash, xml))), self.out.getvalue())
+        self.assertEqual(self.proof()["from_date"], "20270119")
 
     def test_a_proof_never_reaches_past_an_hour_before_it_was_asked_for(self):
         # IBKR: a new execution is typically in a newly generated Trade Confirmation report within 5 to 10 minutes.
@@ -1388,7 +1418,7 @@ class ExecutionsTests(ReadOnceHarness):
         self.read_trades(confirms(("700000301", "20270114;163000")))
         proof = flex.read_executions(flex.executions_path(str(self.ledger)), ACCOUNT)
         self.assertEqual(proof.covered_until, datetime(2027, 1, 15, 5, 0, tzinfo=timezone.utc))
-        self.assertEqual(proof.from_day, date(2027, 1, 9))
+        self.assertEqual(proof.from_day, date(2027, 1, 8))
         self.assertEqual(proof.executions, [("700000301", datetime(2027, 1, 14, 21, 30, tzinfo=timezone.utc))])
 
     def test_the_proof_reader_refuses_a_file_not_as_written(self):

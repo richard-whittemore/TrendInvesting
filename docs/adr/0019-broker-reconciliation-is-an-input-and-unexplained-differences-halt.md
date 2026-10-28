@@ -1158,11 +1158,18 @@ read with the same Flex token, asked for in the same reading after the cash
 query). **Only a Trade Confirmation statement is a proof**: an Activity
 statement's Trades section is never taken, and with no trades query set the
 proof is "none", so sessions delivered the next morning are withheld and
-the page says why. Whether IBKR's "Last N Calendar Days" period
-of a Trade Confirmation query includes the day it is run on is not stated in
-IBKR's documentation; the rule fails closed if it does not (the statement
-then ends yesterday and covers only to yesterday's start), and the first
-live reading's proof (`to_date`, `covered_until`) shows which.
+the page says why. IBKR's Client Portal fixes a Trade Confirmation query's
+period at "Today" (found on the owner's portal, 2026-10-27), so the reader
+asks for the period itself: SendRequest's `fd` and `td` (Flex Web Service
+v3: "Define the earliest date to retrieve. If fd is used, the td parameter
+is required"; at most 365 days), from the 7 New York calendar days before
+its own day through that day, which reaches back past any long weekend to
+the session the morning reading proves. The cash query keeps its saved
+period. A statement that does not cover the period asked for (starting
+after the first session on or after `fd`, or ending before the last session
+on or before `td`) means IBKR ignored the dates, and the proof is set aside
+with that reason ("IBKR ignored the requested dates"); either way the
+coverage rule below still decides what a statement proves.
 
 **The proof is read strictly, and bound to the account.** The statement's
 TradeConfirms section must hold only TradeConfirm rows, each at an

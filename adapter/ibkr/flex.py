@@ -77,7 +77,12 @@ read from IBKR"). One reading:
    before stands for that session's close only with this proof
    (loop.AdapterLoop._morning_proof). Only a Trade Confirmation statement
    is a proof: the query the secrets name as TI_IBKR_FLEX_TRADES_QUERY_ID,
-   asked for in the same reading after the cash query. An Activity statement
+   asked for in the same reading after the cash query, for the TRADES_DAYS
+   New York calendar days before the reader's own day through that day
+   (SendRequest's fd and td: the portal fixes the query's own period at
+   Today); a statement that does not cover that period means IBKR ignored
+   the dates, and the proof is set aside (_check_requested_period). The
+   cash query keeps its saved period. An Activity statement
    is refreshed once a day and its securities day ends at IBKR's 8:20 p.m.
    cutoff, so its Trades section never proves an evening; with no trades
    query named the proof is "none". covered_until is the start of the
@@ -220,6 +225,10 @@ EXECUTIONS_NAME = "executions.json"
 # Service documentation: "Typically a new execution will be available for inclusion in a newly generated Flex Query
 # report within 5 to 10 minutes"; six times that is the margin (ADR 0019, amended 2026-10-27).
 EXECUTION_LAG = timedelta(minutes=60)
+# The New York calendar days before the reader's own day the trades query asks for, through that day: the portal
+# fixes a Trade Confirmation query's period at Today, so the reader asks for the dates itself (SendRequest fd and
+# td); seven days reach back past any long weekend to the session the morning reading proves (step 5 of the module).
+TRADES_DAYS = 7
 # The one section an execution is read from: a Trade Confirmation statement's (step 5 of the module).
 TRADE_CONFIRMS = ("TradeConfirms", "TradeConfirm")
 # The levels of detail a TradeConfirm row may have: each is one execution, or one order's executions together,
@@ -623,9 +632,14 @@ def _ask(get, url, params, step, token):
             getattr(err, "reason", None) and str(err.reason) or type(err).__name__, token))) from None
 
 
-def fetch_statement(token, query_id, get=_get, sleep=time.sleep):
-    """The Flex query response (bytes) for query_id; FlexRejected or FlexUnavailable otherwise, never quoting token."""
+def fetch_statement(token, query_id, get=_get, sleep=time.sleep, period=None):
+    """The Flex query response (bytes) for query_id; FlexRejected or FlexUnavailable otherwise, never quoting token.
+
+    period, when given, is (fromDate, toDate) as yyyyMMdd, sent as SendRequest's fd and td, which override the
+    query's saved period (IBKR's Flex Web Service v3, SendRequest: "If fd is used, the td parameter is required")."""
     params = {"t": token, "q": query_id, "v": FLEX_VERSION}
+    if period is not None:
+        params["fd"], params["td"] = period
     answer = _answer(_ask(get, SEND_REQUEST_URL, params, "SendRequest", token), "SendRequest")
     if answer is None:
         raise FlexUnavailable(None, "its SendRequest answer is not a FlexStatementResponse")
@@ -1384,10 +1398,14 @@ def _read_executions_once(status, trades_query_id, token, account_id, get, sleep
         return proof
     try:
         fetched_at = now()
-        executions = parse_executions(fetch_statement(token, trades_query_id, get=get, sleep=sleep), account_id)
+        day = fetched_at.astimezone(NEW_YORK).date()
+        asked = (_day_text(day - timedelta(days=TRADES_DAYS)), _day_text(day))
+        executions = parse_executions(fetch_statement(token, trades_query_id, get=get, sleep=sleep, period=asked),
+                                      account_id)
         if executions is None:
             raise StatementRefused("the trades query's statement has no Trade Confirmations (TradeConfirms) section; "
                                    "it must be a Trade Confirmation Flex query (docs/manual/reconciliation.md)")
+        _check_requested_period(executions, asked)
     except (StatementRefused, FlexRejected, FlexUnavailable, OSError) as refused:
         proof.update(_set_aside(refused, token, account_id), state=PROOF_SET_ASIDE)
         say("flex: executions proof set aside: " + proof["reason"])
@@ -1423,6 +1441,31 @@ def _write_proof(ledger_path, text, say):
                 stuck.strerror or stuck)
         say("flex: the executions proof cannot be written ({}); {}".format(unwritten.strerror or unwritten, left))
         return True
+
+
+def _check_requested_period(executions, asked):
+    """StatementRefused unless the statement covers the period asked for (fd, td; step 5 of the module).
+
+    It may start at the first NYSE session on or after the day asked for and end at the last session on or before
+    the day asked for, IBKR's statement having no business on the days between; anything later or earlier means IBKR
+    answered with another period (the query's saved one, Today), and the proof is set aside (fail closed,
+    AGENTS.md)."""
+    want_from, want_to = _flex_day(asked[0]), _flex_day(asked[1])
+    got_from, got_to = _flex_day(executions.from_date), _flex_day(executions.to_date)
+    try:
+        latest_from = want_from
+        while not nyse_calendar.is_trading_day(latest_from) and latest_from < want_to:
+            latest_from += timedelta(days=1)
+        earliest_to = want_to
+        while not nyse_calendar.is_trading_day(earliest_to) and earliest_to > want_from:
+            earliest_to -= timedelta(days=1)
+    except nyse_calendar.OutOfRange:
+        latest_from, earliest_to = want_from, want_to
+    if got_from > latest_from or got_to < earliest_to:
+        raise StatementRefused("IBKR ignored the requested dates: the reader asked for {} to {}, and the Trade "
+                               "Confirmation statement covers {} to {}".format(asked[0], asked[1],
+                                                                              executions.from_date,
+                                                                              executions.to_date))
 
 
 def _unfinished_proof(checked_at, account_id):
