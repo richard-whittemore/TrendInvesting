@@ -701,15 +701,40 @@ all_are "bin untouched over a damaged current build" v1.1.0
 if grep -q '^restart' "$work/ctl.log"; then fail "rollback restarted the dashboard over a damaged current build"; fi
 grep -q "v1.1.0" "$work/out" || fail "the refusal does not name the current build: $(cat "$work/out")"
 
-# A build saved before ti-gateway-start joined the release (five programs) is
-# still valid: the server can upgrade from it and roll back to it, while a
-# freshly fetched release must list all six.
+# A build saved before ti-gateway-start joined the release (five programs, no
+# marker) is still valid for an upgrade, but it is not rolled back to: its
+# ti-reporter does not know the flags the installed reporter unit passes. A
+# build saved with the sixth program carries a marker, so one that loses the
+# starter's checksum line is damaged, not old.
+make_five() { # TAG: the saved build as an older ti-release kept it
+  rm -f "$TI_PREFIX/releases/$1/ti-gateway-start" "$TI_PREFIX/releases/$1/.programs"
+  grep -v ti-gateway-start "$TI_PREFIX/releases/$1/checksums.txt" >"$work/five" && mv "$work/five" "$TI_PREFIX/releases/$1/checksums.txt"
+}
 fresh_server
 run v1.0.0 >/dev/null
-rm "$TI_PREFIX/releases/v1.0.0/ti-gateway-start"
-grep -v ti-gateway-start "$TI_PREFIX/releases/v1.0.0/checksums.txt" >"$work/five" && mv "$work/five" "$TI_PREFIX/releases/v1.0.0/checksums.txt"
+make_five v1.0.0
 expect "an upgrade from a saved five-program release succeeds" 0 "$(run v1.1.0)"
-expect "rollback to a saved five-program release succeeds" 0 "$(run --rollback)"
+expect "rollback to a saved five-program release is refused" nonzero "$(nonzero "$(run --rollback)")"
+grep -qi "roll forward" "$work/out" || fail "the refusal does not tell the owner to roll forward: $(cat "$work/out")"
+grep -q "v1.1.0" "$work/out" || fail "the refusal does not name the tag to roll forward to: $(cat "$work/out")"
+all_are "bin untouched by the refused rollback" v1.1.0
+
+# A failed upgrade from a five-program release puts the previous starter back.
+fresh_server
+run v1.0.0 >/dev/null
+make_five v1.0.0
+fake_program "$TI_PREFIX/bin/ti-gateway-start" "echo ti-gateway-start previous"
+expect "an upgrade whose dashboard fails is refused" nonzero "$(nonzero "$(run v1.2.0)")"
+expect "the previous starter is put back after the failed upgrade" "echo ti-gateway-start previous" "$(installed ti-gateway-start)"
+
+# A saved build that carries the marker but lost the starter's line is damaged.
+fresh_server
+run v1.0.0 >/dev/null
+run v1.1.0 >/dev/null
+grep -v ti-gateway-start "$TI_PREFIX/releases/v1.0.0/checksums.txt" >"$work/five" && mv "$work/five" "$TI_PREFIX/releases/v1.0.0/checksums.txt"
+expect "rollback to a six-program build missing its starter line is refused" nonzero "$(nonzero "$(run --rollback)")"
+all_are "bin untouched by a refusal for a damaged six-program build" v1.1.0
+
 fresh_server
 rm "$work/rel/v1.3.0/ti-gateway-start"
 grep -v ti-gateway-start "$work/rel/v1.3.0/checksums.txt" >"$work/five" && mv "$work/five" "$work/rel/v1.3.0/checksums.txt"

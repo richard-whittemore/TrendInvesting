@@ -230,7 +230,13 @@ func gatewayStep(path string, check gatewayChecker, host string, sched gatewaySc
 		h.Resolving = deliveredAnywhere(seen, key)
 		return errors.Join(resolveErr, record())
 	}
-	h.Resolving = false
+	if h.Resolving {
+		// A new outage while an earlier recovery is still being resolved: the
+		// channel that never took that resolution would otherwise hold a
+		// receipt for the old incident and stay silent, so the receipts go.
+		forgetAlert(key, map[string]bool{}, seen, sent, repeats)
+		h.Resolving = false
+	}
 	if h.Since == nil {
 		t := now
 		h.Since = &t

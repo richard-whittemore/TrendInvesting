@@ -407,6 +407,7 @@ func TestAUnitNoLongerFailedResolvesItsPageAndTheNextFailureIsTold(t *testing.T)
 	if resolves := count(r.to(pdHost), `"event_action":"resolve"`); resolves != 1 {
 		t.Errorf("a unit that stays well resolved again: %d", resolves)
 	}
+	systemd.invoke("fedcba9876543210fedcba9876543210") // a new failure is a new run
 	systemd.fail("ti-adapter-boost.service")
 	step(3)
 	for _, host := range []string{ntfyHost, pdHost} {
@@ -1433,6 +1434,33 @@ func TestHandledRunEvictionBreaksTiesByInvocationAndPruneReceiptsLeavesTheRecord
 		}
 		if got := len(u.sent); got != maxHandledRuns {
 			t.Fatalf("pruneReceipts removed handled entries: %d left, want %d", got, maxHandledRuns)
+		}
+	}
+}
+
+// ti-gateway.service is sampled by all three instances. One that sampled it
+// failed before another resolved the episode applies a stale sample after it:
+// the resolved invocation must not page again.
+func TestAStaleFailedSampleOfAResolvedInvocationDoesNotPageAgain(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	systemd.fail("ti-gateway.service")
+	dir := t.TempDir()
+	at := func(i int) time.Time { return t0.Add(time.Hour + time.Duration(i)*5*time.Minute) }
+	step := func(i int) {
+		t.Helper()
+		if err := firing(t, r, dir, systemd, at(i), "ti-gateway.service"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	step(0)
+	systemd.fail()
+	step(1)
+	systemd.fail("ti-gateway.service") // the older sample, same invocation, applied late
+	step(2)
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, "ti-gateway.service"); n != 1 {
+			t.Errorf("%s took %d pages for one invocation resolved in between, want 1", host, n)
 		}
 	}
 }

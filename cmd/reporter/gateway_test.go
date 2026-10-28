@@ -740,3 +740,36 @@ func TestTheGatewayUnitIsATradingUnitTheReporterCanSample(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A new outage while an earlier recovery's resolution has not been taken by
+// every channel pages both channels at once.
+func TestANewOutageWhileAResolveIsPendingPagesEveryChannelAtOnce(t *testing.T) {
+	f := &refusingResolve{relay: &relay{sent: map[string][]string{}}}
+	g := newStandInGateway(t)
+	g.logout()
+	dir := t.TempDir()
+	for _, min := range []int{0, 5, 10} {
+		if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.ibc(stamp(tuesday(14, 12), ibcCompleted))
+	_ = gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, 15)) // the resolve fails
+	g.ibc(stamp(tuesday(14, 16), ibcCompleted), stamp(tuesday(14, 17), ibcRefused))
+	for _, min := range []int{20, 25, 31} {
+		if err := gatewayRun(t, f, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
+		n := 0
+		for _, m := range f.to(host) {
+			if strings.Contains(m, "IB Gateway is logged out") && !strings.Contains(m, `"event_action":"resolve"`) {
+				n++
+			}
+		}
+		if n != 2 {
+			t.Errorf("%s took %d outage pages across two outages, want 2", host, n)
+		}
+	}
+}

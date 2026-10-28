@@ -32,8 +32,8 @@ const unitReminderInterval = time.Hour
 
 // tradingUnit is the shape of every unit name the reporter hands systemctl or
 // journalctl (-units, -self-unit and the hook's argument): the engine, the
-// adapter or the reporter of one account, or the shared data job, nothing
-// else, so no value can be
+// adapter or the reporter of one account, or one of the two shared units, the
+// data job and the Gateway, nothing else, so no value can be
 // read as an option or name another unit (ADR 0019, "Alerting"; ADR 0027,
 // the restart model).
 var tradingUnit = regexp.MustCompile(`^(ti-(engine@|adapter-|reporter@)[a-z0-9][a-z0-9-]*|ti-data|ti-gateway)\.service$`)
@@ -201,7 +201,10 @@ func failedInvocation(getenv func(string) string, systemctl, unit string, at tim
 // run was recorded at or after it, since that run is newer than the sample.
 func failedRun(u *unitState, unit, run, journalctl string, secrets []string, senders []sender, setAside []channelFault, at, sampledAt time.Time, every time.Duration) error {
 	var errs []error
-	if !remindsUnit(unit) && handledRun(u, unit, run) {
+	// A run already resolved does not page again, whichever unit and however
+	// old the sample that names it (the Gateway is sampled by every instance,
+	// and one's stale sample can be applied after another resolved the episode).
+	if handledRun(u, unit, run) && (!remindsUnit(unit) || !sampledAt.IsZero()) {
 		return nil
 	}
 	episode, opened := "", time.Time{}
@@ -597,11 +600,10 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 			}
 			for invocation, recorded := range unitRecords(u, unit) {
 				key := report.UnitFailedKey(unit, invocation)
-				if resolves {
-					handleRuns(u, unit, key, invocation, at)
-				} else if !recorded.Before(sampledAt) || !latestRun(u, key).Before(sampledAt) {
+				if !resolves && (!recorded.Before(sampledAt) || !latestRun(u, key).Before(sampledAt)) {
 					continue
 				}
+				handleRuns(u, unit, key, invocation, at)
 				fail(resolveKey(u, key, senders, setAside, at))
 			}
 		}

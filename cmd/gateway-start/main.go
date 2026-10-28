@@ -22,11 +22,18 @@
 // assumed. The owner's own failed web attempts count against it too, so the
 // bound is 3 refused logins within 24 hours.
 //
-// The count is a file of epoch-second lines, one per START of IBC since the
+// The count is a file of epoch-second lines, one per exec of IBC since the
 // last accepted login: each is written, file and directory synced, BEFORE IBC
 // is launched, so a crash between the login and the parse of its refusal still
-// counts. A completed login, or the prompt for the second factor (IBKR has
-// accepted the credentials), empties it. A count that cannot be read, trusted or written fails closed: the
+// counts. A start where no line of IBC's is ever read (xvfb-run without
+// ibcstart.sh) gives its attempt back. A completed login, or the prompt for the
+// second factor (IBKR has accepted the credentials), resets the count to ONE
+// reserved attempt, on disk, for a relogin IBC may make by itself (the nightly
+// or Sunday restart): its refusal is already counted if this program dies
+// before reading it. IBC's output goes to the journal one line at a time,
+// synchronously, after the count is settled; a journal that takes nothing for
+// SinkTimeout fails the run closed (77) rather than queueing or dropping
+// anything. A count that cannot be read, trusted or written fails closed: the
 // program exits 77 without launching IBC, since an unknown history cannot
 // authorise another try. Exit codes: 75 = a refused login was seen and the
 // bound is not reached (the unit restarts); 77 = retries stopped, always saying
@@ -48,6 +55,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -71,6 +79,7 @@ type config struct {
 	Accepted      *regexp.Regexp // a completed login, or the second-factor prompt
 	StopDeadline  time.Duration  // SIGTERM to SIGKILL, and SIGKILL to giving up
 	DrainDeadline time.Duration  // how long output is read after the child ends
+	SinkTimeout   time.Duration  // how long one write to the journal may take before the run fails closed
 	Now           func() time.Time
 }
 
@@ -79,6 +88,7 @@ const (
 	defaultWindow  = 24 * time.Hour
 	defaultStop    = 15 * time.Second
 	defaultDrain   = 5 * time.Second
+	defaultSink    = 30 * time.Second
 	defaultPattern = `Unrecognized Username or Password`
 	// defaultAccepted matches IBC's own lines for an accepted login, anchored
 	// so that no other text containing the words clears the count. "IBC: Login
@@ -122,6 +132,7 @@ func configFromEnv(getenv func(string) string) (c config, warn []string) {
 		Max:           intIn("TI_GATEWAY_LOGIN_MAX_FAILURES", 1, 9, defaultMax),
 		StopDeadline:  time.Duration(intIn("TI_GATEWAY_STOP_DEADLINE", 1, maxStopDeadline, int(defaultStop/time.Second))) * time.Second,
 		DrainDeadline: defaultDrain,
+		SinkTimeout:   time.Duration(intIn("TI_GATEWAY_SINK_TIMEOUT", 1, 300, int(defaultSink/time.Second))) * time.Second,
 		Now:           time.Now,
 	}
 	// A window shorter than IBKR's 24 hours would forget refusals it still counts.
@@ -259,91 +270,27 @@ func (s *verdictState) get() *verdict {
 	return s.v
 }
 
-// forward sends IBC's output to the journal from a goroutine of its own, so a
-// sink that stops draining cannot hold up the reading of the refusal. Only
-// noise is ever dropped, past a bound; the lines that carry a health-state
-// change (evidence) are always kept. A send after close is ignored.
-type forward struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	q       []fwdLine
-	noise   int
-	closed  bool
-	dropped int
-	done    chan struct{}
-}
-
-type fwdLine struct {
-	text     string
-	evidence bool
-}
-
-const maxQueuedNoise = 4096
-
-func newForward(w io.Writer) *forward {
-	f := &forward{done: make(chan struct{})}
-	f.cond = sync.NewCond(&f.mu)
-	go func() {
-		defer close(f.done)
-		for {
-			f.mu.Lock()
-			for len(f.q) == 0 && !f.closed {
-				f.cond.Wait()
-			}
-			if len(f.q) == 0 {
-				f.mu.Unlock()
-				return
-			}
-			l := f.q[0]
-			f.q = f.q[1:]
-			if !l.evidence {
-				f.noise--
-			}
-			f.mu.Unlock()
-			_, _ = io.WriteString(w, l.text)
-		}
-	}()
-	return f
-}
-
-func (f *forward) send(text string, evidence bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.closed {
-		return
-	}
-	if !evidence {
-		if f.noise >= maxQueuedNoise {
-			f.dropped++
-			return
-		}
-		f.noise++
-	}
-	f.q = append(f.q, fwdLine{text, evidence})
-	f.cond.Signal()
-}
-
-func (f *forward) droppedCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.dropped
-}
-
-// close stops accepting lines and waits a bounded time for the queue to drain.
-func (f *forward) close(wait time.Duration) {
-	f.mu.Lock()
-	f.closed = true
-	f.cond.Broadcast()
-	f.mu.Unlock()
-	select {
-	case <-f.done:
-	case <-time.After(wait):
-	}
-}
-
 func run(cfg config, stdout, stderr io.Writer) int {
 	errw := &lockedWriter{w: stderr}
-	say := func(format string, a ...any) { _, _ = fmt.Fprintf(errw, "gateway-start: "+format+"\n", a...) }
+	// say reports to the journal too, with the same bound: a journal that takes
+	// nothing must not hold the exit, and after one refusal it is not tried again.
+	var sayDead atomic.Bool
+	say := func(format string, a ...any) {
+		if sayDead.Load() {
+			return
+		}
+		msg := fmt.Sprintf("gateway-start: "+format+"\n", a...)
+		done := make(chan struct{})
+		go func() {
+			_, _ = io.WriteString(errw, msg)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(cfg.SinkTimeout):
+			sayDead.Store(true)
+		}
+	}
 	stopped := func(format string, a ...any) int {
 		say(stopPhrase+": "+format, a...)
 		return exitStopped
@@ -351,11 +298,14 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	if cfg.Accepted == nil {
 		cfg.Accepted = regexp.MustCompile(defaultAccepted)
 	}
+	if cfg.SinkTimeout <= 0 {
+		cfg.SinkTimeout = defaultSink
+	}
 
 	if len(cfg.Render) > 0 {
 		//nolint:gosec // G204: the renderer is the unit's own installed script (TI_GATEWAY_RENDER only in the rehearsal), with no argument from outside.
 		r := exec.Command(cfg.Render[0], cfg.Render[1:]...)
-		r.Stdout, r.Stderr = &lockedWriter{w: stdout}, errw
+		r.Stdout, r.Stderr = stdout, errw
 		if err := r.Run(); err != nil {
 			var ee *exec.ExitError
 			if errors.As(err, &ee) && ee.ExitCode() > 0 {
@@ -421,13 +371,35 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		final.set(v)
 		once.Do(func() { close(stopCh) })
 	}
-	fwd := newForward(stdout)
+	// IBC has run once any of its lines has been read; a child that ends before
+	// that (xvfb-run without IBC) gives its attempt back.
+	var proved atomic.Bool
+	// toJournal writes one line to the journal, synchronously, and fails the
+	// run closed when the journal stops taking output: nothing is queued, so
+	// nothing is dropped or grows, and the count is already on disk.
+	sinkDead := false
+	toJournal := func(text string) {
+		if sinkDead {
+			return
+		}
+		done := make(chan struct{})
+		go func() {
+			_, _ = io.WriteString(stdout, text)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(cfg.SinkTimeout):
+			sinkDead = true
+			stop(verdict{exitStopped, stopPhrase + ": the journal has not taken IBC's output for " + cfg.SinkTimeout.String() + ", so what IBC reports cannot be recorded; stopping IBC and not retrying"})
+		}
+	}
 
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
 		br := bufio.NewReaderSize(pr, maxLine)
-		seen, cleared := false, false
+		seen := false
 		for {
 			line, err := br.ReadSlice('\n')
 			if errors.Is(err, bufio.ErrBufferFull) {
@@ -440,29 +412,24 @@ func run(cfg config, stdout, stderr io.Writer) int {
 				text := string(line)
 				trimmed := strings.TrimRight(text, "\r\n")
 				accepted, refused := cfg.Accepted.MatchString(trimmed), cfg.Pattern.MatchString(trimmed)
-				fwd.send(text, accepted || refused)
-				if !strings.HasSuffix(text, "\n") {
-					fwd.send("\n", accepted || refused)
+				if accepted || refused || strings.Contains(trimmed, "IBC: ") {
+					proved.Store(true)
 				}
+				// The count is settled on disk BEFORE the line is passed on or
+				// any decision is taken.
 				if accepted {
-					// IBKR accepted the login: the attempts since the last one are cleared.
-					if err := writeDurable(cfg.StateFile, nil); err != nil {
-						say("the login attempts could not be confirmed cleared after the accepted login (%v); the count may already be empty or may still hold the old attempts", err)
+					// IBKR accepted the login. One attempt stays reserved, on disk,
+					// for a relogin IBC may make by itself (the nightly or Sunday
+					// restart, a second-factor relogin): its refusal is counted
+					// even if this process dies before reading it.
+					if err := writeDurable(cfg.StateFile, []byte(strconv.FormatInt(cfg.Now().Unix(), 10)+"\n")); err != nil {
+						say("the login attempts could not be confirmed reset after the accepted login (%v); the count may be the old one or the reserved one", err)
 					}
-					// A refusal after this is a new episode, counted as its own.
-					cleared, seen = true, false
+					seen = false
 				}
 				if !seen && refused {
 					seen = true
-					// The start was counted before launch; a refusal after an
-					// accepted login in this same run (the nightly or Sunday
-					// restart, a second-factor relogin) is a new attempt.
-					count, rawNow, cerr := loadCount(cfg.StateFile, cfg.Now(), cfg.Window)
-					if cerr == nil && cleared {
-						cerr = writeDurable(cfg.StateFile, append(rawNow, []byte(strconv.FormatInt(cfg.Now().Unix(), 10)+"\n")...))
-						count++
-						cleared = false
-					}
+					count, _, cerr := loadCount(cfg.StateFile, cfg.Now(), cfg.Window)
 					switch {
 					case cerr != nil:
 						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": the login count cannot be read (%v); stopping IBC and not retrying", cerr)})
@@ -471,6 +438,10 @@ func run(cfg config, stdout, stderr io.Writer) int {
 					default:
 						stop(verdict{exitRetry, fmt.Sprintf("IBC reports a refused login (attempt %d of %d within the window); stopping IBC so the unit starts it again", count, cfg.Max)})
 					}
+				}
+				toJournal(text)
+				if !strings.HasSuffix(text, "\n") {
+					toJournal("\n")
 				}
 			}
 			if err != nil {
@@ -536,14 +507,18 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		stop(verdict{exitStopped, stopPhrase + ": the output reader did not finish; the refusal may be unseen, so not retrying"})
 	}
 	_ = pr.Close()
-	fwd.close(2 * time.Second)
-	if n := fwd.droppedCount(); n > 0 {
-		say("%d lines of IBC's output were not forwarded to the journal (the sink was not draining)", n)
-	}
 
 	if v := final.get(); v != nil {
 		say("%s", v.msg)
 		return v.code
+	}
+	if !proved.Load() {
+		// The child ended without one line of IBC's: IBC never ran (xvfb-run
+		// without ibcstart.sh), so this start was no login attempt.
+		if code := giveBack(); code != exitInternal {
+			return code
+		}
+		say("cannot start IBC: the child ended without IBC having run; the attempt was given back")
 	}
 	var ee *exec.ExitError
 	switch {
