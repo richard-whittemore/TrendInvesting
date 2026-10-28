@@ -277,7 +277,16 @@ import (
 //     is refused on arrival, as for a live one. 1.24.0 recorded the sale as
 //     spent and a run restarted after one refused those reports, so a
 //     journal holding one decides differently.
-const RulesVersion = "1.25.0"
+//   - 1.26.0 has a momentum run read the owner's operator.run.approved,
+//     which 1.25.0 refused: a fresh IRA run awaits it, as Boost does, and
+//     one stating a rebalance in progress when the earlier run ended
+//     withholds every decision as rebalance-in-progress, planning nothing,
+//     until the owner's operator.rebalance.cleared names that rebalance and
+//     exactly its orders (ADR 0026, point 5; ADR 0027, amended 2026-10-17).
+//     Boost refuses an approval stating an IRA's momentum state (approval
+//     schema version 6). A journal holding a momentum approval decides
+//     differently under 1.25.0.
+const RulesVersion = "1.26.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -512,8 +521,8 @@ func New(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opt
 // AwaitApproval marks this run as a fresh run after an earlier one, which
 // decides nothing until the owner's approval is recorded (ADR 0027, amended
 // 2026-10-17): until then, every input but the configuration and the
-// approval is refused. Call it before the first input. The momentum handler
-// reads no approval and ignores it.
+// approval is refused. Call it before the first input. A momentum run awaits
+// an IRA approval (momentumRun.applyApproval), Boost one stating its latch.
 func (h *Handler) AwaitApproval() { h.awaiting = true }
 
 // ConfigurationHash returns the hash every emission carries.
@@ -524,14 +533,14 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 	if !h.configured && in.Type != event.TargetWeightConfigurationEventType {
 		return nil, fmt.Errorf("targetweight: %s %s arrived before the configuration", in.Type, in.ID)
 	}
-	if h.momentum != nil && in.Type != event.TargetWeightConfigurationEventType {
-		return h.momentum.apply(in)
-	}
 	if in.Type != event.TargetWeightConfigurationEventType && in.Type != event.OperatorRunApprovedEventType {
 		if h.awaiting && !h.approved {
 			return nil, fmt.Errorf("targetweight: %s %s arrived before the owner's approval; a fresh run after an earlier one reads nothing but its configuration until the approval is recorded (ADR 0027, amended 2026-10-17)", in.Type, in.ID)
 		}
 		h.prelude = true
+	}
+	if h.momentum != nil && in.Type != event.TargetWeightConfigurationEventType {
+		return h.momentum.apply(in)
 	}
 	switch in.Type {
 	case event.TargetWeightConfigurationEventType:
@@ -874,24 +883,20 @@ func (h *Handler) recovery(p event.TargetsDecidedPayload) (risklimit.Recovery, e
 // other input, so the gate it restores into is the one New built: no
 // recorded state, decision or sale of this run can precede it.
 func (h *Handler) applyApproval(in event.Envelope) error {
-	if h.approved || h.prelude {
-		return errors.New("targetweight: an approval comes once, straight after the configuration and before any other input")
-	}
 	// Version 3 adds the starting book, which the IBKR adapter reads (ADR
 	// 0027, amended 2026-10-18), version 4 the incident's retired sale
 	// attempts, and version 5 the adapter's settlements of its never-sent
 	// sales, checked against the previous log before the run starts
 	// (restart.CheckSaleAttempt) and counted in the retired attempts read
 	// here; a version 2, 3 or 4 approval still replays.
-	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, 3, 4, event.OperatorRunApprovedSchemaVersion})
+	// Version 6 adds an IRA approval's momentum state, which a Boost run
+	// refuses: its state in force is the latch.
+	p, err := h.decodeApproval(in)
 	if err != nil {
 		return err
 	}
-	if in.ConfigurationHash != h.hash {
-		return fmt.Errorf("targetweight: approval %s belongs to another configuration", in.ID)
-	}
-	if p.AccountID != h.cfg.AccountID {
-		return fmt.Errorf("targetweight: approval %s is for another account, %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
+	if p.Momentum != nil {
+		return fmt.Errorf("targetweight: approval %s states an IRA's momentum state, not Boost's latch: a Boost run is approved with the latch it ends with (ADR 0026, point 5)", in.ID)
 	}
 	if incident := p.IncidentInForce; incident != nil {
 		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted, incident.SaleRetiredAttempts); err != nil {
@@ -904,6 +909,28 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 	h.approved = true
 	h.latched = *p.Boost.Latched
 	return nil
+}
+
+// decodeApproval reads the owner's approval, refusing one that does not
+// come once, straight after the configuration, or that is for another
+// configuration or account, before either strategy reads its state in
+// force. Versions 2 to 6 are read (ADR 0015); version 1 could not state an
+// incident's cash scope.
+func (h *Handler) decodeApproval(in event.Envelope) (event.OperatorRunApprovedPayload, error) {
+	if h.approved || h.prelude {
+		return event.OperatorRunApprovedPayload{}, errors.New("targetweight: an approval comes once, straight after the configuration and before any other input")
+	}
+	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, 3, 4, 5, event.OperatorRunApprovedSchemaVersion})
+	if err != nil {
+		return event.OperatorRunApprovedPayload{}, err
+	}
+	if in.ConfigurationHash != h.hash {
+		return event.OperatorRunApprovedPayload{}, fmt.Errorf("targetweight: approval %s belongs to another configuration", in.ID)
+	}
+	if p.AccountID != h.cfg.AccountID {
+		return event.OperatorRunApprovedPayload{}, fmt.Errorf("targetweight: approval %s is for another account, %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
+	}
+	return p, nil
 }
 
 // applyRecordedState restores an earlier run's engine state, scope and

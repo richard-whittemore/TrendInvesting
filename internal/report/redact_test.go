@@ -334,3 +334,23 @@ func TestIdentifiersTakesOutWhatNamesTheAccountButKeepsFigures(t *testing.T) {
 		t.Error("text with no identifier changed")
 	}
 }
+
+// TestRedactionCoversPaperAccountsWithLetters: an IBKR paper account
+// number can carry letters after DU (DUX1234567), as the adapter's masking
+// already reads it (adapter/ibkr/masking.py), so the IRAs' paper accounts
+// never reach a public place either (Boost lesson L12); a word of capitals
+// with no digit, such as USD or UTILITIES, is not one. The whole number
+// goes, so none of its letters is left beside a redacted figure.
+func TestRedactionCoversPaperAccountsWithLetters(t *testing.T) {
+	r := report.NewRedactor(nil)
+	for _, account := range []string{"DUX1234567", "DUAB12C34", "DU12AB345"} {
+		if got, want := r.Text("account "+account+" decided"), "account "+report.Redacted+" decided"; got != want {
+			t.Errorf("%s is not redacted whole: %s, want %s", account, got, want)
+		}
+	}
+	for _, word := range []string{"USD", "UTILITIES", "DURATION"} {
+		if got := r.Text("held " + word); got != "held "+word {
+			t.Errorf("%s was redacted: %s", word, got)
+		}
+	}
+}

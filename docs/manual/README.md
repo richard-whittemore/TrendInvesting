@@ -10,9 +10,9 @@ from "what is this program" to "my first paper order".
 
 The program is designed to trade three IBKR accounts automatically, each
 with its own rule (`docs/live-trading/plan.md`, sections 1 to 3). As of
-2026-10-18 only Boost runs, in dry-run; the engine refuses a momentum
-configuration and no IRA configuration exists, so the IRA rows below are not
-runnable yet:
+2026-10-28 Boost runs in dry-run, and the Traditional IRA's engine starts in
+dry-run from its own configuration, shown on a synthetic month only: no daily
+job or adapter feeds an IRA yet, so the IRA rows below cannot trade yet:
 
 | Account | Rule | Chapter |
 | --- | --- | --- |
@@ -36,10 +36,10 @@ began delivering the data job's daily file to the engine:
 | Piece | Built today | Not built yet |
 | --- | --- | --- |
 | Boost rule and its order | Yes; parity passed on every session compared | — |
-| Momentum rule, order planner, minimum lot, glide path | Yes; parity checked for the rule (passed once the owner's 2026-10-18 decisions were applied: `docs/research/parity-2026-10.md`) | Parity of the glide path, the minimum lot, the IRA buy delay and buy scaling; the engine program refuses a momentum configuration; no IRA configuration exists |
+| Momentum rule, order planner, minimum lot, glide path | Yes; parity checked for the rule (passed once the owner's 2026-10-18 decisions were applied: `docs/research/parity-2026-10.md`) | Parity of the glide path, the minimum lot, the IRA buy delay and buy scaling |
 | Risk gate: hard limits, Normal, Degraded, Halted, kill switch, sale back to 98%, margin alarm | Yes | The adapter's second check of the limits before calling IBKR |
 | Durable log, crash resume, approved fresh run | Yes | — |
-| Engine on the server | Boost in dry-run, started by hand; paper rehearsed end to end with the real engine (`deploy/rehearse-paper.sh`) | A paper run on the server |
+| Engine on the server | Boost in dry-run, started by hand; paper rehearsed end to end with the real engine (`deploy/rehearse-paper.sh`). The Traditional IRA's engine in dry-run from `trad-ira.config` (the account and your birth month named on the server), fed a synthetic month (`deploy/feed-month.py`); a fresh IRA run approved with the rebalance in progress, held until cleared; provisioning keeps every account configuration already on the server | A paper run on the server; the IRAs' daily stream and adapter; the Roth IRA's configuration |
 | Daily data job | Boost's stream, installed with its timer | A job for the IRAs |
 | IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, and delivering the data job's daily file behind one account reading after the close: the account snapshot and broker snapshot as of the close when nothing is working at IBKR and nothing has executed since (else at the read time, with the reason), and SPY's mark from the official close; all against a stand-in gateway, rehearsed with the real engine ([paper trading](paper-trading.md), "A paper day") | The paper-account test against IBKR, run by hand; a real server run with `ibapi` installed |
 | Morning reconciliation | The engine's comparison, states and alert; the adapter's read delivered to the engine at a run's first delivery, every start and every reconnect | The checks after fills and before orders, and on a timer; open orders; the joint account's cash (the Boost book states none, so cash is not compared); any command to record a missed event |
@@ -55,7 +55,7 @@ are what this build runs):
 
 | What | Version |
 | --- | --- |
-| Target-weight rules (Boost and momentum), `RulesVersion` | 1.19.0 |
+| Target-weight rules (Boost and momentum), `RulesVersion` | 1.26.0 |
 | IBKR broker snapshot (`account.broker.snapshot`) and mark (`market.mark.recorded`) the adapter writes | 2 |
 | Target-weight configuration schema | 7 |
 | Decision record (`strategy.targets.decided`) | 6 |

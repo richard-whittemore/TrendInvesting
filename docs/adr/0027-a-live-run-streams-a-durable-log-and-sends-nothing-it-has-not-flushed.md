@@ -450,3 +450,32 @@ stated by the owner instead:
   the adapter's comparison walks it to its end, however old the runs, while
   its reconciliation of IBKR's lists still reads only the runs those lists
   can show (relay.run_logs).
+
+## Note (2026-10-28): an IRA's approval states its rebalance in progress
+
+The approval's "state in force" was Boost's latch. A momentum run (an IRA)
+has no latch; what a fresh run of it cannot recompute is the rebalance in
+progress, which ADR 0026, point 5 says a restart sends nothing for until the
+owner clears it. So:
+
+- **`operator.run.approved` schema version 6** adds `momentum`, stated by an
+  IRA's approval only: `{"rebalance_in_progress": null}` when the approved
+  log ends with every order terminal, or the rebalance's decision ID,
+  decision time, phase (`sells-working`: its sells working and its buys never
+  planned; `buys-working`: every sell terminal and its buys working) and
+  every order not terminal. An IRA's approval states `"boost": null`; a Boost
+  approval states no `momentum` key and is otherwise unchanged. An approval
+  states one strategy's state, never both. Versions 1 to 5 stay readable and
+  state no momentum state.
+- **The engine checks it** against the approved log before it starts, by
+  the rule the momentum run and the reporter read orders by
+  (`event.OrderReports`), with a rebalance the log's own approval carried in
+  and not yet cleared still in progress: an approval stating none where one
+  is, or one the log does not hold, is refused, and so is a Boost-shaped
+  approval for a momentum configuration, or an IRA one for Boost.
+- **The fresh run holds**: it withholds every decision as
+  `rebalance-in-progress`, planning nothing, until the owner's
+  `operator.rebalance.cleared` names that rebalance and exactly its orders;
+  the next decision time then decides afresh (target-weight rules version
+  1.26.0). `operator approve` reads the strategy from the log and writes
+  either shape; `-first-run -strategy momentum` writes an IRA's first run's.

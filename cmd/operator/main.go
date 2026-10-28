@@ -5,7 +5,7 @@
 //	operator rebalance-cleared -inbox <dir> -account <id> -decision <decision id> -orders <id,id,...> -by <name> -detail <text> [-at <RFC3339>]
 //	operator acknowledge -inbox <dir> -account <id> -alert <alert key> -by <name> [-detail <text>] [-at <RFC3339>]
 //	operator approve -log <previous durable log> -account <id> -by <name> -out <approval.json> [-clear-incident <incident id>] [-positions <SYM=N,...> -cash <amount> -currency <code>] [-at <RFC3339>]
-//	operator approve -first-run -account <id> -by <name> -positions <SYM=N,...> -cash <amount> -currency <code> -out <approval.json> [-at <RFC3339>]
+//	operator approve -first-run [-strategy boost|momentum] -account <id> -by <name> -positions <SYM=N,...> -cash <amount> -currency <code> -out <approval.json> [-at <RFC3339>]
 //
 // kill-switch, rebalance-cleared and acknowledge write one record into the
 // engine's operator inbox (the engine's -operator), which the engine
@@ -19,7 +19,9 @@
 // an account's first run, which names no previous log and states the
 // starting book the owner checked in IBKR (-positions, -cash, -currency),
 // which a fresh run's approval may state too (ADR 0019 and ADR 0027,
-// amended 2026-10-18). Every input is validated before
+// amended 2026-10-18). A momentum log's approval states the rebalance in
+// progress the log ends with, or none, in place of Boost's latch (ADR 0026,
+// point 5); a first run's names its strategy with -strategy. Every input is validated before
 // anything is written, and nothing is ever overwritten (ADR 0018). It is
 // composition only (AGENTS.md rule 7).
 package main
@@ -316,6 +318,7 @@ func approve(args []string, out io.Writer) error {
 	clearIncident := flags.String("clear-incident", "", "the incident the previous run ended in, to clear it (ADR 0019's recovery procedure)")
 	saleAttempted := flags.Bool("sale-attempted", false, "state the incident's one sale back to 98% as attempted, for the sale you made by hand for that incident and the log does not record, with the book after it: -positions, -cash and -currency (ADR 0019)")
 	firstRun := flags.Bool("first-run", false, "approve the account's first run: no -log, and the starting book stated")
+	strategy := flags.String("strategy", event.TargetWeightStrategyBoost, "with -first-run, the configuration's strategy_id: boost (the joint account) or momentum (an IRA); a fresh run's is read from -log")
 	positions := flags.String("positions", "", "the starting book's holdings checked in IBKR, SYM=shares,...; empty when none")
 	cash := flags.String("cash", "", "the starting book's total cash (IBKR's TotalCashValue)")
 	currency := flags.String("currency", "", "the starting book's cash currency, such as USD")
@@ -337,6 +340,10 @@ func approve(args []string, out io.Writer) error {
 		return errors.New("operator: -first-run approves an account's first run, which has no incident whose sale to state: leave out -sale-attempted")
 	case *saleAttempted && (!set["positions"] || !set["cash"] || !set["currency"]):
 		return errors.New("operator: -sale-attempted states a sale made by hand, so state the book after it: -positions, -cash and -currency, read in IBKR once the sale has filled")
+	case *firstRun && *strategy != event.TargetWeightStrategyBoost && *strategy != event.TargetWeightStrategyMomentum:
+		return fmt.Errorf("operator: -strategy %q: the configuration's strategy_id is %s or %s", *strategy, event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum)
+	case !*firstRun && set["strategy"]:
+		return errors.New("operator: -strategy names a first run's strategy; a fresh run's is read from -log")
 	case !*firstRun && *logPath == "":
 		return errors.New("operator: -log is required: the previous run's durable log (or -first-run for an account's first run)")
 	case *outPath == "":
@@ -362,6 +369,11 @@ func approve(args []string, out io.Writer) error {
 		approval := event.OperatorRunApprovedPayload{
 			AccountID: *account, ApprovedBy: *by, ApprovedAt: at,
 			Boost: event.BoostStateInForce{Latched: new(false)}, StartingBook: book,
+		}
+		if *strategy == event.TargetWeightStrategyMomentum {
+			// An IRA's first run: no latch, and no rebalance in progress,
+			// since no earlier run released an order.
+			approval.Boost, approval.Momentum = event.BoostStateInForce{}, &event.MomentumStateInForce{}
 		}
 		if err := approval.Validate(); err != nil {
 			return fmt.Errorf("operator: %w", err)
@@ -515,7 +527,15 @@ func create(path string, raw []byte) error {
 // describe says what the approval states and what the operator does next.
 func describe(out io.Writer, name string, end restart.EndState, approval event.OperatorRunApprovedPayload, path string) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s ends with Boost latched %t", name, end.Latched)
+	switch r := end.Rebalance; {
+	case !end.Momentum:
+		fmt.Fprintf(&b, "%s ends with Boost latched %t", name, end.Latched)
+	case r == nil:
+		fmt.Fprintf(&b, "%s ends with no rebalance in progress", name)
+	default:
+		fmt.Fprintf(&b, "%s ends mid-rebalance: %s, decided at %s, %s, orders %s not terminal; the fresh run sends nothing for it, and decides no later month, until you deal with each order at IBKR and clear it with `operator rebalance-cleared -decision %s -orders %s` (docs/runbooks/missed-rebalance.md)",
+			name, r.DecisionID, r.DecisionTime.UTC().Format(time.RFC3339), r.Phase, strings.Join(r.ClientOrderIDs, ", "), r.DecisionID, strings.Join(r.ClientOrderIDs, ","))
+	}
 	switch {
 	case approval.IncidentID != "":
 		fmt.Fprintf(&b, "; the approval clears incident %s (%s)", approval.IncidentID, end.State)

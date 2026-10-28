@@ -239,7 +239,7 @@ func TestAnApprovalCarriesTheIncidentsCashScope(t *testing.T) {
 	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 2); err != nil {
 		t.Errorf("a version 2 approval: %v", err)
 	}
-	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 6); err == nil || !strings.Contains(err.Error(), "schema version 6") {
+	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 7); err == nil || !strings.Contains(err.Error(), "schema version 7") {
 		t.Errorf("an approval at an unknown schema version: %v", err)
 	}
 }
@@ -266,7 +266,7 @@ func TestOperatorRunApprovedValidateSchema(t *testing.T) {
 	if err := withCash.ValidateSchema(1); err == nil || !strings.Contains(err.Error(), "cash") {
 		t.Errorf("version 1 naming a cash scope: %v", err)
 	}
-	for _, v := range []uint32{0, 6} {
+	for _, v := range []uint32{0, 7} {
 		if err := plain.ValidateSchema(v); err == nil || !strings.Contains(err.Error(), "schema version") {
 			t.Errorf("version %d: %v", v, err)
 		}
@@ -456,8 +456,8 @@ func settledSale() event.NeverSentSettlement {
 // name its order once; an earlier version cannot state one, and none is left
 // out (ADR 0015).
 func TestAnApprovalCarriesTheAdaptersSettlementsOfNeverSentSales(t *testing.T) {
-	if event.OperatorRunApprovedSchemaVersion != 5 {
-		t.Fatalf("OperatorRunApprovedSchemaVersion = %d, want 5 once an approval carries the adapter's settlements", event.OperatorRunApprovedSchemaVersion)
+	if event.OperatorRunApprovedSchemaVersion < 5 {
+		t.Fatalf("OperatorRunApprovedSchemaVersion = %d, want 5 or later once an approval carries the adapter's settlements", event.OperatorRunApprovedSchemaVersion)
 	}
 	p := validOperatorRunApprovedInIncident()
 	p.AccountID, p.PreviousLog = "joint", "run-1.log"

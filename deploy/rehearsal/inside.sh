@@ -61,14 +61,24 @@ pass "the clock step passes on this host's clock and refuses a skewed one"
 
 # Idempotence: a second pass changes nothing, asks for no passphrase (it is
 # given none) and must not touch the owner's encrypted files.
+# The owner names the IRA's account in its configuration on the server, as
+# the runbook does (a rehearsal ID, never a real one); the second pass must
+# keep that edit byte for byte and put the shipped file beside it (Boost
+# lesson L7).
 secret_sums() { sha256sum /etc/trend-investing/*.gpg /etc/trend-investing/accounts/*.gpg; }
+ira_config=/etc/trend-investing/engines/trad-ira.config
+grep -q '"account_id": "trad-ira"' "$ira_config" || fail "the first pass did not install the shipped trad-ira.config"
+sed -i 's/"account_id": "trad-ira"/"account_id": "DUREHEARS1"/' "$ira_config"
+edited=$(sha256sum "$ira_config")
 before=$(secret_sums)
 "$p" base
 "$p" clock
 "$p" gateway
 "$p" services </dev/null
 test "$(secret_sums)" = "$before" || fail "re-run changed the owner's encrypted secret files"
-pass "second pass idempotent, owner's encrypted files preserved, no passphrase asked"
+test "$(sha256sum "$ira_config")" = "$edited" || fail "re-run changed the account ID the owner named in trad-ira.config"
+cmp -s /root/deploy/etc/engines/trad-ira.config "$ira_config.example" || fail "re-run did not put the shipped trad-ira.config beside the owner's as trad-ira.config.example"
+pass "second pass idempotent, owner's encrypted files and edited account configuration preserved, no passphrase asked"
 
 # The encrypted files, ti-unlock and ti-secrets (deploy/rehearsal/inside-secrets.sh).
 TI_TEST_PASS=$passphrase TI_TEST_MARKER=$marker bash /root/deploy/rehearsal/inside-secrets.sh
@@ -740,6 +750,62 @@ sys.exit(0 if [a for a in acks if a["alert_key"] == alert] else 1)
 ACK
 rm -rf "$state"/run-rehearsal.* "${inbox:?}"/* "$notes" /run/ti-engine-boost "$feed" "$eng_out"
 pass "the owner's kill switch, recorded as ti-operator, makes the engine refuse the entry it otherwise releases; the acknowledgement is journalled with its alert key; the engine notes both in its own folder and writes nothing into the inbox"
+
+# The traditional IRA's engine starts in dry-run from its own settings and
+# configuration, with its unit's own command line, and the synthetic month
+# (cmd/engine/testdata/momentum-month.jsonl, copied in as dist/) is replayed
+# into it by deploy/feed-month.py as the server's demonstration does: the
+# month's decision is recorded withheld with its reason (the shipped rule
+# wants 200 SPY closes and the ranked members' histories), nothing is sent,
+# and SIGTERM stops the run cleanly, its journal written. The account was
+# named above; the birth placeholder is named here as the owner names it, a
+# rehearsal value. The shipped placeholder alone refuses to start.
+ira_state=/var/lib/trend-investing/engines/trad-ira
+ira_line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-engine@.service)
+ira_line=${ira_line//%i/trad-ira}
+ira_line=${ira_line//%t//run}
+ira_mode=$(sed -n 's/^TI_MODE=//p' /etc/trend-investing/engines/trad-ira.env)
+test "$ira_mode" = dry-run || fail "trad-ira.env declares TI_MODE=$ira_mode, not dry-run"
+ira_line=${ira_line//"\${TI_MODE}"/$ira_mode}
+ira_line=${ira_line//"\${TI_CONFIG}"/$ira_config}
+ira_line=${ira_line//"\${TI_STATE_DIR}"/$ira_state}
+ira_line=${ira_line//"\${TI_FLEX_DIR}"/\/var\/lib\/trend-investing\/flex\/trad-ira}
+ira_line=${ira_line//"\${TI_RUN}"/run-rehearsal}
+ira_line=${ira_line//"\${TI_AS_OF}"/2025-01-02T21:00:00Z}
+# shellcheck disable=SC2016
+ira_line=${ira_line//'$TI_RESTART_ARGS'/}
+case $ira_line in *'$'* | *%*) fail "the IRA engine's ExecStart has a variable the rehearsal does not expand: $ira_line" ;; esac
+install -d -o ti-trader -g ti-trader -m 0700 /run/ti-engine-trad-ira
+# shellcheck disable=SC2086
+if out=$(sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York timeout 20 $ira_line 2>&1); then
+  fail "the IRA engine started with its birth a placeholder"
+fi
+case $out in *birth*) ;; *) fail "the IRA engine's refusal of its placeholder birth does not name it: $out" ;; esac
+rm -f "$ira_state"/run-rehearsal.*
+sed -i 's/"birth": "YYYY-MM"/"birth": "1975-06"/' "$ira_config"
+ira_out=$(mktemp)
+# The output file is root's on purpose; the engine writes to the inherited descriptor.
+# shellcheck disable=SC2086,SC2024
+sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York $ira_line >"$ira_out" 2>&1 &
+ira_engine=$!
+for _ in $(seq 100); do
+  test -S /run/ti-engine-trad-ira/engine.sock && break
+  sleep 0.1
+done
+test -S /run/ti-engine-trad-ira/engine.sock || { cat "$ira_out"; fail "the IRA engine did not listen on its socket"; }
+install -m 0644 /root/dist/momentum-month.jsonl /tmp/momentum-month.jsonl
+install -m 0644 /root/deploy/feed-month.py /tmp/feed-month.py
+decided=$(sudo -u ti-trader python3 /tmp/feed-month.py --socket /run/ti-engine-trad-ira/engine.sock --log "$ira_state/run-rehearsal.log" \
+  --config "$ira_config" --month /tmp/momentum-month.jsonl) || { cat "$ira_out"; fail "the synthetic month was refused: $decided"; }
+kill -TERM "$ira_engine"
+wait "$ira_engine" || { cat "$ira_out"; fail "the IRA engine did not stop cleanly"; }
+case $decided in *"strategy.targets.decided withheld"*) ;; *) fail "the month's decision was not recorded withheld: $decided" ;; esac
+case $decided in *risk.order.released*) fail "the withheld month released an order: $decided" ;; esac
+case $decided in *DUREHEARS1*) fail "the feed printed the account" ;; esac
+test -s "$ira_state/run-rehearsal.journal" || { cat "$ira_out"; fail "the stopped IRA run wrote no journal"; }
+grep -q "wrote $ira_state/run-rehearsal.journal" "$ira_out" || fail "the IRA engine did not report its journal: $(cat "$ira_out")"
+rm -rf "$ira_state"/run-rehearsal.* "$ira_state/operator-notes" /tmp/momentum-month.jsonl /tmp/feed-month.py
+pass "the traditional IRA's engine starts in dry-run from its own settings and configuration, refuses its placeholder birth, records the synthetic month's decision withheld and stops cleanly"
 
 # Client IDs are unique. The data step uses Massive, not IB Gateway, and
 # holds none.

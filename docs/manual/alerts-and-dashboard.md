@@ -509,7 +509,8 @@ The reporter therefore writes only the alert's *public* text when it has one,
 the text that names what is in doubt and carries no balance (the same text
 the public ntfy.sh relay gets), and it removes, from every part of the issue,
 each secret in the secrets file, every IBKR account id (the letters U or DU
-and digits), any GitHub token, any Tailscale host name (`...ts.net`) or
+and digits, or a paper account's DU with letters among its digits, such as
+DUX1234567, removed whole), any GitHub token, any Tailscale host name (`...ts.net`) or
 address (`100.64.0.0/10`), this server's own names, and every figure. A
 secret or name shorter than six characters is removed where it stands as a
 word. The issue carries no quantity, price, limit, fill, share count,

@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -42,6 +43,9 @@ import (
 //   - execution.order.lifecycle version 2 and execution.fill version 5 for the
 //     orders this run released;
 //   - operator.kill-switch, which refuses every order while engaged;
+//   - operator.run.approved, straight after the configuration of a fresh
+//     run after an earlier one: the owner's approval stating the rebalance
+//     in progress when that run ended, or none (applyApproval);
 //   - operator.rebalance.cleared, the owner's clearance of the rebalance in
 //     progress (applyCleared); and
 //   - account.broker.snapshot, whose holdings net of working sells size
@@ -137,6 +141,13 @@ type momentumRun struct {
 	retracted map[string]bool
 	compact   bool
 	pending   *pendingDecision
+
+	// carried is the rebalance an earlier run left in progress, as the
+	// owner's approval states it (applyApproval): its orders are that run's,
+	// which this run never released, so it sends nothing for that decision
+	// time and withholds every decision as rebalance-in-progress until the
+	// owner clears it (ADR 0026, point 5); nil when none is.
+	carried *event.RebalanceInProgress
 }
 
 // rebalance is the decision time in progress: what its buy phase needs.
@@ -236,6 +247,8 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		// The kill switch refuses every order of an IRA, which gets no sale
 		// back to 98% (ADR 0026, points 3 and 4).
 		return nil, r.h.applyKillSwitch(in)
+	case event.OperatorRunApprovedEventType:
+		return nil, r.applyApproval(in)
 	case event.RebalanceClearedEventType:
 		return nil, r.applyCleared(in)
 	case event.BrokerSnapshotEventType:
@@ -759,6 +772,10 @@ func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (re
 			return event.WithheldMissingBars, fmt.Sprintf("no %s bar in the session closing %s; it is held or targeted", id, end.Format(idTime))
 		}
 	}
+	if c := r.carried; c != nil {
+		return event.WithheldRebalanceInProgress, fmt.Sprintf("the rebalance %s, decided at %s, was in progress when the earlier run ended (%s), with orders %s not terminal; a fresh run sends nothing for it until the owner clears it (ADR 0026, point 5)",
+			c.DecisionID, c.DecisionTime.Format(idTime), c.Phase, strings.Join(c.ClientOrderIDs, ", "))
+	}
 	if working := r.orders.Working(); len(working) > 0 {
 		return event.WithheldRebalanceInProgress, fmt.Sprintf("order %s of an earlier rebalance is not terminal", working[0])
 	}
@@ -786,6 +803,18 @@ func (r *momentumRun) applyCleared(in event.Envelope) error {
 	if p.AccountID != r.h.cfg.AccountID {
 		return fmt.Errorf("targetweight: clearance %s is for account %q; this run decides %q", in.ID, p.AccountID, r.h.cfg.AccountID)
 	}
+	if c := r.carried; c != nil {
+		// The earlier run's rebalance: this run released none of its orders,
+		// and decided nothing since, so it is the only rebalance in progress.
+		switch {
+		case p.DecisionID != c.DecisionID:
+			return fmt.Errorf("targetweight: clearance %s names %s, but the rebalance in progress is %s", in.ID, p.DecisionID, c.DecisionID)
+		case !slices.Equal(p.ClientOrderIDs, c.ClientOrderIDs):
+			return fmt.Errorf("targetweight: clearance %s names orders %v, but the orders not terminal are %v: name exactly those, each dealt with at the broker", in.ID, p.ClientOrderIDs, c.ClientOrderIDs)
+		}
+		r.carried = nil
+		return nil
+	}
 	if err := r.orders.Clear(p); err != nil {
 		return fmt.Errorf("targetweight: clearance %s: %w", in.ID, err)
 	}
@@ -794,6 +823,35 @@ func (r *momentumRun) applyCleared(in event.Envelope) error {
 			r.rebalance.budget.Close(id)
 		}
 	}
+	return nil
+}
+
+// applyApproval starts a fresh IRA run from the owner's approval (ADR 0027,
+// amended 2026-10-17): the incident in force puts the gate in its Degraded
+// or Halted state and scope before any market input (ADR 0019, amended
+// 2026-09-24, "The state survives a restart"), and a rebalance in progress
+// when the earlier run ended is carried, so this run sends nothing for it
+// until the owner clears it (ADR 0026, point 5). The approval must state the
+// momentum state: one stating Boost's latch says nothing of a rebalance in
+// progress, so it is refused, never read as none. An IRA has no sale back to
+// 98%, so an incident's sale is never restored (event's momentumErrors
+// refuses one stated attempted).
+func (r *momentumRun) applyApproval(in event.Envelope) error {
+	h := r.h
+	p, err := h.decodeApproval(in)
+	if err != nil {
+		return err
+	}
+	if p.Momentum == nil {
+		return fmt.Errorf("targetweight: approval %s is Boost-shaped (it states Boost's latch and no momentum state), so it says nothing of a rebalance in progress: an IRA run is approved with the rebalance its earlier run ended with in progress, or none (ADR 0026, point 5)", in.ID)
+	}
+	if incident := p.IncidentInForce; incident != nil {
+		if err := h.gate.RestoreIncidentState(incident.IncidentID, incident.State, incident.ScopeInstrumentIDs, incident.ScopeCashComponents); err != nil {
+			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
+		}
+	}
+	h.approved = true
+	r.carried = p.Momentum.RebalanceInProgress
 	return nil
 }
 

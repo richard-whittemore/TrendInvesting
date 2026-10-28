@@ -424,9 +424,9 @@ class ReadOnceTests(ReadOnceHarness):
         self.assertEqual(self.status()["in_first_book"], 1)
 
     def test_a_first_run_approved_at_each_version_stating_the_book_has_its_time_read(self):
-        # Versions 3 to 5 of operator.run.approved state the starting book;
+        # Versions 3 to 6 of operator.run.approved state the starting book;
         # cmd/engine records the current one (internal/event).
-        for version in (3, 4, 5):
+        for version in (3, 4, 5, 6):
             with self.subTest(version=version):
                 self.chain("2027-01-15T14:00:00Z", (("s1", "2027-01-15T21:00:00Z", 11030.0),),
                            approval_version=version)

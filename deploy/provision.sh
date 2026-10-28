@@ -570,15 +570,38 @@ require_native_programs() {
   done
 }
 
+# install_engine_settings SRC DEST: installs the engines' settings from SRC
+# into DEST. The settings files (*.env) carry client IDs and modes only, no
+# secret and no account, and are repo-managed, so they are overwritten. A
+# configuration (*.config) names its account, which the owner substitutes on
+# the server and never in the repository, and is hashed into its engine's run
+# (ADR 0016), so it is installed only when DEST has none: an existing one is
+# kept byte for byte, and the shipped one is installed beside it as
+# <name>.config.example, to compare (Boost lesson L7: an earlier provisioner
+# copied the shipped configuration over the server's, resetting Boost's
+# account to the placeholder).
+install_engine_settings() {
+  local src=$1 dest=$2 f name
+  install -m 0644 "$src"/*.env "$dest/"
+  for f in "$src"/*.config; do
+    name=$(basename "$f")
+    if test -e "$dest/$name"; then
+      install -m 0644 "$f" "$dest/$name.example"
+      log "kept $dest/$name, which names the server's account; the shipped one is $dest/$name.example"
+    else
+      install -m 0644 "$f" "$dest/$name"
+      log "installed $dest/$name; name its account on the server (docs/runbooks/first-dry-run-day.md)"
+    fi
+  done
+}
+
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
   log "directories and config"
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/
-  # Engine settings carry client IDs and modes only, no secrets; repo-managed,
-  # overwritten. Each configuration is hashed into its engine's run (ADR 0016).
-  install -m 0644 "$here"/etc/engines/*.env "$here"/etc/engines/*.config "$etc/engines/"
+  install_engine_settings "$here/etc/engines" "$etc/engines"
   # Non-secret gateway settings. Restart times are New York time (the unit sets TZ).
   install -m 0644 /dev/stdin "$etc/gateway.env" <<CONF
 GATEWAY_MAJOR=${GATEWAY_MAJOR}

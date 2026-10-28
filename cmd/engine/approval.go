@@ -154,8 +154,8 @@ func firstRunApproval(opts options, comp composition, dir string) (*event.Operat
 	if !approval.FirstRun() {
 		return nil, fmt.Errorf("engine: the approval in %s names an earlier run, %q, but %s holds no earlier run's durable log (*%s): this is a first run, approved with the starting book and no previous log (`operator approve -first-run`)", opts.approvalPath, approval.PreviousLog, dir, durableLogSuffix)
 	}
-	if approval.AccountID != comp.accountID {
-		return nil, fmt.Errorf("engine: the approval in %s is for account %q; this configuration decides %q", opts.approvalPath, approval.AccountID, comp.accountID)
+	if err := checkApprovalFor(opts, comp, approval); err != nil {
+		return nil, err
 	}
 	return &approval, nil
 }
@@ -250,8 +250,8 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 	if err != nil {
 		return nil, err
 	}
-	if approval.AccountID != comp.accountID {
-		return nil, fmt.Errorf("engine: the approval in %s is for account %q; this configuration decides %q", opts.approvalPath, approval.AccountID, comp.accountID)
+	if err := checkApprovalFor(opts, comp, approval); err != nil {
+		return nil, err
 	}
 	if approval.FirstRun() {
 		return nil, fmt.Errorf("engine: the approval in %s is a first run's, but %s holds an earlier run, %s: approve the latest run, naming it and its final record hash (`operator approve -log`)", opts.approvalPath, dir, latest)
@@ -276,7 +276,13 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 			return nil, err
 		}
 	}
-	if err := restart.CheckApprovedLatch(entries, approval, stateLog); err != nil {
+	// The state in force a fresh run cannot recompute: Boost's latch, or an
+	// IRA's rebalance in progress (ADR 0026, point 5).
+	if comp.strategyID == event.TargetWeightStrategyMomentum {
+		if err := restart.CheckRebalanceInProgress(entries, approval, stateLog); err != nil {
+			return nil, err
+		}
+	} else if err := restart.CheckApprovedLatch(entries, approval, stateLog); err != nil {
 		return nil, err
 	}
 	if err := restart.CheckIncidentInForce(entries, approval, stateLog); err != nil {
@@ -289,6 +295,24 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 		return nil, err
 	}
 	return &approval, nil
+}
+
+// checkApprovalFor refuses an approval for another account than the
+// configuration's, or one stating another strategy's state in force: a
+// momentum run is approved with its rebalance in progress or none, and a
+// Boost run with its latch (ADR 0026, point 5), so a Boost-shaped approval
+// never starts an IRA as if no rebalance were in progress.
+func checkApprovalFor(opts options, comp composition, approval event.OperatorRunApprovedPayload) error {
+	if approval.AccountID != comp.accountID {
+		return fmt.Errorf("engine: the approval in %s is for account %q; this configuration decides %q", opts.approvalPath, approval.AccountID, comp.accountID)
+	}
+	switch got := approval.StrategyID(); {
+	case comp.strategyID == event.TargetWeightStrategyMomentum && got != comp.strategyID:
+		return fmt.Errorf("engine: the approval in %s is Boost-shaped: it states Boost's latch and no momentum state, so it says nothing of a rebalance in progress, and this configuration is a momentum run's; write it with `operator approve`, which reads the strategy from the previous log (ADR 0026, point 5)", opts.approvalPath)
+	case comp.strategyID == event.TargetWeightStrategyBoost && got != comp.strategyID:
+		return fmt.Errorf("engine: the approval in %s states an IRA's momentum state and no latch, but this configuration is a Boost run's, approved with its latch (ADR 0026, point 5)", opts.approvalPath)
+	}
+	return nil
 }
 
 // stateBefore returns the entries and name of the latest run older than

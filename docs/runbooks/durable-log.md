@@ -138,7 +138,12 @@ The engine reads its settings from
    the engine does not know, is refused. `boost.latched` is the state in
    force: the `latched_after` of the latest `strategy.targets.decided` in the
    previous log, or, if that run decided nothing, the latch its own approval
-   stated; the engine refuses any other value. `incident_id` names the
+   stated; the engine refuses any other value. An IRA's approval states
+   `"boost": null` and, in its place, `"momentum": {"rebalance_in_progress":
+   ...}`: the rebalance the previous log ends with in progress, or `null`
+   when none is, which the engine checks against that log the same way
+   (`docs/runbooks/missed-rebalance.md`, "A restart mid-rebalance").
+   `operator approve` writes the right one from the log. `incident_id` names the
    incident you are clearing, or is empty; it must be the ID of the incident
    the previous log ended in (the `incident_id` its own approval carried in
    force, or else the `id` of its first `strategy.engine.state` record out
@@ -236,7 +241,9 @@ whether it is the crashed run. The message says which case it is.
         ended in, under its ID. If that log ended in an incident, carry it
         Halted (or as the same state); never loosen it on a guess, and
         clear it only by that ID through the recorded recovery.
-      - `boost.latched` is the latch the last readable log ended with.
+      - `boost.latched` is the latch the last readable log ended with (for
+        an IRA, `momentum.rebalance_in_progress` is the rebalance it ended
+        with in progress, or `null`).
 
       The engine checks the approval against that log alone. The latch must
       be exactly the one it ended with. The incident must be the one it

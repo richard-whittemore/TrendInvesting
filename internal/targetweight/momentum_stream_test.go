@@ -250,6 +250,10 @@ type momentumOptions struct {
 	// price beside it at brokerLast times the mark (the IBKR adapter's mark,
 	// ADR 0026 point 1, amended 2026-10-18).
 	brokerLast float64
+	// approval, when set, is the owner's operator.run.approved of a fresh
+	// run, recorded straight after the configuration of a handler told to
+	// await it, as cmd/engine records it (ADR 0027, amended 2026-10-17).
+	approval *event.OperatorRunApprovedPayload
 }
 
 type momentumResult struct {
@@ -310,7 +314,13 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 		return out
 	}
 	start := closeOf(cal[0]).Add(-12 * time.Hour)
+	if opts.approval != nil {
+		handler.AwaitApproval()
+	}
 	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
+	if opts.approval != nil {
+		apply(s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "operator-run-approved", start, *opts.approval))
+	}
 	apply(s.envelope(t, event.SessionCalendarEventType, event.SessionCalendarSchemaVersion, "calendar", start,
 		event.SessionCalendarPayload{Source: "fixture", Sessions: slices.DeleteFunc(slices.Clone(cal), func(s string) bool { return opts.unlisted[s] })}))
 	for _, session := range opts.retract {

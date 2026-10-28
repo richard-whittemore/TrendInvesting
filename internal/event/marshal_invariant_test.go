@@ -49,7 +49,7 @@ func marshalPayloads() []validatedPayload {
 		validTargetsDecidedSaleWorking(), validTargetsDecidedWatching(), validTargetsWithheld(), validOrderPlanned(),
 		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
 		validKillSwitch(), validBrokerSnapshot(), postCloseSnapshot(), readTimeSnapshot(), evidencedMark(), validMarginAlarm(), validSaleWithheld(), validSaleOrder(),
-		validOperatorRunApprovedSettled(), validOperatorRunApproved(), validOperatorRunApprovedInIncident(), validRebalanceCleared(), validRetired(),
+		validOperatorRunApprovedSettled(), validOperatorRunApproved(), validOperatorRunApprovedInIncident(), iraApprovalMidRebalance(), validRebalanceCleared(), validRetired(),
 		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
 		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
 		validLimitOrderLifecycle(), validTargetWeightFill(), validOrderSkipped(),
@@ -182,19 +182,26 @@ func requirePayloadMarshals(t *testing.T, p validatedPayload) {
 	}
 }
 
+// TestPayloadTimestampsRejectUnwritableTimes checks every timestamp leaf of
+// every payload type in the first fixture that reaches it: a type with two
+// shapes (a Boost and an IRA approval) has each shape's leaves checked in a
+// fixture of that shape, and a leaf no fixture reaches fails the test.
 func TestPayloadTimestampsRejectUnwritableTimes(t *testing.T) {
-	seen := make(map[reflect.Type]bool)
+	tested := map[string]bool{}
 	for _, p := range marshalPayloads() {
-		if seen[reflect.TypeOf(p)] {
-			continue
-		}
-		seen[reflect.TypeOf(p)] = true
 		requirePayloadMarshals(t, p)
 		v := payloadCopy(p)
 		payloadLeaves(t, v, v.Type().Name(), func(path string, field reflect.Value) {
 			if field.Type() != reflect.TypeFor[time.Time]() {
 				return
 			}
+			if _, seen := tested[path]; !seen {
+				tested[path] = false
+			}
+			if tested[path] || !leafReachable(payloadCopy(p), path) {
+				return
+			}
+			tested[path] = true
 			for _, kind := range []string{"year", "offset"} {
 				t.Run(path+"/"+kind, func(t *testing.T) {
 					candidate := payloadCopy(p)
@@ -225,6 +232,36 @@ func TestPayloadTimestampsRejectUnwritableTimes(t *testing.T) {
 			}
 		})
 	}
+	for path, done := range tested {
+		if !done {
+			t.Errorf("%s: no fixture reaches this timestamp; add one that does", path)
+		}
+	}
+}
+
+// leafReachable reports whether every pointer on path is set in v, so the
+// fixture v reaches the leaf path names.
+func leafReachable(v reflect.Value, path string) bool {
+	for _, part := range strings.Split(path, ".")[1:] {
+		name, _, _ := strings.Cut(part, "[")
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return false
+			}
+			v = v.Elem()
+		}
+		v = v.FieldByName(name)
+		if !v.IsValid() {
+			return false
+		}
+		if v.Kind() == reflect.Slice {
+			if v.Len() == 0 {
+				return false
+			}
+			v = v.Index(0)
+		}
+	}
+	return true
 }
 
 // leafByPath returns the leaf of v that payloadLeaves named path: the

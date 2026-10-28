@@ -2,8 +2,10 @@
 
 *For the owner. What share of each IRA the program means for bonds at your
 age, how it is worked out each month, where you can see it, and what can go
-wrong. The IRAs cannot run yet: the engine program still refuses a momentum
-configuration ([momentum](momentum.md), "Where this stands"). Terms are in
+wrong. The IRAs cannot trade yet: the Traditional IRA's engine runs only in
+dry-run on a synthetic month, and your birth month is named in its
+configuration on the server, never in the repository ([momentum](momentum.md),
+"Where this stands"). Terms are in
 the [glossary](glossary.md).*
 
 ## What it does and why it exists

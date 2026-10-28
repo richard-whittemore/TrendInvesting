@@ -5,13 +5,13 @@ Tailscale SSH, that takes Boost from "programs installed, secrets unlocked,
 Gateway logged in" to a dry-run engine that decides Monday's session after
 its close. Dry-run sends nothing to IBKR, ever.*
 
-> **WARNING: never run `sudo deploy/provision.sh services` (or `all`) once
-> step 1 is done, until the dry-run day is over.** It copies the shipped
-> `boost.config` back over yours, with the account `joint`: the engine then
-> refuses the adapter's reading of your account at its next start, and the
-> data job refuses to write Monday's file, so Monday is not decided. If it
-> happens: do step 1 again (it is safe to repeat), then restart nothing else;
-> the running engine is not affected.
+> **`sudo deploy/provision.sh services` keeps the `boost.config` you edit in
+> step 1.** It installs an engine configuration only when the server has
+> none, and puts the shipped one beside yours as `boost.config.example`
+> ([server](../manual/server.md), "Caution"). A checkout from before
+> 2026-10-28 copied the shipped file, with the account `joint`, back over
+> yours; if a `services` from such a checkout ran after step 1, do step 1
+> again (it is safe to repeat) and restart nothing else.
 
 **How to use the blocks.** Paste one block at a time into your login shell on
 the server, then compare what it printed with the "expect" block under it.
@@ -93,10 +93,9 @@ account number into a chat, a ticket or this repository.
 
 ## 1. Name the paper account in Boost's configuration
 
-> **Never run `sudo deploy/provision.sh services` (or `all`) again after this
-> step.** It copies the shipped file back over the one you edit here (account
-> `joint`): the engine then refuses the adapter's reading of your account at
-> its next start, and the data job refuses to write Monday's file. To recover,
+> `sudo deploy/provision.sh services` keeps the file you edit here: it
+> installs a configuration only when there is none. If a checkout from
+> before 2026-10-28 ran it after this step and put the account `joint` back,
 > run this step again and restart nothing else.
 
 The adapter reads the account `IBKR_ACCOUNT_BOOST` names from IB Gateway and

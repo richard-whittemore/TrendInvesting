@@ -37,7 +37,18 @@ func Operator(journals []Journal, f Filter) (Table, error) {
 				row = []string{"rebalance-cleared", fmt.Sprintf("cleared %s: %s", p.DecisionID, strings.Join(p.ClientOrderIDs, ";")), p.Operator, p.Detail}
 			case it.approved != nil:
 				p := it.approved
-				action := fmt.Sprintf("after %s, latched %t; ", p.PreviousLog, *p.Boost.Latched)
+				// An IRA approval states its rebalance in progress, Boost's
+				// its latch (ADR 0026, point 5).
+				var action string
+				switch r := p.Momentum; {
+				case r == nil:
+					action = fmt.Sprintf("after %s, latched %t; ", p.PreviousLog, *p.Boost.Latched)
+				case r.RebalanceInProgress == nil:
+					action = fmt.Sprintf("after %s, no rebalance in progress; ", p.PreviousLog)
+				default:
+					action = fmt.Sprintf("after %s, rebalance %s in progress (%s: %s); ", p.PreviousLog, r.RebalanceInProgress.DecisionID,
+						r.RebalanceInProgress.Phase, strings.Join(r.RebalanceInProgress.ClientOrderIDs, ";"))
+				}
 				switch in := p.IncidentInForce; {
 				case p.IncidentID != "":
 					action += "clears incident " + p.IncidentID

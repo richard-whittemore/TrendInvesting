@@ -446,6 +446,25 @@ run-2026-10-20.log ends with Boost latched false; the approval carries incident 
 wrote <file>: start the fresh run with -approval <file> (docs/runbooks/durable-log.md, "Restarting an engine")
 ```
 
+For an IRA (the log is a momentum run's), the approval states no latch: it
+states the rebalance the log ends with in progress, read from the log's
+orders by the rule the engine itself reads them by, or that none is
+(`operator.run.approved` schema version 6; ADR 0026, point 5). A restart
+mid-rebalance sends nothing for that decision time until you clear it, so a
+log that ends mid-rebalance prints the rebalance, its phase (`sells-working`:
+its sells were working and its buys never planned; `buys-working`: its buys
+were working) and the clearance to record once you have dealt with each order
+at IBKR:
+
+```
+run-2026-10-30.log ends mid-rebalance: targets-decided:<account>:2026-10-30T20:00:00Z, decided at 2026-10-30T20:00:00Z, sells-working, orders <id>, <id> not terminal; the fresh run sends nothing for it, and decides no later month, until you deal with each order at IBKR and clear it with `operator rebalance-cleared -decision targets-decided:<account>:2026-10-30T20:00:00Z -orders <id>,<id>` (docs/runbooks/missed-rebalance.md)
+```
+
+The engine checks the approval's rebalance against the log before it starts
+([restart](restart.md), "Starting a fresh run"). An IRA's first run is
+approved with `operator approve -first-run -strategy momentum ...` (the
+default `-strategy` is `boost`); a dry-run first run needs no approval.
+
 If the kill switch was engaged when the previous run ended, it also says so:
 a fresh run starts with the switch released, so record it again with
 `operator kill-switch -state engaged` before you start the engine. The
