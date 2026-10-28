@@ -66,7 +66,7 @@ def main(argv):
             if not args.stream or not args.first:
                 raise ValueError("encode needs --first and --stream")
             excluded = {}
-            envelopes = encode.encode(
+            envelopes = encode.iter_encode(
                 args.out, args.first, args.asof,
                 encode.Identity(args.configuration_hash, args.strategy_version, args.run_id),
                 required=split(args.instruments), optional=split(args.optional),

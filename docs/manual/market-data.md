@@ -196,7 +196,9 @@ the IRA's own configuration file, which must say `"universe_input":
 "compact"` (it refuses `"bars"`), and answers, for each universe snapshot,
 whether its session is a decision session, which stocks the engine will rank
 from it, and how many sessions of closes each history must cover. It uses
-the engine's own code for all three. The engine then ranks the snapshot again
+the engine's own code for all three. `encode` starts it once per universe
+session, with that one session's snapshot (about 500 starts for a two-year
+warm-up, a few seconds in all; one start for a daily firing). The engine then ranks the snapshot again
 itself and refuses the stream if the histories name any other set of stocks,
 so a mistaken or stale ranker cannot slip a different universe in.
 
@@ -205,6 +207,40 @@ because the histories reach back to the base and the engine refuses a close
 on a day its calendar does not list. A decision session with no universe
 recording gets no histories, and the engine withholds that month's decision
 (`missing-universe`) and alerts, rather than decide from part of the market.
+
+**Memory the compact stream needs.** The IRA's rule ranks the whole market
+every session, so unlike Boost this step cannot simply ignore the other
+stocks. It never needs all of them at once, though: it reads the recordings
+one session at a time, three times over. The first read checks every
+recording and notes, per stock, only the few figures that decide which
+sessions a stock is left out of for bad data (its bad days, its first close,
+and its close on the session before each of its dividends). The second
+builds each session's snapshot and asks the ranker about that one session.
+The third writes the stream as it goes, never holding the whole file, and
+keeps only the closes of the stocks ranked at a decision whose 260-session
+window covers that day, dropping them once the last decision that needs
+them is written. So the peak is one session's recordings and snapshot plus
+the ranked stocks' windows (about 500 stocks x 260 closes, a little more in
+a year when the ranked set changes, since a stock ranked at any decision
+still to come keeps its closes), not every stock of every session. The
+stream is byte for byte the one the step wrote before it read this way.
+
+The budget is **32 MiB of Python memory** (the tracemalloc peak, the measure
+the Boost figures above use), for the warm-up and the daily firing alike.
+It is tested with made-up recordings of 2,000 listed stocks in each of 502
+sessions (2025-01-02 to 2026-12-31), quarterly dividends and some splits,
+and 500 stocks ranked: the warm-up peaks at about 18 MB and the daily firing
+at about 19 MB (about 55 MB for the whole process), where reading every
+session at once peaked at about 2.3 GB and 1.15 GB. What moves it: about
+4 MB more per extra 1,000 stocks listed in a session (one session is held),
+about 1.5 MB per extra 100 stocks ranked, and from the history's length only
+its split and dividend rows (one year peaks at about 16 MB, two at about 19).
+At the real market's size, measured once on made-up sessions of 10,000
+instruments over the same two years, the warm-up peaks at about 45 MB of
+Python memory and about 100 MB for the whole process (the daily firing about
+50 MB and 106 MB), so it stays far inside the 2 GB server,
+beside the Gateway, three engines and their adapters; the whole server's
+total is measured on the server before the IRAs go live.
 
 ### A session the exchange cancels
 
@@ -1167,7 +1203,10 @@ exits with status 1 and a message on stderr, for the scheduler to alert on.
 - The compact stream and retractions: `test_compact.py` (the stream's shape,
   a count per session showing no input is written per listed stock, each
   history against the closes the full stream's bars carry, bad data, every
-  refusal, the CLI), and with the real Go ranker the Go validators and
+  refusal, the CLI, the ranker asked one session at a time, and the streamed
+  file byte for byte the stream `encode` returns), `test_memory.py`
+  (`MomentumMemoryBudgetTest`: the momentum warm-up and daily firing inside
+  the 32 MiB budget on two years of 2,000-stock sessions), and with the real Go ranker the Go validators and
   `tests/testdata/decision_equivalence.go`, which feeds the full and the
   compact stream of the same recordings through two fresh momentum engines
   and requires identical decisions. The engine side is in the momentum

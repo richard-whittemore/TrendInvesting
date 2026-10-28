@@ -13,7 +13,8 @@ from unittest import mock
 
 from marketdata import __main__ as cli
 from marketdata import encode, record
-from marketdata.tests.test_encode import ALL_SESSIONS, FIRST, REPO, bar_of, break_bar, build, of, rewrite, run, unadjustable_ddd
+from marketdata.tests.test_encode import (ALL_SESSIONS, FIRST, IDENTITY, REPO, bar_of, bars_for, break_bar, build, of,
+                                          rewrite, run, unadjustable_ddd)
 
 D = dt.date
 HISTORY = "market.close.history"
@@ -213,6 +214,53 @@ class CompactRefusalTest(unittest.TestCase):
         self.assertEqual(status, 0)
         named.assert_called_once_with(["bin/universe-rank", "-config", "my config.json"])
         self.assertEqual([json.loads(line) for line in Path(out).read_text().splitlines()], compact(self.tmp.name))
+
+
+class OneSessionAtATimeTest(unittest.TestCase):
+    """The compact stream is read and ranked one session at a time, so the
+    data job never holds every instrument of every session
+    (docs/live-trading/lessons-2026-10.md L1), and the stream it writes is
+    the one encode returns."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        build(self.tmp.name, sector_session="2026-11-27")
+        # A second universe recording, beside 11-27's grouped one (they agree).
+        tickers = [{"ticker": t, "type": "CS", "market": "stocks"} for t in ("AAA", "BBB", "CCC", "DDD", "ZZZ")]
+        record.write(self.tmp.name, {"kind": "universe", "source": "massive", "session": "2026-11-27",
+                                     "fetched_at": "2026-11-27T23:30:00Z", "adjusted": False, "ticker_type": "CS",
+                                     "bars": bars_for(D(2026, 11, 27)), "tickers": tickers})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_ranker_is_asked_one_session_at_a_time(self):
+        calls, ranker = [], FakeRanker()
+
+        def asked(requests):
+            calls.append([r["universe"]["session"] for r in requests])
+            return ranker(requests)
+        compact(self.tmp.name, ranker=asked)
+        self.assertEqual(calls, [["2026-11-27"], ["2026-11-30"]])
+
+    def test_the_streamed_envelopes_are_the_bytes_encode_returns(self):
+        break_bar(self.tmp.name, "2026-11-25", "AAA")
+        unadjustable_ddd(self.tmp.name)
+        ranker = FakeRanker(members=("AAA", "CCC", "DDD"))
+        listed, streamed = {}, {}
+        whole, lazy = os.path.join(self.tmp.name, "whole.jsonl"), os.path.join(self.tmp.name, "lazy.jsonl")
+        encode.write_stream(whole, compact(self.tmp.name, ranker=ranker, excluded=listed))
+        envelopes = encode.iter_encode(self.tmp.name, FIRST, D(2026, 11, 30), IDENTITY, required=["SPY", "IEF"],
+                                       optional=[], ranker=ranker, excluded=streamed)
+        self.assertEqual(streamed, listed)   # filled before the first envelope is written
+        encode.write_stream(lazy, envelopes)
+        self.assertEqual(Path(lazy).read_bytes(), Path(whole).read_bytes())
+
+    def test_a_refusal_is_raised_before_any_envelope_is_written(self):
+        rewrite(self.tmp.name, "universe", "2026-11-30", "SPY", c=None)   # a named instrument's bad row
+        with self.assertRaises(encode.Malformed):
+            encode.iter_encode(self.tmp.name, FIRST, D(2026, 11, 30), IDENTITY, required=["SPY", "IEF"],
+                               optional=[], ranker=FakeRanker())
 
 
 def retract(d, day, reason="NYSE closed for a national day of mourning"):
