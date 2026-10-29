@@ -687,7 +687,7 @@ the editor and save:
 ```
 [Service]
 ExecStart=
-ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -resolve-units ti-data.service -self-unit ti-reporter@%i.service
+ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -gateway-owner boost -gateway-adapters ti-adapter-boost.service,ti-adapter@trad-ira.service -gateway-state ${TI_REPORTS_DIR}/host-gateway.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@boost.service,ti-engine@trad-ira.service,ti-engine@roth-ira.service,ti-adapter-boost.service,ti-adapter@trad-ira.service,ti-adapter@roth-ira.service,ti-gateway.service -resolve-units ti-data.service,ti-data@trad-ira.service,ti-data@roth-ira.service,ti-flex@boost.service,ti-flex@trad-ira.service,ti-flex@roth-ira.service -self-unit ti-reporter@%i.service
 ```
 
 then run `sudo systemctl edit --drop-in=no-github-issues.conf ti-unit-failed@.service`
@@ -1823,7 +1823,7 @@ passes `-clock-check`.
 The Traditional IRA runs the same reporter and dashboard as Boost, as its own
 instance (`ti-reporter@trad-ira`), and everything it says names the IRA's own
 units: `ti-engine@trad-ira`, `ti-adapter@trad-ira`, `ti-flex@trad-ira` and
-`ti-data@trad-ira`. No page for an IRA ever names Boost's units. Four things
+`ti-data@trad-ira`. No page for an IRA ever names Boost's units. Three things
 page you for an IRA, and one does not:
 
 - A **unit failed.** Each of the four units above hands its failure to the same
@@ -1838,23 +1838,24 @@ page you for an IRA, and one does not:
   paged as urgent and repeated until you acknowledge it (the same repeat rule
   as an engine state). The page names the reason.
 - A **sell is still incomplete** on the first session after the rebalance
-  released it. The IRA buys only after every sell of that rebalance has filled,
-  so one sell that never completes (a halted or delisted stock) leaves the IRA
-  in cash for the month. The page comes on the first session it is still
-  incomplete and again once at each later session while it stays so, naming
+  released it. Sells go first; once every sell has filled or reached another
+  accepted terminal event, buys are budgeted from the settled cash available.
+  A cancelled sell can leave unsold holdings when buys become eligible. The
+  page comes on the first session it is still incomplete and again once at
+  each later session while it stays so, naming
   the instrument and the shares outstanding.
 - A **decided rebalance** whose sells complete pages nothing; the daily summary
   and the dashboard show it.
 
 The dashboard shows one card per engine (Boost, the Traditional IRA and the
-Roth IRA), each with its own engine's state. An engine that has not started,
-or whose folder is not there yet, shows as "no run yet: the engine has not
-started a run"; the other cards are unaffected.
+Roth IRA), each with its own engine's state. An existing engine folder with
+no run or run.env shows as "no run yet: the engine has not started a run". A missing folder shows "journal unavailable";
+the other cards are unaffected.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
 | `<account>: rebalance withheld (<reason>)`, urgent, repeated until acknowledged. The reason is one of the withheld reasons in [momentum](momentum.md) (missing bars, a stale account snapshot, a missing universe, insufficient trend history, no eligible names, a rebalance in progress, all unaffordable, histories missing, labels missing) | The month-end decision was withheld: nothing was ordered, held positions and orders are unchanged, and the account decides again only at the next month-end. One page per withheld month and reason; a decided rebalance sends none | Read the reason in the page and the row of that reason in the chapter that explains it. Fix the cause (data job, universe, labels, a rebalance left in progress) and, if the month must not be skipped, start a fresh run as that row says; acknowledge the page with the alert key it ends with once you have acted |
-| `<account>: sell of <instrument> incomplete after the session ending <day> (<n> shares outstanding)`, urgent | A sell the rebalance released has not filled in full or ended by the first session after its release. The program does not sell it again and does not buy until it is complete. Once per session while it stays incomplete; none when the sell completes or ended | In IBKR see why (halted, delisted or a limit that does not fill). Sell the shares outstanding by hand: stop the adapter, then the engine, sell, then start a fresh run approved with the post-sale book ([states and kill switch](states-and-kill-switch.md), "Selling by hand safely"); the rebalance is then planned again from the book as it is |
+| `<account>: sell of <instrument> incomplete after the session ending <day> (<n> shares outstanding)`, urgent | A sell the rebalance released has not filled in full or ended by the first session after its release. Sells finish first (by fill or another accepted terminal event); buys then fit settled cash. Once per session while incomplete, using the current outstanding quantity; none once filled, cancelled, retired or cleared | Stop the account's adapter (`sudo systemctl stop ti-adapter@<account>`), then its engine (`sudo systemctl stop ti-engine@<account>`). In IBKR cancel the program's working order for the instrument and confirm no open order exists for the account from any client, including cancel-pending orders; check the actual position. Only then sell the outstanding shares by hand. Once the manual order has filled or been cancelled, record the hand sale with a fresh run approved with the post-sale book, then clear the carried unfinished rebalance with `operator rebalance-cleared` as `docs/runbooks/missed-rebalance.md`, "A restart mid-rebalance", says. A fresh run carries the unfinished rebalance and withholds every month until you clear it ([momentum](momentum.md)); it does not plan that rebalance again |
 
 ### The reporter itself
 

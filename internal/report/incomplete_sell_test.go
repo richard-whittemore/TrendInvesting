@@ -24,9 +24,9 @@ func (r *logRun) sellFill(n int, o event.OrderReleasedPayload, id string, qty in
 }
 
 // TestASellStillIncompleteOnTheFirstSessionPagesOncePerSession: the IRA buys
-// only after that rebalance's sells have filled (ADR 0026, point 2, "IRA
-// execution"), so one sell that has not completed by the first session after
-// its release leaves the account in cash for the month. The page names the
+// once sells finish, by fill or another accepted terminal event, then fits
+// buys to settled cash (docs/manual/momentum.md; ADR 0026, point 2).
+// An unfinished sell blocks that second phase. The page names the
 // instrument and the shares outstanding, comes once per session while the
 // sell is incomplete, and a completed sell pages nothing.
 func TestASellStillIncompleteOnTheFirstSessionPagesOncePerSession(t *testing.T) {
@@ -63,14 +63,14 @@ func TestASellStillIncompleteOnTheFirstSessionPagesOncePerSession(t *testing.T) 
 
 	run.session(2)
 	later := report.IncompleteSellAlerts(iraInstance, run.out, event.TargetWeightStrategyMomentum)
-	if len(later) != 2 || later[0].Key != a.Key || later[1].Key == a.Key {
-		t.Fatalf("a second session: %+v, want the first session's page again (same key) and one page of its own", later)
+	if len(later) != 1 || later[0].Key == a.Key {
+		t.Fatalf("a second session: %+v, want only the current session's page", later)
 	}
 
 	run.sellFill(3, sell, "f-rest", 6)
 	run.session(3)
-	if got := report.IncompleteSellAlerts(iraInstance, run.out, event.TargetWeightStrategyMomentum); len(got) != 2 {
-		t.Errorf("once completed no more pages: %d, want the two already raised", len(got))
+	if got := report.IncompleteSellAlerts(iraInstance, run.out, event.TargetWeightStrategyMomentum); len(got) != 0 {
+		t.Errorf("once completed no more pages: %d, want none", len(got))
 	}
 }
 
@@ -98,7 +98,7 @@ func TestACompletedOrRetiredSellAndABoostRunPageNothing(t *testing.T) {
 // sent, or the owner's clearance (event.OrderReports), and then no session
 // pages it; a record that does not read, and a buy, change nothing.
 func TestASellTheEngineReadsAsEndedPagesNothing(t *testing.T) {
-	at := day(0).Add(time.Hour)
+	at := day(1).Add(time.Hour)
 	ends := map[string]func(r *logRun, o event.OrderReleasedPayload){
 		"canceled": func(r *logRun, o event.OrderReleasedPayload) {
 			r.add(journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "end", at,
@@ -133,6 +133,7 @@ func TestASellTheEngineReadsAsEndedPagesNothing(t *testing.T) {
 			b.AccountID = iraInstance
 			return b
 		}())
+		run.session(1)
 		end(run, sell)
 		run.add(journal.KindInput, event.SessionClosedEventType, 99, "unreadable", day(1), map[string]string{})
 		run.session(2)
@@ -151,5 +152,60 @@ func TestAFailedIRAFlexReaderIsWordedAsRunAgainByItsTimer(t *testing.T) {
 	if !strings.Contains(page.Body, "Flex reader is run again by its timer") || strings.Contains(page.Body, "does not restart") ||
 		!strings.Contains(page.Body, "docs/manual/reconciliation.md") {
 		t.Errorf("the Flex reader's page:\n%s", page.Body)
+	}
+}
+
+func TestIncompleteSellUsesCurrentQuantityAndEndsAfterFill(t *testing.T) {
+	r := &logRun{t: t}
+	o := iraSell("tw-current")
+	r.session(0)
+	r.release(0, o)
+	r.session(1)
+	if got := report.IncompleteSellAlerts(iraInstance, r.out, event.TargetWeightStrategyMomentum); len(got) != 1 {
+		t.Fatal(got)
+	}
+	r.sellFill(2, o, "partial", 4)
+	got := report.IncompleteSellAlerts(iraInstance, r.out, event.TargetWeightStrategyMomentum)
+	if len(got) != 1 || !strings.Contains(got[0].Title, "6 shares outstanding") {
+		t.Errorf("stale quantity: %+v", got)
+	}
+	r.sellFill(2, o, "rest", 6)
+	if got := report.IncompleteSellAlerts(iraInstance, r.out, event.TargetWeightStrategyMomentum); len(got) != 0 {
+		t.Errorf("filled sell still pages: %+v", got)
+	}
+}
+
+func TestRefusedSyntheticInputDoesNotEndSell(t *testing.T) {
+	r := &logRun{t: t}
+	o := iraSell("tw-refused")
+	r.session(0)
+	r.release(0, o)
+	r.session(1)
+	r.add(journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleSyntheticVersion, "refused", day(2), event.LimitOrderLifecyclePayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side, Status: event.OrderLifecycleStatusCanceled, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: day(2), Synthetic: true, Message: "refused input"})
+	r.session(2)
+	got := report.IncompleteSellAlerts(iraInstance, r.out, event.TargetWeightStrategyMomentum)
+	if len(got) == 0 || !strings.Contains(got[len(got)-1].Key, day(2).Format(time.DateOnly)) {
+		t.Fatalf("refused input ended sell: %+v", got)
+	}
+}
+
+func TestIncompleteSellPageOrdersSafeHandSaleSteps(t *testing.T) {
+	r := &logRun{t: t}
+	r.session(0)
+	r.release(0, iraSell("tw-safe"))
+	r.session(1)
+	body := report.IncompleteSellAlerts(iraInstance, r.out, event.TargetWeightStrategyMomentum)[0].Body
+	last := -1
+	for _, step := range []string{"sudo systemctl stop ti-adapter@trad-ira", "cancel the program's working order", "confirm no open order", "by hand", "record the hand sale"} {
+		n := strings.Index(body, step)
+		if n <= last {
+			t.Errorf("missing or out-of-order %q: %s", step, body)
+		}
+		last = n
+	}
+	for _, want := range []string{"settled cash", "docs/manual/momentum.md", "withholds every month", "docs/runbooks/missed-rebalance.md", "rebalance-cleared"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q: %s", want, body)
+		}
 	}
 }

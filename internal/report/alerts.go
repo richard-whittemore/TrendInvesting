@@ -32,7 +32,8 @@ const (
 	KindWithheld Kind = "withheld"
 	// KindRebalanceWithheld is a momentum account's month-end decision
 	// withheld for any reason: it skips a whole month, not a day, so it is
-	// always urgent and repeats until acknowledged (lessons L11).
+	// always urgent and repeats until acknowledged
+	// (docs/live-trading/lessons-2026-10.md, L11; ADR 0019, "Alerting").
 	KindRebalanceWithheld Kind = "rebalance-withheld"
 	KindMissingData       Kind = "missing-data"
 	KindHeartbeat         Kind = "heartbeat-lost"
@@ -99,14 +100,17 @@ const (
 // set, is the text for a public relay: it names what is in doubt and carries
 // no balance.
 type Alert struct {
-	Key          string
-	Kind         Kind
-	Severity     Severity
-	AccountID    string
-	At           time.Time
-	Title        string
-	Body         string
-	PublicBody   string
+	Key        string
+	Kind       Kind
+	Severity   Severity
+	AccountID  string
+	At         time.Time
+	Title      string
+	Body       string
+	PublicBody string
+	// Standing alerts survive a new channel baseline but retain once-per-key
+	// delivery (docs/live-trading/lessons-2026-10.md, L11).
+	Standing     bool
 	Repeat       bool
 	Acknowledged bool
 }
@@ -381,10 +385,10 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				continue
 			}
 			// A momentum decision is monthly: each withheld month is its own
-			// skipped month, so the run is the reason within the month.
+			// skipped month, keyed by its decision session even when found later.
 			thisRun := p.WithheldReason
 			if p.StrategyID == event.TargetWeightStrategyMomentum {
-				thisRun += "@" + p.SessionPeriodEnd.UTC().Format("2006-01")
+				thisRun += "@" + momentumDecisionSession(p)
 			}
 			if thisRun == runReason {
 				continue
@@ -932,10 +936,19 @@ func RestoredLogNewerKeyPrefix(account string) string {
 // whatever the reason, so it is urgent and repeats until acknowledged
 // (docs/live-trading/lessons-2026-10.md L11; ADR 0019, "Alerting").
 func rebalanceWithheldAlert(account string, e event.Envelope, p event.TargetsDecidedPayload) Alert {
-	month := p.SessionPeriodEnd.UTC().Format("2006-01")
-	key := fmt.Sprintf("%s:%s:%s@%s", KindRebalanceWithheld, p.WithheldReason, month, account)
+	session := momentumDecisionSession(p)
+	key := fmt.Sprintf("%s:%s:%s@%s", KindRebalanceWithheld, p.WithheldReason, session, account)
 	body := fmt.Sprintf("The month-end rebalance for the session ending %s was withheld (%s): %s. Nothing was ordered, held positions and orders are unchanged, and the account decides again only at the next month-end, so this skips the whole month unless you act.",
-		p.SessionPeriodEnd.UTC().Format(time.DateOnly), p.WithheldReason, p.Detail)
+		session, p.WithheldReason, p.Detail)
 	return Alert{Key: key, Kind: KindRebalanceWithheld, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
 		Title: fmt.Sprintf("%s: rebalance withheld (%s)", account, p.WithheldReason), Body: body + acknowledgeLine(key)}
+}
+
+// momentumDecisionSession names the decision's own close, including a missed
+// close discovered later (ADR 0026, point 1).
+func momentumDecisionSession(p event.TargetsDecidedPayload) string {
+	if p.Momentum.CloseSession != "" {
+		return p.Momentum.CloseSession
+	}
+	return p.SessionPeriodEnd.UTC().Format(time.DateOnly)
 }

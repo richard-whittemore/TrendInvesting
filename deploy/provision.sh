@@ -751,6 +751,19 @@ CONF
   # for its instance of the timer, replaced on every run as the units are.
   install -d -m 0755 "$unit_dir/ti-flex@trad-ira.timer.d"
   install -m 0644 "$here/systemd/ti-flex@trad-ira.timer.d/stagger.conf" "$unit_dir/ti-flex@trad-ira.timer.d/"
+  # Only Boost receives TI_HEARTBEAT_URL in its environment (ADR 0019,
+  # "Alerting"). Leave it unset for trad-ira: a second pinger would mask the loss of the first.
+  # Channel credentials remain shared; the reporter never takes the heartbeat
+  # address from that shared credential. systemd reads the tmpfs file at each firing.
+  install -d -m 0755 "$unit_dir/ti-reporter@boost.service.d" "$unit_dir/ti-reporter@trad-ira.service.d"
+  cat >"$unit_dir/ti-reporter@boost.service.d/heartbeat.conf" <<'EOF'
+[Service]
+EnvironmentFile=/run/trend-investing/secrets/secrets.env
+EOF
+  cat >"$unit_dir/ti-reporter@trad-ira.service.d/heartbeat.conf" <<'EOF'
+[Service]
+UnsetEnvironment=TI_HEARTBEAT_URL
+EOF
   if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
     rm -f "$unit_dir/ti-gateway.service"
   fi

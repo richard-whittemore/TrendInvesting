@@ -427,15 +427,19 @@ func loadOne(path, warning, ledger, instance, benchmark string, logs *logCache) 
 	if err != nil {
 		return account{}, errors.New("read journal")
 	}
-	envelopes, recovery, err := report.LoadLog(raw)
+	_, entries, recovery, err := report.LoadEntriesWithRecovery(raw)
 	if err != nil {
 		return account{}, err
+	}
+	envelopes := make([]event.Envelope, len(entries))
+	for i, entry := range entries {
+		envelopes[i] = entry.Envelope
 	}
 	var history report.History
 	if recovery != nil {
 		history = report.EarlierRunsOfRecovery(path, *recovery, logs.earlier)
 	}
-	a, err := view(history, report.LoadCashLedgerFor(ledger, instance, logs.readFile), report.LoadCostLedgerFor(ledger, instance, logs.readFile), envelopes, benchmark)
+	a, err := view(history, report.LoadCashLedgerFor(ledger, instance, logs.readFile), report.LoadCostLedgerFor(ledger, instance, logs.readFile), envelopes, entries, benchmark)
 	if err != nil {
 		return account{}, err
 	}
@@ -452,12 +456,6 @@ func loadOne(path, warning, ledger, instance, benchmark string, logs *logCache) 
 // restored without its time, which the engine would take for the latest run
 // at its next start; it is "" when there is none.
 func currentLogIn(dir string, logs *logCache) (path, warning string, err error) {
-	// An engine whose folder is not there yet (the second IRA's before its
-	// provisioning) has not started: its card says so, and no other card is
-	// affected (docs/live-trading/lessons-2026-10.md L8).
-	if _, statErr := logs.stat(dir); errors.Is(statErr, fs.ErrNotExist) {
-		return "", "", errNoRun
-	}
 	files, err := journalquery.ListLogs(dir, ".log")
 	if err != nil {
 		return "", "", errors.New("read the engine directory")
@@ -482,6 +480,9 @@ func currentLogIn(dir string, logs *logCache) (path, warning string, err error) 
 	if head == "" {
 		if len(files) > 0 {
 			return "", "", errAbandoned
+		}
+		if _, err := logs.stat(filepath.Join(dir, "run.env")); !errors.Is(err, fs.ErrNotExist) {
+			return "", "", errors.New("run settings without a journal")
 		}
 		return "", "", errNoRun
 	}
@@ -692,7 +693,7 @@ func (c *logCache) held(path string) bool {
 	return start || earlier || tied
 }
 
-func view(history report.History, ledger report.CashLedger, costs report.CostLedger, envelopes []event.Envelope, benchmark string) (account, error) {
+func view(history report.History, ledger report.CashLedger, costs report.CostLedger, envelopes []event.Envelope, entries []journal.Entry, benchmark string) (account, error) {
 	date, err := report.LastDate(envelopes)
 	if err != nil {
 		return account{}, err
@@ -705,6 +706,7 @@ func view(history report.History, ledger report.CashLedger, costs report.CostLed
 	if err != nil {
 		return account{}, err
 	}
+	alerts = append(alerts, report.IncompleteSellAlerts(summary.AccountID, entries, summary.StrategyID)...)
 	a := account{Summary: summary}
 	for _, al := range alerts {
 		a.Alerts = append(a.Alerts, alertView{Kind: al.Kind, Severity: al.Severity, At: al.At, Title: al.Title, Body: al.Body})

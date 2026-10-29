@@ -74,3 +74,9 @@ func loadEntries(raw []byte) (journal.Header, []journal.Entry, *journal.Recovery
 	}
 	return loaded.Header, entries, loaded.Recovery, nil
 }
+
+// LoadEntriesWithRecovery keeps committed record kinds and the durable recovery
+// from the same verified read (ADR 0017; ADR 0027), for lifecycle-aware views.
+func LoadEntriesWithRecovery(raw []byte) (journal.Header, []journal.Entry, *journal.Recovery, error) {
+	return loadEntries(raw)
+}

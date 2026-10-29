@@ -169,6 +169,12 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// what it touches: every other channel still delivers, and the run fails
 	// naming each fault (ADR 0019, "Alerting").
 	var failures []error
+	// Only this instance's environment opts into the outside heartbeat
+	// (ADR 0019, "Alerting"); shared channel credentials cannot enable a peer.
+	heartbeatEnv := getenv
+	if heartbeatEnv("TI_HEARTBEAT_URL") == "" {
+		_, _ = fmt.Fprintln(out, "reporter: heartbeat: not this instance")
+	}
 	if *secretsFile != "" {
 		var secretsErr error
 		if getenv, secretsErr = withSecretsFile(getenv, *secretsFile); secretsErr != nil {
@@ -513,7 +519,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			return nil
 		}
 	}
-	pingHeartbeat(getenv, &bounded, out)
+	pingHeartbeat(heartbeatEnv, &bounded, out)
 	return nil
 }
 
@@ -555,7 +561,7 @@ func hasKeys(seen map[string]bool, channel string) bool {
 
 // sendersFor returns the senders alert a may go to now. To a channel whose
 // baseline is after the event the alert reports, the alert is history and is
-// not sent, unless it is still open (repeating and not acknowledged): then it
+// not sent, unless it is still open (standing or repeating, not acknowledged): then it
 // is in force, not history, and is in starting, to be sent marked as the
 // state at reporter start until the channel has taken it, and in current
 // after that, so it repeats as usual (ADR 0019, "Alerting"). An alert with no
@@ -565,7 +571,7 @@ func sendersFor(senders []sender, a report.Alert, baselines map[string]time.Time
 		if _, echo := s.(echoOnly); !echo {
 			if b, ok := baselines[s.name()]; ok && !a.At.IsZero() && a.At.Before(b) {
 				switch {
-				case !a.Repeat || a.Acknowledged:
+				case (!a.Repeat && !a.Standing) || a.Acknowledged:
 				case seen[channelKey(s.name(), a.Key)]:
 					current = append(current, s)
 				default:

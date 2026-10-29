@@ -287,7 +287,7 @@ func TestDashboardDegradesPerAccount(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, body)
 	}
-	for _, want := range []string{"trad-ira: no run yet", "gone: no run yet", "acct-joint", "halted"} {
+	for _, want := range []string{"trad-ira: no run yet", "gone: journal unavailable", "acct-joint", "halted"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q", want)
 		}
@@ -439,12 +439,12 @@ func TestMessageCardAnchorsAreUnique(t *testing.T) {
 	}
 }
 
-// TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsNotStarted: the
+// TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsUnavailable: the
 // dashboard reads every engine's folder (Boost, the Traditional IRA and, once
-// it exists, the Roth IRA), each card keeps its own engine's state, and an
-// engine whose folder is not there yet is the card "not started", never an
-// error page for the others (lessons L8).
-func TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsNotStarted(t *testing.T) {
+// provisioned, the Roth IRA), each card keeps its own engine's state, and a
+// missing engine folder is "journal unavailable", never an error page for
+// the others (docs/live-trading/lessons-2026-10.md, L8).
+func TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsUnavailable(t *testing.T) {
 	root := t.TempDir()
 	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	boost, ira, roth := filepath.Join(root, "boost"), filepath.Join(root, "trad-ira"), filepath.Join(root, "roth-ira")
@@ -460,8 +460,8 @@ func TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsNotStarted(t *testi
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "roth-ira: no run yet: the engine has not started a run") || strings.Contains(body, root) {
-		t.Errorf("the missing engine is not shown as not started, or the page leaks a path:\n%s", body)
+	if body := rec.Body.String(); !strings.Contains(body, "roth-ira: journal unavailable") || strings.Contains(body, root) {
+		t.Errorf("the missing engine is not shown as unavailable, or the page leaks a path:\n%s", body)
 	}
 	var accounts []account
 	if err := json.Unmarshal(get(h, http.MethodGet, "/api/summary.json").Body.Bytes(), &accounts); err != nil || len(accounts) != 3 {
@@ -470,7 +470,18 @@ func TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsNotStarted(t *testi
 	if accounts[0].Summary.EngineState != "halted" || accounts[1].Summary.EngineState == "halted" || accounts[1].Message != "" {
 		t.Errorf("states = %q and %q (message %q), want Boost halted and the IRA's own, normal", accounts[0].Summary.EngineState, accounts[1].Summary.EngineState, accounts[1].Message)
 	}
-	if accounts[2].Name != "roth-ira" || !strings.Contains(accounts[2].Message, "not started") {
+	if accounts[2].Name != "roth-ira" || !strings.Contains(accounts[2].Message, "journal unavailable") {
 		t.Errorf("the missing engine's card = %+v", accounts[2])
+	}
+}
+
+func TestDashboardRunSettingsWithoutLogAreUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "run.env"), []byte("TI_RUN=lost\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := get(newHandlerFor(nil, []string{dir}, nil, "SPY"), http.MethodGet, "/")
+	if !strings.Contains(rec.Body.String(), "journal unavailable") {
+		t.Fatal("run.env without a journal shown as no run")
 	}
 }

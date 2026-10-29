@@ -79,7 +79,7 @@ func TestWaitingWithNoHeartbeatURLPingsNothingAndFailsNothing(t *testing.T) {
 	}
 }
 
-func TestWaitingReadsTheHeartbeatAddressFromTheSecretsFile(t *testing.T) {
+func TestWaitingSharedSecretsDoNotEnableHeartbeat(t *testing.T) {
 	e, server := newStandInEndpoint(t)
 	dir := t.TempDir()
 	secrets := filepath.Join(dir, "secrets")
@@ -88,8 +88,8 @@ func TestWaitingReadsTheHeartbeatAddressFromTheSecretsFile(t *testing.T) {
 	if err := run(args, env(nil), func() time.Time { return t0 }, &bytes.Buffer{}, server.Client()); err != nil {
 		t.Fatal(err)
 	}
-	if e.count("ping") != 1 {
-		t.Errorf("pings = %d, want 1", e.count("ping"))
+	if e.count("ping") != 0 {
+		t.Errorf("pings = %d, want 0", e.count("ping"))
 	}
 }
 

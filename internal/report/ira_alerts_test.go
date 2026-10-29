@@ -164,3 +164,27 @@ func TestAWithheldIRARebalancePagesOnceNamingTheReason(t *testing.T) {
 		t.Errorf("two withheld months paged %d times, want two pages with their own keys", len(pages))
 	}
 }
+
+func TestMissedJanuaryAndFebruaryWithholdsHaveDistinctDecisionKeys(t *testing.T) {
+	s := newIRAStream(t)
+	for i, session := range []string{"2026-01-30", "2026-02-27"} {
+		p := iraDecision(1)
+		found := time.Date(2026, 2, 2, 21, 0, 0, 0, time.UTC)
+		if i == 1 {
+			found = found.AddDate(0, 0, 25)
+		}
+		p.DecisionTime, p.SessionPeriodEnd, p.Momentum.CloseSession = found, found, session
+		p.Glide.RebalanceSession = found.AddDate(0, 0, 1).Format(time.DateOnly)
+		p.Outcome, p.Targets, p.WithheldReason, p.Detail = event.TargetsOutcomeWithheld, nil, event.WithheldMissingBars, "missing bars"
+		s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, session, found, p)
+	}
+	pages := pagesOf(alertsOf(t, s))
+	if len(pages) != 2 {
+		t.Fatalf("got %d pages, want two decision sessions", len(pages))
+	}
+	for i, session := range []string{"2026-01-30", "2026-02-27"} {
+		if !strings.Contains(pages[i].Key, session) || !strings.Contains(pages[i].Body, session) {
+			t.Errorf("decision session %s absent: %+v", session, pages[i])
+		}
+	}
+}

@@ -89,12 +89,18 @@ func TestAHealthyFiringPingsTheOutsideEndpointOnceAfterTheAlertsAreSent(t *testi
 }
 
 func TestAFiringWithNoURLConfiguredPingsNothingAndFailsNothing(t *testing.T) {
-	e, server := newStandInEndpoint(t)
-	if err := heartbeatRun(t, server, t.TempDir(), map[string]string{"TI_HEARTBEAT_URL": ""}, &bytes.Buffer{}); err != nil {
+	r := &relay{sent: map[string][]string{}}
+	dir := t.TempDir()
+	var out bytes.Buffer
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy"}
+	if err := run(args, env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.test"}), func() time.Time { return t0.Add(time.Hour) }, &out, &http.Client{Transport: r}); err != nil {
 		t.Fatal(err)
 	}
-	if e.count("ping") != 0 {
-		t.Errorf("pinged with no URL: %v", e.events)
+	if len(r.sent) != 1 || len(r.to("ntfy.test")) == 0 {
+		t.Errorf("unexpected destinations: %v", r.sent)
+	}
+	if strings.Count(out.String(), "heartbeat: not this instance") != 1 {
+		t.Errorf("missing single instance notice: %s", out.String())
 	}
 }
 
@@ -211,19 +217,31 @@ func TestThePingCarriesNothingButTheEndpoint(t *testing.T) {
 	}
 }
 
-// TestTheURLComesFromTheSecretsFile: under systemd the secrets arrive as a
-// credential file, never in the environment.
-func TestTheURLComesFromTheSecretsFile(t *testing.T) {
-	e, server := newStandInEndpoint(t)
-	dir := t.TempDir()
-	secrets := filepath.Join(dir, "secrets")
-	writeFileT(t, secrets, "TI_NTFY_TOPIC=t\nTI_NTFY_SERVER="+server.URL+"\nTI_HEARTBEAT_URL="+server.URL+heartbeatPath+"\n")
-	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets}
-	if err := run(args, env(nil), func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, server.Client()); err != nil {
-		t.Fatal(err)
-	}
-	if e.count("ping") != 1 {
-		t.Errorf("pings = %d", e.count("ping"))
+// A shared channel credential must not make another instance ping (ADR 0019).
+func TestSharedSecretsDoNotEnableHeartbeat(t *testing.T) {
+	for _, waiting := range []bool{false, true} {
+		r := &relay{sent: map[string][]string{}}
+		dir := t.TempDir()
+		secrets := filepath.Join(dir, "secrets")
+		writeFileT(t, secrets, "TI_NTFY_TOPIC=t\nTI_NTFY_SERVER=https://ntfy.test\nTI_HEARTBEAT_URL=https://heartbeat.test/ping/secret\n")
+		path := filepath.Join(dir, "waiting.log")
+		if !waiting {
+			path = writeJournal(t, dir)
+		}
+		args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets}
+		if waiting {
+			args = append(args, "-account", "trad-ira", "-run-env", filepath.Join(dir, "run.env"))
+		}
+		var out bytes.Buffer
+		if err := run(args, env(nil), func() time.Time { return t0.Add(time.Hour) }, &out, &http.Client{Transport: r}); err != nil {
+			t.Fatal(err)
+		}
+		if len(r.to("heartbeat.test")) != 0 {
+			t.Errorf("waiting %v: shared secret enabled peer heartbeat", waiting)
+		}
+		if strings.Count(out.String(), "heartbeat: not this instance") != 1 {
+			t.Errorf("waiting %v: notice absent: %s", waiting, out.String())
+		}
 	}
 }
 
@@ -262,5 +280,37 @@ func TestAFiringThatFindsATradingUnitFailedSendsNoPing(t *testing.T) {
 	}
 	if e.count("ping") != 1 {
 		t.Errorf("the firing after the engine was well again did not ping: %v", e.events)
+	}
+}
+
+func TestProvisioningAssignsOnlyBoostTheHeartbeatEnvironment(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/provision.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ti-reporter@boost.service.d/heartbeat.conf", "EnvironmentFile=/run/trend-investing/secrets/secrets.env", "ti-reporter@trad-ira.service.d/heartbeat.conf", "UnsetEnvironment=TI_HEARTBEAT_URL", "a second pinger would mask the loss of the first"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("provisioning lacks %q", want)
+		}
+	}
+}
+
+func TestHeartbeatEnvironmentSelectsOnePinger(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	for _, account := range []string{"boost", "trad-ira"} {
+		dir := t.TempDir()
+		secrets := filepath.Join(dir, "secrets")
+		writeFileT(t, secrets, "TI_NTFY_TOPIC=t\nTI_NTFY_SERVER=https://ntfy.test\nTI_HEARTBEAT_URL=https://heartbeat.test/ping/secret\n")
+		environment := map[string]string{}
+		if account == "boost" {
+			environment["TI_HEARTBEAT_URL"] = "https://heartbeat.test/ping/secret"
+		}
+		args := []string{"-journal", filepath.Join(dir, "waiting.log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets, "-account", account, "-run-env", filepath.Join(dir, "run.env")}
+		if err := run(args, env(environment), func() time.Time { return t0 }, &bytes.Buffer{}, &http.Client{Transport: r}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(r.to("heartbeat.test")); got != 1 {
+		t.Errorf("two reporters sent %d pings, want only Boost's one", got)
 	}
 }

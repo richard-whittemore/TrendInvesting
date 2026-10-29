@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,5 +86,37 @@ func TestTheReporterPagesAWithheldRebalanceAndAnIncompleteSellOfAnIRA(t *testing
 	}
 	if strings.Contains(strings.ToLower(got), "boost") {
 		t.Errorf("an IRA's pages name Boost:\n%s", got)
+	}
+}
+
+func TestNewChannelReceivesAlreadyIncompleteSellOncePerSession(t *testing.T) {
+	withBaseline(t)
+	r := &relay{sent: map[string][]string{}}
+	client := &http.Client{Transport: r}
+	var buf bytes.Buffer
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0.Add(24*time.Hour)), iraEntries(t)); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ira.journal")
+	writeFileT(t, path, buf.String())
+	args := []string{"-journal", path, "-state", filepath.Join(dir, "new-state.json"), "-channel", "ntfy"}
+	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.test"})
+	now := t0.Add(48 * time.Hour)
+	for firing := 0; firing < 2; firing++ {
+		if err := run(args, environment, func() time.Time { return now }, &bytes.Buffer{}, client); err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, body := range r.to("ntfy.test") {
+			title, _, _ := strings.Cut(body, "\n")
+			if strings.Contains(title, "sell of AAA incomplete") {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("firing %d: received %d incomplete-sell pages, want one", firing, count)
+		}
+		now = now.Add(2 * time.Hour)
 	}
 }
