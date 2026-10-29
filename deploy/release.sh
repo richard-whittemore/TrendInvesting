@@ -327,17 +327,22 @@ open_window() {
   fi
 }
 
-# ensure_window: right before the swap, at least 120 seconds of window must be
-# left (the install and its checks take less). A window with less, the owner's
-# or this run's own, is waited out, never relied on or added to, and then this
-# run opens one of its own for 300 seconds (never past the 30 minutes
-# ti-maintenance allows per window): never two windows at once, and never an
-# install with none. A window that appears while it waits is looked at again,
-# up to three times, and the install is refused if none holds.
+# ensure_window: the last step before the swap. Each time round it first looks
+# at the engine (an engine unit mid-restart refuses the install: it may have
+# begun during a wait, and the look itself can take time), then at the window:
+# at least 120 seconds must be left (the install and its checks take less). A
+# window with less, the owner's or this run's own, is waited out, never relied
+# on or added to, and then this run opens one of its own for 300 seconds (never
+# past the 30 minutes ti-maintenance allows per window): never two windows at
+# once, and never an install with none. A window that appears while it waits is
+# looked at again, and the install is refused if none holds after four tries.
+# It returns the moment a look at the window finds enough left, and the caller
+# installs at once.
 ensure_window() {
   local left tries=0
-  while test "$tries" -lt 3; do
+  while test "$tries" -lt 4; do
     tries=$((tries + 1))
+    refuse_if_engine_busy
     left=$("$maint" left) || left=0
     test "$left" -ge 120 && return 0
     if test "$left" -gt 0; then
@@ -346,7 +351,7 @@ ensure_window() {
     else
       log "the maintenance window ended during the wait; opening a new one before installing"
     fi
-    start_window 300 && return 0
+    start_window 300 || true
   done
   die "could not get a maintenance window with 120 seconds left; nothing installed"
 }
@@ -655,8 +660,6 @@ if test "$mode" = release; then
     fi
   fi
   ensure_window
-  # The wait may have been long: the engine is looked at again just before the swap.
-  refuse_if_engine_busy
   if ! install_from "$stage" || ! restart_dashboard_verified; then
     log "$tag did not install, or the dashboard did not stay up on it; putting $cur back"
     put_back "$cur" || true
@@ -717,7 +720,6 @@ check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) fai
 open_window
 refuse_if_engine_busy
 ensure_window
-refuse_if_engine_busy
 if ! install_from "$releases/$prev" || ! restart_dashboard_verified; then
   log "rolling back to $prev failed, or the dashboard did not stay up on it; putting $cur back"
   put_back "$cur" || true

@@ -966,6 +966,7 @@ expect "nothing installed without ti-maintenance" "echo ti-dashboard hand" "$(in
 fresh_server
 expect "a release inside a hand-opened window installs" 0 "$(FAKE_MAINT_OPEN=1 run v1.0.0)"
 expect "it opens no window of its own" "" "$(lines_of '^MAINT (start|end)')"
+expect "and no maintenance end of any form ran" 0 "$(grep -c '^MAINT end' "$work/ctl.log" || true)"
 grep -q "already open" "$work/out" || fail "ti-release does not say it is using the open window: $(cat "$work/out")"
 fresh_server
 expect "a failed release inside a hand-opened window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run v1.2.0)")"
@@ -993,7 +994,7 @@ expect "120 seconds is enough" "" "$(lines_of '^MAINT (start|end)')"
 # is waited out and replaced by one of our own.
 fresh_server
 expect "a release when a window appears with 600 seconds left" 0 "$(FAKE_MAINT_START3=600 run v1.0.0)"
-expect "the window that appeared is checked, used and left alone" "MAINT end" "MAINT end$(lines_of '^MAINT end' | cut -d' ' -f3-)"
+expect "the window that appeared is checked, used and no maintenance end of any form ran" 0 "$(grep -c '^MAINT end' "$work/ctl.log" || true)"
 expect "it asked how long was left" 1 "$(grep -c '^MAINT left' "$work/ctl.log")"
 fresh_server
 expect "a release when a window appears with 30 seconds left" 0 "$(FAKE_MAINT_START3=30 run v1.0.0)"
@@ -1015,7 +1016,7 @@ expect "nothing installed after the wait" "echo ti-dashboard hand" "$(installed 
 # A window this run did not open is never ended, however the run goes.
 fresh_server
 expect "a failed release in a borrowed window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run v1.2.0)")"
-expect "a borrowed window is not ended" "" "$(lines_of '^MAINT end')"
+expect "a borrowed window is not ended: no maintenance end of any form ran" 0 "$(grep -c '^MAINT end' "$work/ctl.log" || true)"
 # A rollback is an install too.
 fresh_server
 expect "a first release" 0 "$(run v1.0.0)"

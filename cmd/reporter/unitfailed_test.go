@@ -1020,7 +1020,7 @@ func TestAStaleSampleOfAFailedRunIsNotCountedTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	sampled := map[string]unitSample{unit: {failed: true, invocation: secondRun}}
-	if _, err := unitStep(path, []string{unit}, nil, sampled, base.Add(60*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(60*time.Minute), time.Hour, nil, nil); err != nil {
+	if _, err := unitStep(path, []string{unit}, nil, sampled, base.Add(60*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(60*time.Minute), time.Hour, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, _, repeats, _, err := loadState(path)
@@ -1296,7 +1296,7 @@ func dataStep(t *testing.T, r http.RoundTripper, path string, systemd standInSys
 	if len(stale) > 0 {
 		samples[dataJob] = stale[0]
 	}
-	return unitStep(path, nil, []string{dataJob}, samples, time.Time{}, systemd.journalctl(), nil, senders, setAside, at, time.Hour, nil, now)
+	return unitStep(path, nil, []string{dataJob}, samples, time.Time{}, systemd.journalctl(), nil, senders, setAside, at, time.Hour, nil, now, nil)
 }
 
 func TestAStaleFailedDataJobSampleCannotPageOrResolveOnItsOwnWord(t *testing.T) {

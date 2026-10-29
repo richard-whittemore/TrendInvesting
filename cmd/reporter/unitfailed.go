@@ -578,7 +578,7 @@ func splitUnits(list string) []string {
 // the next firing), and every other error, including any failure to persist
 // the record, is hard and fails the firing (ADR 0019: delivery state is
 // durable).
-func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, window func() time.Time, current func(string) (unitSample, error)) (soft, hard error) {
+func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, window func() time.Time, current func(string) (unitSample, error), note func(string)) (soft, hard error) {
 	var softErrs, hardErrs []error
 	err := withUnitState(path, at, func(u *unitState) error {
 		// Held records are a window's. Whether one holds a failed unit is asked
@@ -590,14 +590,6 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 		// close summary. A record newer than the sample, or of a unit this
 		// instance does not sample, is left exactly as it is (maintenance.go).
 		changed := false
-		// closing records what each held unit came to, written in the same
-		// save as the removal of its held record, so a summary that could not
-		// be delivered is still owed (flushClosing).
-		closing := func(unit, status string, taken []held) {
-			for _, h := range taken {
-				setClosing(u, unit, status, h.until, at)
-			}
-		}
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
 			resolves := slices.Contains(resolveOnly, unit)
@@ -638,27 +630,17 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 					changed = true
 					continue
 				}
-				taken := takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), time.Time{})
-				if len(taken) > 0 {
-					closing(unit, closingPending, taken)
+				// Still failed once the window is closed: the hold is forgotten and
+				// the ordinary page follows, gated by nothing else.
+				if len(takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), time.Time{})) > 0 {
 					changed = true
 				}
-				var paged error
 				switch {
 				case resolves && handledRun(u, unit, sample.invocation):
 				case resolves:
-					paged = failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, time.Time{}, every)
+					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, time.Time{}, every))
 				default:
-					paged = failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every)
-				}
-				fail(paged)
-				if len(taken) > 0 {
-					status := closingPaged
-					if paged != nil {
-						status = closingRetrying
-					}
-					closing(unit, status, taken)
-					changed = true
+					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
 				}
 				continue
 			}
@@ -675,8 +657,11 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				changed = true
 			}
 			if holdFor(report.KindUnitFailed, window).IsZero() {
-				if taken := takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), cutoff); len(taken) > 0 {
-					closing(unit, closingRecovered, taken)
+				for _, h := range takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), cutoff) {
+					line := recordRecoveredHeld(u, unit, h.until, at)
+					if note != nil {
+						note(line)
+					}
 					changed = true
 				}
 			}

@@ -41,15 +41,13 @@ rehearse_maintenance_window() {
   ti-maintenance end >/dev/null || fail "ti-maintenance end failed"
   test ! -e "$marker" || fail "ti-maintenance end left the marker"
   systemctl start ti-reporter@boost.service || fail "the reporter's firing after the window failed"
-  # ntfy (the owner's own server) takes the page and the routine close summary;
-  # Pushover, an urgent channel, takes only the page.
-  { test "$(ntfy_pages)" = "$((ntfy0 + 2))" && test "$(pushover_pages)" = "$((push0 + 1))"; } ||
-    fail "the unit still failed at the window's close did not page once and get one close summary (ntfy $(ntfy_pages) from $ntfy0, Pushover $(pushover_pages) from $push0)"
-  decoded_bodies | grep -q 'maintenance window closed; held: .*still failed (paged)' || fail "the close summary does not say what the window held"
+  # Each channel takes the page, once, and the close sends no message of its own.
+  { test "$(ntfy_pages)" = "$((ntfy0 + 1))" && test "$(pushover_pages)" = "$((push0 + 1))"; } ||
+    fail "the unit still failed at the window's close did not page each channel once (ntfy $(ntfy_pages) from $ntfy0, Pushover $(pushover_pages) from $push0)"
   decoded_bodies | grep -q "$engine failed" || fail "the page at the window's close does not name $engine"
   systemctl start ti-reporter@boost.service || fail "the second reporter firing after the window failed"
-  { test "$(ntfy_pages)" = "$((ntfy0 + 2))" && test "$(pushover_pages)" = "$((push0 + 1))"; } || fail "the unit paged or was summarised again at the next firing"
-  pass "a unit that fails inside a window and stays failed is recorded, not paged, and pages once, with one close summary, at the firing after the window closes"
+  { test "$(ntfy_pages)" = "$((ntfy0 + 1))" && test "$(pushover_pages)" = "$((push0 + 1))"; } || fail "the unit paged again at the next firing"
+  pass "a unit that fails inside a window and stays failed is recorded, not paged, and pages once at the firing after the window closes"
 
   # A window that expires on its own: nobody ends it, and it holds nothing after.
   new_episode

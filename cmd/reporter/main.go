@@ -424,7 +424,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat, windowNow, func(unit string) (unitSample, error) {
 			samples, err := sampleUnitsFor(*systemctl, []string{unit}, "the trading units were checked; only the data job's resolve and backup page are skipped at this firing")
 			return samples[unit], err
-		})
+		}, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) })
 		if soft != nil {
 			_, _ = fmt.Fprintln(out, "reporter: the data job's page or resolve could not be completed and is retried at the next firing: "+soft.Error())
 		}
@@ -457,14 +457,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 		if sched, err := gatewayScheduleFrom(getenv); err != nil {
 			failures = append(failures, err)
-		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, senders, setAside, now); err != nil {
+		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, senders, setAside, now); err != nil {
 			failures = append(failures, err)
 		}
-	}
-	// What a closed window held, the units' failures and the Gateway's outage
-	// together, is told in one routine message, owed until it is delivered.
-	if err := flushClosingStep(unitStatePath, senders, setAside, now(), *repeat, out); err != nil {
-		failures = append(failures, err)
 	}
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
@@ -487,9 +482,23 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		case err != nil:
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
 		case due:
+			// What a maintenance window held and that then recovered is listed
+			// once, in the first summary delivered after it; a summary already
+			// delivered today carries nothing new. Reading or clearing that list
+			// never holds the summary back.
+			var listed []string
+			if !deliveredAnywhere(seen, a.Key) {
+				var line string
+				line, listed = recoveredHeldLine(unitStatePath)
+				a.Body += line
+			}
 			a.Body += notDelivering(setAside)
 			if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
 				failures = append(failures, err)
+			} else if len(listed) > 0 && deliveredAnywhere(seen, a.Key) {
+				if err := forgetRecoveredHeld(unitStatePath, listed, at); err != nil {
+					failures = append(failures, err)
+				}
 			}
 		}
 	}

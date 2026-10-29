@@ -4,11 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"io"
 	"io/fs"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -144,192 +141,93 @@ func heldOf(sent map[string]time.Time, prefix string) (found []held) {
 	return found
 }
 
-// What a held unit came to, as the close summary will say it.
+// gatewayName names the Gateway among the held conditions, and
+// gatewayHeldPrefix begins its held record's alert key (gatewayHeldKey): the
+// Gateway is held by the same record as a unit, in the unit-failure record.
 const (
-	closingRecovered = "recovered"
-	closingPending   = "pending"
-	closingPaged     = "paged"
-	closingRetrying  = "retrying"
-	closingNotYet    = "notyet"
-)
-
-// gatewayClosingName names the Gateway among the held conditions of a close
-// summary, and gatewayHeldPrefix begins its held record's alert key
-// (gatewayHeldKey): the Gateway is held and told by the same machinery as a
-// unit, in the unit-failure record.
-const (
-	gatewayClosingName = "IB Gateway"
-	gatewayHeldPrefix  = "gateway-out:"
+	gatewayName       = "IB Gateway"
+	gatewayHeldPrefix = "gateway-out:"
 )
 
 func gatewayHeldKey(host string) string { return gatewayHeldPrefix + host }
 
-// closingPrefix begins the channel part of a closing record's key in the unit
-// state's sent times: closing:<status>:<window's end>|<unit>. A closing record
-// is a close summary that is owed: it is written in the same save as the
-// removal of the held record it replaces and is removed only once the summary
-// has been delivered, so a summary that could not be sent is sent at a later
-// firing (ADR 0019, "Alerting": delivery state is durable).
-const closingPrefix = "closing:"
+// A held condition ends in one of two ways at the first firing after the
+// window closes. If it is still wrong it is paged by the ordinary path (the
+// page is never gated by any of this bookkeeping). If it recovered it is
+// marked handled and recorded here as held and recovered: the firing says so
+// in one output line, and the next daily summary lists it, read from these
+// records and removed once that summary has been delivered.
+const recoveredHeldPrefix = "recovered-held:"
 
-func closingKey(status string, until time.Time, unit string) string {
-	return channelKey(closingPrefix+status+":"+until.UTC().Format(time.RFC3339), unit)
-}
+// maxRecoveredHeld bounds the records kept for a daily summary that is never
+// sent.
+const maxRecoveredHeld = 50
 
-// setClosing records that the window ending at until held unit and that it
-// came to status, replacing any earlier status for the same window.
-func setClosing(u *unitState, unit, status string, until, at time.Time) {
-	for _, c := range closingOf(u.sent) {
-		if c.unit == unit && c.until.Equal(until) {
-			delete(u.sent, closingKey(c.status, c.until, c.unit))
+// recordRecoveredHeld records that the window ending at until held name and
+// that it recovered, and returns the output line that says so.
+func recordRecoveredHeld(u *unitState, name string, until, at time.Time) string {
+	w := until.UTC().Format(time.RFC3339)
+	u.sent[channelKey(recoveredHeldPrefix+w, name)] = at
+	if len(recoveredHeldIn(u.sent)) > maxRecoveredHeld {
+		all := recoveredHeldIn(u.sent)
+		sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+		for _, r := range all[:len(all)-maxRecoveredHeld] {
+			delete(u.sent, r.key)
 		}
 	}
-	u.sent[closingKey(status, until, unit)] = at
+	return "held during maintenance and recovered: " + name + " (" + w + ")"
 }
 
-type closing struct {
-	unit, status string
-	until        time.Time
+type recoveredHeld struct {
+	key, name, window string
+	at                time.Time
 }
 
-// closingOf lists the closing records.
-func closingOf(sent map[string]time.Time) (found []closing) {
-	for k := range sent {
-		ch, unit, ok := strings.Cut(k, "|")
-		rest, isClosing := strings.CutPrefix(ch, closingPrefix)
-		if !ok || !isClosing {
-			continue
+func recoveredHeldIn(sent map[string]time.Time) (found []recoveredHeld) {
+	for k, at := range sent {
+		ch, name, ok := strings.Cut(k, "|")
+		w, isRecovered := strings.CutPrefix(ch, recoveredHeldPrefix)
+		if ok && isRecovered {
+			found = append(found, recoveredHeld{key: k, name: name, window: w, at: at})
 		}
-		status, untilText, _ := strings.Cut(rest, ":")
-		until, err := time.Parse(time.RFC3339, untilText)
-		if err != nil {
-			continue
-		}
-		found = append(found, closing{unit: unit, status: status, until: until})
 	}
 	return found
 }
 
-// closingText is how the summary says what a held unit came to.
-func closingText(c closing) string {
-	if c.unit == gatewayClosingName {
-		switch c.status {
-		case closingRecovered:
-			return "IB Gateway recovered"
-		case closingPaged:
-			return "IB Gateway still logged out (paged)"
-		case closingRetrying:
-			return "IB Gateway still logged out (page failed, retrying)"
-		case closingPending:
-			return "IB Gateway still logged out (page pending)"
-		}
-		return "IB Gateway still logged out (not paged yet: its 10 minutes have not passed)"
+// recoveredHeldLine is the daily summary's line listing what was held and
+// recovered since the previous daily summary, and the records it lists; empty
+// when there are none or the record cannot be read (a summary never waits for
+// it).
+func recoveredHeldLine(path string) (line string, keys []string) {
+	if path == "" {
+		return "", nil
 	}
-	switch c.status {
-	case closingRecovered:
-		return c.unit + " recovered"
-	case closingPaged:
-		return c.unit + " still failed (paged)"
-	case closingRetrying:
-		return c.unit + " still failed (page failed, retrying)"
+	_, sent, _, _, err := loadState(path)
+	if err != nil {
+		return "", nil
 	}
-	return c.unit + " still failed (page pending)"
+	found := recoveredHeldIn(sent)
+	sort.Slice(found, func(i, j int) bool { return found[i].window+found[i].name < found[j].window+found[j].name })
+	var parts []string
+	for _, r := range found {
+		parts = append(parts, r.name+" ("+r.window+")")
+		keys = append(keys, r.key)
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return "Held during maintenance and recovered since the last daily summary: " + strings.Join(parts, ", ") + "\n", keys
 }
 
-// summaryTakerAmong reports whether any sender takes the routine summary.
-func summaryTakerAmong(senders []sender) bool {
-	for _, s := range senders {
-		if t, ok := s.(summaryTaker); ok && t.takesSummary() {
-			return true
-		}
-	}
-	return false
-}
-
-// flushClosingStep is flushClosing under the unit-failure record's lock. It
-// does nothing, and creates nothing, when there is no record yet.
-func flushClosingStep(path string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, out io.Writer) error {
-	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+// forgetRecoveredHeld removes the records a delivered daily summary listed.
+func forgetRecoveredHeld(path string, keys []string, at time.Time) error {
+	if path == "" || len(keys) == 0 {
 		return nil
-	} else if err != nil {
-		return err
 	}
 	return withUnitState(path, at, func(u *unitState) error {
-		return flushClosing(u, senders, setAside, at, every, out)
+		for _, k := range keys {
+			delete(u.sent, k)
+		}
+		return u.record()
 	})
 }
-
-// attemptsKey counts the firings that have tried to deliver the close summary
-// of the window that ended at w.
-func attemptsKey(w string) string { return channelKey("closing-attempts", w) }
-
-// flushClosing sends, for each window that has closed, the ONE routine message
-// that says what it held, the units and the Gateway together: "maintenance
-// window closed; held: <unit> recovered, <unit> still failed (paged)". It goes
-// only where the daily summary goes (the owner's own ntfy server: deliver
-// restricts kindSummary to such a channel), never to an urgent channel or the
-// issue tracker. A message that could not be delivered, or whose channel is
-// configured but set aside today, stays owed in its closing records and is
-// tried at each later firing; it is given up only after maxClosingAttempts
-// firings, said once in out and recorded. One that has been delivered, or has
-// nowhere to go because no such channel is configured, leaves nothing behind.
-// A page is called "paged" only when it was delivered.
-func flushClosing(u *unitState, senders []sender, setAside []channelFault, at time.Time, every time.Duration, out io.Writer) error {
-	byWindow := map[string][]closing{}
-	for _, c := range closingOf(u.sent) {
-		w := c.until.UTC().Format(time.RFC3339)
-		byWindow[w] = append(byWindow[w], c)
-	}
-	windows := make([]string, 0, len(byWindow))
-	for w := range byWindow {
-		windows = append(windows, w)
-	}
-	sort.Strings(windows)
-	routeSetAside := slices.ContainsFunc(setAside, func(f channelFault) bool { return f.channel == "ntfy" })
-	var errs []error
-	for _, w := range windows {
-		recs := byWindow[w]
-		sort.Slice(recs, func(i, j int) bool { return recs[i].unit < recs[j].unit })
-		var parts []string
-		for _, c := range recs {
-			parts = append(parts, closingText(c))
-		}
-		body := "maintenance window closed; held: " + strings.Join(parts, ", ")
-		key := "maintenance-closed:" + w + ":" + shortHash(body)
-		var failure error
-		switch {
-		case summaryTakerAmong(senders):
-			a := report.Alert{Key: key, Kind: kindSummary, Severity: report.Routine, AccountID: hostName(), At: at, Title: hostName() + ": maintenance window closed", Body: body, PublicBody: body}
-			failure = deliver(senders, a, u.seen, u.sent, u.repeats, at, every, u.record)
-		case routeSetAside:
-			failure = errors.New("the owner's ntfy channel is set aside")
-		}
-		if failure != nil {
-			n := u.repeats[attemptsKey(w)] + 1
-			u.repeats[attemptsKey(w)] = n
-			if n < maxClosingAttempts {
-				errs = append(errs, failure, u.record())
-				continue
-			}
-			_, _ = fmt.Fprintf(out, "reporter: gave up delivering the close summary of the maintenance window that ended %s after %d firings (%s): %s\n", w, n, failure, body)
-			u.sent[channelKey("closing-gaveup", w)] = at
-		}
-		for _, c := range recs {
-			delete(u.sent, closingKey(c.status, c.until, c.unit))
-		}
-		delete(u.repeats, attemptsKey(w))
-		forgetAlert(key, nil, u.seen, u.sent, u.repeats)
-		errs = append(errs, u.record())
-	}
-	return errors.Join(errs...)
-}
-
-// shortHash names a summary's content in its key, so a changed outcome is a
-// new message.
-func shortHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:6])
-}
-
-// maxClosingAttempts is how many firings a close summary is tried for.
-const maxClosingAttempts = 12
