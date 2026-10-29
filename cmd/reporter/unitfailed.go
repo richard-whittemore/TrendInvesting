@@ -565,10 +565,12 @@ func splitUnits(list string) []string {
 func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, hold time.Time, current func(string) (unitSample, error)) (soft, hard error) {
 	var softErrs, hardErrs []error
 	err := withUnitState(path, at, func(u *unitState) error {
-		// Held records are a window's: with none open they are judged afresh
-		// below, by the normal paths; inside one a failed unit is recorded and
-		// not paged, and one no longer failed is forgotten (maintenance.go).
-		changed := hold.IsZero() && dropHeld(u.sent, "")
+		// Held records are a window's: inside one a failed unit is recorded
+		// and not paged; with none open each is judged afresh below, by the
+		// normal paths. A failed unit pages (failedRun), and one that recovered
+		// has its held runs marked handled before they are forgotten, so a
+		// stale redelivery of one never pages it (maintenance.go).
+		changed := false
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
 			resolves := slices.Contains(resolveOnly, unit)
@@ -619,7 +621,8 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
 				continue
 			}
-			if dropHeld(u.sent, report.UnitFailedKeyPrefix(unit)) {
+			for _, key := range dropHeld(u.sent, report.UnitFailedKeyPrefix(unit)) {
+				handleRuns(u, unit, key, strings.TrimPrefix(key, report.UnitFailedKeyPrefix(unit)), at)
 				changed = true
 			}
 			for invocation, recorded := range unitRecords(u, unit) {
@@ -630,6 +633,11 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				handleRuns(u, unit, key, invocation, at)
 				fail(resolveKey(u, key, senders, setAside, at))
 			}
+		}
+		// With no window open nothing is held: a unit the firing did not sample
+		// (the hook's own) is paged by the hook's next failure.
+		if hold.IsZero() && len(dropHeld(u.sent, "")) > 0 {
+			changed = true
 		}
 		if changed {
 			hardErrs = append(hardErrs, u.record())

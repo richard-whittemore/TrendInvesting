@@ -196,6 +196,7 @@ export FAKE_CTL_LOG=$work/ctl.log FAKE_GH_LOG=$work/gh.log FAKE_CURL_LOG=$work/c
 cat >"$work/stub/ti-maintenance" <<'STUB'
 #!/bin/bash
 echo "MAINT $*" >>"$FAKE_CTL_LOG"
+if test "$1" = is-open; then test -n "${FAKE_MAINT_OPEN:-}"; exit; fi
 test -z "${FAKE_MAINT_FAIL:-}" || test "$1" != "${FAKE_MAINT_FAIL}" || { echo "ti-maintenance: refused" >&2; exit 1; }
 STUB
 cat >"$work/stub/sleep" <<'STUB'
@@ -907,13 +908,10 @@ for pair in "0 60" "30 30" "59 1" "60 0" "239 0" "240 120" "299 61"; do
     expect "wait at $past s past a mark" "SLEEP $want;" "$(lines_of '^SLEEP')"
   fi
   expect "window at $past s past a mark" "MAINT start $((want + 300))s;" "$(lines_of '^MAINT start')"
+  asked=$(grep -E '^MAINT start' "$work/ctl.log" | sed 's/^MAINT start \([0-9]*\)s$/\1/')
+  if ! test "$asked" -le 1800 2>/dev/null || ! test "$asked" -ge 1; then fail "the window ti-release asked for at $past s past a mark is '$asked' seconds, outside 1 to 1800"; fi
   if test "$(line_no '^SLEEP')" != "" && test "$(line_no '^SLEEP')" -ge "$(line_no '^restart ti-dashboard')"; then fail "the install began before the wait at $past s"; fi
 done
-# A window never needs more than the 30 minutes ti-maintenance allows.
-for sec in 0 60 240 299; do
-  test $(( ( (361 - sec) % 300 ) + 300 )) -le 1800 || fail "window at $sec s exceeds 30 minutes"
-done
-
 # A release that fails verification (the dashboard does not stay up) closes
 # the window as well.
 fresh_server
@@ -923,7 +921,7 @@ expect "a failed release closes the window" "MAINT end;" "$(lines_of '^MAINT end
 # just before the swap).
 fresh_server
 expect "a late refusal is nonzero" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY_FROM=2 run v1.0.0)")"
-expect "a late refusal closes the window it opened" "MAINT start 300s;MAINT end;" "$(lines_of '^MAINT')"
+expect "a late refusal closes the window it opened" "MAINT start 300s;MAINT end;" "$(lines_of '^MAINT (start|end)')"
 # A window that cannot be opened stops the install before it begins.
 fresh_server
 expect "no window, no install" nonzero "$(nonzero "$(FAKE_MAINT_FAIL=start run v1.0.0)")"
@@ -934,6 +932,14 @@ fresh_server
 expect "no ti-maintenance, no install" nonzero "$(nonzero "$(TI_MAINTENANCE=$work/stub/no-such-maintenance run v1.0.0)")"
 grep -q "ti-maintenance" "$work/out" || fail "the refusal does not name ti-maintenance: $(cat "$work/out")"
 expect "nothing installed without ti-maintenance" "echo ti-dashboard hand" "$(installed ti-dashboard)"
+# A window the owner opened by hand is used, not replaced, extended or ended.
+fresh_server
+expect "a release inside a hand-opened window installs" 0 "$(FAKE_MAINT_OPEN=1 run v1.0.0)"
+expect "it opens no window of its own" "" "$(lines_of '^MAINT (start|end)')"
+grep -q "already open" "$work/out" || fail "ti-release does not say it is using the open window: $(cat "$work/out")"
+fresh_server
+expect "a failed release inside a hand-opened window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run v1.2.0)")"
+expect "a failed release leaves the hand-opened window alone" "" "$(lines_of '^MAINT (start|end)')"
 # A rollback is an install too.
 fresh_server
 expect "a first release" 0 "$(run v1.0.0)"

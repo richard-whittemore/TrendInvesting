@@ -27,7 +27,7 @@ func TestMaintenanceNoteNamesTheEndOfAnOpenWindowOnly(t *testing.T) {
 	if got := maintenanceNote(path, at); got != "" {
 		t.Errorf("note with no marker = %q", got)
 	}
-	body := `{"opened":"2026-10-28T18:59:00Z","until":"2026-10-28T19:10:00Z"}`
+	body := `{"opened":"2026-10-28T18:59:00Z","until":"2026-10-28T19:10:00Z","opened_unix":1793213940,"until_unix":1793214600}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -137,8 +137,8 @@ type hostGateway struct {
 	StartFailing bool `json:"start_failing,omitempty"` // a failing start is open, until it closes
 	RestartOnly  bool `json:"restart_only,omitempty"`  // the outage was opened by the restart rule alone
 	// Held is the end of the maintenance window that held this outage's page:
-	// the outage was recorded and not paged, and when the window has closed it
-	// pages at once, without counting its grace again (maintenance.go).
+	// a record only, that the outage was seen and not paged inside it
+	// (maintenance.go).
 	Held *time.Time `json:"held_in_maintenance_until,omitempty"`
 }
 
@@ -285,13 +285,15 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		return err
 	}
 	// A maintenance window records the outage and pages nothing, reminders
-	// included; once it has closed an outage it held pages at once, since the
-	// window was the reason it had not (restart windows still count).
+	// included. It does not move the outage's start, so the ten minutes still
+	// count from it: an outage already that old pages at the first firing after
+	// the window closes, and a shorter one waits out the rest (restart windows
+	// still count).
 	if !hold.IsZero() {
 		h.Held = &hold
 		return record()
 	}
-	if sched.inWindow(now) || (h.Held == nil && now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter) {
+	if sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter {
 		return nil
 	}
 	h.Held = nil

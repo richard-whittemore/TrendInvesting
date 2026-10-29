@@ -63,7 +63,8 @@
 # Maintenance window: once the release is fetched and checked, ti-release
 # opens a maintenance window (ti-maintenance start; deploy/maintenance.sh)
 # sized to its own worst case, waits until it is 1 to 3 minutes past a
-# 5-minute mark so no reporter firing lands on a program being replaced,
+# 5-minute mark, so a reporter firing rarely overlaps the swap (the window
+# covers one that does),
 # installs, verifies, and closes the window as it exits, whether the install
 # worked or not: a failed one closes it too, so what is still broken pages at
 # the reporter's next firing (docs/manual/server.md, "Installing a release";
@@ -278,9 +279,11 @@ sleep_cmd=${TI_RELEASE_SLEEP:-sleep}
 # seconds_to_quiet_mark: how long to wait before replacing a program. The
 # reporter's timer fires at every 5-minute mark of the New York clock (an
 # offset of whole hours, so the marks are the multiples of 300 seconds since
-# the epoch), with systemd's one minute of accuracy, and a firing lasts
-# seconds; the install starts when it is 60 to 239 seconds past a mark: now,
-# if it is, else at 60 seconds past the next mark. The wait is at most 120.
+# the epoch), up to a minute late (systemd's accuracy); a firing can run for
+# minutes, so no time is certain to be clear of one. The install starts when
+# it is 60 to 239 seconds past a mark, so a collision is unlikely, and the
+# window makes one harmless: now, if it is, else at 60 seconds past the next
+# mark. The wait is at most 120.
 seconds_to_quiet_mark() {
   local past=$(( ${TI_RELEASE_NOW:-$(date +%s)} % 300 ))
   if test "$past" -lt 60; then echo $((60 - past))
@@ -296,10 +299,16 @@ open_window() {
   local wait_for
   test -n "$maint" && test -x "$maint" || die "ti-maintenance is not installed beside ti-release, so no maintenance window can be opened; nothing installed. Run sudo deploy/release.sh --install from the checkout, then try again"
   wait_for=$(seconds_to_quiet_mark)
-  "$maint" start "$((wait_for + 300))s" || die "could not open a maintenance window; nothing installed"
-  window_open=1
+  if "$maint" is-open; then
+    # A window the owner opened is theirs: used as it is, never replaced,
+    # extended or ended by this run.
+    log "a maintenance window is already open; using it (it is not extended and is left open): $("$maint" status)"
+  else
+    "$maint" start "$((wait_for + 300))s" || die "could not open a maintenance window; nothing installed"
+    window_open=1
+  fi
   if test "$wait_for" -gt 0; then
-    log "waiting $wait_for seconds for a quiet moment after a 5-minute mark, so no reporter firing lands on a program being replaced"
+    log "waiting $wait_for seconds for a quiet moment after a 5-minute mark, so a reporter firing rarely overlaps the swap"
     "$sleep_cmd" "$wait_for"
   fi
 }

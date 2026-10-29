@@ -57,9 +57,10 @@ rehearse_maintenance_window() {
   fail_engine
   wait_hook "$n"
   test "$(pushover_pages)" = "$((push0 + 1))" || fail "a failure after a window expired on its own was held"
-  test ! -e "$marker" || fail "the expired marker was not removed by the hook that found it"
+  ti-maintenance status | grep -q 'maintenance window closed' || fail "ti-maintenance status calls the expired window open"
+  test -e "$marker" || fail "the hook removed the expired marker: no reader removes one, so a start in flight is never undone"
   new_episode
-  pass "a window that expires on its own holds nothing after its expiry, and the hook that finds the marker removes it"
+  pass "a window that expires on its own holds nothing after its expiry, and no reader removes the marker"
 }
 
 # rehearse_capital_safety_in_window: the engine is Halted (the drill in

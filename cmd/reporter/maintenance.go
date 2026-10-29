@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/maintenance"
-	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 // A maintenance window (internal/maintenance) holds back the alerts that
@@ -34,14 +33,13 @@ func holdAlert(sent map[string]time.Time, until, at time.Time, alertKey string) 
 }
 
 // dropHeld forgets every held record whose alert key begins with prefix (all
-// of them for ""), and says whether it forgot any.
-func dropHeld(sent map[string]time.Time, prefix string) bool {
-	dropped := false
+// of them for ""), and returns the alert keys it forgot.
+func dropHeld(sent map[string]time.Time, prefix string) (dropped []string) {
 	for k := range sent {
 		ch, alert, ok := strings.Cut(k, "|")
 		if ok && strings.HasPrefix(ch, heldPrefix) && strings.HasPrefix(alert, prefix) {
 			delete(sent, k)
-			dropped = true
+			dropped = append(dropped, alert)
 		}
 	}
 	return dropped
@@ -58,31 +56,16 @@ func maintenancePath(flagValue, statePath string) string {
 }
 
 // windowEnd is when the window open at at ends, or the zero time when none is
-// open. An expired marker is removed by the read.
+// open. Nothing is removed: an expired marker already reads closed, and a
+// start that replaces it must never be undone by a reader that read the old
+// one.
 func windowEnd(path string, at time.Time) time.Time {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return time.Time{}
 	}
-	m, open, expired := maintenance.Read(raw, at)
-	if expired {
-		_ = os.Remove(path)
-	}
-	if open {
+	if m, open := maintenance.Read(raw, at); open {
 		return m.Until
 	}
 	return time.Time{}
-}
-
-// splitHeld separates the alerts a window holds, recording each, from those
-// delivered as always.
-func splitHeld(alerts []report.Alert, sent map[string]time.Time, until, at time.Time) (deliverable []report.Alert) {
-	for _, a := range alerts {
-		if report.HeldDuringMaintenance(a) {
-			holdAlert(sent, until, at, a.Key)
-			continue
-		}
-		deliverable = append(deliverable, a)
-	}
-	return deliverable
 }

@@ -105,10 +105,6 @@ type Alert struct {
 	PublicBody   string
 	Repeat       bool
 	Acknowledged bool
-	// StateUnchanged is set on a reconciliation alert whose difference moved
-	// no account state (a cash read the Flex reader has not covered): the only
-	// reconciliation a maintenance window holds (HeldDuringMaintenance).
-	StateUnchanged bool
 }
 
 // Due reports whether a is to be sent to a channel now: never delivered to
@@ -512,7 +508,7 @@ func pendingCashAlert(account string, e event.Envelope, p event.ReconciliationRe
 		direction, day, verb, after.name(), buys, day, event.PendingCashReadSessions)
 	end := " Check IBKR's activity for the transfer if you made none that day: docs/manual/reconciliation.md, \"A deposit or withdrawal you make\"." + acknowledgeLine(key)
 	return Alert{
-		Key: key, Kind: KindReconciliation, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true, StateUnchanged: true,
+		Key: key, Kind: KindReconciliation, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
 		Title:      fmt.Sprintf("%s: reconciliation %s (%s)", account, p.Classification, p.ReconciliationID),
 		Body:       fmt.Sprintf("%s: cash differs from the book by %s %s %s Reconciliation %s: %s.%s", account, cents(abs(residual)), p.Currency, rest, p.ReconciliationID, p.Detail, end),
 		PublicBody: fmt.Sprintf("%s: cash differs from the book %s Figures are in the journal (journal-query) and the dashboard.%s", account, rest, end),

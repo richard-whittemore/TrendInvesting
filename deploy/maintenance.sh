@@ -7,10 +7,13 @@
 #                                          number of minutes)
 #   sudo ti-maintenance end                close it
 #   ti-maintenance status                  say whether one is open, and until when
+#   ti-maintenance is-open                 exit 0 when one is open, 1 when not
+#                                          (what ti-release asks, so it never
+#                                          overwrites or ends a window you opened)
 #
 # While a window is open the reporter still fires and still pings the outside
-# heartbeat; it RECORDS failed units, a logged-out Gateway and a reconciliation
-# alert without paging them, and pages whatever is still wrong at the first
+# heartbeat; it RECORDS failed units and a logged-out Gateway
+# without paging them, and pages whatever is still wrong at the first
 # firing after the window closes. An order refused, a halt, a Degraded state
 # and the other capital-safety alerts are never held (internal/report,
 # maintenance.go; ADR 0019, "Alerting"). `ti-release` opens and closes a window
@@ -25,6 +28,13 @@
 # shell script that must work while the Go programs are being replaced, and a
 # seventh program would join the release's checksum, build and attestation
 # lists for a dozen lines of work.
+#
+# A marker is judged here exactly as internal/maintenance.Read judges it (one
+# set of fixture files, internal/maintenance/testdata/markers, is run through
+# both): both ends in both forms and agreeing, no more than 30 minutes long,
+# and now from its opening to before its expiry; anything else is closed. No
+# reader removes a marker, expired or not: it reads closed whoever sees it, and
+# the next start replaces it, so a start in flight is never undone.
 #
 # Settings for tests (the server needs none): TI_MAINTENANCE_FILE,
 # TI_MAINTENANCE_NOW (epoch seconds), TI_MAINTENANCE_NO_ROOT.
@@ -43,9 +53,10 @@ need_root() {
   fi
 }
 
-# seconds DURATION: the duration in seconds, or nothing if it is not one.
+# seconds DURATION: the duration in seconds, or nothing if it is not one. At
+# most five digits are read, so the arithmetic below cannot overflow.
 seconds() {
-  [[ $1 =~ ^[0-9]+[ms]?$ ]] || return 1
+  [[ $1 =~ ^[0-9]{1,5}[ms]?$ ]] || return 1
   case $1 in
     *m) printf '%s' "$(( 10#${1%m} * 60 ))" ;;
     *s) printf '%s' "$(( 10#${1%s} ))" ;;
@@ -53,8 +64,21 @@ seconds() {
   esac
 }
 
-# until_unix: the open marker's expiry in epoch seconds, or nothing.
-until_unix() { sed -n 's/.*"until_unix":\([0-9][0-9]*\).*/\1/p' "$file" 2>/dev/null | head -n 1; }
+# field NAME: a marker field's value (a number, or a string without quotes).
+field() { sed -n 's/.*"'"$1"'": *"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' "$file" 2>/dev/null | head -n 1; }
+
+# until_unix: the expiry, in epoch seconds, of the window open now; nothing
+# when there is none or the marker cannot be trusted.
+until_unix() {
+  local o u os us t
+  test -r "$file" || return 0
+  o=$(field opened_unix); u=$(field until_unix); os=$(field opened); us=$(field until); t=$(now)
+  [[ $o =~ ^[0-9]{1,12}$ && $u =~ ^[0-9]{1,12}$ && -n $os && -n $us ]] || return 0
+  test "$u" -ge "$o" && test $((u - o)) -le "$max_s" || return 0
+  test "$t" -ge "$o" && test "$t" -lt "$u" || return 0
+  test "$(iso "$o")" = "$os" && test "$(iso "$u")" = "$us" || return 0
+  printf '%s' "$u"
+}
 
 cmd=${1:-}
 case $cmd in
@@ -65,7 +89,7 @@ case $cmd in
     if test $# -lt 2; then
       secs=$default_s
     else
-      secs=$(seconds "$d") || die "'$d' is not a duration (10m, 90s, or a number of minutes)"
+      secs=$(seconds "$d") || die "'$d' is not a duration (10m, 90s, or a number of minutes up to 30)"
     fi
     test "$secs" -ge 1 || die "the window must be at least a second long"
     test "$secs" -le "$max_s" || die "a window is at most 30 minutes; '$d' is longer, so none was opened"
@@ -73,35 +97,45 @@ case $cmd in
     end=$((t + secs))
     dir=$(dirname "$file")
     test -d "$dir" || die "$dir does not exist"
-    tmp=$(mktemp "$dir/.maintenance.XXXXXX")
-    printf '{"opened":"%s","until":"%s","opened_unix":%s,"until_unix":%s}\n' "$(iso "$t")" "$(iso "$end")" "$t" "$end" >"$tmp" || { rm -f "$tmp"; die "could not write the marker"; }
-    chmod 0644 "$tmp"
-    # The reporter's user owns the reports directory; the file is its to
-    # remove when it is past its expiry.
-    if test "${TI_MAINTENANCE_NO_ROOT:-0}" != 1; then chown ti-trader:ti-trader "$tmp" 2>/dev/null || true; fi
+    # Prepared in a folder only the writer can reach (root, on the server),
+    # then published into the reports folder, which the reporter's user owns,
+    # under a name no one can guess; no path in that folder is written,
+    # chmodded or chowned after it is created, so root follows none that the
+    # reporter's user could swap. The file stays the writer's: the reporter's
+    # user only reads it.
+    work=$(mktemp -d) || die "could not make a private folder"
+    trap 'rm -rf "$work"' EXIT
+    printf '{"opened":"%s","until":"%s","opened_unix":%s,"until_unix":%s}\n' "$(iso "$t")" "$(iso "$end")" "$t" "$end" >"$work/marker" || die "could not write the marker"
+    chmod 0644 "$work/marker"
+    pub=$(mktemp -u "$dir/.maintenance.XXXXXXXXXX")
+    install -m 0644 "$work/marker" "$pub" || { rm -f "$pub"; die "could not write the marker"; }
     # Durable before the rename, and the rename before this returns.
-    sync "$tmp" 2>/dev/null || sync
-    mv -f "$tmp" "$file" || { rm -f "$tmp"; die "could not write the marker"; }
+    sync "$pub" 2>/dev/null || sync
+    mv -f "$pub" "$file" || { rm -f "$pub"; die "could not write the marker"; }
     sync "$dir" 2>/dev/null || sync
     printf 'ti-maintenance: maintenance window open until %s (%s seconds); capital-safety alerts still page\n' "$(iso "$end")" "$secs"
     ;;
   end)
     need_root
     rm -f "$file"
+    # The removal is on disk before success is reported: a power cut must not
+    # bring an earlier marker back.
+    sync "$(dirname "$file")" 2>/dev/null || sync || die "could not make the close durable"
     echo "ti-maintenance: maintenance window closed; whatever is still broken pages at the reporter's next firing, within 5 minutes"
     ;;
   status)
     u=$(until_unix)
-    if test -z "$u" || test "$(now)" -ge "$u"; then
-      # A marker past its expiry is closed; removing it is a courtesy.
-      if test -e "$file" && { test "${TI_MAINTENANCE_NO_ROOT:-0}" = 1 || test "$(id -u)" -eq 0; }; then rm -f "$file"; fi
-      echo "no maintenance window"
+    if test -z "$u"; then
+      echo "maintenance window closed"
     else
       printf 'maintenance window open until %s (%s seconds left)\n' "$(iso "$u")" "$((u - $(now)))"
     fi
     ;;
+  is-open)
+    test -n "$(until_unix)"
+    ;;
   *)
-    echo "usage: ti-maintenance start [DURATION] | end | status" >&2
+    echo "usage: ti-maintenance start [DURATION] | end | status | is-open" >&2
     exit 1
     ;;
 esac

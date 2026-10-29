@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,9 @@ const markerName = "maintenance.json"
 // ends at until.
 func openWindow(t *testing.T, dir string, from, until time.Time) {
 	t.Helper()
-	body := `{"opened":"` + from.Add(-time.Minute).UTC().Format(time.RFC3339) + `","until":"` + until.UTC().Format(time.RFC3339) + `"}`
+	opened := from.Add(-time.Minute).UTC()
+	body := `{"opened":"` + opened.Format(time.RFC3339) + `","until":"` + until.UTC().Format(time.RFC3339) +
+		`","opened_unix":` + strconv.FormatInt(opened.Unix(), 10) + `,"until_unix":` + strconv.FormatInt(until.Unix(), 10) + `}`
 	if err := os.WriteFile(filepath.Join(dir, markerName), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -214,9 +217,50 @@ func TestAWindowedFiringStillPingsTheHeartbeatThoughAHeldUnitIsFailed(t *testing
 	if e.count("ping") != 1 {
 		t.Errorf("pings = %d inside a window, want 1 (events %v)", e.count("ping"), e.events)
 	}
+	// Once the window has closed the failed unit withholds the ping again.
+	at = at.Add(20 * time.Minute)
+	fire()
+	if e.count("ping") != 1 {
+		t.Errorf("pings = %d after the window closed with the unit still failed, want still 1 (events %v)", e.count("ping"), e.events)
+	}
 }
 
-func TestAnExpiredMarkerIsRemovedByTheFiringThatFindsIt(t *testing.T) {
+// A window is open for a firing only if it is open when the firing starts and
+// still open when it delivers: one that closes mid-firing holds nothing from
+// then on, and the failed unit pages and withholds the ping.
+func TestAWindowThatClosesDuringAFiringHoldsNothingFromThenOn(t *testing.T) {
+	const unit = "ti-adapter-boost.service"
+	e, server := newStandInEndpoint(t)
+	systemd := newStandInSystemd(t)
+	systemd.fail(unit)
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	openWindow(t, dir, start, start.Add(10*time.Minute))
+	calls := 0
+	clock := func() time.Time {
+		calls++
+		if calls == 1 {
+			return start // the firing starts inside the window
+		}
+		return start.Add(20 * time.Minute) // and it has closed by the time anything is delivered
+	}
+	environment := map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_HEARTBEAT_URL": server.URL + heartbeatPath}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-units", unit, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+	if err := run(args, env(environment), clock, &bytes.Buffer{}, server.Client()); err != nil {
+		t.Fatal(err)
+	}
+	if e.count("ping") != 0 {
+		t.Errorf("pinged with a failed unit after the window closed mid-firing: %v", e.events)
+	}
+	if strings.Contains(recordText(t, dir, "unit-failures.json"), "held:") {
+		t.Error("the unit was held by a window that had closed")
+	}
+}
+
+// No reader removes a marker: an expired one already reads closed, and a
+// start that replaces it a moment later must never be undone by a reader that
+// read the old one.
+func TestNoReaderRemovesAnExpiredMarker(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	systemd := newStandInSystemd(t)
 	dir := t.TempDir()
@@ -225,20 +269,24 @@ func TestAnExpiredMarkerIsRemovedByTheFiringThatFindsIt(t *testing.T) {
 	if err := firing(t, r, dir, systemd, at, "ti-adapter-boost.service"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(windowFile(dir)); !os.IsNotExist(err) {
-		t.Errorf("the expired marker is still there: %v", err)
+	if err := notifyAt(t, r, dir, systemd, monitored("ti-engine@boost.service", firstRun), at, "ti-engine@boost.service"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(windowFile(dir)); err != nil {
+		t.Errorf("a reader removed the expired marker: %v", err)
 	}
 }
 
-func TestAGatewayLoggedOutInAWindowIsRecordedAndPagesAtOnceWhenItCloses(t *testing.T) {
+// A window records an outage and pages nothing; it does not move the outage's
+// start, so the normal 10 minutes still count from it. An outage already older
+// than that when the window closes pages at the first firing after.
+func TestAnOldGatewayOutageHeldByAWindowPagesAtTheFiringAfterItCloses(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
 	g.logout()
 	dir := t.TempDir()
-	// The window covers the first 25 minutes; the outage is first seen in it
-	// at 14:20, so it is only six minutes old when the window closes at 14:25.
 	openWindow(t, dir, tuesday(14, 0), tuesday(14, 25))
-	for _, at := range []time.Time{tuesday(14, 20), tuesday(14, 22)} {
+	for _, at := range []time.Time{tuesday(14, 0), tuesday(14, 10), tuesday(14, 15), tuesday(14, 20)} {
 		if err := gatewayRun(t, r, dir, g.path(), "boost", at); err != nil {
 			t.Fatal(err)
 		}
@@ -260,6 +308,33 @@ func TestAGatewayLoggedOutInAWindowIsRecordedAndPagesAtOnceWhenItCloses(t *testi
 	}
 	if n := gatewayPages(r); n != 2 {
 		t.Errorf("the page repeated at once: %d", n)
+	}
+}
+
+func TestAShortGatewayOutageHeldByAWindowDoesNotPageWhenItCloses(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.logout()
+	dir := t.TempDir()
+	// First seen at 14:20, six minutes before the window closes at 14:25 and
+	// 14:26's firing: the Gateway may simply still be logging in.
+	openWindow(t, dir, tuesday(14, 0), tuesday(14, 25))
+	for _, at := range []time.Time{tuesday(14, 20), tuesday(14, 22)} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 26)); err != nil {
+		t.Fatal(err)
+	}
+	if n := gatewayPages(r); n != 0 {
+		t.Errorf("%d gateway pages for a six-minute outage when the window closed", n)
+	}
+	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 31)); err != nil {
+		t.Fatal(err)
+	}
+	if n := gatewayPages(r); n != 2 {
+		t.Errorf("%d gateway pages once the outage is 10 minutes old, want 1 per channel", n)
 	}
 }
 
@@ -319,29 +394,18 @@ func journalFiring(t *testing.T, r *relay, dir string, entries []journal.Entry, 
 	}
 }
 
-func TestAReconciliationThatMovedNoStateIsHeldInAWindowAndPagedAtItsClose(t *testing.T) {
+// No install causes a reconciliation, and a cash decrease is a money signal:
+// a window holds no reconciliation of any kind.
+func TestAPendingCashReconciliationIsNeverHeldByAWindow(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	dir := t.TempDir()
 	at := t0.Add(time.Hour)
 	openWindow(t, dir, at, at.Add(10*time.Minute))
 	journalFiring(t, r, dir, pendingCashEntries(t), at)
-	journalFiring(t, r, dir, pendingCashEntries(t), at.Add(5*time.Minute))
-	for _, host := range []string{ntfyHost, pdHost} {
-		if n := count(r.to(host), "reconciliation pending-cash-read"); n != 0 {
-			t.Fatalf("%s took %d reconciliation pages inside the window", host, n)
-		}
-	}
-	if !strings.Contains(recordText(t, dir, "s.json"), "held:") {
-		t.Errorf("the held alert is not recorded:\n%s", recordText(t, dir, "s.json"))
-	}
-	journalFiring(t, r, dir, pendingCashEntries(t), at.Add(15*time.Minute))
 	for _, host := range []string{ntfyHost, pdHost} {
 		if n := count(r.to(host), "reconciliation pending-cash-read"); n != 1 {
-			t.Errorf("%s took %d reconciliation pages once the window closed, want 1", host, n)
+			t.Errorf("%s took %d pending-cash pages inside the window, want 1", host, n)
 		}
-	}
-	if strings.Contains(recordText(t, dir, "s.json"), "held:") {
-		t.Error("a held record outlived the window")
 	}
 }
 
@@ -392,5 +456,31 @@ func TestTheDailySummaryIsUnchangedByAWindow(t *testing.T) {
 	}
 	if counts[false] == 0 || counts[true] != counts[false] {
 		t.Errorf("daily summaries delivered: %d without a window, %d inside one; want the same, and not none", counts[false], counts[true])
+	}
+}
+
+// A held failure that recovers inside the window is marked handled, so a
+// stale redelivery of the same failed run after the window never pages it.
+func TestAHeldFailureThatRecoveredIsNotPagedByAStaleRedelivery(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	openWindow(t, dir, start, start.Add(12*time.Minute))
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, firstRun), start, dataJob); err != nil {
+		t.Fatal(err)
+	}
+	// The data job runs well again inside the window.
+	if err := firing(t, r, dir, systemd, start.Add(5*time.Minute), "ti-engine@boost.service", "-resolve-units", dataJob); err != nil {
+		t.Fatal(err)
+	}
+	// After the window, systemd hands the hook that same failed run again.
+	if err := notifyAt(t, r, dir, systemd, monitored(dataJob, firstRun), start.Add(30*time.Minute), dataJob); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, dataJob); n != 0 {
+			t.Errorf("%s was paged %d times for a failed run that recovered inside the window", host, n)
+		}
 	}
 }

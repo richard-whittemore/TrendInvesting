@@ -267,7 +267,7 @@ func maintenanceNote(path string, now time.Time) string {
 	if err != nil {
 		return ""
 	}
-	if m, open, _ := maintenance.Read(raw, now); open {
+	if m, open := maintenance.Read(raw, now); open {
 		return m.Until.UTC().Format("2006-01-02 15:04Z")
 	}
 	return ""

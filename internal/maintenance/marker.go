@@ -24,30 +24,33 @@ const (
 	Default = 15 * time.Minute
 )
 
-// Marker is the file's content.
+// Marker is the file's content: the window's two ends as times and as
+// seconds since the epoch, which must agree, so that the shell script that
+// writes it and the Go reader that judges it cannot read one file two ways.
 type Marker struct {
-	Opened time.Time `json:"opened"`
-	Until  time.Time `json:"until"`
+	Opened     time.Time `json:"opened"`
+	Until      time.Time `json:"until"`
+	OpenedUnix int64     `json:"opened_unix"`
+	UntilUnix  int64     `json:"until_unix"`
 }
 
 // Read judges the marker file's content at now. The window is open when the
-// content parses, spans no more than Max, and now is within it. A marker with
-// no times, one that spans more than Max or ends before it opens, and one
-// opened in the future read closed, and so does an empty or missing file
-// (nil content). expired is true for a marker at or past its expiry, which
-// the caller removes (best effort: its being there changes nothing).
-func Read(raw []byte, now time.Time) (m Marker, open, expired bool) {
+// content parses, both ends are given in both forms and agree, it spans no
+// more than Max, and now is from its opening to before its expiry. Anything
+// else, including an empty or missing file (nil content), reads closed. An
+// expired marker is left where it is: it reads closed for whoever reads it,
+// and the next start replaces it, so no reader ever removes a file that a
+// start may be replacing.
+func Read(raw []byte, now time.Time) (Marker, bool) {
+	var m Marker
 	if err := json.Unmarshal(raw, &m); err != nil || m.Opened.IsZero() || m.Until.IsZero() {
-		return Marker{}, false, false
+		return Marker{}, false
 	}
-	if !now.Before(m.Until) {
-		return Marker{}, false, true
+	if m.OpenedUnix != m.Opened.Unix() || m.UntilUnix != m.Until.Unix() {
+		return Marker{}, false
 	}
-	if m.Until.Before(m.Opened) || m.Until.Sub(m.Opened) > Max {
-		return Marker{}, false, false
+	if m.Until.Before(m.Opened) || m.Until.Sub(m.Opened) > Max || now.Before(m.Opened) || !now.Before(m.Until) {
+		return Marker{}, false
 	}
-	if now.Before(m.Opened) {
-		return Marker{}, false, false
-	}
-	return m, true, false
+	return m, true
 }
