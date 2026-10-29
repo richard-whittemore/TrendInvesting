@@ -298,7 +298,11 @@ import (
 //     price band reads it as version 2, against IBKR's last price beside it
 //     when set. 1.27.0 refused it, so a journal holding one decides
 //     differently.
-const RulesVersion = "1.28.0"
+//   - 1.29.0 withholds only an IRA pick with a missing mark, leaving its
+//     allocation in cash without degrading, and records its adapter failure
+//     evidence for an urgent page (ADR 0026, amendment of 2026-10-29).
+//     Decisions use payload version 10; market.mark.unavailable is an input.
+const RulesVersion = "1.29.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

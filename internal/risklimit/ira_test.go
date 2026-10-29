@@ -247,3 +247,77 @@ func TestAnIRAGateNamesNoSaleTag(t *testing.T) {
 		t.Errorf("an IRA gate names sale tag %q, want none", tag)
 	}
 }
+
+// ADR 0026, amendment of 2026-10-29: a missing IRA buy mark
+// withholds that pick alone, without spending its cash or degrading.
+func TestIRAMissingMarkWithholdsOnlyThatBuy(t *testing.T) {
+	g := iraGate(t, 0)
+	missing := iraOrder("AAA", event.OrderSideBuy, 100)
+	missing.MarkSet = false
+	out := checkBook(t, g, risklimit.Book{CashAvailable: 200}, missing, iraOrder("BBB", event.OrderSideBuy, 100))
+	if out[0].Refused == nil || out[0].Refused.Reason != event.RefusedMissingMark || out[0].State != nil {
+		t.Fatalf("missing mark outcome: %+v; want refusal without state change", out[0])
+	}
+	released(t, out[1])
+	if out[1].Released.Figures.CashAvailable != 200 || g.State() != risklimit.StateNormal {
+		t.Fatalf("cash/state changed on withheld buy: %+v, %s", out[1].Released, g.State())
+	}
+}
+
+func TestIRAMissingMarkDoesNotMaskAnotherBreach(t *testing.T) {
+	g := iraGate(t, 0)
+	missing := iraOrder("AAA", event.OrderSideBuy, 100)
+	missing.MarkSet = false
+	out := checkBook(t, g, risklimit.Book{CashAvailable: 200}, missing, iraOrder("BBB", event.OrderSideBuy, 300), iraOrder("CCC", event.OrderSideBuy, 1))
+	if out[1].Refused == nil || out[1].Refused.Reason != event.RefusedInsufficientCash || out[1].State == nil {
+		t.Fatalf("second breach must degrade on insufficient cash: %+v", out[1])
+	}
+	if out[2].Refused == nil || out[2].Refused.Reason != event.RefusedEngineDegraded {
+		t.Fatalf("later buy: %+v", out[2])
+	}
+}
+
+// ADR 0026, amendment of 2026-10-29: only a missing mark is exempt
+// from degradation; another breach on that same buy still degrades.
+func TestIRAMissingMarkDoesNotMaskSameBuyBreach(t *testing.T) {
+	for _, tc := range []struct {
+		reason   string
+		quantity int64
+		book     risklimit.Book
+	}{
+		{event.RefusedInsufficientCash, 5000, risklimit.Book{CashAvailable: 200}},
+		{event.RefusedOrderSize, 7001, risklimit.Book{CashAvailable: 10000}},
+		{event.RefusedUnvaluedHolding, 100, risklimit.Book{CashAvailable: 10000, Holdings: map[string]int64{"ZZZ": 1}}},
+		{event.RefusedIRAExposure, 5000, risklimit.Book{CashAvailable: 10000, Holdings: map[string]int64{"ZZZ": 6000}, Prices: map[string]float64{"ZZZ": 1}}},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			buy := iraOrder("AAA", event.OrderSideBuy, tc.quantity)
+			marked := checkBook(t, iraGate(t, 0), tc.book, buy)[0]
+			refusedFor(t, marked, tc.reason)
+
+			g := iraGate(t, 0)
+			buy.MarkSet, buy.Mark = false, 0
+			out := checkBook(t, g, tc.book, buy, iraOrder("BBB", event.OrderSideBuy, 100))
+			refusedFor(t, out[0], event.RefusedMissingMark)
+			if out[0].Refused.Figures.MarkSet || out[0].Refused.Figures.Mark != 0 {
+				t.Errorf("refusal invented a mark: %+v", out[0].Refused.Figures)
+			}
+			if out[0].State == nil {
+				t.Errorf("missing mark masked %s: no Degraded transition", tc.reason)
+			} else {
+				state := out[0].State
+				if err := state.ValidateSchema(out[0].StateSchemaVersion); err != nil {
+					t.Fatalf("invalid engine state: %v", err)
+				}
+				if state.State != event.EngineStateDegraded || state.Reason != event.EngineStateReasonRiskLimitBreached ||
+					len(state.ScopeInstrumentIDs) != 1 || state.ScopeInstrumentIDs[0] != "AAA" || state.Detail != marked.State.Detail {
+					t.Errorf("state %+v, want the marked buy's breach: %+v", state, marked.State)
+				}
+			}
+			if g.State() != risklimit.StateDegraded {
+				t.Errorf("gate state = %s, want Degraded", g.State())
+			}
+			refusedFor(t, out[1], event.RefusedEngineDegraded)
+		})
+	}
+}

@@ -124,6 +124,7 @@ var notYetCrossed = map[string]string{
 	// adapter (ADR 0025), not LEAN, will send the mark and receive the
 	// decisions; LEAN never runs the target-weight strategies.
 	"strategy.target-weight.configuration": "composed by the target-weight engine's own composition root, not the adapter",
+	"market.mark.unavailable":              "sent by the IBKR adapter (ADR 0026), never by LEAN",
 	"market.mark.recorded":                 "sent by the IBKR adapter (ADR 0025), never by LEAN",
 	"strategy.targets.decided":             "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	"strategy.order.planned":               "a target-weight decision; the LEAN adapter never runs target-weight strategies",

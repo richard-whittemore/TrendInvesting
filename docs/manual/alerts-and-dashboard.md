@@ -95,6 +95,7 @@ account.
 | A momentum decision was withheld because more than the configured share (20%) of the ranked stocks had no sector label (`labels-missing`; a sector-label source or its mapping may have failed, see [momentum universe](momentum-universe.md)) | urgent | run of the same reason |
 | A decision was withheld for another reason (a Boost session) | routine | run of the same reason |
 | A momentum account's month-end decision was withheld, whatever the reason: this replaces the momentum rows above (it skips the whole month, so it is always paged; see "What pages for an IRA") | urgent, repeated until acknowledged | withheld month and reason |
+| A momentum pick has no mark: `<account>: <instrument> withheld this month (missing mark: <transient\|final> …)`, with the adapter's recorded detail | urgent, repeated until acknowledged | account, decision month and instrument |
 | A momentum rebalance's sell is still incomplete at a session after its release | urgent | order and session |
 | An order to be sent was not acknowledged by IBKR within `-ack-within` of its commit ([order lifecycle](order-lifecycle.md)). A report that the engine reads counts as the acknowledgement. In a Boost run a fill is read by the risk gate's own rule, so a fill that names the order and fits it (part or whole, even one that arrives after IBKR canceled the order) acknowledges it, and a fill the gate refuses (past the order's size, for another account or side, or a fill number reused for a different execution) does not. A refused fill on an order already acknowledged is paged as a report the engine did not read (two rows down) | urgent | order (its client order ID) |
 | An order already alerted as unacknowledged has since been acknowledged | routine | order |
@@ -156,7 +157,7 @@ or by `-account`, or by the log file's name.
 
 ## Repeated until you acknowledge it
 
-A Degraded, Halted or reconciliation alert is sent again, on every channel,
+A Degraded, Halted, reconciliation, withheld momentum rebalance or withheld-pick alert is sent again, on every channel,
 each `-repeat-interval` (default 30 minutes, your setting under ADR 0019),
 for as long as you have not acknowledged it, overnight and at weekends too
 (below, "When the reporter runs"). Every other alert is sent once. ADR 0019
@@ -1864,6 +1865,25 @@ passes `-clock-check`.
 
 ### What pages for an IRA
 
+A missing mark withholds only that pick's buy for the month (ADR 0026,
+amendment of 2026-10-29). The urgent page says
+`<account>: <instrument> withheld this month (missing mark: <transient|final> …)`.
+It includes the adapter's exact lookup reason: `transient` means the lookup
+did not end within its timeout even after being asked twice in that reading
+attempt; `final` means IBKR refused it or the name could not be resolved
+unambiguously. Every later attempt to read the account that morning re-asks
+unresolved names before a reading is delivered. If the log has no adapter
+failure evidence, the page says `unknown`.
+
+This is one incident per account, decision month and instrument, repeated
+until acknowledged like a withheld-rebalance page. Its alert key begins
+`pick-withheld:`. The matching order refusal produces no duplicate page.
+The unbought allocation stays in cash; it is not redistributed. The missing
+mark does not degrade the account, and every other limit still applies to
+the other buys. Acknowledgement stops reminders, without changing the month's
+decision. A decided month with no withheld picks emits no such page.
+
+
 The Traditional IRA runs the same reporter and dashboard as Boost, as its own
 instance (`ti-reporter@trad-ira`), and everything it says names the IRA's own
 units: `ti-engine@trad-ira`, `ti-adapter@trad-ira`, `ti-flex@trad-ira` and
@@ -1899,6 +1919,7 @@ the other cards are unaffected.
 | What you see | What the program does | What you do |
 | --- | --- | --- |
 | `<account>: rebalance withheld (<reason>)`, urgent, repeated until acknowledged. The reason is one of the withheld reasons in [momentum](momentum.md) (missing bars, a stale account snapshot, a missing universe, insufficient trend history, no eligible names, a rebalance in progress, all unaffordable, histories missing, labels missing) | The month-end decision was withheld: nothing was ordered, held positions and orders are unchanged, and the account decides again only at the next month-end. One page per withheld month and reason; a decided rebalance sends none | Read the reason in the page and the row of that reason in the chapter that explains it. Fix the cause (data job, universe, labels, a rebalance left in progress) and, if the month must not be skipped, start a fresh run as that row says; acknowledge the page with the alert key it ends with once you have acted |
+| `<account>: <instrument> withheld this month (missing mark: <transient or final> — <detail>)`, urgent, repeated until acknowledged, one per month and instrument. | The month-end decision could not value this pick: the adapter found no mark for it (a lookup that timed out twice is transient; an IBKR refusal or an unresolvable name is final; the detail is the adapter's own words). The gate refused that buy only; the pick's weight stays in cash for the month, the other buys proceed and the account is not degraded (ADR 0026, amendment of 2026-10-29). | Acknowledge the page. If the failure is final, check the name's spelling against IBKR before the next month-end; if transient, nothing: the next month-end asks again. |
 | `<instance>: sell of <instrument> incomplete after the session ending <day> (<n> shares outstanding)`, urgent | A sell the rebalance released has not filled in full or ended by the first session after its release. Sells finish first (by fill or another accepted terminal event); buys then fit settled cash. Once per session while incomplete, using the current outstanding quantity; none once filled, cancelled, retired or cleared | Stop the account's adapter (`sudo systemctl stop ti-adapter@<instance>`), then its engine (`sudo systemctl stop ti-engine@<instance>`). Use the deployment instance, such as `trad-ira`, from the reporter's `-account` flag or dashboard engine-directory name, never the journal's IBKR account number. In IBKR cancel the program's working order for the instrument and confirm no open order exists for the account from any client, including cancel-pending orders; check the actual position. Only then sell the outstanding shares by hand. Once the manual order has filled or been cancelled, record the hand sale with a fresh run approved with the post-sale book, then clear the carried unfinished rebalance with `operator rebalance-cleared` as `docs/runbooks/missed-rebalance.md`, "A restart mid-rebalance", says. A fresh run carries the unfinished rebalance and withholds every month until you clear it ([momentum](momentum.md)); it does not plan that rebalance again |
 
 ### The reporter itself

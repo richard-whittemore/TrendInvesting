@@ -473,7 +473,7 @@ def resolve_contracts(conn, symbols, configured):
     conId and a primary exchange, and the conId configured for it
     (configured, config.con_ids) when there is one. refused maps every other
     symbol to why: IBKR's error under the request (200, no security
-    definition; final, never asked again), an answer that did not end within
+    definition; final for this reading attempt), an answer that did not end within
     the request_timeout when asked CONTRACT_ASKS times, more than one
     contract (ambiguous: never a guess), one that is not the name's own, or
     one that contradicts the configured conId. A refused name is given no
@@ -763,6 +763,21 @@ def mark_record(symbol, as_of, price, source, broker_last=None, contract=None):
     payload["contract"] = {"con_id": contract.con_id, "exchange": contract.exchange,
                            "primary_exchange": contract.primary_exchange, "currency": contract.currency}
     return Record(MARK_TYPE, MARK_CONTRACT_VERSION, payload)
+
+
+def mark_unavailable_record(symbol, as_of, detail):
+    """Record why a name has no mark, retaining the adapter's exact resolution evidence.
+
+    ADR 0026, amendment of 2026-10-29: a missing mark withholds one pick
+    and pages with whether resolution timed out or definitively failed.
+    Only resolve_contracts' own timeout detail means transient; an IBKR
+    error message mentioning a timeout is still a final IBKR refusal.
+    """
+    transient = detail.startswith("IBKR's answer to its contract request did not end within ")
+    return Record("market.mark.unavailable", 1, {
+        "instrument_id": symbol, "as_of": _stamp(as_of), "source": "ibkr",
+        "detail": detail, "failure": "transient" if transient else "final",
+    })
 
 
 def reconciliation_record(reading, reconciliation_id, trigger=MORNING):

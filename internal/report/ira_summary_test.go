@@ -229,3 +229,36 @@ func TestBoostFixtureSummaryStaysByteIdentical(t *testing.T) {
 		t.Fatalf("Boost summary changed:\n%s", text)
 	}
 }
+
+func TestIRASummaryMergesWithheldPicksEvidenceForSameSession(t *testing.T) {
+	for _, evidenceDay := range []int{0, 1} {
+		t.Run(fmt.Sprintf("evidence-day-%d", evidenceDay), func(t *testing.T) {
+			s, _ := iraDay(t)
+			var p event.TargetsDecidedPayload
+			for _, e := range s.out {
+				if e.Type == event.TargetsDecidedEventType {
+					if err := json.Unmarshal(e.Payload, &p); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			p.WithheldPicks = []event.WithheldPick{{InstrumentID: "AAA", Reason: "missing-mark", Failure: "transient", Detail: "mark lookup timed out"}}
+			if err := p.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			at := day(evidenceDay).Add(2 * time.Minute)
+			s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:withheld-picks", at, p)
+			got, err := report.Summarize(s.out, at.Format(time.DateOnly), "SPY")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Decisions) != 1 {
+				t.Fatalf("decision lines = %d, want 1 for the session", len(got.Decisions))
+			}
+			line := got.Decisions[0]
+			if !line.At.Equal(at) || !reflect.DeepEqual(line.Targets, p.Targets) || !reflect.DeepEqual(line.WithheldPicks, p.WithheldPicks) {
+				t.Errorf("decision line = %+v, want latest evidence with original targets", line)
+			}
+		})
+	}
+}

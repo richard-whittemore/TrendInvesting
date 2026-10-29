@@ -149,8 +149,9 @@ class DeliveryRecordInvalid(ValueError):
 
 PostCloseReading = namedtuple("PostCloseReading", "account broker marks reading unverified", defaults=(False,))
 """One account read for a batch (the adapter's loop.AdapterLoop._post_close_reading): the engine's
-account.snapshot, the broker snapshot, the marks (one per instrument the batch's last session delivers a bar
-for, in instrument order), each a snapshot.Record, and the snapshot.AccountReading they were made from.
+account.snapshot, the broker snapshot, and marks: each resolved instrument's mark in instrument order,
+then each unresolved instrument's market.mark.unavailable evidence in instrument order (ADR 0026,
+amended 2026-10-29), each a snapshot.Record, and the snapshot.AccountReading they were made from.
 unverified is set when the engine holds no book and the reading differs from the book it was compared with
 (an earlier run's last close or the owner's starting book, book_basis), or has none to compare with: its
 reconciliation then goes alone, its snapshots withheld, so the engine classifies it with no book,

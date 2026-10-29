@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0); amended 2026-10-22 by the owner: an order the adapter can never send is retired, point 2 "Boost" and point 5 (rules version 1.23.0; a live sale a venue has named survives a restart, rules version 1.24.0; a sale that had ended survives a restart, rules version 1.25.0))
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0); amended 2026-10-22 by the owner: an order the adapter can never send is retired, point 2 "Boost" and point 5 (rules version 1.23.0; a live sale a venue has named survives a restart, rules version 1.24.0; a sale that had ended survives a restart, rules version 1.25.0); amended 2026-10-29: a missing IRA mark withholds one pick and pages (rules version 1.29.0; strategy.targets.decided payload v10; market.mark.unavailable v1))
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -1584,3 +1584,49 @@ once it has ended or filled in full is 1.25.0.
   nothing under its tag, as the manual's redelivery chapter says.
 - **Replay.** Rules version 1.22.0 refused the input, so a journal holding
   a retirement decides differently and does not replay across the two.
+
+
+## Amendment (2026-10-29): a missing IRA mark withholds one pick and pages
+
+The owner selected option C on 2026-10-29: an IRA pick whose buy has no
+recorded mark is withheld for that month, its unbought weight stays in cash,
+and an urgent page names it. The account is not degraded by this missing
+mark. Every other limit breach retains its existing state transition.
+
+The following is the orchestrator's reading of that decision, put to the
+owner for review with this implementation:
+
+- **Point 2, IRA execution:** keep the declared target weights and include
+  the withheld buy in the same budget scaling calculation, so its allocation
+  is never redistributed to the other picks. Record the withheld picks when
+  deciding the month, before either execution phase. A later successful mark
+  does not restore that pick during the month's buy phase or create a
+  mid-month catch-up. For a held name being increased, only the unbought
+  increase stays in cash; no existing holding is sold merely for this reason.
+- **Point 3, limits:** an IRA buy without a mark is refused as `missing-mark`
+  without a Degraded transition. Other buys in the decision proceed through
+  every other gate check. Another breach in the same decision still degrades;
+  the exception never clears an existing Degraded/Halted state. Boost's gate
+  behavior is unchanged.
+- **Points 1 and 5, evidence and recovery:** `strategy.targets.decided` payload
+  version 10 adds `withheld_picks`, naming each instrument, the closed reason
+  `missing-mark`, failure classification and exact adapter detail. Targets
+  remain the intended weights. Readers retain explicit support for payload
+  versions 7–9 without inventing withheld entries (ADR 0015). Rules version
+  1.29.0 declares the changed behavior (ADR 0016). The new input
+  `market.mark.unavailable` version 1 journals the adapter's instrument, as-of
+  time, source, detail, and `transient` or `final` failure. Without recorded
+  evidence a decision says `unknown`; it never infers an IBKR refusal.
+- **Re-ask before withholding:** a lookup that does not end is asked twice
+  within its bounded reading attempt. On each later attempt to read the
+  account that morning, every unresolved name is resolved again, including
+  one previously refused by IBKR. Successful resolutions are cached only
+  within that reading on the unchanged connection. The delivered reading
+  records the remaining failures: timeout is `transient`, an IBKR refusal or
+  an unresolvable/ambiguous name is `final`. No sending behavior changes.
+- **Alerting:** one urgent page per account, decision month and instrument,
+  `<account>: <instrument> withheld this month (missing mark:
+  <transient|final> …)`, with the exact recorded detail, repeating until
+  acknowledged like the withheld-rebalance page. No recorded reason means
+  `unknown`. Acknowledgement stops reminders, not the withholding. A decided
+  month with no withheld picks has no per-pick page.

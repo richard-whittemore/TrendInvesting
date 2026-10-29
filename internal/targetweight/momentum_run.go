@@ -115,15 +115,16 @@ type momentumRun struct {
 	last     string    // last session closed, YYYY-MM-DD
 	lastEnd  time.Time // its period end
 
-	adjusted map[string]map[string]float64 // instrument -> session -> adjusted close
-	raw      map[string]float64            // instrument -> raw close in the last session
-	barred   map[string]bool               // instruments with their own bar in the last session
-	bars     map[string]event.CompletedBarAdjustedPayload
-	bases    map[string]string // instrument -> its adjusted view's base
-	universe *event.UniverseSnapshotPayload
-	snapshot *event.AccountCashSnapshotPayload
-	marks    map[string]event.MarkRecordedPayload
-	markAt   map[string]uint32 // each mark's schema version (bandMark)
+	adjusted    map[string]map[string]float64 // instrument -> session -> adjusted close
+	raw         map[string]float64            // instrument -> raw close in the last session
+	barred      map[string]bool               // instruments with their own bar in the last session
+	bars        map[string]event.CompletedBarAdjustedPayload
+	bases       map[string]string // instrument -> its adjusted view's base
+	universe    *event.UniverseSnapshotPayload
+	snapshot    *event.AccountCashSnapshotPayload
+	marks       map[string]event.MarkRecordedPayload
+	markAt      map[string]uint32 // each mark's schema version (bandMark)
+	unavailable map[string]event.MarkUnavailablePayload
 
 	// orders reads the venue's reports on the orders released, by the rule
 	// the reporter reads the log by (event.OrderReports).
@@ -153,11 +154,13 @@ type momentumRun struct {
 // rebalance is the decision time in progress: what its buy phase needs.
 type rebalance struct {
 	decisionID   string
+	decision     event.TargetsDecidedPayload // immutable original targets and decision session
 	session      time.Time
 	snapshot     event.AccountCashSnapshotPayload
 	prices       map[string]float64
 	buys         []event.OrderPlannedPayload
-	sells        []string // client order IDs of released sells
+	withheld     map[string]bool // once withheld, stays cash through the buy phase
+	sells        []string        // client order IDs of released sells
 	sold         map[string]int64
 	sellsPlanned int
 	budget       *orderplan.Budget
@@ -205,12 +208,13 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		h: h, rule: rule, cfg: m, exec: cfg.Execution,
 		window:  momentumWindow(m),
 		anchors: anchors, funds: funds,
-		adjusted: map[string]map[string]float64{},
-		bars:     map[string]event.CompletedBarAdjustedPayload{},
-		bases:    map[string]string{},
-		marks:    map[string]event.MarkRecordedPayload{},
-		markAt:   map[string]uint32{},
-		orders:   event.NewOrderReports(),
+		adjusted:    map[string]map[string]float64{},
+		bars:        map[string]event.CompletedBarAdjustedPayload{},
+		bases:       map[string]string{},
+		marks:       map[string]event.MarkRecordedPayload{},
+		markAt:      map[string]uint32{},
+		unavailable: map[string]event.MarkUnavailablePayload{},
+		orders:      event.NewOrderReports(),
 
 		histories: map[string]event.CloseHistoryPayload{},
 		retracted: map[string]bool{},
@@ -240,6 +244,8 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return r.applySnapshot(in)
 	case event.MarkRecordedEventType:
 		return nil, r.applyMark(in)
+	case event.MarkUnavailableEventType:
+		return nil, r.applyMarkUnavailable(in)
 	case event.SessionClosedEventType:
 		r.h.started = true
 		return r.applySession(in)
@@ -379,9 +385,47 @@ func (r *momentumRun) applyMark(in event.Envelope) error {
 	if last, ok := r.marks[p.InstrumentID]; ok && !p.AsOf.After(last.AsOf) {
 		return fmt.Errorf("targetweight: mark for %s as of %s does not follow the last, %s", p.InstrumentID, p.AsOf, last.AsOf)
 	}
+	if last, ok := r.unavailable[p.InstrumentID]; ok && !p.AsOf.After(last.AsOf) {
+		return fmt.Errorf("targetweight: mark for %s does not follow its last unavailable observation", p.InstrumentID)
+	}
 	r.marks[p.InstrumentID] = p
 	r.markAt[p.InstrumentID] = in.SchemaVersion
 	return nil
+}
+
+// applyMarkUnavailable keeps the adapter's observation for a withheld pick's
+// evidence (ADR 0026, amendment of 2026-10-29). Observations advance per name;
+// a later successful reading can resolve it before the decision.
+func (r *momentumRun) applyMarkUnavailable(in event.Envelope) error {
+	p, err := decodeInput[event.MarkUnavailablePayload](in, event.MarkUnavailableSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if last, ok := r.unavailable[p.InstrumentID]; ok && !p.AsOf.After(last.AsOf) {
+		return fmt.Errorf("targetweight: unavailable mark for %s does not follow its last observation", p.InstrumentID)
+	}
+	if last, ok := r.marks[p.InstrumentID]; ok && !p.AsOf.After(last.AsOf) {
+		return fmt.Errorf("targetweight: unavailable mark for %s does not follow its last mark", p.InstrumentID)
+	}
+	r.unavailable[p.InstrumentID] = p
+	return nil
+}
+
+// missingMark returns the evidence for a missing mark at this decision,
+// never relabelling absent evidence as an IBKR refusal or timeout (ADR 0026,
+// amendment of 2026-10-29).
+func (r *momentumRun) missingMark(id string, session time.Time) *event.WithheldPick {
+	mark, marked := r.marks[id]
+	failure, failed := r.unavailable[id]
+	if marked && !mark.AsOf.Before(session) && (!failed || mark.AsOf.After(failure.AsOf)) {
+		return nil
+	}
+	pick := &event.WithheldPick{InstrumentID: id, Reason: event.RefusedMissingMark,
+		Detail: fmt.Sprintf("no mark recorded for %s at or after the session's close; no adapter failure detail recorded", id), Failure: event.MarkFailureUnknown}
+	if failed && !failure.AsOf.Before(session) {
+		pick.Detail, pick.Failure = failure.Detail, failure.Failure
+	}
+	return pick
 }
 
 func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) {
@@ -566,6 +610,13 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 				ReferencePrices: r.raw, PriceBand: h.cfg.Limits.PriceBand, RebalanceBand: r.cfg.RebalanceBand,
 			})
 			b.fail(err)
+			// Keep the intended weights, including the withheld allocation,
+			// so scaling never redistributes its cash (ADR 0026, 2026-10-29).
+			for _, buy := range plan.Buys {
+				if pick := r.missingMark(buy.InstrumentID, end); pick != nil {
+					p.WithheldPicks = append(p.WithheldPicks, *pick)
+				}
+			}
 		} else {
 			p.Outcome, p.Targets, p.WithheldReason, p.Detail = event.TargetsOutcomeWithheld, nil, reason, detail
 		}
@@ -578,9 +629,13 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 	r.skipped(b, plan.Skipped)
 	h.gate.RecordDecision(id)
 	reb := &rebalance{
-		decisionID: id, session: end, snapshot: *r.snapshot, prices: maps.Clone(r.raw),
+		decisionID: id, decision: p, session: end, snapshot: *r.snapshot, prices: maps.Clone(r.raw),
 		buys: plan.Buys, sold: map[string]int64{}, sellsPlanned: len(plan.Sells),
-		budget: orderplan.NewBudget(r.cash(*r.snapshot)),
+		budget:   orderplan.NewBudget(r.cash(*r.snapshot)),
+		withheld: map[string]bool{},
+	}
+	for _, pick := range p.WithheldPicks {
+		reb.withheld[pick.InstrumentID] = true
 	}
 	r.rebalance = reb
 	for _, o := range r.check(b, reb, plan.Sells, 0) {
@@ -931,9 +986,30 @@ func (r *momentumRun) unexplainedCashDrop(reb *rebalance) float64 {
 // orders released, now tracked. The prior orders are the sell phase's, each
 // sized within its holding (orderplan.PlanIRA), so every one is risk-reducing
 // and none counts toward the order limit (ADR 0026, point 3): the book's
-// PriorCounted stays zero.
+// PriorCounted stays zero. A mark must follow the latest unavailable
+// observation; the original rebalance withholding remains in force
+// (ADR 0026, amendment of 2026-10-29).
 func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPlannedPayload, prior int) []event.OrderPlannedPayload {
 	h := r.h
+	// Preserve the original decision and order tags. Later missing marks
+	// append evidence for that same session before any refusal (ADR 0026,
+	// amendment of 2026-10-29); its unbought weights still stay in cash.
+	p := reb.decision
+	p.WithheldPicks = slices.Clone(p.WithheldPicks)
+	for _, o := range orders {
+		if o.Side == event.OrderSideBuy && !reb.withheld[o.InstrumentID] {
+			if pick := r.missingMark(o.InstrumentID, reb.session); pick != nil {
+				p.WithheldPicks = append(p.WithheldPicks, *pick)
+				reb.withheld[o.InstrumentID] = true
+			}
+		}
+	}
+	if len(p.WithheldPicks) > len(reb.decision.WithheldPicks) {
+		slices.SortFunc(p.WithheldPicks, func(a, b event.WithheldPick) int {
+			return strings.Compare(a.InstrumentID, b.InstrumentID)
+		})
+		b.add(reb.decisionID+":withheld-picks", event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
+	}
 	holdings := holdings(reb.snapshot.Positions)
 	for id, sold := range reb.sold {
 		holdings[id] -= sold
@@ -942,7 +1018,9 @@ func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPl
 	plan := make([]risklimit.Order, len(orders))
 	for i, o := range orders {
 		plan[i] = risklimit.Order{PlanID: "order-planned:" + o.ClientOrderID, Planned: o}
-		if mark, ok := r.marks[o.InstrumentID]; ok && !mark.AsOf.Before(reb.session) {
+		failure, failed := r.unavailable[o.InstrumentID]
+		if mark, ok := r.marks[o.InstrumentID]; ok && !mark.AsOf.Before(reb.session) &&
+			(!failed || mark.AsOf.After(failure.AsOf)) && !reb.withheld[o.InstrumentID] {
 			plan[i].MarkSet = true
 			plan[i].Mark, plan[i].MarkSource = bandMark(mark, r.markAt[o.InstrumentID])
 		}

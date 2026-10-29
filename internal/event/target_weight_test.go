@@ -1150,11 +1150,11 @@ func namedSaleOrder() *event.BoostRestoredSaleOrder {
 // as it was written, and refused if it carries a field of version 8; a
 // record written now states the sale's side and attempt (ADR 0015).
 func TestBoostRestoredSaleOrderAtVersion7(t *testing.T) {
-	if got, want := event.TargetsDecidedVersions(), []uint32{event.TargetsDecidedRetiredVersion, event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedSchemaVersion}; !slices.Equal(got, want) {
+	if got, want := event.TargetsDecidedVersions(), []uint32{event.TargetsDecidedRetiredVersion, event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedEndedSaleVersion, event.TargetsDecidedSchemaVersion}; !slices.Equal(got, want) {
 		t.Fatalf("decision versions read are %v, want %v", got, want)
 	}
-	if event.TargetsDecidedRetiredVersion != 7 || event.TargetsDecidedLiveSaleVersion != 8 || event.TargetsDecidedSchemaVersion != 9 {
-		t.Fatalf("decision versions are %d, %d and %d, want 7, 8 and 9", event.TargetsDecidedRetiredVersion, event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedSchemaVersion)
+	if event.TargetsDecidedRetiredVersion != 7 || event.TargetsDecidedLiveSaleVersion != 8 || event.TargetsDecidedEndedSaleVersion != 9 || event.TargetsDecidedSchemaVersion != 10 {
+		t.Fatalf("decision versions are %d, %d, %d and %d, want 7, 8, 9 and 10", event.TargetsDecidedRetiredVersion, event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedEndedSaleVersion, event.TargetsDecidedSchemaVersion)
 	}
 	old := validTargetsDecided()
 	old.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true,
@@ -1201,7 +1201,7 @@ func TestBoostRestoredSaleOrderAtVersion7(t *testing.T) {
 		o := namedSaleOrder()
 		drop(o)
 		p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: o}
-		for _, version := range []uint32{event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedSchemaVersion} {
+		for _, version := range []uint32{event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedEndedSaleVersion, event.TargetsDecidedSchemaVersion} {
 			if err := p.ValidateSchema(version); err == nil || !strings.Contains(err.Error(), "side") {
 				t.Errorf("a version %d live sale with %s is read: %v, want it refused", version, name, err)
 			}
@@ -1234,8 +1234,10 @@ func TestBoostRestoredSaleOrderAtVersion9(t *testing.T) {
 		if err := p.ValidateWritten(); err != nil {
 			t.Errorf("a sale %s is written at version 9: %v", name, err)
 		}
-		if err := p.ValidateSchema(event.TargetsDecidedSchemaVersion); err != nil {
-			t.Errorf("a version 9 sale %s is read: %v", name, err)
+		for _, version := range []uint32{event.TargetsDecidedEndedSaleVersion, event.TargetsDecidedSchemaVersion} {
+			if err := p.ValidateSchema(version); err != nil {
+				t.Errorf("a version %d sale %s is read: %v", version, name, err)
+			}
 		}
 		if err := p.ValidateSchema(event.TargetsDecidedLiveSaleVersion); err == nil || !strings.Contains(err.Error(), "version 9") {
 			t.Errorf("a version 8 record of a sale %s is refused as a version 9 field; got %v", name, err)
