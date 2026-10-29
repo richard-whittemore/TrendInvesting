@@ -1,0 +1,15 @@
+joint (boost) daily summary, 2024-01-03
+Engine state: normal
+Net liquidation 4300.00 as of 2024-01-03 21:00Z
+Behind SPY by 2.5 points since 2024-01-02; dollar gap -100.00 (account 4300.00, SPY shadow 4400.00)
+Holdings: SPY 39
+Targets:
+  SPY 98%
+Orders:
+  tw-b buy 10 SPY limit 101.00: refused (order-size)
+Refusals: 1
+Fills: none
+Costs this month: commissions 0.00, fees 0.00, interest 0.00 (fees and interest not yet recorded by the Flex reader)
+Equity vs SPY, 2024-01-02 to 2024-01-03, time-weighted: account +7.50%, SPY +10.00%, difference -2.50 points
+Day, 2024-01-02 to 2024-01-03: account +7.50%, SPY +10.00%
+Counted: SPY price return only: dividends not counted; deposits and withdrawals not yet recorded: the comparison assumes none, so money you add or take out counts as the account's own gain or loss. Both returns are time-weighted; fees and interest stay in the account's own result.

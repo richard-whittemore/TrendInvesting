@@ -1469,7 +1469,10 @@ closing price. From then on:
   and each withdrawal sells SPY for the same amount, at the official close of
   the New York day the transfer is dated (IBKR usually dates a transfer by
   its day alone; that day's close is used). A transfer dated on a weekend or
-  holiday is mirrored at the next session's close. A transfer on or before
+  holiday is mirrored at the next session's close. If that session has no
+  account point, the shadow still mirrors it at that session's close, in
+  session order; only the account return counts it at the next paired close
+  ("Reading the figures", below). A transfer on or before
   the first paired day is already in the starting balance;
 - SPY's dividends are reinvested in SPY on their ex-date. This comes from
   the split- and dividend-adjusted price the market-data job records
@@ -1680,14 +1683,40 @@ IBKR").
 
 ## What the summary shows, and its limits
 
+### An IRA's summary
+
+The IRA summary shows net liquidation and the snapshot's date and time,
+settled cash, total cash (including unsettled proceeds), and every holding:
+the stock book of up to 25 names and any SPY, IEF or SHY fund holdings. The
+targets list each name's total target weight, followed by that day's orders
+and fills. These are the recorded account figures, not a book reconstructed
+from marks or targets. A newer snapshot that fails validation, names another
+account or does not follow the last accepted snapshot replaces none of them.
+
+### Reading the figures
+
 - Holdings come from the broker's account snapshot.
 - Each released order says "released (send requested)" or "released (not
   sent)". The engine records a release before it sends, so a release is only
   possibly sent; the summary does not yet say a broker confirmed it. A dry-run
   releases orders without sending them.
-- Equity against SPY pairs the snapshot's net liquidation with SPY's closing
-  price on the same day, and needs two paired points before it shows a
-  comparison. The summary then opens with the same verdict line as the card,
+- Equity against SPY pairs only an accepted account snapshot whose timestamp
+  matches SPY's close exactly and stood as of that close. A withheld rebalance
+  (including all-unaffordable, rebalance-in-progress or no-eligible-names)
+  keeps its point when that snapshot stood; stale-account-snapshot excludes
+  it. A reading stamped at read time is never used as a close. An unreadable
+  past decision or snapshot omits the session and says "account point unknown
+  for <date>". This also applies to earlier runs.
+  When paired closes bracket a session with no account point, every deposit
+  or withdrawal inside that gap is counted at the **end of the gap for the
+  account's time-weighted return**, because there is no account point inside
+  the gap. The SPY shadow mirrors each transfer on its **own session date**,
+  in session order, priced at that session's SPY index. The dollar gap
+  therefore includes SPY's growth on a gap deposit from its real date to the
+  paired close. SPY's return is the growth index, with no transfer term, and
+  is unaffected by this account convention. Account returns within the gap
+  cannot be resolved without intermediate valuations.
+  The comparison needs two paired points before it shows a comparison. The summary then opens with the same verdict line as the card,
   with the dollar gap and both accounts' values beside it ("Beating SPY by
   1.3 points since 2027-03-01; dollar gap +130.00 (account 13130.00, SPY
   shadow 13000.00)"). The returns are time-weighted, against the SPY shadow

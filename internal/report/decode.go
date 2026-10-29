@@ -65,7 +65,7 @@ var (
 	// A bar is read at version 1, which the Turtle engine writes, and at
 	// version 2, which the target-weight engines write (ADR 0026).
 	barVersions         = []uint32{event.CompletedBarSchemaVersion, event.CompletedBarAdjustedVersion}
-	snapshotVersions    = []uint32{event.AccountSnapshotPositionsVersion}
+	snapshotVersions    = []uint32{event.AccountSnapshotPositionsVersion, event.AccountSnapshotCashVersion}
 	fillVersions        = []uint32{event.FillSchemaVersion}
 	engineStateVersions = []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}
 	// A decision is read at version 7, which earlier builds wrote, and at
@@ -109,6 +109,24 @@ var (
 	// version.
 	approvalVersions = []uint32{1, 2, 3, 4, 5, event.OperatorRunApprovedSchemaVersion}
 )
+
+// readSnapshot reads the account's own snapshot shape (ADR 0015; ADR 0026
+// point 2): Boost has positions and net liquidation, an IRA also has cash.
+// Validating the cash shape in full prevents an invalid cash figure from
+// replacing the holdings (Boost lessons L9).
+func readSnapshot(e event.Envelope, strategy string) (event.AccountCashSnapshotPayload, bool, error) {
+	if isMomentum(strategy) {
+		var p event.AccountCashSnapshotPayload
+		if e.SchemaVersion != event.AccountSnapshotCashVersion {
+			return p, false, fmt.Errorf("report: momentum snapshot must be version %d", event.AccountSnapshotCashVersion)
+		}
+		err := read(e, snapshotVersions, &p)
+		return p, true, err
+	}
+	var p event.AccountPositionsSnapshotPayload
+	err := read(e, []uint32{event.AccountSnapshotPositionsVersion}, &p)
+	return event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: p}, false, err
+}
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }
 

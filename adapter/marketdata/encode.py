@@ -804,7 +804,7 @@ class _Runs:
 
 
 def _compact(directory, first, last, identity, required, optional, base, ahead, first_sequence,
-             max_sector_age_days, excluded, ranker, retracted_through=None):
+             max_sector_age_days, excluded, ranker, retracted_through=None, without_universe=()):
     """The compact stream of encode, read one session at a time in three
     passes over the recordings, so memory holds one session's recordings,
     the closes of the names ranked at a decision whose window covers the
@@ -833,6 +833,10 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
     byte for byte encode's own before it read this way (the recorded
     fixture in the compact stream's tests pins that)."""
     listing = list_recordings(directory)
+    # ADR 0027: replay only the snapshots published to the engine. Removing
+    # these recordings before every pass also avoids reading their sector labels.
+    for day in without_universe:
+        listing.pop("universe_{}.json".format(day.isoformat()), None)
     retractions = load_retractions(directory)
     if retracted_through is not None:   # a retraction recorded later, of a later day, is the next file's
         retractions = {d: r for d, r in retractions.items() if d <= retracted_through}
@@ -1095,7 +1099,7 @@ def _held_history(ticker, day, window, held, named, factors, closes, days, by_ti
 
 def iter_encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), optional=(),
                 universe_members=False, base=None, ahead=1, first_sequence=2, max_sector_age_days=7,
-                engine="momentum", excluded=None, ranker=None, retracted_through=None):
+                engine="momentum", excluded=None, ranker=None, retracted_through=None, without_universe=()):
     """The envelopes of encode (same arguments), as an iterator for
     write_stream. A compact stream (with ``ranker``) is checked and ranked
     in full before this returns, so it fails as encode does and
@@ -1107,13 +1111,15 @@ def iter_encode(directory, first, last, identity, required=("SPY", "IEF", "SHY")
     of days on or before it: the data job checks a file it published long
     ago against the recordings, and a session cancelled after that file's
     last one is delivered with a later file (its calendar and retraction),
-    never a change to the earlier one."""
+    never a change to the earlier one. ``without_universe`` (compact only)
+    omits those sessions' universe recordings, including ones recorded after
+    publication, so their snapshots and sector labels are never read."""
     if ranker is None:
         return iter(encode(directory, first, last, identity, required, optional, universe_members, base, ahead,
                            first_sequence, max_sector_age_days, engine, excluded))
     _, _, base = _check_request(first, last, required, optional, universe_members, base, ahead, engine, ranker)
     return _compact(directory, first, last, identity, required, optional, base, ahead, first_sequence,
-                    max_sector_age_days, excluded, ranker, retracted_through)
+                    max_sector_age_days, excluded, ranker, retracted_through, without_universe)
 
 
 def write_stream(path, envelopes):
