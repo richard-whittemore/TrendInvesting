@@ -24,12 +24,14 @@ const (
 	OrderRefused  = "refused"
 )
 
-// DecisionLine is one strategy.targets.decided record.
+// DecisionLine is the latest decision evidence for one account session
+// (ADR 0026, amendment of 2026-10-29).
 type DecisionLine struct {
 	At             time.Time
 	Outcome        string
 	WithheldReason string
 	Targets        []event.TargetWeight
+	WithheldPicks  []event.WithheldPick
 }
 
 // OrderLine is one order of the day and what the gate did with it.
@@ -283,6 +285,11 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 	}
 	end = end.AddDate(0, 0, 1)
 	s := Summary{AccountID: account, StrategyID: strategy, Date: date, Benchmark: benchmark, EngineState: StateNormal}
+	type decisionSession struct {
+		account string
+		end     time.Time
+	}
+	decisions := map[decisionSession]int{}
 	orders := map[string]int{}
 	closes := map[string]benchBar{}
 	var points []equityPoint
@@ -358,7 +365,14 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 			if !today {
 				continue
 			}
-			s.Decisions = append(s.Decisions, DecisionLine{At: e.EventTime, Outcome: p.Outcome, WithheldReason: p.WithheldReason, Targets: p.Targets})
+			key := decisionSession{account: p.AccountID, end: p.SessionPeriodEnd.UTC()}
+			line := DecisionLine{At: e.EventTime, Outcome: p.Outcome, WithheldReason: p.WithheldReason, Targets: p.Targets, WithheldPicks: p.WithheldPicks}
+			if i, ok := decisions[key]; ok {
+				s.Decisions[i] = line
+			} else {
+				decisions[key] = len(s.Decisions)
+				s.Decisions = append(s.Decisions, line)
+			}
 		case event.OrderPlannedEventType:
 			if !today {
 				continue
