@@ -121,6 +121,47 @@ func TestABoostHandSalePageStillNamesBoostsUnits(t *testing.T) {
 	}
 }
 
+func TestReporterHandSaleWithInvalidAccountLabel(t *testing.T) {
+	t.Run("Boost keeps fixed units", func(t *testing.T) {
+		s := newStream(t)
+		s.saleWithheld(0, "sale-label", event.SaleWithheldNotPositive)
+		baseline, err := report.Alerts(s.out, "boost")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := ofKind(baseline, report.KindSaleByHand)
+		for _, label := range []string{"Joint", "", "joint", "trad;ira", strings.Repeat("a", 33)} {
+			got, err := report.Alerts(s.out, label)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pages := ofKind(got, report.KindSaleByHand)
+			if len(pages) != 1 || len(want) != 1 {
+				t.Fatalf("hand-sale pages: got %+v, baseline %+v", pages, want)
+			}
+			body := pages[0].Body
+			if !strings.Contains(body, "sudo systemctl stop ti-adapter-boost, then sudo systemctl stop ti-engine@boost") || strings.Contains(body, "instance unknown") {
+				t.Errorf("account %q: Boost fixed units missing or instance unknown", label)
+			}
+			if pages[0].Title != want[0].Title || body != want[0].Body || pages[0].PublicBody != want[0].PublicBody {
+				t.Errorf("account %q: hand-sale text differs from boost", label)
+			}
+		}
+	})
+	t.Run("IRA keeps strict instance validation", func(t *testing.T) {
+		s := newIRAStream(t)
+		s.saleWithheld(0, "sale-label", event.SaleWithheldNotPositive)
+		got, err := report.Alerts(s.out, "Joint")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages := ofKind(got, report.KindSaleByHand)
+		if len(pages) != 1 || !strings.Contains(pages[0].Body, "instance unknown") {
+			t.Fatalf("invalid IRA instance: %+v", pages)
+		}
+	})
+}
+
 // TestAWithheldIRARebalancePagesOnceNamingTheReason: a month-end decision the
 // momentum engine withholds skips a whole month, so whatever the reason it is
 // an urgent page that names the reason and repeats until acknowledged; one
@@ -256,7 +297,7 @@ func TestAlertCommandsValidateDeploymentInstance(t *testing.T) {
 		}
 		s.saleWithheld(0, "sale-instance", event.SaleWithheldNotPositive)
 		for _, instance := range []string{"trad ira", "trad;ira", "trad/ira", "Trad-ira", "1ira", "-ira", "trad_ira", "trad\\ira", "trad-ira\n", strings.Repeat("a", 33), "trad-ira", "boost", "a", "a" + strings.Repeat("0-", 15) + "0"} {
-			for _, render := range []func([]event.Envelope, string) ([]report.Alert, error){report.Alerts, report.AlertsForDashboard} {
+			for renderer, render := range []func([]event.Envelope, string) ([]report.Alert, error){report.Alerts, report.AlertsForDashboard} {
 				got, err := render(s.out, instance)
 				if err != nil {
 					t.Fatal(err)
@@ -267,6 +308,9 @@ func TestAlertCommandsValidateDeploymentInstance(t *testing.T) {
 				}
 				body := pages[0].Body
 				valid := instance == "trad-ira" || instance == "boost" || instance == "a" || len(instance) == 32
+				if renderer == 0 && !momentum {
+					valid = true // Reporter Boost units are fixed, regardless of the account label.
+				}
 				if !valid {
 					if !strings.Contains(body, "instance unknown: run the reporter for the account to get the exact units") {
 						t.Errorf("%q: missing unknown line", instance)

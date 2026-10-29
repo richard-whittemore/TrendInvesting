@@ -192,7 +192,7 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 // instance is the caller's deployment name, never the journal's broker
 // account ID (ADR 0019, "Alerting"; docs/live-trading/lessons-2026-10.md L8).
 // Momentum callers must supply it; Boost retains its fixed unit names.
-// Invalid nonempty names are unknown and omit unit commands.
+// Invalid nonempty momentum names are unknown and omit unit commands.
 func Alerts(envelopes []event.Envelope, instance string) ([]Alert, error) {
 	return alerts(envelopes, instance, true)
 }
@@ -212,6 +212,9 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 	}
 	if requireInstance && isMomentum(strategy) && instance == "" {
 		return nil, fmt.Errorf("report: momentum alerts require an engine instance")
+	}
+	if requireInstance && !isMomentum(strategy) {
+		instance = "boost"
 	}
 	if instance != "" && !deploymentInstancePattern.MatchString(instance) {
 		instance = ""
