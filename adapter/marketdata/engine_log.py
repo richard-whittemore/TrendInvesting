@@ -65,19 +65,38 @@ class LogUnreadable(ValueError):
         self.path, self.line, self.why = path, line, why
 
 
-def read(path):
-    """The durable log at path as a CommittedLog, read strictly; LogUnreadable otherwise (see the module)."""
+def read(path, keep=None):
+    """The durable log at path as a CommittedLog, read strictly; LogUnreadable otherwise (see the module).
+
+    The log is read a line at a time, so memory holds one line and what is
+    kept of each committed group, never the file (docs/live-trading/
+    lessons-2026-10.md L1: an IRA's log grows by a universe snapshot a day).
+    ``keep``, if given, is called with each committed group as it is
+    committed and returns what CommittedLog.groups holds for it (by default
+    the group itself); a caller that needs only a few fields of each input
+    passes one that drops the rest."""
     try:
         with open(path, "rb") as f:
-            data = f.read()
+            return _read_lines(path, f, keep)
     except OSError as err:
         raise LogUnreadable(path, None, err.strerror or str(err)) from None
-    # The last element is empty when the log ends with a newline, else a
-    # line the engine is still writing.
-    lines = data.split(b"\n")[:-1]
-    if not lines:
+
+
+def _complete(f):
+    """The file's complete lines, without their newline: the last one, when it has none, is a line the engine
+    is still writing, and is not read."""
+    for raw in f:
+        if not raw.endswith(b"\n"):
+            return
+        yield raw[:-1]
+
+
+def _read_lines(path, f, keep):
+    lines = _complete(f)
+    first = next(lines, None)
+    if first is None:
         raise LogUnreadable(path, 1, "it has no complete header line")
-    header = _json(path, 1, lines[0])
+    header = _json(path, 1, first)
     if isinstance(header, dict) and "journal_version" in header:
         raise LogUnreadable(path, 1, "it is the journal the engine writes when it stops, not the durable log it "
                                      "streams as it runs (its -log file)")
@@ -90,7 +109,7 @@ def read(path):
     sequence, last_hash, final_hash = 0, None, None
     chain = chain_seed(header)
     chain_break = pending_break = None
-    for n, raw in enumerate(lines[1:], 2):
+    for n, raw in enumerate(lines, 2):
         line = _json(path, n, raw)
         if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
             raise LogUnreadable(path, n, "a line is exactly one of a record and a commit")
@@ -117,7 +136,7 @@ def read(path):
         if (not isinstance(commit, dict) or tuple(sorted(commit)) != LOG_COMMIT_FIELDS or not group
                 or commit["sequence"] != sequence or commit["record_hash"] != last_hash):
             raise LogUnreadable(path, n, "it is not the commit of the group before it")
-        groups.append(group)
+        groups.append(group if keep is None else keep(group))
         hashes.extend(pending)
         group, pending = [], []
         final_hash = last_hash

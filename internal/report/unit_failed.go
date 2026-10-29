@@ -30,6 +30,7 @@ var UnitManualRows = []struct{ prefix, row string }{
 	{"ti-engine@", `docs/manual/engine.md, "While it runs", the row "The engine's unit failed"`},
 	{"ti-gateway.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "ti-gateway failed and stays down" (login file, or login retries stopped)`},
 	{"ti-data.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
+	{"ti-data@", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
 }
 
 // UnitManualRow is the manual row for a failed unit; every other unit is
@@ -43,12 +44,21 @@ func UnitManualRow(unit string) string {
 	return `docs/manual/alerts-and-dashboard.md, "The reporter itself", the row "<host>: <unit> failed"`
 }
 
-func isDataJob(unit string) bool { return strings.HasPrefix(unit, "ti-data.") }
+// isDataJob is Boost's data job, ti-data.service, or an IRA's instance of it,
+// ti-data@<instance>.service: each is run again by its timer, so its page and
+// a state-at-start line say the timer runs it again instead of "systemd does
+// not restart it" (ADR 0019, "Alerting"; ADR 0027, the restart model: systemd
+// never restarts the engine or the adapter). Only timer-retried data jobs
+// qualify; an engine, adapter or reporter unit must never match, or its page
+// would tell the owner it restarts by itself.
+func isDataJob(unit string) bool {
+	return strings.HasPrefix(unit, "ti-data.") || strings.HasPrefix(unit, "ti-data@")
+}
 
 // restartSentence says who starts the failed unit again, per unit. The rule
 // is the restart model (ADR 0027): systemd never restarts the engine or the
 // adapter, so a stop waits for the owner; the data job is the exception,
-// run again by ti-data.timer (ADR 0019, "Alerting").
+// run again by its timer, ti-data.timer or ti-data@.timer (ADR 0019, "Alerting").
 func restartSentence(unit string) string {
 	if isDataJob(unit) {
 		return "The data job is run again by its timer at the next firing; you need not start it unless you fixed its cause and want the session recorded sooner."

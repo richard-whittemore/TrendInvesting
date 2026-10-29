@@ -804,7 +804,7 @@ class _Runs:
 
 
 def _compact(directory, first, last, identity, required, optional, base, ahead, first_sequence,
-             max_sector_age_days, excluded, ranker):
+             max_sector_age_days, excluded, ranker, retracted_through=None):
     """The compact stream of encode, read one session at a time in three
     passes over the recordings, so memory holds one session's recordings,
     the closes of the names ranked at a decision whose window covers the
@@ -834,6 +834,8 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
     fixture in the compact stream's tests pins that)."""
     listing = list_recordings(directory)
     retractions = load_retractions(directory)
+    if retracted_through is not None:   # a retraction recorded later, of a later day, is the next file's
+        retractions = {d: r for d, r in retractions.items() if d <= retracted_through}
     named = set(required) | set(optional)
     start = base + dt.timedelta(days=1)
     by_ticker = collections.defaultdict(lambda: ([], []))
@@ -1093,19 +1095,25 @@ def _held_history(ticker, day, window, held, named, factors, closes, days, by_ti
 
 def iter_encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), optional=(),
                 universe_members=False, base=None, ahead=1, first_sequence=2, max_sector_age_days=7,
-                engine="momentum", excluded=None, ranker=None):
+                engine="momentum", excluded=None, ranker=None, retracted_through=None):
     """The envelopes of encode (same arguments), as an iterator for
     write_stream. A compact stream (with ``ranker``) is checked and ranked
     in full before this returns, so it fails as encode does and
     ``excluded`` is filled; its envelopes are then made one at a time as
     they are written, so the stream is never held whole (docs/live-trading/
-    lessons-2026-10.md L1). Any other stream is encode's list."""
+    lessons-2026-10.md L1). Any other stream is encode's list.
+
+    ``retracted_through`` (a compact stream only) reads only the retractions
+    of days on or before it: the data job checks a file it published long
+    ago against the recordings, and a session cancelled after that file's
+    last one is delivered with a later file (its calendar and retraction),
+    never a change to the earlier one."""
     if ranker is None:
         return iter(encode(directory, first, last, identity, required, optional, universe_members, base, ahead,
                            first_sequence, max_sector_age_days, engine, excluded))
     _, _, base = _check_request(first, last, required, optional, universe_members, base, ahead, engine, ranker)
     return _compact(directory, first, last, identity, required, optional, base, ahead, first_sequence,
-                    max_sector_age_days, excluded, ranker)
+                    max_sector_age_days, excluded, ranker, retracted_through)
 
 
 def write_stream(path, envelopes):
