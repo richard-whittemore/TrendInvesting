@@ -29,10 +29,15 @@ makes them true:
    Gateway negotiated is reported (which of ibapi's decoders reads IBKR);
 2. it connected to IB Gateway with that client ID;
 3. it reconciled the account with that client ID;
-4. it queued a batch of the run's stream. A start that finds every file
-   already delivered queues none: that passes as "no new batch since start",
-   unless --expect-batch says this start must deliver one;
-5. for a queued batch, the engine journalled, among this start's inputs, an
+4. it queued a batch of the run's stream, and every batch it queued reached
+   the engine whole (as many inputs answered as it queued: an earlier batch
+   delivered never covers a later one still waiting). A start that queued
+   none passes only on the adapter's own word that its stream is caught up
+   ("ibkr stream no new file since ...; caught up"), and fails when it is
+   still waiting for its reading (the Flex proof, or between attempts), when
+   --expect-batch says this start must deliver one, or when nothing says
+   either way;
+5. for the latest batch, the engine journalled, among the inputs it delivered, an
    account snapshot at the version the engine reads (4 for an IRA: settled
    and total cash), a reconciliation, the batch's marks (version 3 with the
    IBKR contract for an IRA) and its session closes, each with every field
@@ -60,6 +65,12 @@ RECONCILED = re.compile(r"ibkr reconciled client_id=(\d+) positions=(\d+) open_o
 QUEUED = re.compile(r"ibkr stream queued run=(\S+) files=(\S+) inputs=(\d+)")
 ANSWERED = re.compile(r"ibkr input=(\S+) type=(\S+) answered with (\d+) decisions")
 UNRESOLVED = re.compile(r"ibkr contract for (\S+) not resolved")
+CAUGHT_UP = re.compile(r"ibkr stream no new file since (\S+); caught up")
+WAITS = re.compile(r"(ibkr broker snapshot waits.*)$")
+# The adapter's stamp: whole seconds in UTC (snapshot._stamp), as every mark's as_of.
+STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+# The largest contract ID the engine holds (MarkContract.ConID is an int64).
+MAX_INT64 = 2 ** 63 - 1
 STOPPED = re.compile(r"^adapter stopped: (.*)$")
 REFUSED = re.compile(r"^refused: (.*)$")
 
@@ -139,20 +150,43 @@ def reconciliation_fault(payload):
     return ""
 
 
-def mark_fault(payload, version):
-    """The first field of a mark the engine would not read as valid at version, or ""."""
+def mark_fault(payload, version, close=None):
+    """The first field of a mark the engine would not read as valid at version, or "".
+
+    The engine's rule is internal/event MarkRecordedPayload.ValidateSchema:
+    an instrument, an as-of time, a finite positive price and a source; a
+    broker last that is finite, positive when set and zero when not; version
+    1 with no broker last, and only version 3 with a contract (a positive
+    int64 contract ID, SMART, a primary exchange, US dollars). The probe
+    asks one thing more of the adapter's own marks: as_of is the batch's
+    close (close, the last session close's period_end), in the adapter's
+    whole-second UTC stamp, since a mark as of any other time is not the
+    close the engine values the batch at (ADR 0026 point 3).
+    """
     if not isinstance(payload, dict):
         return "payload"
     if not _text(payload.get("instrument_id")):
         return "instrument_id"
+    as_of = payload.get("as_of")
+    if not (isinstance(as_of, str) and STAMP.fullmatch(as_of)) or (close is not None and as_of != close):
+        return "as_of"
     if not (_number(payload.get("price")) and payload["price"] > 0):
         return "price"
-    if version != 3:
-        return ""
+    if not _text(payload.get("source")):
+        return "source"
+    last, last_set = payload.get("broker_last", 0), payload.get("broker_last_set", False)
+    if not isinstance(last_set, bool):
+        return "broker_last_set"
+    if not _number(last) or (last_set and not last > 0) or (not last_set and last != 0):
+        return "broker_last"
+    if version == 1 and (last_set or last != 0):
+        return "broker_last"
     contract = payload.get("contract")
+    if version != 3:
+        return "contract" if contract is not None else ""
     if not isinstance(contract, dict):
         return "contract"
-    if not (_count(contract.get("con_id")) and contract["con_id"] > 0):
+    if not (_count(contract.get("con_id")) and 0 < contract["con_id"] <= MAX_INT64):
         return "contract.con_id"
     for name, ok in (("contract.exchange", contract.get("exchange") == "SMART"),
                      ("contract.primary_exchange", _text(contract.get("primary_exchange"))),
@@ -199,22 +233,48 @@ def check_journal(lines, client_id, mode, report, expect_batch=False):
                 *found[-1].groups()))
         else:
             report.ok("connected to IB Gateway as client_id={} ({} time(s))".format(client_id, len(found)))
-    queued = [m for m in (QUEUED.search(line) for line in text) if m]
-    answered = [m.group(1) for m in (ANSWERED.search(line) for line in text) if m]
-    if queued:
-        for m in queued:
-            report.ok("queued run={} files={} inputs={}".format(*m.groups()))
-    elif expect_batch:
-        report.fail("no stream batch was queued by this start, and --expect-batch says one is due (is the run's "
-                    "stream folder written? docs/manual/market-data.md, \"A job for the IRAs\")")
-    elif connected and reconciled:
-        report.ok("no new batch since start; link connected, reconciled")
+    batches, current, answered = [], None, []
+    for line in text:
+        q = QUEUED.search(line)
+        if q:
+            current = {"run": q.group(1), "files": q.group(2), "inputs": int(q.group(3)), "answered": []}
+            batches.append(current)
+            continue
+        a = ANSWERED.search(line)
+        if a:
+            answered.append(a.group(1))
+            if current is not None:
+                current["answered"].append(a.group(1))
+    waits = [m.group(1) for m in (WAITS.search(line) for line in text) if m]
+    caught = [m for m in (CAUGHT_UP.search(line) for line in text) if m]
+    for b in batches:
+        # Every batch this start queued must have reached the engine whole: an
+        # earlier one delivered never covers a later one still waiting.
+        if len(b["answered"]) < b["inputs"]:
+            report.fail("the batch run={} files={} this start queued ({} inputs) reached the engine with only {} "
+                        "input(s) answered".format(b["run"], b["files"], b["inputs"], len(b["answered"])))
+        else:
+            report.ok("queued run={} files={} inputs={}".format(b["run"], b["files"], b["inputs"]))
+    if not batches:
+        if waits:
+            report.fail("no stream batch was queued: this start is still waiting for its reading ({})".format(waits[-1]))
+        elif expect_batch:
+            report.fail("no stream batch was queued by this start, and --expect-batch says one is due (is the run's "
+                        "stream folder written? docs/manual/market-data.md, \"A job for the IRAs\")")
+        elif caught and connected and reconciled:
+            report.ok("no new batch since start; caught up (every file through {} delivered); link connected, "
+                      "reconciled".format(caught[-1].group(1)))
+        else:
+            report.fail("no stream batch was queued and the adapter did not say its stream is caught up (\"ibkr "
+                        "stream no new file since ...; caught up\"): nothing shows this start delivered or needed to")
     unresolved = sorted({m.group(1) for m in (UNRESOLVED.search(line) for line in text) if m})
-    return bool(queued), answered, unresolved
+    latest = batches[-1]["answered"] if batches else []
+    return bool(batches), latest, answered, unresolved
 
 
-def check_engine_log(path, snapshot_version, mode, report, queued, answered):
-    """Checks 5 to 7 over the engine's durable log at path, for the inputs this start delivered (answered)."""
+def check_engine_log(path, snapshot_version, mode, report, queued, answered, latest=()):
+    """Checks 5 to 7 over the engine's durable log at path: the latest batch's records among the inputs it delivered
+    (latest), and the decisions in reply to every input this start delivered (answered)."""
     try:
         groups = _committed_groups(path)[1]
     except ResolveRefused as err:
@@ -222,10 +282,10 @@ def check_engine_log(path, snapshot_version, mode, report, queued, answered):
         return
     mine = set(answered)
     own = [g for g in groups if g[0][1] == LOG_INPUT and g[0][2]["id"] in mine]
-    inputs = [g[0][2] for g in own]
     decisions = [e for g in own for _, kind, e in g if kind == LOG_DECISION]
     if queued:
-        _check_batch(inputs, snapshot_version, report)
+        batch = set(latest)
+        _check_batch([g[0][2] for g in own if g[0][2]["id"] in batch], snapshot_version, report)
     sent = [e for e in decisions if e["type"] == RELEASED and e["payload"].get("send") is True]
     missing = [e["payload"].get("instrument_id") for e in decisions
                if e["type"] == ORDER_REFUSED and e["payload"].get("reason") == "missing-mark"]
@@ -285,7 +345,8 @@ def _check_batch(inputs, snapshot_version, report):
     closes = [e for e in inputs if e["type"] == CLOSED]
     want = 3 if snapshot_version == 4 else 2
     wrong = [e["id"] for e in marks if e["schema_version"] != want]
-    faults = [(e["id"], mark_fault(e["payload"], e["schema_version"])) for e in marks]
+    close = closes[-1]["payload"].get("period_end") if closes else None
+    faults = [(e["id"], mark_fault(e["payload"], e["schema_version"], close)) for e in marks]
     faults = [(i, f) for i, f in faults if f]
     if not marks or not closes:
         report.fail("the batch this start queued delivered {} mark(s) and {} session close(s): it did not reach the "
@@ -302,7 +363,7 @@ def _check_batch(inputs, snapshot_version, report):
 def run(journal_path, engine_log_path, client_id, snapshot_version=4, mode="dry-run", account="", expect_batch=False):
     """(lines, status) of the probe: every check's line, then passed (0) or FAILED (1)."""
     report = Report()
-    queued, answered = False, []
+    queued, latest, answered = False, [], []
     try:
         with open(journal_path, encoding="utf-8") as f:
             journal = f.read().splitlines()
@@ -312,10 +373,10 @@ def run(journal_path, engine_log_path, client_id, snapshot_version=4, mode="dry-
     if journal is not None:
         if not [line for line in journal if line.strip()]:
             report.fail("the adapter's journal {} is empty: give the lines of its start".format(journal_path))
-        queued, answered, unresolved = check_journal(journal, client_id, mode, report, expect_batch)
+        queued, latest, answered, unresolved = check_journal(journal, client_id, mode, report, expect_batch)
         if unresolved:
             report.note("contracts not resolved (no mark, so no order for them): {}".format(", ".join(unresolved)))
-    check_engine_log(engine_log_path, snapshot_version, mode, report, queued, answered)
+    check_engine_log(engine_log_path, snapshot_version, mode, report, queued, answered, latest)
     if report.failures:
         report.lines.append("probe: FAILED, {} check(s)".format(report.failures))
     else:

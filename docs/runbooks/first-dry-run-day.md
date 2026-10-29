@@ -12,6 +12,13 @@ its close. Dry-run sends nothing to IBKR, ever.*
 > 2026-10-28 copied the shipped file, with the account `joint`, back over
 > yours; if a `services` from such a checkout ran after step 1, do step 1
 > again (it is safe to repeat) and restart nothing else.
+>
+> **It also reinstalls every Go program in the checkout's `dist/`** over
+> `/opt/trend-investing/bin` and restarts the dashboard on it. On the live
+> server, once a `ti-release` has installed newer builds, move `dist/` aside
+> (or leave it empty) before `services`, else a stale `dist/` downgrades them
+> (`docs/runbooks/lightsail-deployment.md`). The settings files
+> (`engines/*.env`) are kept as `boost.config` is.
 
 **How to use the blocks.** Paste one block at a time into your login shell on
 the server, then compare what it printed with the "expect" block under it.
@@ -784,15 +791,22 @@ timer's doing):
 
 - `sudo deploy/provision.sh services`. What it **installs**: the adapter
   template `ti-adapter@.service` and every other unit file (replaced), the
-  Flex reader's staggered times for the IRA (the drop-in), and
-  `/etc/trend-investing/adapters/trad-ira.json` once. What it **keeps**,
+  Flex reader's staggered times for the IRA (the drop-in),
+  `/etc/trend-investing/adapters/trad-ira.json` once, `gateway.env`
+  (rewritten every run), and **every Go program present in the checkout's
+  `dist/`** (`ti-data`, `ti-reporter`, `ti-dashboard`, `operator`,
+  `journal-query`, `ti-gateway-start`, `universe-rank`; never `ti-engine`)
+  over `/opt/trend-investing/bin`. So on the live server run it with `dist/`
+  moved aside, or with a `dist/` that holds only the builds you mean to
+  install: a stale `dist/` downgrades the programs a `ti-release` installed
+  (`docs/runbooks/lightsail-deployment.md`). What it **keeps**,
   byte for byte: every engine configuration (`engines/*.config`), every
   settings file already on the server (`engines/*.env`; the shipped one is
   put beside it as `<name>.env.example`), the adapters' configurations and
   the secrets. What it **does to running units**: it enables and starts
   `ti-data.timer`, `ti-data@trad-ira.timer` and `ti-reporter@boost.timer`
   (already running on a Boost server, so no change), restarts
-  `ti-dashboard`, and disables (never stops) the engines and adapters, which
+  `ti-dashboard` (on whatever `ti-dashboard` it just installed), and disables (never stops) the engines and adapters, which
   are never enabled at boot. Boost's engine and adapter keep running.
 - `sudo deploy/provision.sh adapter` (the adapter's code).
 - The engine and reporter binaries built on the Mac
@@ -1086,7 +1100,7 @@ invocation=$(systemctl show -p InvocationID --value ti-adapter@trad-ira)
 sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat >/tmp/ti-adapter-trad-ira.journal
 cd /opt/trend-investing/adapter
 sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr probe --journal /tmp/ti-adapter-trad-ira.journal \
-  --engine-log /var/lib/trend-investing/engines/trad-ira/"$run".log --client-id 12 --snapshot-version 4
+  --engine-log /var/lib/trend-investing/engines/trad-ira/"$run".log --client-id 12 --snapshot-version 4 --expect-batch
 )
 ```
 

@@ -306,7 +306,7 @@ class IraBatchHarness(unittest.TestCase):
         self.fake.contract_details = {s: [contract_details(s, c)] for s, c in CON_IDS.items()}
         self.fake.marks = {900001: 52.41}
 
-    def run_loop(self, **overrides):
+    def run_loop(self, held=(), **overrides):
         clock = Clock()
 
         def sleep(seconds):
@@ -318,7 +318,7 @@ class IraBatchHarness(unittest.TestCase):
                            now=lambda: datetime(2027, 1, 14, 22, 5, tzinfo=timezone.utc), today=lambda: FRIDAY,
                            sleep=sleep, monotonic=clock, poll=0, new_id=Ids(), streams=str(self.streams))
         self.addCleanup(loop.close)
-        write_stream(self.folder, FRIDAY, ira_session(FRIDAY), prefix="trad-ira")
+        write_stream(self.folder, FRIDAY, ira_session(FRIDAY, held=held), prefix="trad-ira")
         loop.start()
         for _ in range(40):
             loop.step()
@@ -797,7 +797,7 @@ class ProbeEvidenceTests(ProbeTests):
     def test_a_restart_with_no_new_file_passes_saying_so(self):
         status, lines = self.probe(self.restart())
         self.assertEqual(status, 0, lines)
-        self.assertIn("probe: ok no new batch since start; link connected, reconciled", lines)
+        self.assertTrue(any(line.startswith("probe: ok no new batch since start; caught up") for line in lines), lines)
 
     def test_a_restart_with_no_new_file_fails_when_a_batch_is_expected(self):
         status, lines = self.probe(self.restart(), "--expect-batch")
@@ -883,6 +883,128 @@ def _read_groups(path):
                 groups.append(current)
                 current = []
     return None, groups
+
+
+
+class ClassShareHoldingTests(IraBatchHarness):
+    """IBKR spells a held class share "BRK B"; the adapter names it as the data job and the engine do, BRK.B, at the
+    boundary where it reads positions, open orders and executions, so the book, the closes and the marks all join."""
+
+    def test_a_held_class_share_reconciles_against_the_book_and_gets_its_close_and_mark(self):
+        from pathlib import Path as P
+        P(self.engine_log).unlink()
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(ACCOUNT, starting_book=({"BRK.B": 10}, 10000.0)))
+        self.fake.positions = [(ACCOUNT, contract(con_id=900077, symbol="BRK B"), Decimal("10"), 300.0)]
+        self.fake.summary = [(ACCOUNT, "NetLiquidation", "11002.50", "USD"), (ACCOUNT, "TotalCashValue", "10000.00", "USD"),
+                             (ACCOUNT, "ExcessLiquidity", "10000.00", "USD"), (ACCOUNT, "SettledCash", "10000.00", "USD")]
+        self.fake.contract_details["BRK B"] = [contract_details("BRK B", 900077, primary_exchange="NYSE")]
+        sent = self.run_loop(held=("BRK.B",))
+        account = [e for e in sent if e["type"] == ACCOUNT_SNAPSHOT_TYPE][0]["payload"]
+        self.assertEqual(account["positions"], [{"instrument_id": "BRK.B", "quantity": 10}])
+        self.assertEqual(account["as_of"], "2027-01-14T21:00:00Z", "the reading stands for the close: valued at BRK.B's")
+        broker = [e for e in sent if e["type"] == "account.broker.snapshot"][0]["payload"]
+        self.assertEqual([(p["instrument_id"], p["mark_set"]) for p in broker["positions"]], [("BRK.B", True)])
+        reconciliation = [e for e in sent if e["type"] == "account.reconciliation"][0]["payload"]
+        self.assertEqual(reconciliation["positions"], [{"instrument_id": "BRK.B", "quantity": 10}])
+        mark = [e for e in sent if e["type"] == MARK_TYPE and e["payload"]["instrument_id"] == "BRK.B"][0]
+        self.assertEqual(mark["payload"]["contract"]["con_id"], 900077)
+
+    def test_ibkrs_spelling_is_turned_into_the_data_jobs_and_back(self):
+        from spelling import engine_symbol, ibkr_symbol
+        self.assertEqual((engine_symbol("BRK B"), ibkr_symbol("BRK.B")), ("BRK.B", "BRK B"))
+        self.assertEqual((engine_symbol("SPY"), ibkr_symbol("SPY")), ("SPY", "SPY"))
+        self.assertEqual(engine_symbol(ibkr_symbol("BF.B")), "BF.B")
+
+    def test_an_order_names_ibkrs_spelling_beside_its_contract_id(self):
+        from sender import request_shape, OrderRequest
+        req = OrderRequest(client_order_id="tw-1", account_id=ACCOUNT, con_id=900077, symbol="BRK.B", action="BUY",
+                           quantity=Decimal(1), order_type="LMT", limit_price=Decimal("300"), tif="DAY")
+        contract_shape, _ = request_shape(req)
+        self.assertEqual((contract_shape.symbol, contract_shape.conId), ("BRK B", 900077))
+
+
+class MarkValidationTests(unittest.TestCase):
+    """The probe judges a mark by the engine's own rules (internal/event MarkRecordedPayload.ValidateSchema)."""
+
+    CLOSE = "2027-01-14T21:00:00Z"
+
+    def good(self):
+        return {"instrument_id": "AAA", "as_of": self.CLOSE, "price": 52.5, "source": "marketdata",
+                "broker_last": 52.41, "broker_last_set": True,
+                "contract": {"con_id": 900001, "exchange": "SMART", "primary_exchange": "NASDAQ", "currency": "USD"}}
+
+    def fault(self, payload, version=3):
+        from probe import mark_fault
+        return mark_fault(payload, version, self.CLOSE)
+
+    def test_a_good_mark_passes(self):
+        self.assertEqual(self.fault(self.good()), "")
+        unset = dict(self.good(), broker_last=0, broker_last_set=False)
+        self.assertEqual(self.fault(unset), "")
+
+    def test_each_field_the_engine_refuses_is_named(self):
+        cases = {
+            "as_of": [dict(self.good(), as_of=""), dict(self.good(), as_of="2027-01-14T20:00:00Z"),
+                      dict(self.good(), as_of="yesterday")],
+            "source": [dict(self.good(), source=""), {k: v for k, v in self.good().items() if k != "source"}],
+            "broker_last": [dict(self.good(), broker_last=-1.0), dict(self.good(), broker_last=0, broker_last_set=True),
+                            dict(self.good(), broker_last=5.0, broker_last_set=False),
+                            dict(self.good(), broker_last=float("nan"))],
+            "broker_last_set": [dict(self.good(), broker_last_set="yes")],
+            "contract.con_id": [dict(self.good(), contract=dict(self.good()["contract"], con_id=2 ** 63))],
+        }
+        for field, payloads in cases.items():
+            for payload in payloads:
+                self.assertEqual(self.fault(payload), field, payload)
+
+    def test_a_version_2_mark_carries_no_contract_and_version_1_no_broker_price(self):
+        self.assertEqual(self.fault(self.good(), version=2), "contract")
+        v1 = {k: v for k, v in self.good().items() if k not in ("contract", "broker_last", "broker_last_set")}
+        self.assertEqual(self.fault(v1, version=1), "")
+        self.assertEqual(self.fault(dict(v1, broker_last=1.0, broker_last_set=True), version=1), "broker_last")
+
+
+class ProbeCatchUpTests(ProbeTests):
+    """No batch passes only on the adapter's own word that the stream is caught up; a start still waiting, or one with
+    no word either way, fails; and every batch a start queued must reach the engine."""
+
+    test_a_good_start_passes_naming_each_check = None
+
+    def journal_of(self, lines):
+        path = self.dir / "made.txt"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def head(self):
+        return [line for line in self.start().read_text().splitlines()
+                if "adapter starting" in line or "link state=connected" in line or "reconciled" in line]
+
+    def test_a_caught_up_restart_passes_on_the_adapters_caught_up_line(self):
+        self.start()
+        second = self.start()
+        self.assertIn("ibkr stream no new file since", second.read_text())
+        status, lines = self.probe(second)
+        self.assertEqual(status, 0, lines)
+        self.assertTrue(any(line.startswith("probe: ok no new batch since start; caught up") for line in lines), lines)
+
+    def test_a_start_still_waiting_for_its_reading_fails_saying_why(self):
+        lines = self.head() + ["x ibkr broker snapshot waits for the Flex reader's executions proof until 09:00 New "
+                               "York: no executions proof is written"]
+        status, out = self.probe(self.journal_of(lines))
+        self.assertEqual(status, 1, out)
+        self.assertTrue(any(line.startswith("probe: FAIL") and "waits for the Flex reader" in line for line in out), out)
+
+    def test_a_start_with_no_batch_and_no_word_either_way_fails(self):
+        status, out = self.probe(self.journal_of(self.head()))
+        self.assertEqual(status, 1, out)
+        self.assertTrue(any(line.startswith("probe: FAIL") and "caught up" in line for line in out), out)
+
+    def test_an_earlier_delivered_batch_never_covers_a_later_undelivered_one(self):
+        journal = self.start().read_text().splitlines()
+        later = "x ibkr stream queued run={} files=trad-ira-2027-01-15.jsonl inputs=9".format(RUN)
+        status, out = self.probe(self.journal_of(journal[:-1] + [later, journal[-1]]))
+        self.assertEqual(status, 1, out)
+        self.assertTrue(any(line.startswith("probe: FAIL") and "trad-ira-2027-01-15.jsonl" in line for line in out), out)
 
 
 if __name__ == "__main__":

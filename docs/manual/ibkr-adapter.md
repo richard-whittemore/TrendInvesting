@@ -224,7 +224,7 @@ After every adapter install, run the probe on the server the same day,
 right after the adapter's first start (lessons L5 and L10: every server
 defect of the Boost dry run appeared one per morning). It reads only two
 files: the adapter's journal lines for that start and the engine's durable
-log. The exact block is `docs/runbooks/first-dry-run-day.md`, I-7:
+log. The exact block is `docs/runbooks/first-dry-run-day.md`, I-8 ("The same-day probe"):
 
 ```sh
 invocation=$(systemctl show -p InvocationID --value ti-adapter@trad-ira)
@@ -232,7 +232,8 @@ sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat >/tmp/ti-
 cd /opt/trend-investing/adapter
 sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr probe \
   --journal /tmp/ti-adapter-trad-ira.journal \
-  --engine-log /var/lib/trend-investing/engines/trad-ira/<TI_RUN>.log --client-id 12 --snapshot-version 4
+  --engine-log /var/lib/trend-investing/engines/trad-ira/<TI_RUN>.log --client-id 12 --snapshot-version 4 \
+  --expect-batch
 ```
 
 What a good start prints, one line a check, last line `probe: passed`. Its
@@ -256,10 +257,18 @@ probe: no decision yet: the first is made at the close of a month's last session
 probe: passed
 ```
 
-A restart that finds every file already delivered queues nothing, and says
-so instead of the batch's four lines: `probe: ok no new batch since start;
-link connected, reconciled`. Give `--expect-batch` when this start must
-deliver one (the morning after a session): then that is a `FAIL`. In
+Every batch the start queued must have reached the engine whole (an
+earlier batch delivered never covers a later one still waiting), and the
+latest is the one judged. A start that queued none passes only on the
+adapter's own word that its stream is caught up: the adapter logs `ibkr
+stream no new file since <file>; caught up` once every file of the run is
+delivered, and the probe then says `probe: ok no new batch since start;
+caught up (...)`. A start still waiting for its reading (`ibkr broker
+snapshot waits ...`: the Flex proof, or between attempts) fails, naming
+that line, and so does one with no word either way. Give `--expect-batch`
+after an install or the morning after a session, when this start must
+deliver a batch (the runbook's block does); leave it out only to check a
+restart you know has nothing new. In
 dry-run an order released marked to be sent is a `FAIL`; in paper the
 probe only counts them (whether IBKR acknowledged each is in the order
 reports). After a month-end the second-to-last line names the latest decision instead

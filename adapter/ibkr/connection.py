@@ -66,9 +66,6 @@ LIST_MESSAGES = ("open_order", "open_order_end")
 # both, so request IDs start far above any order ID an account reaches
 # (IBKR's are 32-bit) and an error on a request never names an order.
 REQUEST_ID_BASE = 1 << 30
-# How long one sleep of Connection.pause lasts at most, so the callbacks
-# that arrive meanwhile are applied (and fanned out) at least this often;
-# a link change ends the wait early (ADR 0025 point 5).
 # The adapter's bulk requests (contract lookups, market-data snapshots and
 # their cancels; snapshot.py) share one pacer: at most PACE_LIMIT of them in
 # any PACE_WINDOW seconds. IBKR accepts at most 50 API messages a second from
@@ -80,6 +77,9 @@ PACE_WINDOW = 1.0
 # ibapi 10.51.01's MIN_SERVER_VER_PROTOBUF_CONTRACT_DATA: from this server
 # version on, a contract's details arrive as protobuf messages.
 PROTOBUF_CONTRACT_DATA = 205
+# How long one sleep of Connection.pause lasts at most, so the callbacks
+# that arrive meanwhile are applied (and fanned out) at least this often;
+# a link change ends the wait early (ADR 0025 point 5).
 PAUSE_SLICE = 1.0
 
 ConnectionStatus = namedtuple(

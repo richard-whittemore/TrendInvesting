@@ -590,7 +590,10 @@ install_engine_settings() {
       install -m 0644 "$f" "$dest/$name.example"
       log "kept $dest/$name; the shipped one is $dest/$name.example (copy any line it adds by hand)"
     else
-      install -m 0644 "$f" "$dest/$name"
+      # Written whole beside it, then renamed into place: a copy cut short
+      # never stands under the file's own name, which a later run would keep.
+      install -m 0644 "$f" "$dest/.$name.new"
+      mv -f "$dest/.$name.new" "$dest/$name"
     fi
   done
   for f in "$src"/*.config; do

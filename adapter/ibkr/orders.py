@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from connection import LIST_ENDED, LIST_READING
+from spelling import engine_symbol
 from values import to_decimal
 
 # IBKR's order statuses ("Order Status" in IBKR's TWS API documentation) and
@@ -229,7 +230,7 @@ def open_order_record(order_id, contract, order, order_state):
     return OpenOrderRecord(
         account_id=order.account, client_id=order.clientId, broker_order_id=order_id,
         perm_id=order.permId,
-        client_order_id=order.orderRef or None, con_id=contract.conId, symbol=contract.symbol,
+        client_order_id=order.orderRef or None, con_id=contract.conId, symbol=engine_symbol(contract.symbol),
         action=order.action, quantity=to_decimal(order.totalQuantity, "totalQuantity"),
         order_type=order.orderType, limit_price=_price(order.lmtPrice, "lmtPrice"),
         aux_price=_price(order.auxPrice, "auxPrice"), tif=order.tif,
@@ -248,7 +249,7 @@ def execution_report(contract, execution, received_at=None):
         account_id=execution.acctNumber, exec_id=execution.execId, client_id=execution.clientId,
         broker_order_id=execution.orderId, perm_id=execution.permId,
         client_order_id=execution.orderRef or None, con_id=contract.conId,
-        symbol=contract.symbol, side=execution.side,
+        symbol=engine_symbol(contract.symbol), side=execution.side,
         shares=to_decimal(execution.shares, "shares"), price=to_decimal(execution.price, "price"),
         cum_qty=to_decimal(execution.cumQty, "cumQty"),
         avg_price=to_decimal(execution.avgPrice, "avgPrice"),

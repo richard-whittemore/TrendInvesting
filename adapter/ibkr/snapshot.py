@@ -62,6 +62,7 @@ from connection import LIST_ENDED, LIST_READING, NotConnected
 from masking import mask_accounts
 from orders import FINISHED, UnrecognisedOrderReport, open_order_record, order_key, order_label
 from sender import CURRENCY, EXCHANGE, SEC_TYPE
+from spelling import ibkr_symbol
 from values import to_decimal
 
 log = logging.getLogger("ibkr")
@@ -459,24 +460,13 @@ CONTRACT_BATCH = 40
 CONTRACT_ASKS = 2
 
 
-def ibkr_symbol(instrument):
-    """IBKR's spelling of a stock the data job names: a class share's dot as a space (BRK.B -> "BRK B").
-
-    Massive and the universe sources spell a share class with a dot; IBKR's
-    contract symbol spells it with a space. The rule is fixed and the answer
-    is checked against it (_one_contract), so it is a spelling, never a guess
-    of which contract is meant. Every other name is unchanged.
-    """
-    return instrument.replace(".", " ")
-
-
 def resolve_contracts(conn, symbols, configured):
     """(contracts, refused) for symbols, each resolved by name with IBKR's reqContractDetails; None if the link went.
 
     ADR 0026 point 3 and ADR 0025 (amended 2026-10-29): an IRA's mark states
     the IBKR contract it is for, and a stock newly picked is in no
     configuration, so its contract is looked up by name, in IBKR's spelling
-    (ibkr_symbol), as a US-dollar stock on SMART. contracts maps a symbol to
+    (spelling.ibkr_symbol), as a US-dollar stock on SMART. contracts maps a symbol to
     its Contract when IBKR answered with exactly one contract, and that
     contract is the name's own: IBKR's symbol and local symbol are the
     spelling asked, a stock (STK), in US dollars, on SMART, with a positive

@@ -227,7 +227,7 @@ is the account the IRA's configuration names. An **urgent** alert pages
 you; a **routine** one only informs. A withheld month sends one alert when
 a run of withheld months with the same reason starts, and its text says
 held positions and orders are unchanged. The IRA's reporter is not running yet, so none of these alerts reaches you
-for the IRA until it is; until then the same-day probe (`docs/runbooks/first-dry-run-day.md`, I-7) names the
+for the IRA until it is; until then the same-day probe (`docs/runbooks/first-dry-run-day.md`, I-8) names the
 latest decision and any `missing-mark` refusal.
 
 | What you see | What the program does | What you do |

@@ -590,6 +590,8 @@ class Deliverer:
         self._engine_log_path = engine_log_path
         self._snapshot = snapshot
         self._new_id = new_id
+        # The last file the "caught up" line named (deliver).
+        self._caught_up_said = None
 
     def check(self):
         """At start, once the engine listens (its log is whole): the run's stream folder exists and the delivery
@@ -619,6 +621,14 @@ class Deliverer:
         new = sorted((_session_of(n), n) for n in os.listdir(self.folder)
                      if STREAM_FILE.fullmatch(n) and n not in delivered)
         if not new:
+            # Said once per file, so the same-day probe can tell a start that
+            # is caught up from one still waiting (probe.py): only when every
+            # file of the run's folder is delivered and none is in the outbox;
+            # a run with nothing delivered yet is never caught up.
+            last = max(delivered, key=_session_of) if delivered else None
+            if last is not None and self._caught_up_said != last:
+                self._caught_up_said = last
+                log.info("ibkr stream no new file since %s; caught up", last)
             return
         for session, name in new:
             if latest is not None and session <= latest:

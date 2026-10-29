@@ -53,6 +53,34 @@ cmp -s "$src/trad-ira.env" "$dest/trad-ira.env.example" || fail "the shipped tra
 grep -q "kept $dest/trad-ira.env" "$work/out" || fail "the install does not say it kept trad-ira.env: $(cat "$work/out")"
 grep -q "kept $dest/trad-ira.config" "$work/out" || fail "the install does not say it kept trad-ira.config: $(cat "$work/out")"
 
+# A first install interrupted mid-copy never leaves a partial settings file
+# under its own name, which every later run would keep as the owner's: the
+# file is written beside it under a temporary name and renamed into place.
+fresh=$work/etc/fresh
+mkdir -p "$fresh"
+# provision.sh runs with errexit, so the failed copy ends the step there (a
+# subshell in a condition or a || list would run with errexit off).
+set +e
+(
+  set -e
+  # A stand-in for install(1) that dies part-way through trad-ira.env's
+  # temporary file, after writing its first line.
+  # shellcheck disable=SC2329 # called by install_engine_settings in this subshell
+  install() {
+    local last=${*: -1}
+    case $last in
+      */.trad-ira.env.new) head -n 1 "${*: -2:1}" >"$last"; return 1 ;;
+      *) command install "$@" ;;
+    esac
+  }
+  install_engine_settings "$src" "$fresh" >/dev/null 2>&1
+)
+set -e
+test ! -e "$fresh/trad-ira.env" || fail "an interrupted first install left a partial trad-ira.env under its own name"
+install_engine_settings "$src" "$fresh" >"$work/out"
+cmp -s "$src/trad-ira.env" "$fresh/trad-ira.env" || fail "the install after an interrupted one did not install the whole trad-ira.env"
+test -z "$(find "$fresh" -name '.*.new')" || fail "a temporary settings file is left behind: $(find "$fresh" -name '.*.new')"
+
 if test "$failures" -gt 0; then
   echo "$failures failure(s)" >&2
   exit 1

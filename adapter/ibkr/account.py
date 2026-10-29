@@ -24,6 +24,7 @@ the adapter's own receipt time.
 from collections import namedtuple
 
 from connection import ACCOUNT_VALUES_ASKED, CODE_ACCOUNT_UNSUBSCRIBED, NotConnected
+from spelling import engine_symbol
 from values import to_decimal
 
 NET_LIQUIDATION = "NetLiquidation"
@@ -359,7 +360,7 @@ def _add_position(positions, account, row_account, contract, quantity, avg_cost)
         raise SnapshotInvalid("two position rows for contract {}".format(contract.conId))
     try:
         positions[contract.conId] = Position(
-            account_id=row_account, con_id=contract.conId, symbol=contract.symbol,
+            account_id=row_account, con_id=contract.conId, symbol=engine_symbol(contract.symbol),
             sec_type=contract.secType, currency=contract.currency,
             quantity=to_decimal(quantity, "position"), avg_cost=to_decimal(avg_cost, "avg_cost"))
     except ValueError as err:
