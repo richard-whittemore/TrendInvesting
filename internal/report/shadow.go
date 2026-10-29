@@ -58,11 +58,12 @@ func growthLink(prev, next benchBar) (ratio float64, reinvested bool) {
 // A transfer on or before the first paired
 // day is in the starting balance.
 //
-// Both returns are time-weighted: each interval between paired points grows
-// by (net at its end less the transfers mirrored in it) over the net at its
-// start, chained, so a transfer is never a gain or a loss. The benchmark's
-// is its growth index's, which is the shadow's time-weighted return. The
-// day's figures are the last interval's.
+// The account's return is time-weighted: each interval between paired
+// points grows by (net at its end less the transfers counted in it) over the
+// net at its start, chained, so a transfer is never a gain or a loss. The
+// benchmark's return is its growth index's, with no transfer term, which is
+// also the shadow's time-weighted return. The day's figures are the last
+// interval's.
 func equityOf(points []equityPoint, bars map[string]benchBar, ledger CashLedger, benchmark, date string) Equity {
 	if len(points) < 2 {
 		return Equity{}
