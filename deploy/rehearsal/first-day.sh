@@ -421,6 +421,7 @@ systemctl start ti-adapter-boost.service
 for _ in $(seq 120); do grep -q '"state":"halted"' "$engines/run-2026-10-25.log" && break; sleep 1; done
 grep -q '"state":"halted"' "$engines/run-2026-10-25.log" || fail "the engine did not halt on a first reading that is not the approved book: $(journalctl -u ti-adapter-boost -n 8 --no-pager -o cat)"
 note "the drill's first run halted on its first reading, as a mistyped book makes it"
+rehearse_capital_safety_in_window
 
 # The recovery section's names (recover-vars) are prefixed to each of its
 # blocks, as the owner sets them once; the drill's run names replace the

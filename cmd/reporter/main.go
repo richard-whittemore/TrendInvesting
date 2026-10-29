@@ -19,6 +19,13 @@
 // journal file's modification time, with silence counted in NYSE sessions; a
 // reporter on the engine's own host cannot be the external dead-man's switch
 // ADR 0019 asks for, which is a separate service.
+//
+// While the host's maintenance window is open (-maintenance; internal/maintenance)
+// the reporter still runs and still pings the outside heartbeat, and records,
+// without delivering, a failed unit, a logged-out Gateway and a reconciliation
+// that moved no state; the first firing after it closes judges them afresh and
+// pages what is still wrong. Capital-safety alerts are never held
+// (internal/report, maintenance.go).
 package main
 
 import (
@@ -115,6 +122,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
 	runEnv := flags.String("run-env", "", "the engine's run.env (/var/lib/trend-investing/engines/<instance>/run.env): while it is missing or empty and nothing shows a run (no *.log in its folder, no <account>.ran marker beside -state; -account is required with it) the firing logs that it is waiting for the account's first run and skips only the journal step; every other check still runs, and the firing pings the outside heartbeat only when nothing else is wrong. With any sign of a run it is an urgent alert and a failed firing")
 	journalctl := flags.String("journalctl", "journalctl", "the journal reader that gives a failed unit's last line")
+	maintenanceFile := flags.String("maintenance", "", "the host's maintenance window marker (default: maintenance.json beside -state, written by ti-maintenance): while a window is open, failed units, a logged-out Gateway and a reconciliation that moved no state are recorded and not paged, the heartbeat is still pinged, and the first firing after the window closes pages what is still wrong; capital-safety alerts are never held")
 	err := flags.Parse(args)
 	if err != nil {
 		return err
@@ -205,6 +213,15 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	seen, sent, repeats, baselines, err := loadState(*statePath)
 	if err != nil {
 		return errors.Join(append(failures, err)...)
+	}
+	// A window held alerts only for as long as it was open: at the first
+	// firing after it closes they are judged afresh, by the paths below.
+	windowUntil := windowEnd(maintenancePath(*maintenanceFile, *statePath), sampledAt)
+	windowOpen := !windowUntil.IsZero()
+	if !windowOpen && dropHeld(sent, "") {
+		if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
+			failures = append(failures, err)
+		}
 	}
 	// The firing waits only on proof that the account has never run: nothing
 	// shows a run but the missing settings file. Any sign of one is a fault.
@@ -330,6 +347,12 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	for _, f := range setAside {
 		alerts = append(alerts, report.ChannelRefusedAlert(label, f.channel, f.err, now()))
 	}
+	// An open window records what it holds and delivers the rest.
+	heldUnits := sortedUnits(tradingUnits, failedNow)
+	if windowOpen {
+		alerts = splitHeld(alerts, sent, windowUntil, sampledAt)
+		heldUnits = nil
+	}
 
 	// Each delivery is saved as soon as a channel takes it, so a run stopped
 	// before it ends (systemd stops one at its TimeoutStartSec) makes the
@@ -353,7 +376,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			continue
 		}
 		if !waiting && refused == nil {
-			if err := tellStateAtStart(group, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, sortedUnits(tradingUnits, failedNow), record); err != nil {
+			if err := tellStateAtStart(group, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, heldUnits, record); err != nil {
 				failures = append(failures, err)
 			}
 		}
@@ -387,7 +410,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// the page of a unit not failed at the sample. A systemctl that could not
 	// be run checked nothing, so no page is resolved on its word.
 	if unitsErr == nil && len(tradingUnits)+len(resolveOnly) > 0 {
-		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat, func(unit string) (unitSample, error) {
+		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat, windowUntil, func(unit string) (unitSample, error) {
 			samples, err := sampleUnitsFor(*systemctl, []string{unit}, "the trading units were checked; only the data job's resolve and backup page are skipped at this firing")
 			return samples[unit], err
 		})
@@ -423,7 +446,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 		if sched, err := gatewayScheduleFrom(getenv); err != nil {
 			failures = append(failures, err)
-		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, senders, setAside, now); err != nil {
+		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowUntil, senders, setAside, now); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -472,8 +495,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if err := errors.Join(failures...); err != nil {
 		return err
 	}
+	// A window still pings: its failed units are recorded and page when it
+	// closes, and the outside check must not page the install's own noise.
 	for _, failed := range failedNow {
-		if failed {
+		if failed && !windowOpen {
 			return nil
 		}
 	}

@@ -136,6 +136,10 @@ type hostGateway struct {
 	Quiet        int  `json:"quiet,omitempty"`         // consecutive good quiet firings
 	StartFailing bool `json:"start_failing,omitempty"` // a failing start is open, until it closes
 	RestartOnly  bool `json:"restart_only,omitempty"`  // the outage was opened by the restart rule alone
+	// Held is the end of the maintenance window that held this outage's page:
+	// the outage was recorded and not paged, and when the window has closed it
+	// pages at once, without counting its grace again (maintenance.go).
+	Held *time.Time `json:"held_in_maintenance_until,omitempty"`
 }
 
 func loadHostGateway(path string) (hostGateway, error) {
@@ -160,7 +164,7 @@ func loadHostGateway(path string) (hostGateway, error) {
 // seen in; it pages once the time passes gatewayPagesAfter outside a window,
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
-func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, senders []sender, setAside []channelFault, clock func() time.Time) (retErr error) {
+func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, hold time.Time, senders []sender, setAside []channelFault, clock func() time.Time) (retErr error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -224,7 +228,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
 		if err != nil {
 			return err
 		}
@@ -255,7 +259,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		}
 	}
 	if !out {
-		h.Since, h.RestartOnly = nil, false
+		h.Since, h.RestartOnly, h.Held = nil, false, nil
 		if !deliveredAnywhere(seen, key) {
 			h.Resolving = false
 			return record()
@@ -280,9 +284,17 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	if err := record(); err != nil {
 		return err
 	}
-	if sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter {
+	// A maintenance window records the outage and pages nothing, reminders
+	// included; once it has closed an outage it held pages at once, since the
+	// window was the reason it had not (restart windows still count).
+	if !hold.IsZero() {
+		h.Held = &hold
+		return record()
+	}
+	if sched.inWindow(now) || (h.Held == nil && now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter) {
 		return nil
 	}
+	h.Held = nil
 	if h.Resolving {
 		// The new outage is due its page while an earlier recovery's resolution
 		// is still pending: the channel that never took that resolution holds a

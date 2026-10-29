@@ -227,6 +227,54 @@ that one channel (delivery is at-least-once: ntfy and Pushover post it twice); e
 period divides the repeat interval and is at most half the acknowledgement
 bound, and that a run is stopped before the next firing.
 
+## Maintenance windows
+
+Installing a new program on the server replaces files the reporter runs from
+at 5-minute marks, and a unit can fail for a moment because of it. A
+**maintenance window** is a bounded quiet period for exactly that: nothing
+pages for the install's own noise, and anything still broken when the window
+ends pages at once. You normally never open one: `sudo ti-release <tag>`
+opens one for its own run and closes it ([server](server.md), "Installing a
+release"). To open one by hand, `sudo ti-maintenance start 10m` (15 minutes
+if you give no length; 30 at most), `sudo ti-maintenance end` to close it,
+`ti-maintenance status` to see it. A window ends by itself at its expiry even
+if nobody closes it; no window can last more than 30 minutes.
+
+**What you see while a window is open.** The dashboard's header says
+"Maintenance until ..." with the end time in UTC. The reporter still runs
+every 5 minutes and still pings the outside heartbeat, so the outside check
+does not page you for the install, and the daily summary is sent as always.
+Four things are *recorded and not paged*: a failed unit (the failure the unit
+hook reports at the moment it fails, and the failure the reporter finds at its
+firing, the data job's included, and the hourly reminder of a failure already
+paged), the Gateway logged out, and a reconciliation that moved no account
+state (the pending cash read, [reconciliation](reconciliation.md)). Each is
+written in the reporter's state files with the window's end noted
+(`held:<end of window>` in `unit-failures.json` and the account's state file,
+`held_in_maintenance_until` in `host-gateway.json`), so you can see what a
+window held.
+
+**What never waits for a window.** Every capital-safety alert pages as it
+always does, inside a window too: an order refused (the kill switch is a
+refusal), a Halted or Degraded account, a reconciliation that Degrades or
+Halts the account, a decision withheld, an order the venue has not
+acknowledged, a sale that failed or must be made by hand, a margin alarm. The
+list is in one place, `NeverHeld` in `internal/report/maintenance.go`
+(`TestNoCapitalSafetyAlertIsHeldByAMaintenanceWindow`); every alert not named
+above (a lost heartbeat, an unreadable journal, a refused channel) is
+delivered as always, since a window changes no other alert.
+
+**What happens when it closes.** Nothing held is forgotten. At the first
+reporter firing after the window ends, whether you ended it, `ti-release`
+did, or it expired, every held alert is judged afresh by the normal paths: a
+unit still failed pages once, as a new failure would (and is reminded hourly
+after that), a Gateway still logged out pages at once without waiting out its
+10 minutes again, and a unit that recovered inside the window, or a Gateway
+that logged in again, resolves with no page at all. That firing is at most 5
+minutes after the window closes. A window that expires because `ti-release`
+died, or because you forgot it, therefore cannot hide a broken install for
+more than its length plus 5 minutes.
+
 ## Where alerts go
 
 Alerts go to real channels. You choose them with `-channel`, comma-separated.

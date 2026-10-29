@@ -130,6 +130,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that names the failed run when systemd did not (MONITOR_INVOCATION_ID)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
 	repeat := flags.Duration("repeat-interval", defaultRepeatInterval, "unused by a page that does not repeat; kept so the hook and the reporter share one delivery code")
+	maintenanceFile := flags.String("maintenance", "", "the host's maintenance window marker (default: maintenance.json beside -state): while a window is open the failure is recorded and not paged, and the first reporter firing after it closes pages the unit if it is still failed")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -140,6 +141,17 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 		return errors.New("reporter: -send-timeout must be positive")
 	}
 	unit := flags.Arg(0)
+	// Inside a maintenance window the failure is recorded and not paged: the
+	// reporter's first firing after the window closes pages it if the unit is
+	// still failed, and forgets it if the unit recovered (maintenance.go).
+	if until := windowEnd(maintenancePath(*maintenanceFile, *statePath), now()); !until.IsZero() {
+		at := now()
+		run := failedInvocation(getenv, *systemctl, unit, at)
+		return withUnitState(*statePath, at, func(u *unitState) error {
+			holdAlert(u.sent, until, at, report.UnitFailedKey(unit, run))
+			return u.record()
+		})
+	}
 	var failures []error
 	secrets := secretValues(getenv, *secretsFile)
 	if *secretsFile != "" {
@@ -550,9 +562,13 @@ func splitUnits(list string) []string {
 // the next firing), and every other error, including any failure to persist
 // the record, is hard and fails the firing (ADR 0019: delivery state is
 // durable).
-func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, current func(string) (unitSample, error)) (soft, hard error) {
+func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, hold time.Time, current func(string) (unitSample, error)) (soft, hard error) {
 	var softErrs, hardErrs []error
 	err := withUnitState(path, at, func(u *unitState) error {
+		// Held records are a window's: with none open they are judged afresh
+		// below, by the normal paths; inside one a failed unit is recorded and
+		// not paged, and one no longer failed is forgotten (maintenance.go).
+		changed := hold.IsZero() && dropHeld(u.sent, "")
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
 			resolves := slices.Contains(resolveOnly, unit)
@@ -588,6 +604,11 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				if sample.invocation == "" {
 					sample.invocation = unnamedRun
 				}
+				if !hold.IsZero() {
+					holdAlert(u.sent, hold, at, report.UnitFailedKey(unit, sample.invocation))
+					changed = true
+					continue
+				}
 				if resolves {
 					if handledRun(u, unit, sample.invocation) {
 						continue
@@ -598,6 +619,9 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
 				continue
 			}
+			if dropHeld(u.sent, report.UnitFailedKeyPrefix(unit)) {
+				changed = true
+			}
 			for invocation, recorded := range unitRecords(u, unit) {
 				key := report.UnitFailedKey(unit, invocation)
 				if !resolves && (!recorded.Before(sampledAt) || !latestRun(u, key).Before(sampledAt)) {
@@ -606,6 +630,9 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				handleRuns(u, unit, key, invocation, at)
 				fail(resolveKey(u, key, senders, setAside, at))
 			}
+		}
+		if changed {
+			hardErrs = append(hardErrs, u.record())
 		}
 		return nil
 	})
@@ -729,6 +756,7 @@ func allTook(senders []sender, key string, seen map[string]bool) bool {
 func clearUnit(path, unit, current string, senders []sender, setAside []channelFault, at time.Time) error {
 	return withUnitState(path, at, func(u *unitState) error {
 		var failures []error
+		dropHeld(u.sent, report.UnitFailedKeyPrefix(unit))
 		for invocation := range unitRecords(u, unit) {
 			if invocation == current {
 				continue
