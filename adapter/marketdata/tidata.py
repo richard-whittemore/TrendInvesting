@@ -957,6 +957,13 @@ def _check_chain(spans, retracted):
         except (ValueError, KeyError, TypeError) as e:
             raise Refused("the run's file {} does not begin with its calendar ({}); this stops the job for a "
                           "person".format(path, e)) from None
+        if begins != expected and begins in retracted and first <= begins < expected:
+            # The file begins at a session cancelled since it was published: the retraction rule (a
+            # retraction of a session on or before a published file's last stops the job), not a lost file.
+            raise Refused("{} begins at {}, but a retraction of {} was recorded after it was published: the engine "
+                          "has already read that session, so nothing more is written for the run: this stops the "
+                          "job for a person (docs/manual/market-data.md, \"A file already written differs\")".format(
+                              path, begins, begins))
         if begins != expected:
             raise Refused("the run's files are not one unbroken chain: {} begins at {}, but the sessions from {} "
                           "are in no file, so a file written for the run is missing; nothing more is written for "

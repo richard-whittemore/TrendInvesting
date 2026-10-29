@@ -1339,11 +1339,20 @@ class RetractionRuleTest(unittest.TestCase):
                                      recorded_at="2026-11-20T15:00:00Z")
             job = MomentumJob(root, data=data, client=FakeMassive({D(2026, 12, 1): bars_for(D(2026, 12, 1))}),
                               ranker=FakeRanker())
+            written = {}
             for now, extra in ((after_settle(D(2026, 11, 25)), ("--backfill-from", "2026-11-23")),
                                (after_settle(D(2026, 11, 27)), ()), (after_settle(D(2026, 11, 30)), ()),
                                (after_settle(D(2026, 12, 1)), ()), (after_settle(D(2026, 12, 1), minutes=600), ())):
                 status, _, err = job.main(now, *extra)
                 self.assertEqual(status, 0, err)
+                for day in (D(2026, 11, 25), D(2026, 11, 27)):
+                    if job.path(day).exists():
+                        raw = job.path(day).read_bytes()
+                        self.assertNotIn(b"market.session.retracted", raw, day)
+                        self.assertEqual(written.setdefault(day, raw), raw, day)
+            self.assertEqual(sorted(written), [D(2026, 11, 25), D(2026, 11, 27)])
+            self.assertEqual([e["payload"]["session"] for e in job.envelopes(D(2026, 12, 1))
+                              if e["type"] == "market.session.retracted"], ["2026-11-30"])
 
     def test_bars_recorded_on_a_cancelled_session_refuse_the_firing_that_steps_over_it(self):
         self.assertEqual(self.fire(after_settle(D(2026, 11, 27))), str(self.job.path(D(2026, 11, 27))))
@@ -1369,6 +1378,21 @@ class RetractionRuleTest(unittest.TestCase):
         with mock.patch.object(tidata, "_verify_momentum", racing):
             self.fire(after_settle(D(2026, 11, 27), minutes=600))
         self.assertNotIn(late, json.loads(manifest_path.read_text())["actions"])
+
+
+
+class FirstSessionRetractedLaterTest(unittest.TestCase):
+    def test_a_retraction_of_a_published_files_first_session_is_refused_as_a_file_that_differs(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            job.client = FakeMassive({D(2026, 12, 1): bars_for(D(2026, 12, 1))})
+            encode.record_retraction(str(job.data), D(2026, 11, 30), "NYSE closed (recorded late)",
+                                     recorded_at="2026-12-01T23:00:00Z")
+            status, _, err = job.main(after_settle(D(2026, 12, 1)))
+            self.assertEqual(status, 1, err)
+            self.assertIn("retraction of 2026-11-30 was recorded after", err)
+            self.assertIn("A file already written differs", err)
+            self.assertNotIn("is missing", err)
 
 
 if __name__ == "__main__":

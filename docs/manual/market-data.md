@@ -948,8 +948,9 @@ written, leaves that file with the rules' calendar through the cancelled
 day, and the next file brings the retraction. A retraction of a session on
 or before a file's last, recorded after the file was published, changes a
 stream the engine has already read: the job stops for a person ("A file
-already written differs", above; a cancelled day recorded with bars stops
-it too). The firing's session is the last real close on or before the
+already written differs", above; when it is the file's own first session,
+the message reads "... begins at ..., but a retraction of ... was recorded
+after it was published"; a cancelled day recorded with bars stops it too). The firing's session is the last real close on or before the
 latest settled session; when its file exists, the firing returns it
 unchanged, after every check a new session's firing makes.
 
