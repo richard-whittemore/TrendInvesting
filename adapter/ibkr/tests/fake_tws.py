@@ -224,6 +224,12 @@ class FakeTWS(TWSApi):
         self.contract_detail_errors = {}
         self.end_contract_details = True
         self.drop_on_contract_details = False
+        # Symbols whose first lookup IBKR answers but never ends (a slow
+        # Gateway); a second lookup is answered and ended as usual.
+        self.unended_contract_details_once = set()
+        # The server version the session negotiates (EClient.serverVersion);
+        # 205 and later read contract details from IBKR's protobuf messages.
+        self.negotiated_server_version = 205
 
     # -- connection ------------------------------------------------------
     def connect(self, host, port, client_id, callbacks, timeout):
@@ -454,6 +460,10 @@ class FakeTWS(TWSApi):
         elif self.end_marks:
             self.callbacks.tick_snapshot_end(req_id)
 
+    def server_version(self):
+        """The negotiated server version, as EClient.serverVersion() gives it (an int; synthetic here)."""
+        return self.negotiated_server_version if self.connected else None
+
     def req_contract_details(self, req_id, contract_):
         self.calls.append(("req_contract_details", req_id, contract_))
         if self.drop_on_contract_details:
@@ -464,6 +474,9 @@ class FakeTWS(TWSApi):
             return
         for details in self.contract_details.get(contract_.symbol, []):
             self.callbacks.contract_details(req_id, details)
+        if contract_.symbol in self.unended_contract_details_once:
+            self.unended_contract_details_once.discard(contract_.symbol)
+            return
         if self.end_contract_details:
             self.callbacks.contract_details_end(req_id)
 

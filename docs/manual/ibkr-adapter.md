@@ -25,8 +25,8 @@ link, not the program that holds the record (ADR 0025, plan section 3).
 | --- | --- | --- |
 | Configuration (`config.py`) | Host, port (4002 is IB Gateway's paper port), this engine's client ID, the IBKR account, the mode, the timing bounds (`commission_wait` among them) and `con_ids`, IBKR's contract number for each instrument. Every value is required but three: `paper_sending_enabled` (off when left out), and the IRA's two, `account_snapshot_version` (3, Boost's, when left out; 4 for an IRA) and `resolve_contracts` (off when left out; on for an IRA), so Boost's configuration reads exactly as before ("The IRAs' adapter", below). That includes `mark_timeout`, how long the adapter waits for IBKR's last prices (the example sets 15 seconds: IBKR sends the last price at once but only finishes the request at the end of an 11-second window, and the adapter takes a price only from a finished request, so a wait of 11 seconds or less can miss a price IBKR did send). A key that looks like a credential is refused: the adapter never holds the IBKR login, IBC does. A paper configuration must name a paper account (beginning `DU`), and `live` is refused | Built |
 | Connection (`connection.py`) | Connects under the engine's own **client ID** (Boost 11, Traditional IRA 12, Roth IRA 13; 0 is refused). Set IB Gateway's **Master API client ID** to it (Configure > Settings > API > Settings): IBKR shows an API client other clients' and TWS's executions only then, and the adapter asks for every client's (`docs/runbooks/first-paper-order.md`, A4); its check of the holdings and cash since the previous close needs no client ID ([paper trading](paper-trading.md), "A paper day"). It notices a lost link (a closed socket, IBKR's codes 1100, 2110, 504, 1300, or no answer to a heartbeat) and a restored one (1101, 1102), after which it matches IBKR's orders and balances again before sending, and reconnects with growing pauses. When Gateway says it has lost IBKR's servers (1100 or 2110) it waits for Gateway to restore them (1101, 1102) for at most `restore_timeout`, and only while Gateway's connection stays open: if the connection closes during that wait, it reports the link lost at once and connects again straight away. Each new session records which accounts the IBKR login manages | Built |
-| Account read (`account.py`, `snapshot.py`) | Reads positions, net liquidation, total cash, Excess Liquidity and every open order in one pass, bracketed by IBKR's clock, and builds the records the engine reads from one reading: the engine's **account snapshot** (positions and net liquidation, which orders are valued against), the **broker snapshot** the risk gate sizes sells from and the margin alarm watches, both stamped as of the session's close when the reading stands for it (your decision of 2026-10-18) or at the read time with the reason, the **mark** (the delivered bar's official close, IBKR's last price beside it, which the price band compares with when it is set), and the **reconciliation** the engine compares against its book. For an IRA (`account_snapshot_version` 4) the account snapshot is version 4: the same positions and net liquidation with IBKR's **settled cash** (`SettledCash`) and **total cash** (`TotalCashValue`) beside them, from the same reading; a reading without both gives no snapshot at all, never one with a zero Anything IBKR did not deliver, or delivered in a form the engine cannot hold exactly, is marked **unreadable**, never sent as zero ([reconciliation](reconciliation.md), "What the adapter sends") | Built |
-| Contracts (`snapshot.py`, `resolve_contracts`) | For an IRA only (`resolve_contracts`): asks IBKR, by name, for the contract of each instrument a delivery marks, as a US-dollar stock on SMART, 40 requests at a time a second apart (IBKR takes at most 50 messages a second), and records the one contract IBKR answers (its contract number, SMART, its primary exchange, US dollars) with the mark. A name IBKR answers with no contract, more than one, or one that is not that name's own US-dollar stock gets no mark ("Contracts and marks for an IRA", below) | Built, against a stand-in for IB Gateway built from what IBKR's own `ibapi` hands the adapter |
+| Account read (`account.py`, `snapshot.py`) | Reads positions, net liquidation, total cash, Excess Liquidity and every open order in one pass, bracketed by IBKR's clock, and builds the records the engine reads from one reading: the engine's **account snapshot** (positions and net liquidation, which orders are valued against), the **broker snapshot** the risk gate sizes sells from and the margin alarm watches, both stamped as of the session's close when the reading stands for it (your decision of 2026-10-18) or at the read time with the reason, the **mark** (the delivered bar's official close, IBKR's last price beside it, which the price band compares with when it is set), and the **reconciliation** the engine compares against its book. For an IRA (`account_snapshot_version` 4) the account snapshot is version 4: the same positions and net liquidation with IBKR's **settled cash** (`SettledCash`) and **total cash** (`TotalCashValue`) beside them, from the same reading; a reading without both gives no snapshot at all, never one with a zero. Anything IBKR did not deliver, or delivered in a form the engine cannot hold exactly, is marked **unreadable**, never sent as zero ([reconciliation](reconciliation.md), "What the adapter sends") | Built |
+| Contracts (`snapshot.py`, `resolve_contracts`) | For an IRA only (`resolve_contracts`): asks IBKR, by name (a class share in IBKR's spelling, `BRK.B` as `BRK B`), for the contract of each instrument a delivery marks, as a US-dollar stock on SMART, and records the one contract IBKR answers (its contract number, SMART, its primary exchange, US dollars) with the mark. A name IBKR answers with no contract, more than one, or one that is not that name's own US-dollar stock gets no mark ("Contracts and marks for an IRA", below) | Built, against a stand-in for IB Gateway built from what IBKR's own `ibapi` hands the adapter |
 | Same-day probe (`probe.py`) | `python3 -m adapter.ibkr probe ...`: reads one start's journal lines and the engine's durable log, talks to nothing, and says check by check whether the start worked ("The same-day probe", below) | Built; run on the server after every adapter install |
 | Relay (`relay.py`) | Keeps the input waiting for the engine's reply in a small file on disk (the **pending file**), asks the engine for that reply again after either side restarts, and hands each released order marked `send` to the sender once, writing "about to send" before and "sent" after (the **hand-over** marks) ([re-delivery](redelivery.md)) | Built |
 | Sender (`sender.py`) | Sends a released order to IB Gateway only in paper, on a paper account the login manages, while the link is up and matched, as a whole-share DAY limit order released in today's New York session, under IBKR's next order number (never reused). Dry-run never sends. Live is refused | Built, against a stand-in for IB Gateway only |
@@ -184,22 +184,39 @@ session's universe snapshot (the same close the engine values it at), beside
 the bars; a stock you hold keeps its bar's close.
 
 Each of those marks also says which IBKR contract it is for. The adapter
-asks IBKR for each name's contract (`resolve_contracts` on), and the mark
+asks IBKR for each name's contract (`resolve_contracts` on), by its name in
+IBKR's spelling (a class share's dot becomes a space: `BRK.B` is asked as
+`BRK B`, and only an answer IBKR itself spells `BRK B`, symbol and local
+symbol alike, is taken; the mark keeps the name `BRK.B`), and the mark
 records IBKR's contract number, SMART (where it was asked), the primary
 exchange and US dollars (`market.mark.recorded` version 3); IBKR's last
 price is beside it, as for Boost, when IBKR gives one (asked 50 at a time,
 inside IBKR's market-data lines). A name gets **no mark** when IBKR answers
 with no contract ("No security definition", IBKR's code 200), with more than
 one (nothing tells which is meant, so none is taken), with one that is not
-that name's own US-dollar stock, with one whose number differs from
-`con_ids` when `con_ids` names it, or does not answer in time. The adapter
+that name's own US-dollar stock, or with one whose number differs from
+`con_ids` when `con_ids` names it. An answer IBKR has not finished within
+`request_timeout` is not a refusal: the name is asked once more after the
+rest, and gets no mark only if that second answer does not finish either.
+IBKR's own refusal (code 200) is final and never asked again. The adapter
 logs a warning for each (`ibkr contract for XYZ not resolved, so it has no
 mark and the engine refuses any order for it (missing-mark): ...`), and the
 engine then refuses any order for that stock before it is released; it is
 never sized on a guess. A link lost while the contracts are asked for
 voids the delivery, which is read again once the link is back. On a
 month-end morning the adapter asks for about 500 contracts: allow a few
-minutes.
+minutes. Every one of these requests, the market-data requests for IBKR's
+last prices and their cancellations included, goes through one pacer: at
+most 40 a second, under IBKR's limit of 50 messages a second, past which
+IBKR warns and then disconnects the client. However fast IBKR answers or
+refuses, no burst passes it.
+
+At each connection the adapter also logs the server version the Gateway
+negotiated (`ibkr gateway server_version=N contract_data=protobuf|text`):
+`ibapi` reads IBKR's contract details from protobuf messages from version
+205 on and from IBKR's older text messages below it. The adapter's test
+doubles are built from both, as `ibapi`'s own decoder hands them over, so
+either works; the probe reports which one the live Gateway uses.
 
 ### The same-day probe
 
@@ -218,22 +235,34 @@ sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr 
   --engine-log /var/lib/trend-investing/engines/trad-ira/<TI_RUN>.log --client-id 12 --snapshot-version 4
 ```
 
-What a good start prints, one line a check, last line `probe: passed`:
+What a good start prints, one line a check, last line `probe: passed`. Its
+evidence is this start's own: the engine records it checks are the inputs
+this start delivered, as its journal lines name them, never an earlier
+start's or another run's, and each is checked field by field (a field that
+is not valid, a negative net liquidation or a contract without its exchange,
+fails naming it):
 
 ```text
 probe: ok the adapter started: mode=dry-run client_id=12 sending=off ibapi=10.51.01
+probe: Gateway server version 205 (contract details read from IBKR's protobuf messages)
 probe: ok connected to IB Gateway as client_id=12 (1 time(s))
 probe: ok reconciled client_id=12: positions=0 open_orders=0 executions=0
 probe: ok queued run=<TI_RUN> files=trad-ira-<last session>.jsonl inputs=<n>
 probe: ok account snapshot version 4 as of <time>: net_liquidation <n>, settled_cash <n>, total_cash <n>
 probe: ok reconciliation journalled (1)
 probe: ok <n> mark(s) at version 3, <n> session close(s), the last <time>
-probe: ok no order sent and none refused for a missing mark
+probe: ok no order released to be sent and none refused for a missing mark
 probe: no decision yet: the first is made at the close of a month's last session, from the morning delivery after it
 probe: passed
 ```
 
-After a month-end the second-to-last line names the latest decision instead
+A restart that finds every file already delivered queues nothing, and says
+so instead of the batch's four lines: `probe: ok no new batch since start;
+link connected, reconciled`. Give `--expect-batch` when this start must
+deliver one (the morning after a session): then that is a `FAIL`. In
+dry-run an order released marked to be sent is a `FAIL`; in paper the
+probe only counts them (whether IBKR acknowledged each is in the order
+reports). After a month-end the second-to-last line names the latest decision instead
 (`latest decision: session <close> decided with <n> target(s)`, or
 `withheld (<reason>: <detail>)`). For Boost, `--client-id 11
 --snapshot-version 3` against `ti-adapter-boost`'s journal and Boost's log

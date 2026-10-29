@@ -67,20 +67,26 @@ def ira_summary(settled="9000.00", total="10000.00"):
 class CapturedShapeTests(unittest.TestCase):
     """The doubles carry what ibapi hands EWrapper: each attribute the adapter reads, of the type ibapi gives it."""
 
+    # Both of ibapi's decoders: the protobuf messages a Gateway at server version 205 or later sends, and the older
+    # text messages a lower version gets (the adapter logs which one its session negotiated).
+    PATHS = ("protobuf", "text")
+
     def test_the_contract_details_double_has_ibapis_attributes_and_types(self):
-        captured = fixture("ibapi_shapes.json")["protobuf"]["contract_details"]
         details = contract_details("AAA", 900001, primary_exchange="NASDAQ")
-        for name, shape in captured["contract"].items():
-            self.assertEqual(type(getattr(details.contract, name)).__name__, shape["type"], name)
-        for name, shape in captured["details"].items():
-            self.assertEqual(type(getattr(details, name)).__name__, shape["type"], name)
-        self.assertEqual(captured["req_id"]["type"], "int")
+        for path in self.PATHS:
+            captured = fixture("ibapi_shapes.json")[path]["contract_details"]
+            for name, shape in captured["contract"].items():
+                self.assertEqual(type(getattr(details.contract, name)).__name__, shape["type"], (path, name))
+            for name, shape in captured["details"].items():
+                self.assertEqual(type(getattr(details, name)).__name__, shape["type"], (path, name))
+            self.assertEqual(captured["req_id"]["type"], "int")
 
     def test_an_account_value_is_a_string_as_ibapi_hands_it(self):
-        captured = fixture("ibapi_shapes.json")["protobuf"]["account_value"]
-        self.assertEqual({k: v["type"] for k, v in captured.items()},
-                         {"key": "str", "val": "str", "currency": "str", "accountName": "str"})
-        self.assertEqual(captured["key"]["value"], "SettledCash")
+        for path in self.PATHS:
+            captured = fixture("ibapi_shapes.json")[path]["account_value"]
+            self.assertEqual({k: v["type"] for k, v in captured.items()},
+                             {"key": "str", "val": "str", "currency": "str", "accountName": "str"}, path)
+            self.assertEqual(captured["key"]["value"], "SettledCash")
         for row in ira_summary():
             self.assertTrue(all(isinstance(v, str) for v in row))
 
@@ -350,9 +356,6 @@ class IraDeliveryTests(IraBatchHarness):
         self.assertEqual(sorted(c[2].conId for c in self.fake.called("req_mkt_data")), sorted(CON_IDS.values()))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class IraFlexTests(unittest.TestCase):
     """ti-flex@trad-ira reads the IRA engine's log, whose account snapshots are version 4 (lessons L3)."""
@@ -579,10 +582,15 @@ class ProbeTests(unittest.TestCase):
                      "probe: ok connected to IB Gateway as client_id=12",
                      "probe: ok reconciled client_id=12", "probe: ok queued run=" + RUN,
                      "probe: ok account snapshot version 4", "probe: ok reconciliation journalled",
-                     "probe: ok 5 mark(s) at version 3", "probe: ok no order sent and none refused for a missing mark",
+                     "probe: ok 5 mark(s) at version 3", "probe: ok no order released to be sent and none refused for a missing mark",
                      "probe: no decision yet"):
             self.assertTrue(any(line.startswith(want) for line in lines), (want, lines))
         self.assertNotIn(ACCOUNT, "\n".join(lines))
+
+    def answered(self, journal, ident, kind):
+        """journal with a line saying this start delivered input ident: the probe's evidence is this start's only."""
+        journal.write_text(journal.read_text() + "x ibkr input={} type={} answered with 1 decisions\n".format(ident, kind))
+        return journal
 
     def test_a_missing_or_empty_journal_fails_loudly(self):
         status, lines = self.probe(self.dir / "no-such-file.txt")
@@ -609,7 +617,7 @@ class ProbeTests(unittest.TestCase):
         commit(self.engine, "bad-snapshot", kind="account.snapshot", version=4, payload={
             "account_id": ACCOUNT, "as_of": "2027-01-15T21:00:00Z", "net_liquidation": 10000.0, "currency": "USD",
             "positions": [], "total_cash": 10000.0})
-        status, lines = self.probe(journal)
+        status, lines = self.probe(self.answered(journal, "bad-snapshot", "account.snapshot"))
         self.assertEqual(status, 1)
         self.assertTrue(any("bad-snapshot" in line and "settled_cash" in line for line in lines), lines)
 
@@ -619,7 +627,7 @@ class ProbeTests(unittest.TestCase):
         commit(self.engine, "boost-shaped", kind="account.snapshot", version=3, payload={
             "account_id": ACCOUNT, "as_of": "2027-01-15T21:00:00Z", "net_liquidation": 10000.0, "currency": "USD",
             "positions": []})
-        status, lines = self.probe(journal)
+        status, lines = self.probe(self.answered(journal, "boost-shaped", "account.snapshot"))
         self.assertEqual(status, 1)
         self.assertTrue(any("not at version 4" in line for line in lines), lines)
 
@@ -629,7 +637,7 @@ class ProbeTests(unittest.TestCase):
         self.engine.decisions["refusing"] = [{"type": "risk.order.refused", "schema_version": 1, "payload": {
             "reason": "missing-mark", "instrument_id": "BBB"}}]
         commit(self.engine, "refusing")
-        status, lines = self.probe(journal)
+        status, lines = self.probe(self.answered(journal, "refusing", "test.input"))
         self.assertEqual(status, 1)
         self.assertTrue(any("missing mark: BBB" in line for line in lines), lines)
 
@@ -669,3 +677,213 @@ class SettledCashCutoffTests(IraBatchHarness):
         self.assertTrue(any("changed between its reads" in line for line in logged.output), logged.output)
         snapshots = [e for e in sent if e["type"] == ACCOUNT_SNAPSHOT_TYPE]
         self.assertEqual([s["payload"]["settled_cash"] for s in snapshots], [10000.0])
+
+
+class PacedHarness(unittest.TestCase):
+    """The scripted Gateway with every outbound message's time on the connection's own clock."""
+
+    def connected(self, **fake):
+        h = connected(**IRA)
+        self.times = []
+        for name in ("req_contract_details", "req_mkt_data", "cancel_mkt_data"):
+            original = getattr(h.fake, name)
+
+            def timed(*args, _original=original):
+                self.times.append(h.clock.now)
+                return _original(*args)
+            setattr(h.fake, name, timed)
+        for k, v in fake.items():
+            setattr(h.fake, k, v)
+        return h
+
+    def assert_paced(self):
+        """No more than the connection's PACE_LIMIT messages in any one-second window (IBKR's limit is 50)."""
+        from connection import PACE_LIMIT
+        self.assertLess(PACE_LIMIT, 50)
+        for i, start in enumerate(self.times):
+            in_window = [t for t in self.times[i:] if t < start + 1.0]
+            self.assertLessEqual(len(in_window), PACE_LIMIT, "messages at {}".format(in_window))
+
+
+class PacingTests(PacedHarness):
+    """IBKR accepts at most 50 API messages a second; the adapter's bulk requests, their cancels included, share one
+    pacer so no burst passes it, however fast IBKR answers or refuses."""
+
+    def test_marks_refused_at_once_for_500_names_never_exceed_the_pace(self):
+        from snapshot import read_marks
+        names = {"N{:03d}".format(i): 700000 + i for i in range(500)}
+        h = self.connected(mark_errors={c: (354, "synthetic: not subscribed") for c in names.values()})
+        self.assertEqual(read_marks(h.conn, names), {})
+        self.assertEqual(len(self.times), 500)
+        self.assert_paced()
+
+    def test_marks_whose_snapshots_never_end_are_cancelled_within_the_pace(self):
+        from snapshot import read_marks
+        names = {"N{:03d}".format(i): 700000 + i for i in range(120)}
+        h = self.connected(end_marks=False)
+        read_marks(h.conn, names)
+        self.assertEqual(len(self.times), 240, "each asked and each cancelled")
+        self.assert_paced()
+
+    def test_500_contract_lookups_answered_at_once_never_exceed_the_pace(self):
+        names = ["N{:03d}".format(i) for i in range(500)]
+        h = self.connected(contract_details={n: [contract_details(n, 700000 + i)] for i, n in enumerate(names)})
+        contracts, refused = resolve_contracts(h.conn, names, {})
+        self.assertEqual((len(contracts), refused), (500, {}))
+        self.assert_paced()
+
+
+class ContractRetryAndSpellingTests(unittest.TestCase):
+    def resolved(self, symbols, **fake):
+        h = connected(**IRA)
+        for k, v in fake.items():
+            setattr(h.fake, k, v)
+        return h, resolve_contracts(h.conn, symbols, {})
+
+    def test_an_answer_that_did_not_end_is_asked_once_more_and_then_resolves(self):
+        h, (contracts, refused) = self.resolved(["AAA"], contract_details={"AAA": [contract_details("AAA", 900001)]},
+                                                unended_contract_details_once={"AAA"})
+        self.assertEqual((sorted(contracts), refused), (["AAA"], {}))
+        self.assertEqual(len(h.fake.called("req_contract_details")), 2)
+
+    def test_an_answer_that_never_ends_is_asked_twice_and_then_has_no_mark(self):
+        h, (contracts, refused) = self.resolved(["AAA"], end_contract_details=False,
+                                                contract_details={"AAA": [contract_details("AAA", 900001)]})
+        self.assertEqual(contracts, {})
+        self.assertIn("did not end", refused["AAA"])
+        self.assertIn("twice", refused["AAA"])
+        self.assertEqual(len(h.fake.called("req_contract_details")), 2)
+
+    def test_a_definitive_refusal_is_not_asked_again(self):
+        h, (contracts, refused) = self.resolved(["ZZZ"], contract_detail_errors={
+            "ZZZ": (200, "No security definition has been found for the request")})
+        self.assertIn("200", refused["ZZZ"])
+        self.assertEqual(len(h.fake.called("req_contract_details")), 1)
+
+    def test_a_class_share_ticker_is_asked_in_ibkrs_spelling_and_resolves_to_the_universe_name(self):
+        h, (contracts, refused) = self.resolved(["BRK.B"], contract_details={
+            "BRK B": [contract_details("BRK B", 900077, primary_exchange="NYSE")]})
+        self.assertEqual(refused, {})
+        self.assertEqual((contracts["BRK.B"].symbol, contracts["BRK.B"].con_id), ("BRK.B", 900077))
+        self.assertEqual([c[2].symbol for c in h.fake.called("req_contract_details")], ["BRK B"])
+        record = mark_record("BRK.B", CLOSE, 401.5, "marketdata", contract=contracts["BRK.B"])
+        self.assertEqual((record.payload["instrument_id"], record.payload["contract"]["con_id"]), ("BRK.B", 900077))
+
+    def test_an_answer_for_another_name_than_the_spelling_asked_is_refused(self):
+        wrong = contract_details("BRK A", 900078, primary_exchange="NYSE")
+        _, (contracts, refused) = self.resolved(["BRK.B"], contract_details={"BRK B": [wrong]})
+        self.assertEqual(contracts, {})
+        self.assertIn("BRK A", refused["BRK.B"])
+
+    def test_a_local_symbol_that_is_not_the_name_is_refused(self):
+        odd = contract_details("BRK B", 900079, primary_exchange="NYSE")
+        odd.contract.localSymbol = "BRKB.OLD"
+        _, (contracts, refused) = self.resolved(["BRK.B"], contract_details={"BRK B": [odd]})
+        self.assertEqual(contracts, {})
+        self.assertIn("BRKB.OLD", refused["BRK.B"])
+
+
+
+class ProbeEvidenceTests(ProbeTests):
+    """The probe's evidence is this start's: the inputs it delivered, never an earlier start's or another run's."""
+
+    test_a_good_start_passes_naming_each_check = None
+
+    def restart(self):
+        """A second start of the adapter after the first delivered its batch: caught up, it queues nothing."""
+        self.start()
+        return self.start()
+
+    def test_a_restart_with_no_new_file_passes_saying_so(self):
+        status, lines = self.probe(self.restart())
+        self.assertEqual(status, 0, lines)
+        self.assertIn("probe: ok no new batch since start; link connected, reconciled", lines)
+
+    def test_a_restart_with_no_new_file_fails_when_a_batch_is_expected(self):
+        status, lines = self.probe(self.restart(), "--expect-batch")
+        self.assertEqual(status, 1, lines)
+        self.assertTrue(any(line.startswith("probe: FAIL no stream batch was queued") for line in lines), lines)
+
+    def test_an_earlier_starts_records_never_pass_for_this_one(self):
+        first = self.start()
+        journal = self.dir / "second.txt"
+        # This start's journal claims a batch, but none of its inputs reached the engine.
+        lines = [line for line in first.read_text().splitlines() if " input=" not in line]
+        journal.write_text("\n".join(lines) + "\n")
+        status, out = self.probe(journal)
+        self.assertEqual(status, 1, out)
+        self.assertTrue(any("this start" in line and line.startswith("probe: FAIL") for line in out), out)
+
+    def test_a_release_marked_to_be_sent_fails_a_dry_run_probe(self):
+        from test_delivery import commit
+        self.engine.decisions["sending"] = [{"type": "risk.order.released", "schema_version": 1, "payload": {
+            "send": True, "instrument_id": "AAA", "side": "buy"}}]
+        journal = self.start()
+        commit(self.engine, "sending")
+        text = journal.read_text() + "x ibkr input=sending type=test.input answered with 1 decisions\n"
+        journal.write_text(text)
+        status, lines = self.probe(journal)
+        self.assertEqual(status, 1, lines)
+        self.assertTrue(any("marked to be sent in a dry-run" in line for line in lines), lines)
+        self.assertFalse(any("no order sent" in line for line in lines), lines)
+
+    def tampered(self, kind, mutate):
+        """This start's journal, after the delivered input of kind is rewritten in the engine's log by mutate."""
+        journal = self.start()
+        text = self.engine_log.read_text()
+        out = []
+        for line in text.splitlines():
+            if '"type":"{}"'.format(kind) in line and '"record"' in line:
+                record = json.loads(line)
+                mutate(record["record"]["envelope"]["payload"])
+                line = json.dumps(record, separators=(",", ":"))
+            out.append(line)
+        self.engine_log.write_text("\n".join(out) + "\n")
+        return journal
+
+    def probe_unchained(self, journal):
+        """The probe on a log whose payloads were rewritten: its validation, not the hash chain, must name the field."""
+        from unittest import mock
+        with mock.patch("probe._committed_groups", side_effect=lambda path: _read_groups(path)):
+            return self.probe(journal)
+
+    def test_a_negative_net_liquidation_fails_naming_the_field(self):
+        journal = self.tampered("account.snapshot", lambda p: p.update(net_liquidation=-5.0))
+        status, lines = self.probe_unchained(journal)
+        self.assertEqual(status, 1, lines)
+        self.assertTrue(any("net_liquidation" in line and line.startswith("probe: FAIL") for line in lines), lines)
+
+    def test_a_contract_with_only_a_boolean_id_fails_naming_the_field(self):
+        journal = self.tampered("market.mark.recorded", lambda p: p.update(contract={"con_id": True}))
+        status, lines = self.probe_unchained(journal)
+        self.assertEqual(status, 1, lines)
+        self.assertTrue(any("contract.con_id" in line and line.startswith("probe: FAIL") for line in lines), lines)
+
+    def test_a_reconciliation_without_its_cash_fails_naming_the_field(self):
+        journal = self.tampered("account.reconciliation", lambda p: p.pop("total_cash"))
+        status, lines = self.probe_unchained(journal)
+        self.assertEqual(status, 1, lines)
+        self.assertTrue(any("total_cash" in line and line.startswith("probe: FAIL") for line in lines), lines)
+
+    def test_the_gateways_negotiated_server_version_is_shown(self):
+        status, lines = self.probe(self.start())
+        self.assertTrue(any(line.startswith("probe: Gateway server version") for line in lines), lines)
+
+
+def _read_groups(path):
+    """The engine log's groups as engine_log reads them, without its record hash chain (for tampered payloads)."""
+    groups, current = [], []
+    with open(path, encoding="utf-8") as f:
+        f.readline()
+        for n, line in enumerate(f, 2):
+            row = json.loads(line)
+            if "record" in row:
+                current.append((n, row["record"]["kind"], row["record"]["envelope"]))
+            elif "commit" in row and current:
+                groups.append(current)
+                current = []
+    return None, groups
+
+
+if __name__ == "__main__":
+    unittest.main()

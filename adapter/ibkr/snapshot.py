@@ -409,8 +409,8 @@ def _read_mark_batch(conn, con_ids):
     for symbol in sorted(con_ids):
         req_id = conn.new_req_id()
         asked[req_id] = symbol
-        conn.api.req_mkt_data(req_id, SimpleNamespace(conId=con_ids[symbol], symbol=symbol, secType=SEC_TYPE,
-                                                      currency=CURRENCY, exchange=EXCHANGE))
+        conn.paced(conn.api.req_mkt_data, req_id, SimpleNamespace(
+            conId=con_ids[symbol], symbol=ibkr_symbol(symbol), secType=SEC_TYPE, currency=CURRENCY, exchange=EXCHANGE))
     prices, failed, ended = {}, set(), set()
     try:
         for event in conn.events(conn.config.mark_timeout):
@@ -436,7 +436,7 @@ def _read_mark_batch(conn, con_ids):
     finally:
         if conn.connected:
             for req_id in sorted(set(asked) - ended):
-                conn.api.cancel_mkt_data(req_id)
+                conn.paced(conn.api.cancel_mkt_data, req_id)
     if not conn.connected:
         return {}
     return {asked[r]: prices[r] for r in sorted(ended - failed) if r in prices}
@@ -446,99 +446,151 @@ Contract = namedtuple("Contract", "symbol con_id exchange primary_exchange curre
 """One IBKR contract a name resolved to (resolve_contracts): IBKR's conId, the SMART routing it was asked on, its
 primary exchange and currency."""
 
-# How many contract-details requests go out together, and how long the
-# adapter waits between batches: IBKR accepts at most 50 API messages a
-# second from a client (TWS API documentation, request limitations; past it
-# the client is warned and then disconnected), so 40 requests, then a
-# second's wait.
+# How many contract-details requests are outstanding at once. Their rate is
+# the connection's shared pacer's (Connection.paced: under IBKR's 50
+# messages a second, cancels included), so a batch answered at once and the
+# next one never make a burst together.
 CONTRACT_BATCH = 40
-CONTRACT_PACE = 1.0
+# How many times a name whose answer did not end is asked: once, then once
+# more after the rest of the batch. An answer IBKR has not finished is not a
+# refusal (IBKR's error, such as 200, which is final and never asked again),
+# so a slow Gateway does not leave a pick without a mark; one that does not
+# end the second time gets none (ADR 0025, amended 2026-10-29).
+CONTRACT_ASKS = 2
+
+
+def ibkr_symbol(instrument):
+    """IBKR's spelling of a stock the data job names: a class share's dot as a space (BRK.B -> "BRK B").
+
+    Massive and the universe sources spell a share class with a dot; IBKR's
+    contract symbol spells it with a space. The rule is fixed and the answer
+    is checked against it (_one_contract), so it is a spelling, never a guess
+    of which contract is meant. Every other name is unchanged.
+    """
+    return instrument.replace(".", " ")
 
 
 def resolve_contracts(conn, symbols, configured):
     """(contracts, refused) for symbols, each resolved by name with IBKR's reqContractDetails; None if the link went.
 
-    ADR 0026 point 3 and ADR 0025: an IRA's order names its IBKR contract,
-    and a stock newly picked is in no configuration, so its contract is
-    looked up once, by symbol, as a US-dollar stock on SMART. contracts maps
-    a symbol to its Contract when IBKR answered with exactly one contract,
-    and that contract is the name's own: the same symbol, a stock (STK), in
-    US dollars, on SMART, with a positive conId and a primary exchange, and
-    the conId configured for it (configured, config.con_ids) when there is
-    one. refused maps every other symbol to why: IBKR's error under the
-    request (200, no security definition), no answer that ended within the
-    request_timeout, more than one contract (ambiguous: never a guess), one
-    that is not the name's own, or one that contradicts the configured
-    conId. A refused name is given no mark, so the engine refuses any order
-    for it (missing-mark), never sizes it on another contract. A link that
-    changed during the requests gives None: nothing read on it stands (ADR
-    0019, one cutoff), and the caller waits for it to be reconciled.
+    ADR 0026 point 3 and ADR 0025 (amended 2026-10-29): an IRA's mark states
+    the IBKR contract it is for, and a stock newly picked is in no
+    configuration, so its contract is looked up by name, in IBKR's spelling
+    (ibkr_symbol), as a US-dollar stock on SMART. contracts maps a symbol to
+    its Contract when IBKR answered with exactly one contract, and that
+    contract is the name's own: IBKR's symbol and local symbol are the
+    spelling asked, a stock (STK), in US dollars, on SMART, with a positive
+    conId and a primary exchange, and the conId configured for it
+    (configured, config.con_ids) when there is one. refused maps every other
+    symbol to why: IBKR's error under the request (200, no security
+    definition; final, never asked again), an answer that did not end within
+    the request_timeout when asked CONTRACT_ASKS times, more than one
+    contract (ambiguous: never a guess), one that is not the name's own, or
+    one that contradicts the configured conId. A refused name is given no
+    mark, so the engine refuses any order for it (missing-mark), never sizes
+    it on another contract. Every request goes through the connection's
+    pacer. A link that changed during the requests gives None: nothing read
+    on it stands (ADR 0019, one cutoff), and the caller waits for it to be
+    reconciled.
     """
     contracts, refused = {}, {}
     changes = conn.link_changes
-    names = sorted(set(symbols))
-    for start in range(0, len(names), CONTRACT_BATCH):
-        if start:
-            conn.pause(CONTRACT_PACE)
-        if not conn.connected or conn.link_changes != changes:
-            return None
-        asked, answers, ended, errors = {}, {}, set(), {}
-        try:
-            for symbol in names[start:start + CONTRACT_BATCH]:
-                req_id = conn.new_req_id()
-                asked[req_id] = symbol
-                answers[req_id] = []
-                conn.api.req_contract_details(req_id, SimpleNamespace(
-                    symbol=symbol, secType=CONTRACT_SEC_TYPE, currency=CONTRACT_CURRENCY, exchange=CONTRACT_EXCHANGE))
-                if not conn.connected:
-                    return None
-            for event in conn.events(conn.config.request_timeout):
-                if not conn.connected:
-                    break
-                req_id = event.args[0] if event.args else None
-                if not isinstance(req_id, int) or isinstance(req_id, bool) or req_id not in asked or req_id in ended:
-                    continue
-                if event.name == "contract_details" and len(event.args) >= 2:
-                    answers[req_id].append(event.args[1])
-                elif event.name == "contract_details_end":
-                    ended.add(req_id)
-                elif event.name == "error":
-                    errors[req_id] = event.args[1:3]
-                    ended.add(req_id)
-                if len(ended) == len(asked):
-                    break
-        except NotConnected:
-            return None
-        if not conn.connected or conn.link_changes != changes:
-            return None
-        for req_id, symbol in sorted(asked.items()):
-            if req_id in errors:
-                code, message = (tuple(errors[req_id]) + ("", ""))[:2]
-                refused[symbol] = "IBKR answered its contract request with error {}: {}".format(
-                    code, mask_accounts(str(message), conn.config.account_id))
-            elif req_id not in ended:
-                refused[symbol] = "IBKR's answer to its contract request did not end within {}s".format(
-                    conn.config.request_timeout)
-            else:
-                contract, why = _one_contract(symbol, answers[req_id], configured.get(symbol))
-                if contract is None:
-                    refused[symbol] = why
+    pending = sorted(set(symbols))
+    for ask in range(1, CONTRACT_ASKS + 1):
+        unended = []
+        for start in range(0, len(pending), CONTRACT_BATCH):
+            answered = _ask_contracts(conn, pending[start:start + CONTRACT_BATCH], changes)
+            if answered is None:
+                return None
+            for symbol, (state, value) in answered.items():
+                if state == "unended":
+                    unended.append(symbol)
+                elif state == "error":
+                    code, message = value
+                    refused[symbol] = "IBKR answered its contract request with error {}: {}".format(
+                        code, mask_accounts(str(message), conn.config.account_id))
                 else:
-                    contracts[symbol] = contract
+                    contract, why = _one_contract(symbol, value, configured.get(symbol))
+                    if contract is None:
+                        refused[symbol] = why
+                    else:
+                        contracts[symbol] = contract
+        pending = unended
+        if not pending:
+            break
+    for symbol in pending:
+        refused[symbol] = "IBKR's answer to its contract request did not end within {}s, asked {}".format(
+            conn.config.request_timeout, {2: "twice"}.get(CONTRACT_ASKS, "{} times".format(CONTRACT_ASKS)))
     return contracts, refused
 
 
+def _ask_contracts(conn, names, changes):
+    """{symbol: (state, value)} for one batch of contract lookups: ("answered", details), ("error", (code, message))
+    or ("unended", None); None if the link went or changed (see resolve_contracts)."""
+    if not conn.connected or conn.link_changes != changes:
+        return None
+    asked, answers, ended, errors = {}, {}, set(), {}
+    try:
+        for symbol in names:
+            req_id = conn.new_req_id()
+            asked[req_id] = symbol
+            answers[req_id] = []
+            conn.paced(conn.api.req_contract_details, req_id, SimpleNamespace(
+                symbol=ibkr_symbol(symbol), secType=CONTRACT_SEC_TYPE, currency=CONTRACT_CURRENCY,
+                exchange=CONTRACT_EXCHANGE))
+            if not conn.connected:
+                return None
+        for event in conn.events(conn.config.request_timeout):
+            if not conn.connected:
+                break
+            req_id = event.args[0] if event.args else None
+            if not isinstance(req_id, int) or isinstance(req_id, bool) or req_id not in asked or req_id in ended:
+                continue
+            if event.name == "contract_details" and len(event.args) >= 2:
+                answers[req_id].append(event.args[1])
+            elif event.name == "contract_details_end":
+                ended.add(req_id)
+            elif event.name == "error":
+                errors[req_id] = (tuple(event.args[1:3]) + ("", ""))[:2]
+                ended.add(req_id)
+            if len(ended) == len(asked):
+                break
+    except NotConnected:
+        return None
+    if not conn.connected or conn.link_changes != changes:
+        return None
+    out = {}
+    for req_id, symbol in sorted(asked.items()):
+        if req_id in errors:
+            out[symbol] = ("error", errors[req_id])
+        elif req_id not in ended:
+            out[symbol] = ("unended", None)
+        else:
+            out[symbol] = ("answered", answers[req_id])
+    return out
+
+
 def _one_contract(symbol, answers, configured):
-    """(Contract, "") for the one answer that is symbol's own US-dollar stock on SMART, else (None, why)."""
+    """(Contract, "") for the one answer that is symbol's own US-dollar stock on SMART, else (None, why).
+
+    The answer's symbol and local symbol must both be the name in IBKR's
+    spelling (ibkr_symbol): a class share asked as "BRK B" is taken only from
+    an answer IBKR spells "BRK B" itself, and is recorded under the data
+    job's name, BRK.B.
+    """
     if len(answers) != 1:
         return None, "IBKR gave {} contracts for it, not one{}".format(
             len(answers), " (ambiguous: none is taken)" if answers else "")
     details = answers[0]
     c = getattr(details, "contract", None)
     con_id = getattr(c, "conId", None)
-    fields = {name: getattr(c, name, None) for name in ("symbol", "secType", "currency", "exchange", "primaryExchange")}
-    if fields["symbol"] != symbol:
-        return None, "IBKR's contract is for {!r}, not {!r}".format(fields["symbol"], symbol)
+    fields = {name: getattr(c, name, None) for name in ("symbol", "localSymbol", "secType", "currency", "exchange",
+                                                         "primaryExchange")}
+    spelled = ibkr_symbol(symbol)
+    if fields["symbol"] != spelled:
+        return None, "IBKR's contract is for {!r}, not {!r}".format(fields["symbol"], spelled)
+    if fields["localSymbol"] != spelled:
+        return None, "IBKR's contract's local symbol is {!r}, not {!r}".format(fields["localSymbol"], spelled)
     if (fields["secType"], fields["currency"], fields["exchange"]) != (
             CONTRACT_SEC_TYPE, CONTRACT_CURRENCY, CONTRACT_EXCHANGE):
         return None, "IBKR's contract is a {} {} contract on {}, not a {} {} contract on {}".format(

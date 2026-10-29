@@ -165,6 +165,9 @@ def _parser():
                        help="the account snapshot version the engine reads: 4 for an IRA (the default), 3 for Boost")
     probe.add_argument("--mode", choices=("dry-run", "paper", "live"), default="dry-run",
                        help="the mode the adapter must have started in (default dry-run)")
+    probe.add_argument("--expect-batch", action="store_true",
+                       help="fail unless this start queued a batch of the run's stream; left out, a start that "
+                            "finds every file delivered passes as \"no new batch since start\"")
     return parser
 
 
@@ -284,7 +287,8 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
     args = _parser().parse_args(argv)
     if args.command == "probe":
         import probe
-        lines, status = probe.run(args.journal, args.engine_log, args.client_id, args.snapshot_version, args.mode)
+        lines, status = probe.run(args.journal, args.engine_log, args.client_id, args.snapshot_version, args.mode,
+                                  expect_batch=args.expect_batch)
         print("\n".join(lines), file=out or sys.stdout)
         return status
     if args.command == "flex":

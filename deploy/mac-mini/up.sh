@@ -290,14 +290,16 @@ if test "$exists" = 1 && test "$recreate" = 1; then
     # Removing the container ends every process in it at once, which for an
     # engine is a crash: its last group may be uncommitted (ADR 0027). The
     # owner stops the engine and the adapter first (docs/manual/restart.md).
-    if ! running=$(docker exec "$name" systemctl list-units --state=active,activating,deactivating,reloading --no-legend --plain 'ti-engine@*' 'ti-adapter-*' | awk '{print $1}' | tr '\n' ' '); then
+    if ! running=$(docker exec "$name" systemctl list-units --state=active,activating,deactivating,reloading --no-legend --plain 'ti-engine@*' 'ti-adapter-*' 'ti-adapter@*' | awk '{print $1}' | tr '\n' ' '); then
       refuse "cannot ask systemd in $name which units run, so it is not removed: an engine might be running. Nothing was changed. See: docker logs $name"
     fi
     running=${running% }
     # The adapter first, then the engines (docs/manual/restart.md).
     stop_order=
-    for u in $running; do case $u in ti-adapter-*) stop_order="$stop_order $u" ;; esac; done
-    for u in $running; do case $u in ti-adapter-*) ;; *) stop_order="$stop_order $u" ;; esac; done
+    # Boost's adapter (ti-adapter-boost) and an IRA's template instance
+    # (ti-adapter@<instance>) alike stop before any engine.
+    for u in $running; do case $u in ti-adapter-* | ti-adapter@*) stop_order="$stop_order $u" ;; esac; done
+    for u in $running; do case $u in ti-adapter-* | ti-adapter@*) ;; *) stop_order="$stop_order $u" ;; esac; done
     # One systemctl call orders its stops by unit dependencies, not by the
     # order of its arguments, so each unit gets its own command; && ends the
     # chain at a failed stop, leaving the engine running to be looked at.

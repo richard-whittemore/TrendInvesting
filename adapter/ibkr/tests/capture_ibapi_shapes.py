@@ -7,8 +7,10 @@ built from what ibapi delivers, never from what we expect it to. This
 script feeds IBKR's wire messages, filled with synthetic values (an
 invented symbol, contract ID and account), through the pinned ibapi's own
 Decoder (deploy/versions.env, TWSAPI_VERSION; protobuf PROTOBUF_VERSION),
-both the protobuf messages a Gateway at server version 205 or later sends
-and the older text messages, and records each callback's arguments as
+both the protobuf messages a Gateway that negotiates server version 205 or
+later sends (the "protobuf" section) and the older text messages one that
+negotiates a lower version sends (the "text" section, at version 200), and
+records each callback's arguments as
 ibapi passes them to EWrapper: every attribute the adapter reads, with its
 Python type and value. No IBKR source is copied: only the field names and
 types ibapi produces (ADR 0025, amendment of 2026-10-16). It needs ibapi
@@ -91,6 +93,46 @@ def protobuf_calls():
     return wrapper.calls
 
 
+# A server version below protobuf (MIN_SERVER_VER_PROTOBUF, 201): a Gateway
+# that negotiates one sends IBKR's older text messages, which ibapi decodes
+# field by field (Decoder.interpret). At 200 every field the decoder reads
+# for these messages is present (size rules, stock type, ineligibility
+# reasons, error time).
+TEXT_SERVER_VERSION = 200
+
+
+def text_calls():
+    """The same answers as text messages, each a list of fields as ibapi splits the socket's bytes."""
+    from ibapi.message import IN
+    wrapper = Recorder()
+    decoder = Decoder(wrapper, TEXT_SERVER_VERSION)
+
+    def b(*fields):
+        return [str(f).encode() for f in fields]
+    contract = b(
+        7,                       # reqId
+        SYMBOL, "STK", "",        # symbol, secType, lastTradeDateOrContractMonth
+        "",                       # lastTradeDate
+        0.0, "",                  # strike, right
+        "SMART", "USD", SYMBOL,   # exchange, currency, localSymbol
+        "NMS", "NMS", CON_ID,     # marketName, tradingClass, conId
+        0.01, "", "LMT,MKT",      # minTick, multiplier, orderTypes
+        "SMART,NASDAQ,ARCA", 1,   # validExchanges, priceMagnifier
+        0, "SYNTHETIC CO", "NASDAQ",  # underConId, longName, primaryExchange
+        "", "", "", "", "US/Eastern", "", "",  # contractMonth .. liquidHours
+        "", 0, 0,                 # evRule, evMultiplier, secIdListCount
+        1, "", "",                # aggGroup, underSymbol, underSecType
+        "26", "", "COMMON",       # marketRuleIds, realExpirationDate, stockType
+        "1", "1", "1",            # minSize, sizeIncrement, suggestedSizeIncrement
+        0)                        # ineligibilityReasonListCount
+    decoder.interpret(contract, IN.CONTRACT_DATA)
+    decoder.interpret(b(1, 7), IN.CONTRACT_DATA_END)
+    decoder.interpret(b(2, "SettledCash", "10000.00", "USD", ACCOUNT), IN.ACCT_VALUE)
+    decoder.interpret(b(8, 200, "No security definition has been found for the request", "", 1800000000000),
+                      IN.ERR_MSG)
+    return wrapper.calls
+
+
 def shapes(calls):
     out = {}
     for call in calls:
@@ -110,7 +152,9 @@ def main():
     report = {"ibapi": ".".join(str(p) for p in ibapi.VERSION.values()) if isinstance(ibapi.VERSION, dict)
               else str(ibapi.VERSION),
               "server_version": server_versions.MIN_SERVER_VER_PROTOBUF_CONTRACT_DATA,
-              "protobuf": shapes(protobuf_calls())}
+              "protobuf": shapes(protobuf_calls()),
+              "text_server_version": TEXT_SERVER_VERSION,
+              "text": shapes(text_calls())}
     json.dump(report, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
 

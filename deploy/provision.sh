@@ -571,18 +571,28 @@ require_native_programs() {
 }
 
 # install_engine_settings SRC DEST: installs the engines' settings from SRC
-# into DEST. The settings files (*.env) carry client IDs and modes only, no
-# secret and no account, and are repo-managed, so they are overwritten. A
-# configuration (*.config) names its account, which the owner substitutes on
-# the server and never in the repository, and is hashed into its engine's run
-# (ADR 0016), so it is installed only when DEST has none: an existing one is
-# kept byte for byte, and the shipped one is installed beside it as
-# <name>.config.example, to compare (docs/live-trading/lessons-2026-10.md L7: an earlier provisioner
-# copied the shipped configuration over the server's, resetting Boost's
-# account to the placeholder).
+# into DEST. A settings file (*.env: client ID, mode, the adapter's account
+# line name; no secret, no account) and a configuration (*.config, which
+# names its account, which the owner substitutes on the server and never in
+# the repository, and is hashed into its engine's run, ADR 0016) are each
+# installed only when DEST has none: an existing one is kept byte for byte,
+# an owner's edit included, and the shipped one is installed beside it as
+# <name>.env.example or <name>.config.example, to compare; a line the
+# shipped file adds is the owner's to copy (docs/runbooks/first-dry-run-day.md,
+# "The Traditional IRA"; docs/live-trading/lessons-2026-10.md L7: an earlier
+# provisioner copied the shipped configuration over the server's, resetting
+# Boost's account to the placeholder).
 install_engine_settings() {
   local src=$1 dest=$2 f name
-  install -m 0644 "$src"/*.env "$dest/"
+  for f in "$src"/*.env; do
+    name=$(basename "$f")
+    if test -e "$dest/$name"; then
+      install -m 0644 "$f" "$dest/$name.example"
+      log "kept $dest/$name; the shipped one is $dest/$name.example (copy any line it adds by hand)"
+    else
+      install -m 0644 "$f" "$dest/$name"
+    fi
+  done
   for f in "$src"/*.config; do
     name=$(basename "$f")
     if test -e "$dest/$name"; then

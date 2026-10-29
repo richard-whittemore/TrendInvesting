@@ -249,8 +249,15 @@ To point 5 and the amendment of 2026-10-18, for the IRAs' momentum engines
 - **Each such mark states its IBKR contract** (`market.mark.recorded`
   version 3), resolved by name with IBKR's contract details as a US-dollar
   stock on SMART: exactly one answer, that name's own, agreeing with
-  `con_ids` where `con_ids` names it. A name that does not resolve gets no
-  mark, with a warning naming IBKR's reason, so the engine refuses any order
+  `con_ids` where `con_ids` names it. A class share is asked in IBKR's
+  spelling (the data job's dot as a space, `BRK.B` as `BRK B`) and taken
+  only from an answer IBKR spells so, symbol and local symbol: a fixed
+  spelling, checked, never a guess. An answer not finished within the
+  request time is asked once more, after the rest; IBKR's refusal (200) is
+  final. Every bulk request (contract lookups, market-data snapshots and
+  their cancels) shares one pacer under IBKR's 50 messages a second. A
+  name that does not resolve gets no mark, with a warning naming IBKR's
+  reason, so the engine refuses any order
   for it (`missing-mark`) and never sizes it on a guessed contract. IBKR's
   last price beside the mark is the price band's comparison, as for Boost.
 - **Not decided here:** sending an IRA order (paper) will need the sender to

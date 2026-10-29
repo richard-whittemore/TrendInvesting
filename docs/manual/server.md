@@ -85,20 +85,21 @@ Boost instance's account id is `joint`.
 
 | File | What it holds | Who writes it |
 | --- | --- | --- |
-| `/etc/trend-investing/engines/<instance>.env` | the account's label (`TI_ACCOUNT`), its adapter client ID (Boost 11, Traditional IRA 12, Roth IRA 13) and the engine's start mode (`TI_MODE`, `dry-run`) | copied from `deploy/etc/engines/` by `provision.sh services`, every time |
+| `/etc/trend-investing/engines/<instance>.env` | the account's label (`TI_ACCOUNT`), its adapter client ID (Boost 11, Traditional IRA 12, Roth IRA 13) and the engine's start mode (`TI_MODE`, `dry-run`) | installed from `deploy/etc/engines/` by `provision.sh services` when there is none, then kept; the shipped one beside it as `<instance>.env.example` |
 | `/etc/trend-investing/engines/<instance>.config` | the account's configuration: strategy, account, mode, rule figures, hard limits. Hashed into every run (ADR 0016). `boost.config` and `trad-ira.config` exist; the Roth IRA has none yet. Each ships with placeholders (`joint`, `trad-ira`; the IRA's birth month `YYYY-MM`), never your account or birth month, which you name on the server | installed from `deploy/etc/engines/` by `provision.sh services` only when there is none; then yours, kept by every later run (the shipped one goes beside it as `<instance>.config.example`) |
 | `/var/lib/trend-investing/engines/<instance>/run.env` | one engine start: `TI_RUN` (the run's name, never reused), `TI_AS_OF` (its first decided session) and `TI_RESTART_ARGS` (empty, `-approval <file>` or `-resume <log>`) | you, before every start (`docs/runbooks/durable-log.md`, "Restarting an engine"; example in `deploy/etc/engines/run.env.example`) |
 | `/etc/trend-investing/gateway.env` | the Gateway's restart times | `provision.sh services` |
 | `/etc/trend-investing/adapters/boost.json` | the Boost adapter's settings: the Gateway's address and port (4002), client ID 11, mode and the paper sending switch (`paper_sending_enabled`), timeouts; no account number | created once from `deploy/etc/adapters/boost.json.example` by `provision.sh services`, never overwritten; you edit it for paper |
 
-**Caution:** `provision.sh services` copies the repository's `*.env` files
-over `/etc/trend-investing/engines/` every time it runs, so a `TI_MODE` you
-set to `paper` there comes back as `dry-run`; the engine then refuses to start
-in paper, which is safe, and you set it again. It installs an account's
-`*.config` only when there is none: one already there, with the account you
-named in it, is kept byte for byte, and the shipped file is put beside it as
-`<instance>.config.example` to compare (rehearsed by `deploy/rehearse.sh`
-and `deploy/rehearsal/test-engine-configs.sh`).
+**Caution:** `provision.sh services` installs an account's settings file
+(`*.env`) and its configuration (`*.config`) only when there is none: one
+already there, with a `TI_MODE` you set to `paper` or the account you named,
+is kept byte for byte, and the shipped file is put beside it as
+`<instance>.env.example` or `<instance>.config.example` to compare. A line the
+shipped settings file adds (such as the IRA adapter's `TI_ADAPTER_ACCOUNT_KEY`)
+is yours to copy by hand; `docs/runbooks/first-dry-run-day.md`, "The
+Traditional IRA", gives the lines (rehearsed by `deploy/rehearse.sh` and
+`deploy/rehearsal/test-engine-configs.sh`).
 
 ## Where the secrets live
 

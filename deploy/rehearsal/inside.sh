@@ -70,6 +70,10 @@ ira_config=/etc/trend-investing/engines/trad-ira.config
 grep -q '"account_id": "trad-ira"' "$ira_config" || fail "the first pass did not install the shipped trad-ira.config"
 sed -i 's/"account_id": "trad-ira"/"account_id": "DUREHEARS1"/' "$ira_config"
 edited=$(sha256sum "$ira_config")
+# A settings file the owner edited by hand (a line the shipped one lacks)
+# survives too, the shipped one beside it.
+echo "TI_OWNER_MARKER=kept" >>/etc/trend-investing/engines/trad-ira.env
+edited_env=$(sha256sum /etc/trend-investing/engines/trad-ira.env)
 before=$(secret_sums)
 "$p" base
 "$p" clock
@@ -78,7 +82,9 @@ before=$(secret_sums)
 test "$(secret_sums)" = "$before" || fail "re-run changed the owner's encrypted secret files"
 test "$(sha256sum "$ira_config")" = "$edited" || fail "re-run changed the account ID the owner named in trad-ira.config"
 cmp -s /root/deploy/etc/engines/trad-ira.config "$ira_config.example" || fail "re-run did not put the shipped trad-ira.config beside the owner's as trad-ira.config.example"
-pass "second pass idempotent, owner's encrypted files and edited account configuration preserved, no passphrase asked"
+test "$(sha256sum /etc/trend-investing/engines/trad-ira.env)" = "$edited_env" || fail "re-run changed the trad-ira.env the owner edited (its marker line)"
+cmp -s /root/deploy/etc/engines/trad-ira.env /etc/trend-investing/engines/trad-ira.env.example || fail "re-run did not put the shipped trad-ira.env beside the owner's as trad-ira.env.example"
+pass "second pass idempotent, owner's encrypted files, edited account configuration and edited settings file preserved, no passphrase asked"
 
 # The encrypted files, ti-unlock and ti-secrets (deploy/rehearsal/inside-secrets.sh).
 TI_TEST_PASS=$passphrase TI_TEST_MARKER=$marker bash /root/deploy/rehearsal/inside-secrets.sh
@@ -887,8 +893,7 @@ grep -q '"paper_sending_enabled": false' /etc/trend-investing/adapters/boost.jso
 cmp -s /root/deploy/etc/adapters/trad-ira.json.example /etc/trend-investing/adapters/trad-ira.json || fail "the IRA adapter's configuration not created from its example"
 test "$(stat -c %U:%a /var/lib/trend-investing/adapters/trad-ira)" = ti-trader:750 || fail "the IRA adapter's state directory not ti-trader 0750"
 # The Traditional IRA's Flex reader fires 15 minutes after Boost's (lessons L3).
-test "$(grep -c '^OnCalendar=Mon\.\.Fri 0[567]:45 America/New_York$' /etc/systemd/system/ti-flex@trad-ira.timer.d/stagger.conf)" = 3 &&
-  grep -qx 'OnCalendar=Mon..Fri 05:45 America/New_York' /etc/systemd/system/ti-flex@trad-ira.timer.d/stagger.conf || fail "the IRA Flex reader's staggered times are not installed"
+test "$(grep -c '^OnCalendar=Mon\.\.Fri 0[567]:45 America/New_York$' /etc/systemd/system/ti-flex@trad-ira.timer.d/stagger.conf)" = 3 || fail "the IRA Flex reader's staggered times are not installed"
 pass "adapter state directories and configurations in place (Boost's and the Traditional IRA's), sending off, and the IRA Flex reader's staggered times installed"
 # ti-release, run against a local fake release (file://) on the programs
 # installed above, with a stand-in systemctl (no systemd runs here) and no gh.

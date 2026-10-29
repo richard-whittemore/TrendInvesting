@@ -776,24 +776,53 @@ one-time warm-up** of the IRA's data job (it reads that log and writes the
 run's stream folder), then **the IRA's adapter**, `ti-adapter@trad-ira`
 (client ID 12; it refuses to start until the stream folder exists), then
 **the daily firings** (`ti-data@trad-ira.timer`, already enabled by
-provisioning, and the Flex reader `ti-flex@trad-ira.timer`). Install first, from
-the checkout (each is an explicit step; never a timer's doing):
-`sudo deploy/provision.sh services` (the adapter template
-`ti-adapter@.service`, `/etc/trend-investing/adapters/trad-ira.json` once,
-the Flex reader's staggered times), `sudo deploy/provision.sh adapter` (the
-adapter's code) and the engine and reporter binaries built on the Mac
-(`sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine`
-and the same for `ti-reporter`). Install binaries at :01 to :03 past a
-5-minute mark (the reporter fires every 5 minutes) or with
-`ti-reporter@boost.timer` stopped; a running Boost engine is not touched by
-a new binary until it is next started.
+provisioning). The IRA's Flex reader is turned on before the adapter (I-6):
+a morning start of the adapter waits for its executions proof.
 
-Every block below except the warm-up is run by `deploy/rehearse.sh` as
-written, as for Boost's steps. The warm-up block is not: the rehearsal's
-container has no Massive, sector sources or two years of recordings, so a
-stand-in writes the run's first file there (`deploy/rehearsal/ira-stream.py`),
-and the warm-up command itself is rehearsed on its own, on synthetic
-recordings (`deploy/rehearsal/inside.sh`).
+Install first, from the checkout (each is an explicit step; never a
+timer's doing):
+
+- `sudo deploy/provision.sh services`. What it **installs**: the adapter
+  template `ti-adapter@.service` and every other unit file (replaced), the
+  Flex reader's staggered times for the IRA (the drop-in), and
+  `/etc/trend-investing/adapters/trad-ira.json` once. What it **keeps**,
+  byte for byte: every engine configuration (`engines/*.config`), every
+  settings file already on the server (`engines/*.env`; the shipped one is
+  put beside it as `<name>.env.example`), the adapters' configurations and
+  the secrets. What it **does to running units**: it enables and starts
+  `ti-data.timer`, `ti-data@trad-ira.timer` and `ti-reporter@boost.timer`
+  (already running on a Boost server, so no change), restarts
+  `ti-dashboard`, and disables (never stops) the engines and adapters, which
+  are never enabled at boot. Boost's engine and adapter keep running.
+- `sudo deploy/provision.sh adapter` (the adapter's code).
+- The engine and reporter binaries built on the Mac
+  (`sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine`
+  and the same for `ti-reporter`), at :01 to :03 past a 5-minute mark (the
+  reporter fires every 5 minutes) or with `ti-reporter@boost.timer` stopped;
+  a running Boost engine is not touched by a new binary until it is next
+  started.
+
+Because `services` keeps a `trad-ira.env` the server already has, add by
+hand the two lines the IRA's adapter and engine need if it lacks them
+(compare with `trad-ira.env.example` beside it), then check:
+
+```sh
+f=/etc/trend-investing/engines/trad-ira.env
+sudo grep -q '^TI_ADAPTER_ACCOUNT_KEY=' "$f" || echo 'TI_ADAPTER_ACCOUNT_KEY=IBKR_ACCOUNT_TRAD_IRA' | sudo tee -a "$f"
+sudo grep -q '^TI_MODE=' "$f" || echo 'TI_MODE=dry-run' | sudo tee -a "$f"
+sudo grep -E '^TI_(ADAPTER_CLIENT_ID|ADAPTER_ACCOUNT_KEY|MODE)=' "$f"
+```
+
+It must print `TI_ADAPTER_CLIENT_ID=12`, `TI_ADAPTER_ACCOUNT_KEY=IBKR_ACCOUNT_TRAD_IRA`
+and `TI_MODE=dry-run` (in that file's order).
+
+Every block below except the warm-up and the Flex reader is run by
+`deploy/rehearse.sh` as written, as for Boost's steps. The warm-up block is
+not: the rehearsal's container has no Massive, sector sources or two years
+of recordings, so a stand-in writes the run's first file there
+(`deploy/rehearsal/ira-stream.py`), and the warm-up command itself is
+rehearsed on its own, on synthetic recordings (`deploy/rehearsal/inside.sh`).
+Nor is the Flex reader's: it needs IBKR's Flex Web Service.
 
 ### I-0. Where the server stands
 
@@ -962,7 +991,28 @@ sudo systemd-run --unit=ti-warmup-ira --collect -p User=ti-trader -p Group=ti-tr
 The last line of its journal is the file it wrote:
 `/var/lib/trend-investing/data/streams/trad-ira/run-ira-2026-10-29/trad-ira-<last session>.jsonl`.
 
-### I-6. Start the IRA's adapter, in dry-run
+### I-6. Turn on the IRA's Flex reader (not rehearsed; see above)
+
+Before the adapter: a morning reading of a session stands for its close
+only with the IRA's own executions proof (ADR 0019, amended 2026-10-27), and
+until 09:00 New York a morning start of the adapter waits for it rather than
+deliver, so I-7 would not be ready in its five minutes without it. Its own
+Flex reader writes it, firing at 05:45, 06:45 and 07:45, after Boost's (the
+drop-in provisioning installs). Run it once, check it, then enable its timer,
+with the same token and queries as Boost's ("Monday after the close"):
+
+```sh
+sudo systemctl start ti-flex@trad-ira
+sudo journalctl -u ti-flex@trad-ira -n 20 --no-pager
+sudo cat /var/lib/trend-investing/flex/trad-ira/executions.json
+sudo systemctl enable --now ti-flex@trad-ira.timer
+systemctl list-timers ti-flex@trad-ira.timer --no-pager
+```
+
+The journal says it read, `executions.json` shows `"state": "read"`, and the
+timer's next firing is at 05:45, 06:45 or 07:45 New York.
+
+### I-7. Start the IRA's adapter, in dry-run
 
 `ti-adapter@trad-ira` connects with client ID 12 (Boost's is 11, on the same
 Gateway), reads the account's positions and balances, its settled cash
@@ -1021,9 +1071,9 @@ the engine refuses any order for it (`missing-mark`) rather than size it on
 a guessed contract (`docs/manual/ibkr-adapter.md`, "Contracts and marks for
 an IRA").
 
-### I-7. The same-day probe
+### I-8. The same-day probe
 
-Run it right after I-6, the same day (`docs/live-trading/lessons-2026-10.md`
+Run it right after I-7, the same day (`docs/live-trading/lessons-2026-10.md`
 L10), and after every later install of the adapter. It reads this start's
 journal and the engine's log, talks to nothing, and prints one line per
 check; it prints no account number.
@@ -1043,13 +1093,14 @@ sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr 
 <!-- expect: ira-probe -->
 ```text
 ~ probe: ok the adapter started: mode=dry-run client_id=12 sending=off ibapi=
+~ probe: Gateway server version [0-9]+ \(contract details read from IBKR's (protobuf|text) messages\)
 ~ probe: ok connected to IB Gateway as client_id=12
 ~ probe: ok reconciled client_id=12: positions=[0-9]+ open_orders=0 executions=0
 ~ probe: ok queued run=run-ira-2026-10-29 files=trad-ira-[0-9-]+\.jsonl
 ~ probe: ok account snapshot version 4 as of .*settled_cash .*total_cash
 ~ probe: ok reconciliation journalled
 ~ probe: ok [0-9]+ mark\(s\) at version 3
-probe: ok no order sent and none refused for a missing mark
+probe: ok no order released to be sent and none refused for a missing mark
 ~ probe: (no decision yet|latest decision)
 probe: passed
 ```
@@ -1059,26 +1110,12 @@ no account number). A `probe: FAIL` line says what is missing; the last line
 then reads `probe: FAILED, <n> check(s)` and the command exits 1. The
 manual's "The same-day probe" says what each check means and what to do.
 
-### I-8. The daily firings and the Flex reader
+### I-9. The daily firings
 
 `ti-data@trad-ira.timer` is enabled by provisioning; once `run.env` exists its
 06:15, 07:15 and 08:15 firings write each session's file and the adapter,
-still running, delivers it behind that morning's reading. That reading
-stands for the close only with the IRA's own executions proof (ADR 0019,
-amended 2026-10-27), written by its own Flex reader, which fires at 05:45,
-06:45 and 07:45, after Boost's (the drop-in provisioning installs). Turn it
-on once, as for Boost ("Monday after the close"), with the IRA's names:
-
-```sh
-sudo systemctl start ti-flex@trad-ira
-sudo journalctl -u ti-flex@trad-ira -n 20 --no-pager
-sudo cat /var/lib/trend-investing/flex/trad-ira/executions.json
-sudo systemctl enable --now ti-flex@trad-ira.timer
-systemctl list-timers ti-flex@trad-ira.timer --no-pager
-```
-
-The journal says it read, `executions.json` shows `"state": "read"`, and the
-timer's next firing is at 05:45, 06:45 or 07:45 New York.
+still running, delivers it behind that morning's reading, with the proof
+the Flex reader (I-6) writes each morning before it.
 
 ### The first IRA month-end, in dry-run (the slice's acceptance)
 
@@ -1089,8 +1126,8 @@ For `TI_AS_OF=2026-11-30T21:00:00Z`:
 | Mon 30 Nov 16:00 | The month's last session closes | nothing |
 | Tue 1 Dec 05:45 | `ti-flex@trad-ira` writes the executions proof | `sudo cat /var/lib/trend-investing/flex/trad-ira/executions.json` shows `"state": "read"` |
 | Tue 1 Dec 06:15 | `ti-data@trad-ira` writes `trad-ira-2026-11-30.jsonl`: SPY, IEF, SHY and the holdings' bars, the month-end universe and the 500 ranked stocks' histories | `sudo journalctl -u ti-data@trad-ira -n 5 --no-pager`, last line the file |
-| Tue 1 Dec, minutes after | The adapter reads the account once, resolves the contract of every name it will mark (each ranked stock, SPY, IEF, SHY and the holdings: about 500 names, in batches of 40 a second apart), asks IBKR's last price for each in batches of 50, and delivers the file with a mark and contract for each, before the session's close | `sudo journalctl -u ti-adapter@trad-ira -n 40 --no-pager`: `contracts resolved=N of M`, then `stream queued`; each `contract for X not resolved` names a stock that gets no mark |
-| Then | The engine decides the month, or withholds it with a stated reason; a dry-run records a synthetic cancel for each order it releases, so the buy phase is planned at the same close | the probe (I-7) again: its `latest decision` line |
+| Tue 1 Dec, minutes after | The adapter reads the account once, resolves the contract of every name it will mark (each ranked stock, SPY, IEF, SHY and the holdings: about 500 names, at most 40 requests a second, a slow answer asked once more), asks IBKR's last price for each under the same pace, and delivers the file with a mark and contract for each, before the session's close | `sudo journalctl -u ti-adapter@trad-ira -n 40 --no-pager`: `contracts resolved=N of M`, then `stream queued`; each `contract for X not resolved` names a stock that gets no mark |
+| Then | The engine decides the month, or withholds it with a stated reason; a dry-run records a synthetic cancel for each order it releases, so the buy phase is planned at the same close | the probe (I-8) again, with `--expect-batch`, on that morning's start or the adapter's journal since its start: its `latest decision` line |
 
 The slice is accepted when that first month-end is decided, or withheld
 with a stated reason (`stale-account-snapshot` without the proof by 09:00,

@@ -134,6 +134,9 @@ class _EClient:
     def cancelMktData(self, reqId):
         self.requests.append(("cancelMktData", reqId))
 
+    def serverVersion(self):
+        return 205
+
     def reqContractDetails(self, reqId, contract):
         self.requests.append(("reqContractDetails", reqId, contract.conId, contract.symbol, contract.secType,
                               contract.currency, contract.exchange))

@@ -496,6 +496,14 @@ class IbapiClient(TWSApi):
     def cancel_mkt_data(self, req_id):
         self._client.cancelMktData(req_id)
 
+    def server_version(self):
+        """EClient.serverVersion() for this session, an int; None with no session or any other value."""
+        client = self._client
+        if client is None or not client.isConnected():
+            return None
+        version = client.serverVersion()
+        return version if isinstance(version, int) and not isinstance(version, bool) else None
+
     def req_contract_details(self, req_id, contract):
         """IBKR's contracts for a name (snapshot.resolve_contracts): a US-dollar stock on SMART, by symbol, no conId.
 

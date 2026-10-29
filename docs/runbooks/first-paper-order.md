@@ -177,13 +177,12 @@ files never contain it, because the repository is public.
 
 Two cautions:
 
-- `sudo deploy/provision.sh services` copies the repository's `*.env`
-  files over `/etc/trend-investing/engines/`, so a `TI_MODE` you set there
-  comes back as `dry-run`: after the first paper edit, redo it if you run
-  `services` again (the engine refuses to start in paper with a dry-run
-  `TI_MODE`, which is the safe outcome). It never replaces a `*.config`
-  that is already there: your edited `boost.config` is kept byte for byte,
-  and the shipped one is put beside it as `boost.config.example`.
+- `sudo deploy/provision.sh services` never replaces a `*.env` or a
+  `*.config` that is already there: the `TI_MODE` you set in `boost.env`
+  and your edited `boost.config` are kept byte for byte, and the shipped
+  ones are put beside them as `boost.env.example` and
+  `boost.config.example`. A line a later shipped `.env` adds is yours to
+  copy by hand.
 - Check that `git status` in the checkout shows nothing new under `deploy/`
   before every commit or pull. The edits above are made in `/etc`, not in the
   checkout.

@@ -66,7 +66,17 @@ case "$*" in
     if test -n "${FAKE_VOLUME_ERR:-}"; then echo "$FAKE_VOLUME_ERR" >&2; exit 1; fi
     if test "${FAKE_VOLUMES:-}" = absent; then echo "Error response from daemon: get volume: no such volume" >&2; exit 1; fi
     case "$*" in "volume inspect --format "*) printf '%s\n' "${FAKE_VOLUME_LABELS-$n|${FAKE_CHECKOUT:-}}" ;; esac ;;
-  *"systemctl list-units --state=active"*) test "${FAKE_LIST_FAILS:-0}" = 0 || exit 1; test -z "${FAKE_ACTIVE:-}" || printf '%s\n' $FAKE_ACTIVE ;;
+  *"systemctl list-units --state=active"*)
+    test "${FAKE_LIST_FAILS:-0}" = 0 || exit 1
+    # Only the units the asked patterns (the arguments after --plain) match,
+    # as systemctl lists them.
+    patterns=${*#*--plain }
+    for u in ${FAKE_ACTIVE:-}; do
+      for pat in $patterns; do
+        # shellcheck disable=SC2254
+        case $u in $pat) printf '%s\n' "$u"; break ;; esac
+      done
+    done ;;
   *"systemctl list-units --state=failed"*) test -z "${FAKE_FAILED:-}" || printf '%s\n' $FAKE_FAILED ;;
   *"systemctl is-system-running"*) echo "${FAKE_SYSTEM:-running}" ;;
   *"systemctl is-active --quiet mount-shared.service"*) test "${FAKE_MOUNT_SHARED:-0}" = 0 ;;
@@ -383,6 +393,12 @@ refused_after "--recreate while three run" "if any of these stops fails, stop th
 refused_after "--recreate while two adapters and two engines run" "systemctl stop ti-adapter-cde.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service ti-adapter-boost.service ti-engine@cde.service ti-adapter-cde.service"
 stop_units=$(grep -o 'systemctl stop [^ ;]*' "$work/out" | sed 's/^systemctl stop //' | tr '\n' ' ')
 test "$stop_units" = "ti-adapter-boost.service ti-adapter-cde.service ti-engine@boost.service ti-engine@cde.service " || fail "two adapters and two engines are not stopped adapters first: '$stop_units' in $(cat "$work/out")"
+# An IRA's adapter is an instance of the template, ti-adapter@<instance>: it
+# alone running refuses the recreate, and it is stopped before its engine.
+refused_after "--recreate while only the IRA's adapter runs" "ti-adapter@trad-ira.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-adapter@trad-ira.service"
+refused_after "--recreate while the IRA's engine and adapter run" "systemctl stop ti-adapter@trad-ira.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@trad-ira.service ti-adapter@trad-ira.service"
+stop_units=$(grep -o 'systemctl stop [^ ;]*' "$work/out" | sed 's/^systemctl stop //' | tr '\n' ' ')
+test "$stop_units" = "ti-adapter@trad-ira.service ti-engine@trad-ira.service " || fail "the IRA's adapter is not stopped before its engine: '$stop_units' in $(cat "$work/out")"
 # systemd not answering which units run: refused, saying so, before anything
 # is stopped.
 refused_after "--recreate when systemd does not list its units" "cannot ask systemd" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_LIST_FAILS=1

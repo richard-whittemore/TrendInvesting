@@ -101,6 +101,10 @@ class TWSApi:
     def req_contract_details(self, req_id, contract):
         raise NotImplementedError
 
+    def server_version(self):
+        """The server version this session negotiated with IB Gateway (EClient.serverVersion), or None with none."""
+        raise NotImplementedError
+
     def can_place_orders(self):
         raise NotImplementedError
 
