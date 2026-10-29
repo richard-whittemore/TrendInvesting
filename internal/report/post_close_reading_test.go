@@ -48,7 +48,7 @@ func TestAStaleWithholdSaysWhyThePostCloseReadingWasNotTheClose(t *testing.T) {
 	s.withheld(3, event.WithheldStaleAccountSnapshot)
 	s.broker(4, "", false)
 	s.withheld(4, event.WithheldMissingBars)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestABrokerSnapshotThatDoesNotReadRaisesNoAlert(t *testing.T) {
 	s := newStream(t)
 	s.add(event.BrokerSnapshotEventType, event.BrokerSnapshotReadAtVersion, "broker:bad", day(0), event.BrokerSnapshotPayload{})
 	s.withheld(0, event.WithheldStaleAccountSnapshot)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -135,6 +135,8 @@ scenario() {
   : >"$work/calls"
   rm -rf "${work:?}/etc" "${work:?}/units" "${work:?}/tmp" "${work:?}/cwd"
   mkdir -p "$work/etc/adapters" "$work/units" "$work/tmp" "$work/cwd"
+  # install is a recording stand-in; prepare the drop-in directories for cat.
+  mkdir -p "$work/units/ti-reporter@trad-ira.service.d" "$work/units/ti-reporter@roth-ira.service.d"
   # The owner's checkout, which the service users cannot enter.
   chmod 0700 "$work/cwd"
   printf '%s\n' "${FAKE_PASSWD-$default_passwd}" | sed '/^$/d' >"$work/passwd"
@@ -509,6 +511,10 @@ called "ufw" || fail "Lightsail base no longer installs ufw"
 if called "journald.conf.d"; then fail "Lightsail base changed the journal's settings"; fi
 
 scenario "" x86_64 services || fail "Lightsail services failed: $(cat "$work/out")"
+for instance in trad-ira roth-ira; do
+  called "install -d -m 0755 $work/units/ti-reporter@$instance.service.d" || fail "$instance reporter drop-in directory is not installed"
+  grep -qx 'Environment=TI_HEARTBEAT=off' "$work/units/ti-reporter@$instance.service.d/heartbeat.conf" || fail "$instance reporter heartbeat is not disabled"
+done
 called "systemctl enable ti-gateway.service" || fail "Lightsail no longer enables the Gateway unit"
 if called "systemctl mask"; then fail "Lightsail masks a unit"; fi
 called "/systemd/ti-gateway.service" || fail "Lightsail no longer installs the Gateway unit"

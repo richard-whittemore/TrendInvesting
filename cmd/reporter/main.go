@@ -100,7 +100,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	date := flags.String("date", "", "summary date, YYYY-MM-DD, sent once the log records that day's session closed (default: the latest closed session)")
 	summary := flags.Bool("summary", false, "also deliver the daily summary")
 	sessions := flags.Int("heartbeat-sessions", 2, "NYSE sessions that may close with nothing written to the journal before a heartbeat alert fires (at least 2); weekends and holidays close none")
-	accountName := flags.String("account", "", "account name for alerts when the journal cannot name its own (default: the journal file's name)")
+	accountName := flags.String("account", "", "deployment instance (%i, e.g. trad-ira), required for IRA alert unit commands; also the alert label when the journal cannot name its account (default label: the journal file's name)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
 	repeat := flags.Duration("repeat-interval", defaultRepeatInterval, "how often a Degraded, Halted or reconciliation alert is sent again until the journal records its acknowledgement (the owner's setting, ADR 0019)")
 	secretsFile := flags.String("secrets-file", "", "KEY=VALUE file of channel secrets, read for any not set in the environment (under systemd: %d/secrets, the credential file)")
@@ -289,7 +289,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		refused = lostRunEnv
 	default:
 		info, statErr = os.Stat(*journalPath)
-		history, envelopes, account, alerts, refused = journalReader(*journalPath, now(), *ackWithin, seen)
+		history, envelopes, account, alerts, refused = journalReader(*journalPath, *accountName, now(), *ackWithin, seen)
 		if account != "" {
 			label = account
 		}
@@ -715,8 +715,9 @@ var journalReader = readJournal
 // acknowledged within ackWithin of its commit by now, or the reason it was
 // refused. Only the summary's equity comparison reads the earlier runs, so a
 // broken chain of them refuses nothing: it is one more alert, delivered once
-// (ADR 0019, "Alerting").
-func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[string]bool) (history report.History, envelopes []event.Envelope, account string, alerts []report.Alert, err error) {
+// (ADR 0019, "Alerting"). instance comes from -account, never from the
+// journal's broker account ID.
+func readJournal(path, instance string, now time.Time, ackWithin time.Duration, seen map[string]bool) (history report.History, envelopes []event.Envelope, account string, alerts []report.Alert, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return report.History{}, nil, "", nil, fmt.Errorf("reporter: read journal: %w", err)
@@ -733,7 +734,7 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 	if err != nil {
 		return report.History{}, nil, "", nil, err
 	}
-	alerts, err = report.Alerts(envelopes)
+	alerts, err = report.Alerts(envelopes, instance)
 	if err != nil {
 		return report.History{}, nil, account, nil, err
 	}
@@ -742,7 +743,7 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 		return report.History{}, nil, account, nil, err
 	}
 	alerts = append(alerts, report.UnreadReportAlerts(account, unread)...)
-	alerts = append(alerts, report.IncompleteSellAlerts(account, entries, strategy)...)
+	alerts = append(alerts, report.IncompleteSellAlerts(instance, entries, strategy)...)
 	alerts = append(alerts, report.UnacknowledgedAlerts(orders, now, ackWithin, func(key string) bool { return deliveredAnywhere(seen, key) })...)
 	history = report.EarlierRunsOf(path, raw, recoverLogFile)
 	if history.Broken != nil {

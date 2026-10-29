@@ -39,7 +39,7 @@ func TestACloseSnapshotNoFillExplainsIsOneUrgentAlert(t *testing.T) {
 	s := newStream(t)
 	s.snapshot(0, 4000, 147)
 	s.unexplainedCloseSnapshot(1, 150)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}

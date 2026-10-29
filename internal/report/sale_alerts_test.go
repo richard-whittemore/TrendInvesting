@@ -74,7 +74,15 @@ func (s *stream) saleWithheld(n int, clientID, reason string) {
 
 func alertsOf(t *testing.T, s *stream) []report.Alert {
 	t.Helper()
-	got, err := report.Alerts(s.out)
+	instance := "boost"
+	_, strategy, err := report.AccountOf(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategy == event.TargetWeightStrategyMomentum {
+		instance = iraInstance
+	}
+	got, err := report.Alerts(s.out, instance)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +138,7 @@ func TestAnUnreadableMarginAlarmRefusesTheAlerts(t *testing.T) {
 	s := newStream(t)
 	s.marginAlarm(0, "w", event.MarginAlarmWarning)
 	s.out[len(s.out)-1].Payload = []byte(`{`)
-	if _, err := report.Alerts(s.out); err == nil {
+	if _, err := report.Alerts(s.out, "boost"); err == nil {
 		t.Fatal("Alerts accepted a corrupt margin alarm")
 	}
 }
@@ -299,7 +307,7 @@ func TestAnUnreadablePlanRefusesTheAlerts(t *testing.T) {
 		spoil(&s.out[len(s.out)-1])
 		s.saleReleased(0, "sale-1", true)
 		s.refused(0, "tw-b", event.RefusedOrderSize)
-		_, err := report.Alerts(s.out)
+		_, err := report.Alerts(s.out, "boost")
 		if err == nil || !strings.Contains(err.Error(), "plan:sale-1") {
 			t.Errorf("%s: Alerts err = %v, want a refusal naming plan:sale-1", name, err)
 		}
@@ -342,7 +350,7 @@ func TestAnUnreadableReleaseRefusesTheAlerts(t *testing.T) {
 	s.salePlanned(0, "sale-1")
 	s.saleReleased(0, "sale-1", true)
 	s.out[len(s.out)-1].Payload = []byte(`{`)
-	if _, err := report.Alerts(s.out); err == nil {
+	if _, err := report.Alerts(s.out, "boost"); err == nil {
 		t.Fatal("Alerts accepted a corrupt release")
 	}
 }

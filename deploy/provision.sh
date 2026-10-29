@@ -741,7 +741,7 @@ CONF
     "$unit_dir/timers.target.wants/ti-reporter.timer"
   # On the Mac mini the Gateway's unit file is not installed: masking puts a
   # link to /dev/null in its place, which a real file there would block.
-  local unit
+  local unit instance
   for unit in "$here"/systemd/*.service "$here"/systemd/*.timer; do
     if mac_mini && test "$(basename "$unit")" = ti-gateway.service; then continue; fi
     install -m 0644 "$unit" "$unit_dir/"
@@ -752,13 +752,15 @@ CONF
   install -d -m 0755 "$unit_dir/ti-flex@trad-ira.timer.d"
   install -m 0644 "$here/systemd/ti-flex@trad-ira.timer.d/stagger.conf" "$unit_dir/ti-flex@trad-ira.timer.d/"
   # Boost pings using its credential URL (ADR 0019, "Alerting").
-  # Disable trad-ira: a second pinger would mask the loss of the first.
-  install -d -m 0755 "$unit_dir/ti-reporter@trad-ira.service.d"
-  cat >"$unit_dir/ti-reporter@trad-ira.service.d/heartbeat.conf" <<'EOF'
+  # Disable every IRA reporter: a second pinger would mask the loss of Boost.
+  for instance in trad-ira roth-ira; do
+    install -d -m 0755 "$unit_dir/ti-reporter@$instance.service.d"
+    cat >"$unit_dir/ti-reporter@$instance.service.d/heartbeat.conf" <<'EOF'
 [Service]
-# a second pinger would mask the loss of the first
+# A second pinger would mask the loss of Boost (ADR 0019, "Alerting").
 Environment=TI_HEARTBEAT=off
 EOF
+  done
   if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
     rm -f "$unit_dir/ti-gateway.service"
   fi

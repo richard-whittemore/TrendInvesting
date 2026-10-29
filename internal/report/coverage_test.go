@@ -49,14 +49,14 @@ func TestEveryDecisionThatCannotBeDecodedFailsTheReportAndEveryInputIsCounted(t 
 	for _, i := range []int{3, 6, 7} { // decided, refused, engine state
 		s := rich(t)
 		s.out[i].Payload = []byte(`{`)
-		if _, err := report.Alerts(s.out); err == nil {
+		if _, err := report.Alerts(s.out, "boost"); err == nil {
 			t.Errorf("Alerts accepted a corrupt %s", s.out[i].Type)
 		}
 	}
 }
 
 func TestAlertsNeedAConfiguration(t *testing.T) {
-	if _, err := report.Alerts(nil); err == nil {
+	if _, err := report.Alerts(nil, "boost"); err == nil {
 		t.Fatal("expected an error")
 	}
 }

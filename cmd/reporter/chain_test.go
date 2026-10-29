@@ -66,7 +66,7 @@ func TestReadJournalFollowsTheChainOfRunsForTheSummary(t *testing.T) {
 	first := writeChainedLog(t, filepath.Join(dir, "run1.log"), approvalNaming("", ""))
 	current := filepath.Join(dir, "run2.log")
 	writeChainedLog(t, current, approvalNaming("run1.log", first))
-	history, envelopes, _, _, err := readJournal(current, t0, time.Minute, map[string]bool{})
+	history, envelopes, _, _, err := readJournal(current, "boost", t0, time.Minute, map[string]bool{})
 	if err != nil || history.Broken != nil || len(envelopes) == 0 || len(history.Earlier) == 0 {
 		t.Fatalf("earlier = %d, broken = %v, envelopes = %d, err = %v", len(history.Earlier), history.Broken, len(envelopes), err)
 	}
@@ -216,7 +216,7 @@ func TestARunStillStartingCostsNoHistoryAlert(t *testing.T) {
 	if err := os.WriteFile(current, bytes.Clone(buf.Bytes()), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	history, _, _, alerts, err := readJournal(current, t0, time.Minute, map[string]bool{})
+	history, _, _, alerts, err := readJournal(current, "boost", t0, time.Minute, map[string]bool{})
 	if err != nil || history.Broken != nil || !history.Starting {
 		t.Fatalf("history = %+v, err = %v; want a start in progress", history, err)
 	}

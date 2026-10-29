@@ -109,7 +109,7 @@ type Alert struct {
 	Body       string
 	PublicBody string
 	// Standing alerts survive a new channel baseline but retain once-per-key
-	// delivery (docs/live-trading/lessons-2026-10.md, L11).
+	// delivery (ADR 0019, "Alerting"; docs/live-trading/lessons-2026-10.md, L11).
 	Standing     bool
 	Repeat       bool
 	Acknowledged bool
@@ -187,12 +187,19 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 // acknowledgement for another account with no effect. The engine journals only
 // acknowledgements it could read, so one this build cannot read is a build
 // mismatch and a read error.
-func Alerts(envelopes []event.Envelope) ([]Alert, error) {
+//
+// instance is the caller's deployment name, never the journal's broker
+// account ID (ADR 0019, "Alerting"; docs/live-trading/lessons-2026-10.md L8).
+// Momentum callers must supply it; Boost retains its fixed unit names.
+func Alerts(envelopes []event.Envelope, instance string) ([]Alert, error) {
 	account, strategy, err := AccountOf(envelopes)
 	if err != nil {
 		return nil, err
 	}
-	instance := instanceOf(strategy, account)
+	if isMomentum(strategy) && instance == "" {
+		return nil, fmt.Errorf("report: momentum alerts require an engine instance")
+	}
+	instance = instanceOf(strategy, instance)
 	var out []Alert
 	var lastState, runReason string
 	var runStart time.Time
@@ -619,14 +626,13 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
 }
 
-// instanceOf is the engine instance (ti-engine@<instance>) of the account a
-// journal's configuration names: Boost runs as "boost" whatever account it
-// decides, and an IRA's configuration names its own instance (deploy/etc/
-// engines), so no alert names another account's units (docs/live-trading/
-// lessons-2026-10.md L8).
-func instanceOf(strategyID, account string) string {
+// instanceOf selects the deployment instance for alert commands (ADR 0019,
+// "Alerting"; docs/live-trading/lessons-2026-10.md L8). Momentum callers supply
+// the reporter flag or dashboard directory name, never a journal account ID;
+// Boost retains its fixed deployment name.
+func instanceOf(strategyID, instance string) string {
 	if strategyID == event.TargetWeightStrategyMomentum {
-		return account
+		return instance
 	}
 	return "boost"
 }

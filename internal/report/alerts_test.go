@@ -26,7 +26,7 @@ func TestEveryRefusalAlertsOnceUrgently(t *testing.T) {
 	s := newStream(t)
 	s.refused(0, "tw-a", event.RefusedMarginExposure)
 	s.refused(1, "tw-b", event.RefusedPriceBand)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestAKillSwitchOrStaleRefusalAlertsOnlyWhenFlagged(t *testing.T) {
 	s.flaggedRefusal(1, "tw-b", event.RefusedKillSwitch, false)
 	s.flaggedRefusal(2, "tw-c", event.RefusedStaleBrokerSnapshot, true)
 	s.flaggedRefusal(3, "tw-d", event.RefusedStaleBrokerSnapshot, false)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestAPendingCashDecreasePagesOncePerPendingDifference(t *testing.T) {
 	for n, flagged := range []bool{true, false, false, false} {
 		s.flaggedRefusal(n, fmt.Sprintf("tw-%d", n), event.RefusedPendingCashDecrease, flagged)
 	}
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestAnUnflaggedRefusalAlertsUnlessTheJournalProvesTheGateFlags(t *testing.T
 	s.flaggedRefusal(2, "tw-c", event.RefusedKillSwitch, true)
 	s.flaggedRefusal(3, "tw-d", event.RefusedKillSwitch, false)
 	s.flaggedRefusal(4, "tw-e", event.RefusedStaleBrokerSnapshot, false)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestAStaleEpisodeOpenedByAWithheldSaleAlertsOnce(t *testing.T) {
 	s.staleSaleWithheld(2, "sell-a", true)
 	s.flaggedRefusal(3, "tw-b", event.RefusedStaleBrokerSnapshot, false)
 	s.staleSaleWithheld(4, "sell-b", false)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestAlertsRefuseAWithheldSaleTheyCannotRead(t *testing.T) {
 		s := newStream(t)
 		s.staleSaleWithheld(0, "sell-a", true)
 		mutate(s)
-		if _, err := report.Alerts(s.out); err == nil {
+		if _, err := report.Alerts(s.out, "boost"); err == nil {
 			t.Errorf("%s: Alerts accepted it", name)
 		}
 	}
@@ -166,7 +166,7 @@ func TestADecisionRecordedAtVersion7IsRead(t *testing.T) {
 	s := newStream(t)
 	s.withheld(0, event.WithheldMissingBars)
 	s.out[len(s.out)-1].SchemaVersion = event.TargetsDecidedRetiredVersion
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatalf("a version 7 decision was refused: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestADecisionRecordedAtVersion7IsRead(t *testing.T) {
 		Outcome: event.TargetsOutcomeWithheld, WithheldReason: event.WithheldMissingBars, Detail: "detail",
 		Boost: event.BoostFigures{InstrumentID: "SPY", RestoredSale: &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true,
 			Order: &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit, Named: true}}}})
-	if _, err := report.Alerts(s.out); err == nil || !strings.Contains(err.Error(), "version 8") {
+	if _, err := report.Alerts(s.out, "boost"); err == nil || !strings.Contains(err.Error(), "version 8") {
 		t.Errorf("a version 7 decision recording a version 8 field was read as %v, want it refused", err)
 	}
 }
@@ -188,7 +188,7 @@ func TestADegradedOrHaltedStateAlertsOncePerIncident(t *testing.T) {
 	s.engineState(1, event.EngineStateDegraded, event.EngineStateReasonRiskLimitBreached, "SPY")
 	s.engineState(2, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
 	s.engineState(3, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestAWithheldRunIsOneIncidentAndADecisionEndsIt(t *testing.T) {
 	s.decided(2, 0.98)
 	s.withheld(3, event.WithheldMissingBars)
 	s.withheld(4, event.WithheldNoEligibleNames)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestABoostGapPagesOnceAndSaysDecisionsContinue(t *testing.T) {
 	s.withheld(1, event.WithheldMissingBars)
 	s.decided(2, 0.98)
 	s.withheld(3, event.WithheldMissingBars)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 				RejectedInARow: []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-6"}, {ClientOrderID: "tw-7"}},
 				ReplanWithheld: event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-7", Released: 37}}})
 	s.decidedFor("joint", 1, 0.98)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
 					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-9", Released: 5},
 				}}})
 	s.decidedFor("joint", 1, 0.98)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
 func TestAnAllUnaffordableWithholdIsUrgent(t *testing.T) {
 	s := newStream(t)
 	s.withheld(0, event.WithheldAllUnaffordable)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestAnAllUnaffordableWithholdIsUrgent(t *testing.T) {
 func TestALabelsMissingWithholdIsUrgent(t *testing.T) {
 	s := newStream(t)
 	s.withheld(0, event.WithheldLabelsMissing)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +459,7 @@ func TestALabelsMissingWithholdIsUrgent(t *testing.T) {
 func TestMissingHistoriesAreMissingData(t *testing.T) {
 	s := newStream(t)
 	s.withheld(0, event.WithheldHistoriesMissing)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestAStaleSnapshotAndAMissingMarkAreMissingData(t *testing.T) {
 	s := newStream(t)
 	s.withheld(0, event.WithheldStaleAccountSnapshot)
 	s.refused(1, "tw-a", event.RefusedMissingMark)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,8 +491,8 @@ func TestAlertsAreStableAcrossRepeatedReads(t *testing.T) {
 	s := newStream(t)
 	s.refused(0, "tw-a", event.RefusedOrderSize)
 	s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-	first, _ := report.Alerts(s.out)
-	second, _ := report.Alerts(s.out)
+	first, _ := report.Alerts(s.out, "boost")
+	second, _ := report.Alerts(s.out, "boost")
 	if len(first) != len(second) {
 		t.Fatal("alerts differ between reads")
 	}
@@ -556,7 +556,7 @@ func TestAlertsFailOnAMalformedPayload(t *testing.T) {
 	s := newStream(t)
 	s.refused(0, "tw-a", event.RefusedOrderSize)
 	s.out[1].Payload = []byte(`{`)
-	if _, err := report.Alerts(s.out); err == nil {
+	if _, err := report.Alerts(s.out, "boost"); err == nil {
 		t.Fatal("expected a decode error")
 	}
 }
@@ -566,7 +566,7 @@ func TestTheSameEngineStateAfterAnotherIsANewIncident(t *testing.T) {
 	s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
 	s.engineState(1, event.EngineStateDegraded, event.EngineStateReasonRiskLimitBreached, "SPY")
 	s.engineState(2, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,14 +608,14 @@ func TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats(t *testing.T) {
 	t.Run("another account is not counted", func(t *testing.T) {
 		s := newStream(t)
 		s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-		alerts, err := report.Alerts(s.out)
+		alerts, err := report.Alerts(s.out, "boost")
 		if err != nil || len(alerts) != 1 {
 			t.Fatalf("alerts = %v, %v", alerts, err)
 		}
 		p := good(alerts[0].Key)
 		p.AccountID = "ira"
 		s.ack("ack", event.AlertAcknowledgedSchemaVersion, p)
-		got, err := report.Alerts(s.out)
+		got, err := report.Alerts(s.out, "boost")
 		if err != nil {
 			t.Fatalf("a readable acknowledgement for another account is no error: %v", err)
 		}
@@ -641,12 +641,12 @@ func TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats(t *testing.T) {
 		t.Run("unreadable acknowledgement errors the read: "+name, func(t *testing.T) {
 			s := newStream(t)
 			s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-			alerts, err := report.Alerts(s.out)
+			alerts, err := report.Alerts(s.out, "boost")
 			if err != nil || len(alerts) != 1 {
 				t.Fatalf("alerts = %v, %v", alerts, err)
 			}
 			record(alerts[0].Key, s)
-			if _, err := report.Alerts(s.out); err == nil {
+			if _, err := report.Alerts(s.out, "boost"); err == nil {
 				t.Fatal("an acknowledgement the engine could not have journalled means a build mismatch: want a read error")
 			}
 		})
@@ -654,9 +654,9 @@ func TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats(t *testing.T) {
 	t.Run("delivered", func(t *testing.T) {
 		s := newStream(t)
 		s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-		alerts, _ := report.Alerts(s.out)
+		alerts, _ := report.Alerts(s.out, "boost")
 		s.ack("ack", event.AlertAcknowledgedSchemaVersion, good(alerts[0].Key))
-		got, err := report.Alerts(s.out)
+		got, err := report.Alerts(s.out, "boost")
 		if err != nil || len(got) != 1 || !got[0].Acknowledged {
 			t.Fatalf("a delivered acknowledgement stops the repeats: %+v, %v", got, err)
 		}
@@ -664,12 +664,12 @@ func TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats(t *testing.T) {
 	t.Run("a refused one beside a delivered one", func(t *testing.T) {
 		s := newStream(t)
 		s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-		alerts, _ := report.Alerts(s.out)
+		alerts, _ := report.Alerts(s.out, "boost")
 		p := good(alerts[0].Key)
 		p.AccountID = "ira"
 		s.ack("ack:refused", event.AlertAcknowledgedSchemaVersion, p)
 		s.ack("ack:delivered", event.AlertAcknowledgedSchemaVersion, good(alerts[0].Key))
-		got, _ := report.Alerts(s.out)
+		got, _ := report.Alerts(s.out, "boost")
 		if !got[0].Acknowledged {
 			t.Fatal("the delivered acknowledgement still counts")
 		}
@@ -687,7 +687,7 @@ func TestARejectionWhileBuysAreStoppedNamesItsPlace(t *testing.T) {
 				Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2, RejectionsWhileStopped: count,
 					RejectedInARow:       []event.BoostRejectedOrder{{ClientOrderID: "tw-1"}, {ClientOrderID: "tw-2"}},
 					RejectedWhileStopped: []event.BoostReplan{{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-8", Released: 6}}}})
-		got, err := report.Alerts(s.out)
+		got, err := report.Alerts(s.out, "boost")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -369,7 +369,9 @@ if grep -qx "EnvironmentFile=$source" /etc/systemd/system/ti-reporter@.service; 
   fail "the reporter must not load secrets into the environment"
 fi
 test ! -e /etc/systemd/system/ti-reporter@boost.service.d/heartbeat.conf || fail "Boost must not need a heartbeat drop-in"
-grep -qx 'Environment=TI_HEARTBEAT=off' /etc/systemd/system/ti-reporter@trad-ira.service.d/heartbeat.conf || fail "the trad-ira drop-in does not disable the heartbeat"
+for instance in trad-ira roth-ira; do
+  grep -qx 'Environment=TI_HEARTBEAT=off' "/etc/systemd/system/ti-reporter@$instance.service.d/heartbeat.conf" || fail "the $instance drop-in does not disable the heartbeat"
+done
 
 line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-reporter@.service)
 line=${line//%i/boost}

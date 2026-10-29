@@ -138,7 +138,7 @@ func TestTheJournalSliceSaysWhichJournalRaisedTheAlert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alerts, err := report.Alerts(envelopes)
+	alerts, err := report.Alerts(envelopes, "boost")
 	if err != nil || len(alerts) == 0 {
 		t.Fatalf("the fixture raises no alert: %v", err)
 	}
@@ -188,9 +188,9 @@ func TestTheAlertsOfALogAreComputedOncePerVersionOfIt(t *testing.T) {
 	path := writeJournal(t, t.TempDir())
 	logs := newLogCache(os.ReadFile, func(p string) (io.ReadCloser, error) { return os.Open(p) })
 	var passes int
-	logs.alerts = func(envelopes []event.Envelope) ([]report.Alert, error) {
+	logs.alerts = func(envelopes []event.Envelope, instance string) ([]report.Alert, error) {
 		passes++
-		return report.Alerts(envelopes)
+		return report.Alerts(envelopes, instance)
 	}
 	h := newHandlerCached(source{journals: []string{path}}, "SPY", logs)
 	alert := "?alert=" + strings.Repeat("0", 64)

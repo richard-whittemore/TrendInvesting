@@ -439,7 +439,7 @@ func loadOne(path, warning, ledger, instance, benchmark string, logs *logCache) 
 	if recovery != nil {
 		history = report.EarlierRunsOfRecovery(path, *recovery, logs.earlier)
 	}
-	a, err := view(history, report.LoadCashLedgerFor(ledger, instance, logs.readFile), report.LoadCostLedgerFor(ledger, instance, logs.readFile), envelopes, entries, benchmark)
+	a, err := view(history, report.LoadCashLedgerFor(ledger, instance, logs.readFile), report.LoadCostLedgerFor(ledger, instance, logs.readFile), envelopes, entries, instance, benchmark)
 	if err != nil {
 		return account{}, err
 	}
@@ -515,7 +515,7 @@ type logCache struct {
 	tied      map[string]cachedLog
 	// alerts is the reporter's rules over a log's records (report.Alerts;
 	// tests: a counter); raised keeps each log's alert keys' hashes.
-	alerts func([]event.Envelope) ([]report.Alert, error)
+	alerts func([]event.Envelope, string) ([]report.Alert, error)
 	raised map[string]cachedAlerts
 }
 
@@ -693,7 +693,7 @@ func (c *logCache) held(path string) bool {
 	return start || earlier || tied
 }
 
-func view(history report.History, ledger report.CashLedger, costs report.CostLedger, envelopes []event.Envelope, entries []journal.Entry, benchmark string) (account, error) {
+func view(history report.History, ledger report.CashLedger, costs report.CostLedger, envelopes []event.Envelope, entries []journal.Entry, instance, benchmark string) (account, error) {
 	date, err := report.LastDate(envelopes)
 	if err != nil {
 		return account{}, err
@@ -702,11 +702,11 @@ func view(history report.History, ledger report.CashLedger, costs report.CostLed
 	if err != nil {
 		return account{}, err
 	}
-	alerts, err := report.Alerts(envelopes)
+	alerts, err := report.Alerts(envelopes, instance)
 	if err != nil {
 		return account{}, err
 	}
-	alerts = append(alerts, report.IncompleteSellAlerts(summary.AccountID, entries, summary.StrategyID)...)
+	alerts = append(alerts, report.IncompleteSellAlerts(instance, entries, summary.StrategyID)...)
 	a := account{Summary: summary}
 	for _, al := range alerts {
 		a.Alerts = append(a.Alerts, alertView{Kind: al.Kind, Severity: al.Severity, At: al.At, Title: al.Title, Body: al.Body})

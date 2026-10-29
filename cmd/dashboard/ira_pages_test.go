@@ -15,10 +15,10 @@ import (
 func iraEnvelope(t *testing.T, seq uint64, typ string, version uint32, id string, at time.Time, p any) event.Envelope {
 	return input(t, seq, at, typ, version, id, p).Envelope
 }
-func iraEntries(t *testing.T) []journal.Entry {
+func iraEntries(t *testing.T, brokerAccount string) []journal.Entry {
 	t.Helper()
 	cfg := event.TargetWeightConfigurationPayload{
-		StrategyID: event.TargetWeightStrategyMomentum, AccountID: "trad-ira", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
+		StrategyID: event.TargetWeightStrategyMomentum, AccountID: brokerAccount, Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
 		Momentum: event.MomentumConfiguration{
 			Rule: event.MomentumRuleTrend, ListingType: "CS", UniverseSize: 500, MinPrice: 5,
 			ScoreLookback: 252, ScoreSkip: 21, VolatilityReturns: 252, TopN: 25, SectorCap: 3,
@@ -35,7 +35,7 @@ func iraEntries(t *testing.T) []journal.Entry {
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 60, MaxOrderFraction: 0.5, PriceBand: 0.05},
 	}
 	decided := event.TargetsDecidedPayload{
-		AccountID: "trad-ira", StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: sessions, SessionPeriodEnd: sessions,
+		AccountID: brokerAccount, StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: sessions, SessionPeriodEnd: sessions,
 		Outcome: event.TargetsOutcomeWithheld, WithheldReason: event.WithheldLabelsMissing, Detail: "too many names unlabelled",
 		Glide: event.GlideFigures{RebalanceSession: "2024-01-03", AgeMonths: 360},
 		Momentum: event.MomentumFigures{
@@ -45,7 +45,7 @@ func iraEntries(t *testing.T) []journal.Entry {
 				Status: event.MomentumStatusPicked, Closes: 300, Score: 0.3, Volatility: 0.02, ScoreRank: 1, Weight: 0.49, BacktestWouldPick: true}},
 		},
 	}
-	sell := event.OrderReleasedPayload{AccountID: "trad-ira", PlanID: "plan:s", Tag: "targets", ClientOrderID: "tw-sell", InstrumentID: "AAA",
+	sell := event.OrderReleasedPayload{AccountID: brokerAccount, PlanID: "plan:s", Tag: "targets", ClientOrderID: "tw-sell", InstrumentID: "AAA",
 		Side: event.OrderSideSell, Quantity: 10, LimitPrice: 101, Mode: event.TradingModePaper, Send: true,
 		Figures: event.RiskFigures{NetLiquidation: 4000, ReferencePrice: 100, ExposureBefore: 0.5, ExposureAfter: 0.98, OrderFraction: 0.48, OrdersInDecision: 1}}
 	next := sessions.Add(24 * time.Hour)
@@ -60,7 +60,7 @@ func iraEntries(t *testing.T) []journal.Entry {
 
 func TestDashboardShowsIncompleteSellInHTMLAndJSON(t *testing.T) {
 	var buf bytes.Buffer
-	if err := journal.Write(&buf, journal.NewHeader("h", "v", sessions.Add(-time.Hour), sessions.Add(24*time.Hour)), iraEntries(t)); err != nil {
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", sessions.Add(-time.Hour), sessions.Add(24*time.Hour)), iraEntries(t, "trad-ira")); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "ira.journal")
@@ -72,6 +72,43 @@ func TestDashboardShowsIncompleteSellInHTMLAndJSON(t *testing.T) {
 		rec := get(h, http.MethodGet, url)
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "sell of AAA incomplete") {
 			t.Errorf("%s: status %d, incomplete sell absent: %s", url, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestDashboardIRAUnitsUseEngineDirectoryInsteadOfBrokerAccount(t *testing.T) {
+	var buf memoryFile
+	log, err := journal.CreateLog(&buf, journal.NewLogHeader("h", "v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := iraEntries(t, "DU0000001")
+	for _, group := range [][]journal.Entry{entries[:1], entries[1:4], entries[4:]} {
+		if err := log.Append(group); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "trad-ira")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run.log"), buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newHandlerFor(nil, []string{dir}, nil, "SPY")
+	for _, url := range []string{"/", "/api/summary.json"} {
+		rec := get(h, http.MethodGet, url)
+		text := rec.Body.String()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d: %s", url, rec.Code, text)
+		}
+		for _, unit := range []string{"ti-adapter@trad-ira", "ti-engine@trad-ira"} {
+			if !strings.Contains(text, unit) {
+				t.Errorf("%s: missing %s: %s", url, unit, text)
+			}
+		}
+		if strings.Contains(text, "ti-adapter@DU") || strings.Contains(text, "ti-engine@DU") {
+			t.Errorf("broker account used as a unit: %s", text)
 		}
 	}
 }

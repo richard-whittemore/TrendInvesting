@@ -20,13 +20,13 @@ const KindSellIncomplete Kind = "sell-incomplete"
 // to the venue's reports (event.OrderReports), so a report it refused
 // completes nothing. A dry-run release ends by its synthetic report, and a
 // run of any other strategy has no such sells, so neither pages. entries are
-// the log's committed records in recording order; account is the one its
-// configuration names, whose engine instance the page's units name.
-func IncompleteSellAlerts(account string, entries []journal.Entry, strategyID string) []Alert {
+// the log's committed records in recording order. The caller supplies the
+// nonempty deployment instance, never the journal's broker account ID
+// (ADR 0019, "Alerting"; docs/live-trading/lessons-2026-10.md L8).
+func IncompleteSellAlerts(instance string, entries []journal.Entry, strategyID string) []Alert {
 	if !isMomentum(strategyID) {
 		return nil
 	}
-	instance := instanceOf(strategyID, account)
 	reports := event.NewOrderReports()
 	released := map[string]time.Time{} // sell client order ID -> the session closed when it was released
 	var order []string
@@ -41,7 +41,9 @@ func IncompleteSellAlerts(account string, entries []journal.Entry, strategyID st
 			if read(e, sessionVersions, &p) != nil {
 				continue
 			}
-			lastSession, sessionEvent = p.PeriodEnd, e
+			if p.PeriodEnd.After(lastSession) {
+				lastSession, sessionEvent = p.PeriodEnd, e
+			}
 		case event.OrderReleasedEventType:
 			var p event.OrderReleasedPayload
 			if read(e, releasedVersions, &p) != nil || p.Side != event.OrderSideSell {
@@ -90,7 +92,7 @@ func incompleteSellAlert(instance string, at event.Envelope, o *event.ReportedOr
 	return Alert{
 		Key: fmt.Sprintf("sell-incomplete:%s:%s@%s", r.ClientOrderID, day, r.AccountID), Kind: KindSellIncomplete, Severity: Urgent,
 		AccountID: r.AccountID, At: at.EventTime, Standing: true,
-		Title: fmt.Sprintf("%s: sell of %s incomplete after the session ending %s (%d shares outstanding)", r.AccountID, r.InstrumentID, day, left),
+		Title: fmt.Sprintf("%s: sell of %s incomplete after the session ending %s (%d shares outstanding)", instance, r.InstrumentID, day, left),
 		Body: fmt.Sprintf("Order %s, the rebalance's sell of %s, has not completed: the current journal shows %d of its %d shares outstanding. Sells must finish by fill or another accepted terminal event before buys are budgeted from settled cash; unsold holdings may remain (docs/manual/momentum.md). To act safely: (1) stop the account's adapter (sudo systemctl stop %s), then its engine (sudo systemctl stop ti-engine@%s); (2) in IBKR cancel the program's working order for this instrument and confirm no open order exists for the account from any client, including cancel-pending orders, then check the actual position; (3) only then sell the outstanding shares by hand; (4) record the hand sale as docs/runbooks/missed-rebalance.md says: only after the manual order has filled or been canceled, start a fresh run approved with the post-sale book, then use operator rebalance-cleared to clear the carried unfinished rebalance. A fresh run carries the unfinished rebalance and withholds every month until the owner clears it (docs/manual/momentum.md; docs/runbooks/missed-rebalance.md, 'A restart mid-rebalance'); it does not plan this rebalance again. This page comes once per session while the sell is incomplete.",
 			r.ClientOrderID, r.InstrumentID, left, r.Quantity, adapterUnitOf(instance), instance),
 	}

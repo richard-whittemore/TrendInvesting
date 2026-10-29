@@ -228,7 +228,7 @@ func TestAPendingDifferenceReadTwicePagesOnce(t *testing.T) {
 		t.Fatalf("each reading is journalled: %d results", got)
 	}
 	pages := func() int {
-		alerts, err := report.Alerts(journal)
+		alerts, err := report.Alerts(journal, "boost")
 		if err != nil {
 			t.Fatal(err)
 		}

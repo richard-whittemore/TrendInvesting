@@ -10,8 +10,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
-// iraInstance is the Traditional IRA's engine instance and, by the server's
-// convention, the account its configuration names (deploy/etc/engines).
+// iraInstance is the Traditional IRA deployment instance (docs/manual/server.md).
 const iraInstance = "trad-ira"
 
 // monthEnd is the decision session closing month m of 2025 (synthetic dates).
@@ -186,5 +185,27 @@ func TestMissedJanuaryAndFebruaryWithholdsHaveDistinctDecisionKeys(t *testing.T)
 		if !strings.Contains(pages[i].Key, session) || !strings.Contains(pages[i].Body, session) {
 			t.Errorf("decision session %s absent: %+v", session, pages[i])
 		}
+	}
+}
+
+func TestIRAHandSaleUnitsDoNotUseBrokerAccount(t *testing.T) {
+	s := newIRAStream(t)
+	s.out[0].Payload = []byte(strings.ReplaceAll(string(s.out[0].Payload), iraInstance, "DU0000001"))
+	s.out[0].PayloadHash = event.HashPayload(s.out[0].Payload)
+	if _, err := report.Alerts(s.out, ""); err == nil || !strings.Contains(err.Error(), "engine instance") {
+		t.Fatalf("missing deployment instance was not refused: %v", err)
+	}
+	s.saleWithheld(0, "sale-1", event.SaleWithheldNotPositive)
+	got := ofKind(alertsOf(t, s), report.KindSaleByHand)
+	if len(got) != 1 {
+		t.Fatalf("pages: %+v", got)
+	}
+	for _, unit := range []string{"ti-adapter@trad-ira", "ti-engine@trad-ira"} {
+		if !strings.Contains(got[0].Body, unit) {
+			t.Errorf("missing %s: %s", unit, got[0].Body)
+		}
+	}
+	if strings.Contains(got[0].Body, "ti-adapter@DU") || strings.Contains(got[0].Body, "ti-engine@DU") {
+		t.Errorf("broker account used as a unit: %s", got[0].Body)
 	}
 }

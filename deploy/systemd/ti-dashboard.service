@@ -17,8 +17,9 @@ Environment=TZ=America/New_York
 # firewall also closes every non-Tailscale port. The dashboard needs no
 # secret, so it is handed none.
 # Every engine's folder is read (Boost, the Traditional IRA and the Roth IRA),
-# each card with its own engine's state; a folder not there yet, or with no
-# run, is the card "no run yet: the engine has not started a run".
+# each card with its own engine's state. An existing folder with no log and
+# no run.env shows "no run yet: the engine has not started a run". A missing
+# folder, or run.env without a journal, shows "journal unavailable".
 # The Flex reader's ledger of each account's deposits and withdrawals (ti-flex@<instance>)
 # is read on every request for the equity card's SPY shadow account; until
 # the reader has written it the card says the comparison assumes none.

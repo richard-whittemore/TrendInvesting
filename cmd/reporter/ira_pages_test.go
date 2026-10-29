@@ -16,10 +16,10 @@ import (
 // iraEntries is a synthetic Traditional IRA run: its configuration, a month-end
 // decision withheld for labels-missing, and a sell released at one session
 // and still unfilled when the next closes.
-func iraEntries(t *testing.T) []journal.Entry {
+func iraEntries(t *testing.T, brokerAccount string) []journal.Entry {
 	t.Helper()
 	cfg := event.TargetWeightConfigurationPayload{
-		StrategyID: event.TargetWeightStrategyMomentum, AccountID: "trad-ira", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
+		StrategyID: event.TargetWeightStrategyMomentum, AccountID: brokerAccount, Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
 		Momentum: event.MomentumConfiguration{
 			Rule: event.MomentumRuleTrend, ListingType: "CS", UniverseSize: 500, MinPrice: 5,
 			ScoreLookback: 252, ScoreSkip: 21, VolatilityReturns: 252, TopN: 25, SectorCap: 3,
@@ -36,7 +36,7 @@ func iraEntries(t *testing.T) []journal.Entry {
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 60, MaxOrderFraction: 0.5, PriceBand: 0.05},
 	}
 	decided := event.TargetsDecidedPayload{
-		AccountID: "trad-ira", StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: t0, SessionPeriodEnd: t0,
+		AccountID: brokerAccount, StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: t0, SessionPeriodEnd: t0,
 		Outcome: event.TargetsOutcomeWithheld, WithheldReason: event.WithheldLabelsMissing, Detail: "too many names unlabelled",
 		Glide: event.GlideFigures{RebalanceSession: "2024-01-03", AgeMonths: 360},
 		Momentum: event.MomentumFigures{
@@ -46,7 +46,7 @@ func iraEntries(t *testing.T) []journal.Entry {
 				Status: event.MomentumStatusPicked, Closes: 300, Score: 0.3, Volatility: 0.02, ScoreRank: 1, Weight: 0.49, BacktestWouldPick: true}},
 		},
 	}
-	sell := event.OrderReleasedPayload{AccountID: "trad-ira", PlanID: "plan:s", Tag: "targets", ClientOrderID: "tw-sell", InstrumentID: "AAA",
+	sell := event.OrderReleasedPayload{AccountID: brokerAccount, PlanID: "plan:s", Tag: "targets", ClientOrderID: "tw-sell", InstrumentID: "AAA",
 		Side: event.OrderSideSell, Quantity: 10, LimitPrice: 101, Mode: event.TradingModePaper, Send: true,
 		Figures: event.RiskFigures{NetLiquidation: 4000, ReferencePrice: 100, ExposureBefore: 0.5, ExposureAfter: 0.98, OrderFraction: 0.48, OrdersInDecision: 1}}
 	next := t0.Add(24 * time.Hour)
@@ -64,7 +64,7 @@ func iraEntries(t *testing.T) []journal.Entry {
 // naming the IRA's own account and no Boost unit.
 func TestTheReporterPagesAWithheldRebalanceAndAnIncompleteSellOfAnIRA(t *testing.T) {
 	var buf bytes.Buffer
-	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0.Add(24*time.Hour)), iraEntries(t)); err != nil {
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0.Add(24*time.Hour)), iraEntries(t, "trad-ira")); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
@@ -74,7 +74,7 @@ func TestTheReporterPagesAWithheldRebalanceAndAnIncompleteSellOfAnIRA(t *testing
 	}
 	fakeEnv, client := acceptingNtfy(t)
 	var out bytes.Buffer
-	args := []string{"-journal", path, "-state", filepath.Join(dir, "state.json"), "-channel", "stdout,ntfy"}
+	args := []string{"-journal", path, "-account", "trad-ira", "-state", filepath.Join(dir, "state.json"), "-channel", "stdout,ntfy"}
 	if err := run(args, fakeEnv, func() time.Time { return t0.Add(48 * time.Hour) }, &out, client); err != nil {
 		t.Fatal(err)
 	}
@@ -94,13 +94,13 @@ func TestNewChannelReceivesAlreadyIncompleteSellOncePerSession(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	client := &http.Client{Transport: r}
 	var buf bytes.Buffer
-	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0.Add(24*time.Hour)), iraEntries(t)); err != nil {
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0.Add(24*time.Hour)), iraEntries(t, "trad-ira")); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ira.journal")
 	writeFileT(t, path, buf.String())
-	args := []string{"-journal", path, "-state", filepath.Join(dir, "new-state.json"), "-channel", "ntfy"}
+	args := []string{"-journal", path, "-account", "trad-ira", "-state", filepath.Join(dir, "new-state.json"), "-channel", "ntfy"}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.test"})
 	now := t0.Add(48 * time.Hour)
 	for firing := 0; firing < 2; firing++ {
@@ -118,5 +118,45 @@ func TestNewChannelReceivesAlreadyIncompleteSellOncePerSession(t *testing.T) {
 			t.Errorf("firing %d: received %d incomplete-sell pages, want one", firing, count)
 		}
 		now = now.Add(2 * time.Hour)
+	}
+}
+
+func TestReporterIRAUnitsUseFlagInsteadOfBrokerAccount(t *testing.T) {
+	var buf bytes.Buffer
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0.Add(24*time.Hour)), iraEntries(t, "DU0000001")); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.log")
+	writeFileT(t, path, buf.String())
+	var out bytes.Buffer
+	args := []string{"-journal", path, "-account", "trad-ira", "-state", filepath.Join(dir, "state.json"), "-channel", "stdout,ntfy"}
+	if err := run(args, env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.test"}), func() time.Time { return t0.Add(48 * time.Hour) }, &out, &http.Client{Transport: &relay{sent: map[string][]string{}}}); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, unit := range []string{"ti-adapter@trad-ira", "ti-engine@trad-ira"} {
+		if !strings.Contains(text, unit) {
+			t.Errorf("missing %s: %s", unit, text)
+		}
+	}
+	if strings.Contains(text, "ti-adapter@DU") || strings.Contains(text, "ti-engine@DU") {
+		t.Errorf("broker account used as a unit: %s", text)
+	}
+}
+
+func TestReporterRefusesIRAUnitsWithoutInstance(t *testing.T) {
+	var buf bytes.Buffer
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0.Add(24*time.Hour)), iraEntries(t, "DU0000001")); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.log")
+	writeFileT(t, path, buf.String())
+	args := []string{"-journal", path, "-state", filepath.Join(dir, "state.json"), "-channel", "stdout,ntfy"}
+	var out bytes.Buffer
+	err := run(args, env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.test"}), func() time.Time { return t0.Add(48 * time.Hour) }, &out, &http.Client{Transport: &relay{sent: map[string][]string{}}})
+	if err == nil || !strings.Contains(out.String()+err.Error(), "engine instance") {
+		t.Fatalf("missing instance was not refused: err=%v output=%s", err, out.String())
 	}
 }

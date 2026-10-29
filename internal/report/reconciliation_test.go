@@ -42,7 +42,7 @@ func (s *stream) mismatch(n int, input string) {
 func TestAMismatchIsOneAlertThatRepeatsUntilAcknowledged(t *testing.T) {
 	s := newStream(t)
 	s.mismatch(1, "reconciliation:1")
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestAMismatchIsOneAlertThatRepeatsUntilAcknowledged(t *testing.T) {
 	s.add(event.AlertAcknowledgedEventType, event.AlertAcknowledgedSchemaVersion, "ack:1", day(2), event.AlertAcknowledgedPayload{
 		AccountID: "joint", AlertKey: a.Key, AcknowledgedBy: "owner", AcknowledgedAt: day(2),
 	})
-	got, err = report.Alerts(s.out)
+	got, err = report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestAMismatchIsOneAlertThatRepeatsUntilAcknowledged(t *testing.T) {
 
 	// A second mismatch is a second alert, unacknowledged.
 	s.mismatch(3, "reconciliation:2")
-	got, _ = report.Alerts(s.out)
+	got, _ = report.Alerts(s.out, "boost")
 	if len(got) != 2 || got[1].Acknowledged || got[1].Key == got[0].Key {
 		t.Fatalf("a later mismatch: %+v", got)
 	}
@@ -91,7 +91,7 @@ func TestAMatchingReconciliationSendsNothing(t *testing.T) {
 		Components: []event.ReconciliationComponent{{Component: event.ReconciliationComponentPosition, InstrumentID: "SPY", Book: 147, Expected: 147, Observed: 147, Explanations: []string{}, Explained: true}},
 		Detail:     "matched",
 	})
-	if got, err := report.Alerts(s.out); err != nil || len(got) != 0 {
+	if got, err := report.Alerts(s.out, "boost"); err != nil || len(got) != 0 {
 		t.Fatalf("a match alerts nothing: %+v, %v", got, err)
 	}
 }
@@ -102,7 +102,7 @@ func TestAnUnverifiableReconciliationSaysHalted(t *testing.T) {
 		AccountID: "joint", ReconciliationID: "morning", InputID: "r", Classification: event.ReconciliationUnverifiable, Action: event.ReconciliationActionHalt,
 		Components: []event.ReconciliationComponent{}, Unverifiable: []string{"the broker's positions could not be read"}, Detail: "unverifiable",
 	})
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil || len(got) != 1 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
@@ -126,7 +126,7 @@ func TestAnUnverifiableReasonNeverReachesThePublicRelay(t *testing.T) {
 		AccountID: "joint", ReconciliationID: "morning", InputID: "r", Classification: event.ReconciliationUnverifiable, Action: event.ReconciliationActionHalt,
 		Components: []event.ReconciliationComponent{}, Unverifiable: reasons, Detail: "unverifiable",
 	})
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil || len(got) != 1 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
@@ -149,7 +149,7 @@ func TestAnEngineStateAlertRepeatsAndAnAcknowledgementStopsIt(t *testing.T) {
 	s := newStream(t)
 	s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
 	s.refused(0, "tw-a", event.RefusedOrderSize)
-	got, _ := report.Alerts(s.out)
+	got, _ := report.Alerts(s.out, "boost")
 	if len(got) != 2 || !got[0].Repeat || got[1].Repeat {
 		t.Fatalf("the state repeats and the refusal does not: %+v", got)
 	}
@@ -159,7 +159,7 @@ func TestAnEngineStateAlertRepeatsAndAnAcknowledgementStopsIt(t *testing.T) {
 	s.add(event.AlertAcknowledgedEventType, event.AlertAcknowledgedSchemaVersion, "ack", day(1), event.AlertAcknowledgedPayload{
 		AccountID: "joint", AlertKey: got[0].Key, AcknowledgedBy: "owner", AcknowledgedAt: day(1),
 	})
-	if got, _ = report.Alerts(s.out); !got[0].Acknowledged || got[1].Acknowledged {
+	if got, _ = report.Alerts(s.out, "boost"); !got[0].Acknowledged || got[1].Acknowledged {
 		t.Errorf("only the named alert is acknowledged: %+v", got)
 	}
 }
@@ -172,7 +172,7 @@ func TestReconciliationRecordsAreReadLikeAnyOther(t *testing.T) {
 		s := newStream(t)
 		s.add(eventType, 9, "x", day(1), map[string]string{})
 		s.caused("reconciliation:1")
-		if _, err := report.Alerts(s.out); err == nil || !strings.Contains(err.Error(), "schema version 9") {
+		if _, err := report.Alerts(s.out, "boost"); err == nil || !strings.Contains(err.Error(), "schema version 9") {
 			t.Errorf("%s at an unknown version: %v", name, err)
 		}
 	}
@@ -217,7 +217,7 @@ func TestAReconciliationAlertStatesTheAccountsActualState(t *testing.T) {
 	halted := newStream(t)
 	halted.engineState(0, event.EngineStateHalted, event.EngineStateReasonReconciliationUnverifiable)
 	halted.mismatchAlone(1, "reconciliation:1")
-	got, err := report.Alerts(halted.out)
+	got, err := report.Alerts(halted.out, "boost")
 	if err != nil || len(got) != 2 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
@@ -242,7 +242,7 @@ func TestAReconciliationAlertStatesTheAccountsActualState(t *testing.T) {
 	wider.out = wider.out[:len(wider.out)-1]
 	wider.add(event.EngineStateEventType, event.EngineStateScopedVersion, last.ID, last.EventTime, p)
 	wider.caused("reconciliation:1")
-	got, err = report.Alerts(wider.out)
+	got, err = report.Alerts(wider.out, "boost")
 	if err != nil || len(got) != 2 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
@@ -253,7 +253,7 @@ func TestAReconciliationAlertStatesTheAccountsActualState(t *testing.T) {
 	unchanged := newStream(t)
 	unchanged.engineState(0, event.EngineStateDegraded, event.EngineStateReasonRiskLimitBreached, "SPY", "TLT")
 	unchanged.mismatchAlone(1, "reconciliation:1")
-	got, err = report.Alerts(unchanged.out)
+	got, err = report.Alerts(unchanged.out, "boost")
 	if err != nil || len(got) != 2 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
@@ -264,7 +264,7 @@ func TestAReconciliationAlertStatesTheAccountsActualState(t *testing.T) {
 	// With no state record at all, the result's own scope is the state.
 	alone := newStream(t)
 	alone.mismatchAlone(1, "reconciliation:1")
-	if got, err = report.Alerts(alone.out); err != nil || len(got) != 1 || !strings.Contains(got[0].Body, "Degraded on instruments [SPY] and cash [total-cash]") {
+	if got, err = report.Alerts(alone.out, "boost"); err != nil || len(got) != 1 || !strings.Contains(got[0].Body, "Degraded on instruments [SPY] and cash [total-cash]") {
 		t.Errorf("no state record: %+v, %v", got, err)
 	}
 
@@ -277,7 +277,7 @@ func TestAReconciliationAlertStatesTheAccountsActualState(t *testing.T) {
 		IncidentInForce: &event.IncidentInForce{IncidentID: "engine-state:joint:0", State: event.EngineStateHalted, SaleAttempted: new(true)},
 	})
 	approved.mismatchAlone(1, "reconciliation:1")
-	got, err = report.Alerts(approved.out)
+	got, err = report.Alerts(approved.out, "boost")
 	if err != nil || len(got) != 1 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
@@ -298,7 +298,7 @@ func TestAReconciliationAlertStatesTheAccountsActualState(t *testing.T) {
 		ApprovedBy: "owner", ApprovedAt: day(1), Boost: event.BoostStateInForce{Latched: new(false)},
 	})
 	cleared.mismatchAlone(2, "reconciliation:1")
-	got, err = report.Alerts(cleared.out)
+	got, err = report.Alerts(cleared.out, "boost")
 	if err != nil || len(got) != 1 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
@@ -322,13 +322,13 @@ func TestAnApprovalIsReadAtItsRecordedSchemaVersion(t *testing.T) {
 	v2 := newStream(t)
 	v2.add(event.OperatorRunApprovedEventType, 2, "operator-run-approved:x", day(0), payload)
 	v2.mismatchAlone(1, "reconciliation:1")
-	if _, err := report.Alerts(v2.out); err != nil {
+	if _, err := report.Alerts(v2.out, "boost"); err != nil {
 		t.Errorf("a version 2 approval naming a cash scope: %v", err)
 	}
 	v1 := newStream(t)
 	v1.add(event.OperatorRunApprovedEventType, 1, "operator-run-approved:x", day(0), payload)
 	v1.mismatchAlone(1, "reconciliation:1")
-	if _, err := report.Alerts(v1.out); err == nil || !strings.Contains(err.Error(), "cash") {
+	if _, err := report.Alerts(v1.out, "boost"); err == nil || !strings.Contains(err.Error(), "cash") {
 		t.Errorf("a version 1 approval naming a cash scope was read: %v", err)
 	}
 }
@@ -363,7 +363,7 @@ func (s *stream) pendingRead(n int, input string, residual int64, repeatOf strin
 func TestAPendingCashReadStatesTheTruth(t *testing.T) {
 	increase := newStream(t)
 	increase.pendingRead(1, "reconciliation:1", 50000, "")
-	got, err := report.Alerts(increase.out)
+	got, err := report.Alerts(increase.out, "boost")
 	if err != nil || len(got) != 1 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
@@ -388,7 +388,7 @@ func TestAPendingCashReadStatesTheTruth(t *testing.T) {
 	decrease := newStream(t)
 	decrease.engineState(0, event.EngineStateDegraded, event.EngineStateReasonRiskLimitBreached, "TLT")
 	decrease.pendingRead(1, "reconciliation:1", -25050, "")
-	got, err = report.Alerts(decrease.out)
+	got, err = report.Alerts(decrease.out, "boost")
 	if err != nil || len(got) != 2 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
@@ -407,7 +407,7 @@ func TestAPendingCashReadStatesTheTruth(t *testing.T) {
 	cash.pendingRead(4, "reconciliation:1", -100, "")
 	cash.out[len(cash.out)-2].SchemaVersion = 9
 	cash.out[len(cash.out)-1].EventTime = day(1)
-	got, err = report.Alerts(cash.out)
+	got, err = report.Alerts(cash.out, "boost")
 	if err != nil || len(got) != 2 || !strings.Contains(got[1].Body, "on 2024-01-03; the Flex reader has not covered that day yet; the account stays Degraded on instruments [SPY] and cash [total-cash]; buys are withheld") {
 		t.Errorf("a Degraded scope with cash, and an unread input: %+v, %v", got, err)
 	}
@@ -415,7 +415,7 @@ func TestAPendingCashReadStatesTheTruth(t *testing.T) {
 	halted := newStream(t)
 	halted.engineState(0, event.EngineStateHalted, event.EngineStateReasonReconciliationUnverifiable)
 	halted.pendingRead(1, "reconciliation:1", -100, "")
-	if got, err = report.Alerts(halted.out); err != nil || len(got) != 2 || !strings.Contains(got[1].Body, "; the account stays Halted;") {
+	if got, err = report.Alerts(halted.out, "boost"); err != nil || len(got) != 2 || !strings.Contains(got[1].Body, "; the account stays Halted;") {
 		t.Errorf("an account already Halted stays Halted: %+v, %v", got, err)
 	}
 }
@@ -434,7 +434,7 @@ func TestAPendingCashReadSaysIsWhenItsInputMovedTheState(t *testing.T) {
 		ScopeCashComponents: []string{event.ReconciliationComponentCash},
 	})
 	s.caused("reconciliation:2")
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +474,7 @@ func TestAPendingCashDifferenceIsDecidedWithItsOwnBody(t *testing.T) {
 		Detail: "explained: the cash difference the reader has since recorded",
 	})
 	s.caused("reconciliation:3")
-	got, err := report.Alerts(s.out)
+	got, err := report.Alerts(s.out, "boost")
 	if err != nil || len(got) != 1 || got[0].Key != "reconciliation:reconciliation-result:joint:reconciliation:1@joint" {
 		t.Fatalf("the first reading pages, its repeat and its explanation do not: %+v, %v", got, err)
 	}
@@ -496,7 +496,7 @@ func TestAPendingCashDifferenceIsDecidedWithItsOwnBody(t *testing.T) {
 		ScopeCashComponents: []string{event.ReconciliationComponentCash},
 	})
 	degraded.caused("reconciliation:4")
-	got, err = report.Alerts(degraded.out)
+	got, err = report.Alerts(degraded.out, "boost")
 	if err != nil || len(got) != 2 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}

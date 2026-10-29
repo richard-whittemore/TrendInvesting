@@ -15,7 +15,7 @@ import (
 // same log raises.
 func stateAtStart(t *testing.T, s *stream) (report.Alert, bool) {
 	t.Helper()
-	alerts, err := report.Alerts(s.out)
+	alerts, err := report.Alerts(s.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestTheStateAtReporterStartIsNothingWhenNothingIsInForce(t *testing.T) {
 	}
 	acknowledged := newStream(t)
 	acknowledged.engineState(1, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-	alerts, err := report.Alerts(acknowledged.out)
+	alerts, err := report.Alerts(acknowledged.out, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,7 +665,7 @@ func TestAnApprovalOfEveryVersionAnEngineRecordedIsRead(t *testing.T) {
 		} else {
 			s.add(event.OperatorRunApprovedEventType, version, "operator-run-approved:x", day(0), *p)
 		}
-		if _, err := report.Alerts(s.out); err != nil {
+		if _, err := report.Alerts(s.out, "boost"); err != nil {
 			t.Errorf("alerts over an approval at schema version %d: %v", version, err)
 		}
 		if _, _, err := report.StateAtStartAlert(s.out, nil); err != nil {

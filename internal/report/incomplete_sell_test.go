@@ -209,3 +209,48 @@ func TestIncompleteSellPageOrdersSafeHandSaleSteps(t *testing.T) {
 		}
 	}
 }
+
+// ADR 0026's session ordering and CONTEXT.md's order lifecycle leave an
+// unfinished sell open when an older close is recorded but refused.
+func TestRefusedOlderSessionDoesNotDropIncompleteSell(t *testing.T) {
+	r := &logRun{t: t}
+	r.session(0)
+	r.release(0, iraSell("tw-older-session"))
+	r.session(1)
+	before := report.IncompleteSellAlerts(iraInstance, r.out, event.TargetWeightStrategyMomentum)
+	if len(before) != 1 {
+		t.Fatalf("before refused input: %+v", before)
+	}
+	for _, end := range []time.Time{day(0), day(1)} {
+		r.add(journal.KindInput, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "redelivered:"+end.String(), day(2), event.SessionClosedPayload{PeriodEnd: end, InstrumentIDs: []string{"SPY"}})
+		after := report.IncompleteSellAlerts(iraInstance, r.out, event.TargetWeightStrategyMomentum)
+		if len(after) != 1 || after[0] != before[0] {
+			t.Fatalf("refused close changed the open page: before=%+v after=%+v", before, after)
+		}
+	}
+}
+
+func TestIncompleteSellPageUsesInstanceAndNoBrokerNumber(t *testing.T) {
+	r := &logRun{t: t}
+	sell := iraSell("tw-broker-account")
+	sell.AccountID = "DU0000001"
+	r.session(0)
+	r.release(0, sell)
+	r.session(1)
+	got := report.IncompleteSellAlerts(iraInstance, r.out, event.TargetWeightStrategyMomentum)
+	if len(got) != 1 {
+		t.Fatalf("pages: %+v", got)
+	}
+	page := got[0].Title + "\n" + got[0].Body
+	for _, unit := range []string{"ti-adapter@trad-ira", "ti-engine@trad-ira"} {
+		if !strings.Contains(page, unit) {
+			t.Errorf("missing %s: %s", unit, page)
+		}
+	}
+	if strings.Contains(page, "DU") {
+		t.Errorf("broker number in page: %s", page)
+	}
+	if got[0].AccountID != sell.AccountID || !strings.HasSuffix(got[0].Key, "@"+sell.AccountID) {
+		t.Errorf("incident lost its broker identity: %+v", got[0])
+	}
+}
