@@ -34,7 +34,7 @@ git -C "$clone" -c user.name=test -c user.email=test@invalid commit -q --allow-e
 stamp=$(cd "$clone" && scripts/build-stamp.sh)
 case $stamp in *dirty*) expect "the clone is clean" clean "$stamp" ;; esac
 
-programs="ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start"
+programs="ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start universe-rank"
 
 # ELF e_machine, the two bytes at offset 18, little-endian: 62 is x86-64,
 # 183 is AArch64.

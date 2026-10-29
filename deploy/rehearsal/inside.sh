@@ -262,7 +262,7 @@ pass "the data step is installed, runs, and refuses a missing key with nothing w
 # The reporter, the dashboard and the owner's two tools are installed from
 # the build beside deploy/, and the tools are on sudo's PATH for ti-trader,
 # as the runbooks run them.
-for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
+for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start universe-rank; do
   cmp "/root/dist/$b" "/opt/trend-investing/bin/$b" || fail "$b is not installed from the build"
 done
 # Each tool exits 1 with its usage when given no command.
@@ -273,7 +273,7 @@ done
 for u in ti-reporter.timer ti-reporter.service timers.target.wants/ti-reporter.timer; do
   test ! -e "/etc/systemd/system/$u" || fail "the old single reporter's $u is still installed"
 done
-pass "reporter, dashboard, operator and journal-query installed; the tools run under sudo -u ti-trader"
+pass "reporter, dashboard, operator, journal-query and universe-rank installed; the tools run under sudo -u ti-trader"
 
 # The reporter, run with its unit's own command line (systemd is not running
 # here, so the line is expanded as systemd would: %i, %d, and the unit's and
@@ -452,7 +452,7 @@ sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null 
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook paged again for the same failure"
 test "$(issues_opened)" = "$((opened + 1))" || fail "the failed-unit hook opened another issue for the same failure"
 test "$(comments_posted)" = "$hook_comments" || fail "the failed-unit hook commented on an issue again for the same failure"
-for unit in ti-engine@.service ti-adapter-boost.service ti-reporter@.service ti-data.service; do
+for unit in ti-engine@.service ti-adapter-boost.service ti-reporter@.service ti-data.service ti-data@.service; do
   grep -qx 'OnFailure=ti-unit-failed@%n.service' "/etc/systemd/system/$unit" || fail "$unit does not hand its failure to the hook"
 done
 pass "the failed-unit hook runs as its unit runs it, as ti-trader, pages both channels once per failure episode and not again, and the engine, adapter, reporter and data job units name it in OnFailure="
@@ -543,10 +543,11 @@ test -x /opt/trend-investing/adapter-venv/bin/python3 || install -m 0755 /dev/nu
 cd /etc/systemd/system
 verify_log=$(mktemp)
 verify_status=0
-systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
+systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer ti-data@trad-ira.service ti-data@trad-ira.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
   ti-reporter@boost.service ti-reporter@boost.timer \
   ti-unit-failed@ti-engine@boost.service.service ti-unit-failed@ti-adapter-boost.service.service ti-unit-failed@ti-reporter@boost.service.service \
+  ti-unit-failed@ti-data@trad-ira.service.service \
   ti-dashboard.service ti-adapter-boost.service ti-ntfy.service \
   ti-flex@boost.service ti-flex@boost.timer ti-flex@trad-ira.service ti-flex@trad-ira.timer \
   ti-flex@roth-ira.service ti-flex@roth-ira.timer >"$verify_log" 2>&1 || verify_status=$?
@@ -597,7 +598,7 @@ for a in boost trad-ira roth-ira; do
 done
 # shellcheck disable=SC2016
 grep -q -- '-operator ${TI_STATE_DIR}/operator' /etc/systemd/system/ti-engine@.service || fail "the engine unit does not pass -operator"
-for unit in ti-adapter-boost.service ti-data.service ti-reporter@.service ti-unit-failed@.service ti-dashboard.service ti-flex@.service; do
+for unit in ti-adapter-boost.service ti-data.service ti-data@.service ti-reporter@.service ti-unit-failed@.service ti-dashboard.service ti-flex@.service; do
   grep -q '^InaccessiblePaths=.*-/var/lib/trend-investing/engines/boost/operator' "/etc/systemd/system/$unit" || fail "$unit can reach the operator inbox"
 done
 pass "ti-operator writes the instructions: each account's inbox is ti-operator:ti-trader 0750, the engine unit passes it, and no network-facing unit can reach it"
@@ -818,11 +819,59 @@ grep -q "wrote $ira_state/run-rehearsal.journal" "$ira_out" || fail "the IRA eng
 rm -rf "$ira_state"/run-rehearsal.* "$ira_state/operator-notes" /tmp/momentum-month.jsonl /tmp/feed-month.py
 pass "the traditional IRA's engine starts in dry-run from its own settings and configuration, refuses its placeholder birth, records the synthetic month's decision withheld and stops cleanly"
 
+# The IRA's data job, run with ti-data@trad-ira's own command line (expanded
+# as systemd would) as ti-trader, on synthetic recordings of the last 210
+# sessions (deploy/rehearsal/ira-recordings.py; invented prices only): the
+# engine is started once and stopped, so its durable log holds its
+# configuration, as before the owner's warm-up; the warm-up then writes the
+# run's first compact stream with the installed universe-rank, offline (every
+# session, the universe, the sector labels and the action windows the job
+# asks for are already recorded, so no request is made), and a second firing
+# finds the file, re-encodes it, and prints the same path.
+rm -rf "$ira_state"/run-rehearsal.* "$ira_state/operator-notes"
+# shellcheck disable=SC2086,SC2024
+sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York $ira_line >"$ira_out" 2>&1 &
+ira_engine=$!
+for _ in $(seq 100); do
+  test -S /run/ti-engine-trad-ira/engine.sock && break
+  sleep 0.1
+done
+test -S /run/ti-engine-trad-ira/engine.sock || { cat "$ira_out"; fail "the IRA engine did not listen on its socket for the data job's rehearsal"; }
+kill -TERM "$ira_engine"
+wait "$ira_engine" || { cat "$ira_out"; fail "the IRA engine did not stop cleanly"; }
+ira_data=$(mktemp -d)
+chown ti-trader:ti-trader "$ira_data"
+install -m 0644 /root/deploy/rehearsal/ira-recordings.py /tmp/ira-recordings.py
+base=$(sudo -u ti-trader python3 /tmp/ira-recordings.py /opt/trend-investing/bin/ti-data "$ira_data") || fail "the IRA's synthetic recordings were not written"
+printf 'MASSIVE_API_KEY=rehearsal-not-a-key\n' >"$ira_data/secrets"
+chown ti-trader:ti-trader "$ira_data/secrets"
+chmod 0600 "$ira_data/secrets"
+printf 'TI_RUN=run-rehearsal\nTI_AS_OF=2025-01-02T21:00:00Z\nTI_RESTART_ARGS=\n' >"$ira_state/run.env"
+data_line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-data@.service)
+data_line=${data_line//%i/trad-ira}
+data_line=${data_line//"%d/secrets"/$ira_data/secrets}
+data_line=${data_line//"\${TI_DATA_DIR}"/$ira_data}
+data_line=${data_line//"\${TI_RUN}"/run-rehearsal}
+case $data_line in *'$'* | *%*) fail "the IRA data job's ExecStart has a variable the rehearsal does not expand: $data_line" ;; esac
+# shellcheck disable=SC2086
+warm=$(sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York $data_line --backfill-from "$base" 2>"$ira_out") || { cat "$ira_out"; fail "the IRA data job's warm-up failed"; }
+case $warm in "$ira_data/streams/trad-ira/run-rehearsal/trad-ira-"*.jsonl) ;; *) cat "$ira_out"; fail "the IRA data job's warm-up wrote $warm" ;; esac
+head -c 200 "$warm" | grep -q '"type":"market.session.calendar"' || fail "the IRA stream does not begin with its calendar"
+grep -q "\"name\": \"$(basename "$warm")\"" "$(dirname "$warm")/manifest.json" || fail "the IRA job's manifest does not list the file it published"
+test "$(grep -c '"type":"market.universe.snapshot"' "$warm")" = 1 || fail "the IRA stream does not hold the latest session's universe snapshot"
+grep -q '"instrument_id":"SHY"' "$warm" || fail "the IRA stream has no SHY bars"
+grep -q '"instrument_id":"R00","period_end"' "$warm" && fail "the IRA stream carries a bar for a stock it does not hold"
+# shellcheck disable=SC2086
+again=$(sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York $data_line 2>"$ira_out") || { cat "$ira_out"; fail "the IRA data job's second firing failed"; }
+test "$again" = "$warm" || fail "the second firing printed $again, not $warm"
+rm -rf "$ira_data" "$ira_state"/run-rehearsal.* "$ira_state/operator-notes" "$ira_state/run.env" /tmp/ira-recordings.py
+pass "the IRA's data job, run as ti-data@trad-ira runs it, writes the run's first compact stream with the installed universe-rank, and a second firing finds and re-verifies it"
+
 # Client IDs are unique. The data step uses Massive, not IB Gateway, and
 # holds none.
 ids=$(grep -h '^TI_ADAPTER_CLIENT_ID=' /etc/trend-investing/engines/*.env | sort)
 test "$(echo "$ids" | uniq | wc -l)" -eq 3 || fail "engine client IDs not unique"
-grep -q 'TI_ADAPTER_CLIENT_ID' /etc/systemd/system/ti-data.service && fail "the data step names an IB Gateway client ID"
+grep -q 'TI_ADAPTER_CLIENT_ID' /etc/systemd/system/ti-data.service /etc/systemd/system/ti-data@.service && fail "the data step names an IB Gateway client ID"
 pass "three distinct engine client IDs, and none for the data step"
 
 # The adapter's state directory and its configuration, created once and kept.

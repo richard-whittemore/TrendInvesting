@@ -24,7 +24,7 @@ set +x
 
 fail() {
   echo "REHEARSAL FAIL: $*" >&2
-  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u ti-adapter-boost -u ti-data -u ti-warmup -u ti-warmup-drill -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
+  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u ti-adapter-boost -u ti-data -u 'ti-data@*' -u ti-warmup -u ti-warmup-drill -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
   exit 1
 }
 pass() { echo "REHEARSAL ok: $*"; }
@@ -40,7 +40,7 @@ useradd --system --no-create-home --shell /usr/sbin/nologin ti-trader
 install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing "$reports"
 install -D -m 0755 /dist/ti-reporter /opt/trend-investing/bin/ti-reporter
 install -D -m 0755 /dist/ti-data /opt/trend-investing/bin/ti-data
-install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/data /var/lib/trend-investing/engines/boost
+install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/data /var/lib/trend-investing/engines/boost /var/lib/trend-investing/engines/trad-ira
 install -d -m 0755 /etc/trend-investing
 install -d -m 0700 /etc/trend-investing/accounts
 
@@ -71,7 +71,7 @@ test -z "$(on_disk "$marker")" || fail "the migrated secret is on disk: $(on_dis
 # Every unit that loads a secret, installed as provision.sh installs it, with
 # what its Condition= lines want in place (stand-ins), so that only the
 # locked secrets stand in its way.
-for u in ti-gateway.service ti-engine@.service ti-adapter-boost.service ti-data.service ti-reporter@.service ti-flex@.service ti-unit-failed@.service; do
+for u in ti-gateway.service ti-engine@.service ti-adapter-boost.service ti-data.service ti-data@.service ti-reporter@.service ti-flex@.service ti-unit-failed@.service; do
   cp "/deploy/systemd/$u" /etc/systemd/system/
 done
 install -D -m 0755 /dist/ti-engine /opt/trend-investing/bin/ti-engine
@@ -103,10 +103,11 @@ refused ti-gateway.service ibkr-login.env
 refused ti-engine@boost.service secrets.env
 refused ti-adapter-boost.service accounts/boost.env
 refused ti-data.service secrets.env
+refused ti-data@trad-ira.service secrets.env
 refused ti-reporter@boost.service secrets.env
 refused ti-flex@trad-ira.service secrets.env
 refused ti-unit-failed@ti-engine@boost.service.service secrets.env
-pass "with the secrets locked, systemd refuses to start the Gateway, the engine, the adapter, the data job, the reporter, the Flex reader and the failed-unit page, each on its assertion of the decrypted file it loads"
+pass "with the secrets locked, systemd refuses to start the Gateway, the engine, the adapter, the data job and its IRA instance, the reporter, the Flex reader and the failed-unit page, each on its assertion of the decrypted file it loads"
 
 # A timer whose firing is refused keeps firing: the reporter's timer fires
 # every 5 minutes, so a stand-in timer every 2 seconds fires a unit with the
@@ -362,6 +363,43 @@ rm -f "$reports/unit-failures.json"
 systemctl daemon-reload
 pass "a failing data job starts $data_hook with %i = ti-data.service and the failed run's invocation, and it pages with the run's own line"
 
+# The IRA's instance of the data job pages the same way: a stand-in
+# ti-data@.service with the real template's OnFailure= line.
+ira_data_hook=ti-unit-failed@ti-data@trad-ira.service.service
+ondata=$(grep -x 'OnFailure=.*' /deploy/systemd/ti-data@.service) || fail "the IRA data job's unit names no OnFailure="
+cat >/etc/systemd/system/ti-data@.service <<UNIT
+[Unit]
+Description=Stand-in IRA data job (rehearsal): fails as the real one can
+$ondata
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo "ti-data: HTTP 403 for session 2026-10-23, marker-I" >&2; exit 1'
+UNIT
+systemctl daemon-reload
+rm -f "$reports/unit-failures.json"
+before=$(instances)
+data_pushover=$(pushover_pages)
+systemctl start ti-data@trad-ira.service 2>/dev/null && fail "the stand-in IRA data job did not fail"
+for _ in $(seq 150); do
+  if test "$(instances)" -gt "$before" && test "$(systemctl show -p ActiveState --value "$ira_data_hook")" != activating; then break; fi
+  sleep 0.1
+done
+test "$(instances)" -gt "$before" || fail "systemd did not start $ira_data_hook when ti-data@trad-ira failed"
+ira_run=$(systemctl show -p InvocationID --value ti-data@trad-ira.service)
+test "$(tail -n 1 "$reports/hook-instances")" = "ti-data@trad-ira.service $ira_run" ||
+  fail "the IRA data job's hook was given '$(tail -n 1 "$reports/hook-instances")', want 'ti-data@trad-ira.service $ira_run'"
+test "$(systemctl show -p Result --value "$ira_data_hook")" = success || fail "$ira_data_hook did not succeed"
+test "$(pushover_pages)" = "$((data_pushover + 1))" || fail "the failed IRA data job did not page Pushover once"
+decoded_bodies | grep -q 'ti-data@trad-ira.service failed' || fail "the page does not name ti-data@trad-ira.service"
+decoded_bodies | grep -q 'marker-I' || fail "the page's reason is not the failed IRA data job's own line"
+decoded_bodies | grep -q 'The data job fails' || fail "the IRA data job's page does not give the data job's manual row"
+systemctl reset-failed ti-data@trad-ira.service
+cp /deploy/systemd/ti-data@.service /etc/systemd/system/ti-data@.service
+rm -f "$reports/unit-failures.json"
+systemctl daemon-reload
+pass "a failing IRA data job starts $ira_data_hook with %i = ti-data@trad-ira.service and the failed run's invocation, and it pages with the run's own line and the data job's manual row"
+
 # The maintenance window, as the owner meets it (deploy/rehearsal/maintenance-window.sh).
 . /deploy/rehearsal/maintenance-window.sh
 rehearse_maintenance_window
@@ -396,6 +434,10 @@ systemctl start ti-data.service 2>/dev/null || fail "the data job's firing with 
 data_said=$(journalctl -u ti-data.service --no-pager -o cat)
 grep -q "waiting for the account's first run" <<<"$data_said" || fail "the data job did not say it is waiting for the first run: $data_said"
 ! grep -q 'refused\|missing or empty: start' <<<"$data_said" || fail "the data job refused with no run.env: $data_said"
+systemctl start ti-data@trad-ira.service 2>/dev/null || fail "the IRA data job's firing with no run.env failed: $(journalctl -u ti-data@trad-ira.service --no-pager -o cat | tail -n 5)"
+! systemctl is-failed --quiet ti-data@trad-ira.service || fail "the IRA data job's unit is failed with no run.env"
+data_said=$(journalctl -u ti-data@trad-ira.service --no-pager -o cat)
+grep -q "waiting for the account's first run.*start the trad-ira engine once" <<<"$data_said" || fail "the IRA data job did not say it is waiting for the first run: $data_said"
 test -z "$(on_disk "$marker")" || fail "the secret is on disk at the end: $(on_disk "$marker")"
 pass "after the unlock the hook read its channels from the credential systemd handed it, the reporter's unit and the data job, no longer refused and with no run started, wait for the first run and succeed, and the secret is nowhere on disk"
 

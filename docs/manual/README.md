@@ -11,8 +11,9 @@ from "what is this program" to "my first paper order".
 The program is designed to trade three IBKR accounts automatically, each
 with its own rule (`docs/live-trading/plan.md`, sections 1 to 3). As of
 2026-10-28 Boost runs in dry-run, and the Traditional IRA's engine starts in
-dry-run from its own configuration, shown on a synthetic month only: no daily
-job or adapter feeds an IRA yet, so the IRA rows below cannot trade yet:
+dry-run from its own configuration, shown on a synthetic month only; its daily
+data job writes its stream each morning, but no adapter delivers it to the
+engine yet, so the IRA rows below cannot trade yet:
 
 | Account | Rule | Chapter |
 | --- | --- | --- |
@@ -40,7 +41,7 @@ began delivering the data job's daily file to the engine:
 | Risk gate: hard limits, Normal, Degraded, Halted, kill switch, sale back to 98%, margin alarm | Yes | The adapter's second check of the limits before calling IBKR |
 | Durable log, crash resume, approved fresh run | Yes | — |
 | Engine on the server | Boost in dry-run, started by hand; paper rehearsed end to end with the real engine (`deploy/rehearse-paper.sh`). The Traditional IRA's engine in dry-run from `trad-ira.config` (the account and your birth month named on the server), fed a synthetic month (`deploy/feed-month.py`); a fresh IRA run approved with the rebalance in progress, held until cleared; provisioning keeps every account configuration already on the server | A paper run on the server; the IRAs' daily stream and adapter; the Roth IRA's configuration |
-| Daily data job | Boost's stream, installed with its timer | A job for the IRAs |
+| Daily data job | Boost's stream, installed with its timer; the Traditional IRA's compact stream (`ti-data@trad-ira`, its own timer ten minutes after Boost's, the holdings read from the engine's log, the Go ranker built and installed for the server: [market data](market-data.md), "A job for the IRAs") | The Roth IRA's instance; delivering the IRA's stream to its engine (the IRA adapter); the job's line in the daily summary and the dashboard |
 | IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, and delivering the data job's daily file behind one account reading after the close: the account snapshot and broker snapshot as of the close when nothing is working at IBKR and nothing has executed since (else at the read time, with the reason), and SPY's mark from the official close; all against a stand-in gateway, rehearsed with the real engine ([paper trading](paper-trading.md), "A paper day") | The paper-account test against IBKR, run by hand; a real server run with `ibapi` installed |
 | Morning reconciliation | The engine's comparison, states and alert; the adapter's read delivered to the engine at a run's first delivery, every start and every reconnect | The checks after fills and before orders, and on a timer; open orders; the joint account's cash (the Boost book states none, so cash is not compared); any command to record a missed event |
 | Flex reader of deposits and withdrawals | The reader and its templated unit and timer, one instance per account, writing each new transfer to the account's ledger; the engine's reconciliation, the daily summary and the dashboard all read the ledger's deposits and withdrawals; against synthetic statements only ([reconciliation](reconciliation.md), "Deposits and withdrawals, read from IBKR") | A reading of a real statement; a page from the reporter when the Flex reader itself is set aside (today only the failed unit shows it); recording the dividends, interest and fees the reader parses (not yet recorded); the IRAs' engines, which their readers need |

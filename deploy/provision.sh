@@ -563,7 +563,7 @@ require_native_programs() {
     aarch64) want=183 ;;
     *) die "no Go build for $machine; not installing" ;;
   esac
-  for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
+  for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start universe-rank; do
     test -f "$dist/$b" || continue
     got=$(elf_machine "$dist/$b")
     test "$got" = "$want" || die "$dist/$b is not a Linux program for this machine ($machine; its ELF machine is ${got:-none, not ELF}): build it with deploy/build-engine.sh for this machine and copy dist/ again; nothing installed"
@@ -617,7 +617,8 @@ CONF
   else
     log "no $data_job: the data step is not installed (deploy/build-data.sh builds it)"
   fi
-  # The reporter, the dashboard and the owner's two tools, built for the
+  # The reporter, the dashboard, the owner's two tools and universe-rank (the
+  # Go ranker the IRAs' data job runs: ti-data@.service), built for the
   # server beside ti-engine by deploy/build-engine.sh (the server has no Go)
   # and copied to dist/ beside deploy/. A missing one is named here, and its
   # unit fails when it runs, so the gap is seen. The owner records instructions
@@ -625,7 +626,7 @@ CONF
   # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
   # PATH includes /usr/local/bin, where each is linked.
   local dist=${TI_DIST:-$here/../dist} b
-  for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
+  for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start universe-rank; do
     if test -f "$dist/$b"; then
       install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
       log "installed $b from $dist"
@@ -743,7 +744,10 @@ CONF
     else
       systemctl enable ti-gateway.service
     fi
-    systemctl enable --now ti-data.timer ti-reporter@boost.timer
+    # The Traditional IRA's data job too: until its engine's run.env exists
+    # each firing is a quiet wait (ti-data@.service; docs/live-trading/
+    # lessons-2026-10.md L8: a timer that should run unattended is enabled).
+    systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer
     if mac_mini; then
       systemctl enable --now ti-clock-check.timer
     fi
@@ -765,9 +769,9 @@ CONF
     # their files are installed and the Boost engine's run.env exists; the
     # reporter also until secrets.env holds its channel secrets.
     if mac_mini; then
-      log "enabled; started ti-data.timer, ti-reporter@boost.timer and ti-dashboard; ti-gateway is masked (the Gateway is the Mac app)"
+      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-reporter@boost.timer and ti-dashboard; ti-gateway is masked (the Gateway is the Mac app)"
     else
-      log "enabled; started ti-data.timer, ti-reporter@boost.timer and ti-dashboard; start the gateway with: systemctl start ti-gateway (after the owner enters the IBKR login)"
+      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-reporter@boost.timer and ti-dashboard; start the gateway with: systemctl start ti-gateway (after the owner enters the IBKR login)"
     fi
   fi
 }

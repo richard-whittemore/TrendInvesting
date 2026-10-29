@@ -32,11 +32,12 @@ const unitReminderInterval = time.Hour
 
 // tradingUnit is the shape of every unit name the reporter hands systemctl or
 // journalctl (-units, -self-unit and the hook's argument): the engine, the
-// adapter or the reporter of one account, or one of the two shared units, the
-// data job and the Gateway, nothing else, so no value can be
+// adapter or the reporter of one account, or one of the shared units: a data
+// job (Boost's ti-data.service or an IRA's ti-data@<instance>.service) and the
+// Gateway, nothing else, so no value can be
 // read as an option or name another unit (ADR 0019, "Alerting"; ADR 0027,
 // the restart model).
-var tradingUnit = regexp.MustCompile(`^(ti-(engine@|adapter-|reporter@)[a-z0-9][a-z0-9-]*|ti-data|ti-gateway)\.service$`)
+var tradingUnit = regexp.MustCompile(`^(ti-(engine@|adapter-|reporter@|data@)[a-z0-9][a-z0-9-]*|ti-data|ti-gateway)\.service$`)
 
 // invocationShape is systemd's invocation ID: 32 lowercase hex digits.
 var invocationShape = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -46,7 +47,7 @@ var invocationShape = regexp.MustCompile(`^[0-9a-f]{32}$`)
 func checkTradingUnits(flagName string, units []string) error {
 	for _, unit := range units {
 		if !tradingUnit.MatchString(unit) {
-			return fmt.Errorf("reporter: %s %q is not a trading unit's name (ti-engine@<account>.service, ti-adapter-<account>.service, ti-reporter@<account>.service, ti-gateway.service or ti-data.service)", flagName, unit)
+			return fmt.Errorf("reporter: %s %q is not a trading unit's name (ti-engine@<account>.service, ti-adapter-<account>.service, ti-reporter@<account>.service, ti-gateway.service, ti-data.service or ti-data@<account>.service)", flagName, unit)
 		}
 	}
 	return nil
@@ -268,7 +269,16 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 // fault that persists is not left silent). Its latest later failed run is
 // still recorded (noteLaterRun), so that the episode's resolve marks that run
 // handled (handleRuns) and it does not page again.
-func remindsUnit(unit string) bool { return unit != "ti-data.service" }
+func remindsUnit(unit string) bool { return !dataJobUnit.MatchString(unit) }
+
+// dataJobUnit is a data job's unit: Boost's ti-data.service, or an IRA's
+// instance ti-data@<account>.service. A unit it matches is paged once by its
+// OnFailure hook and then only resolved, never reminded, and never holds back
+// the heartbeat, because its timer runs it again (ADR 0019, "Alerting": each
+// incident once, and a fault that persists is not left silent). Only these
+// timer-retried data services may match: the engine, the adapter and the
+// reporter must stay excluded, or their failures would lose their reminders.
+var dataJobUnit = regexp.MustCompile(`^ti-data(@[a-z0-9][a-z0-9-]*)?\.service$`)
 
 // unnamedRun is what a firing names a failed unit systemd gave no invocation
 // for.
@@ -524,7 +534,7 @@ func checkResolveUnits(resolveOnly, monitored []string) error {
 			return fmt.Errorf("reporter: -resolve-units %q is also in -units: a unit is either monitored or only resolved", unit)
 		}
 		if remindsUnit(unit) {
-			return fmt.Errorf("reporter: -resolve-units %q is a trading unit (the engine, the adapter or the reporter): only ti-data.service may be only resolved, since a trading unit must be paged, reminded and held against the heartbeat", unit)
+			return fmt.Errorf("reporter: -resolve-units %q is a trading unit (the engine, the adapter or the reporter): only a data job (ti-data.service or ti-data@<account>.service) may be only resolved, since a trading unit must be paged, reminded and held against the heartbeat", unit)
 		}
 	}
 	return nil

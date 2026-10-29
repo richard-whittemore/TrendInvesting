@@ -512,7 +512,7 @@ scenario "" x86_64 services || fail "Lightsail services failed: $(cat "$work/out
 called "systemctl enable ti-gateway.service" || fail "Lightsail no longer enables the Gateway unit"
 if called "systemctl mask"; then fail "Lightsail masks a unit"; fi
 called "/systemd/ti-gateway.service" || fail "Lightsail no longer installs the Gateway unit"
-called "systemctl enable --now ti-data.timer ti-reporter@boost.timer" || fail "Lightsail no longer starts the timers"
+called "systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer" || fail "Lightsail no longer starts the timers"
 grep -q '"host": "127.0.0.1"' "$work/etc/adapters/boost.json" || fail "Lightsail's adapter configuration does not point at 127.0.0.1"
 called "install -m 0755 $work/deploy/secrets.sh /usr/local/sbin/ti-secrets" || fail "Lightsail services does not install ti-secrets: $(grep secrets "$work/calls")"
 called "ln -sfn ti-secrets /usr/local/sbin/ti-unlock" || fail "Lightsail services does not install ti-unlock"
@@ -600,7 +600,7 @@ scenario mac-mini aarch64 services || fail "Mac mini services failed: $(cat "$wo
 called "systemctl mask ti-gateway.service" || fail "Mac mini does not mask the Gateway unit"
 if called "systemctl enable ti-gateway.service"; then fail "Mac mini enables the Gateway unit"; fi
 if called "/systemd/ti-gateway.service"; then fail "Mac mini installs the Gateway unit, which masking cannot replace"; fi
-called "systemctl enable --now ti-data.timer ti-reporter@boost.timer" || fail "Mac mini does not start the timers"
+called "systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer" || fail "Mac mini does not start the timers"
 called "systemctl enable ti-dashboard.service" || fail "Mac mini does not enable the dashboard"
 called "systemctl disable ti-engine@boost.service" || fail "Mac mini does not keep the engines disabled"
 called "systemctl disable ti-adapter-boost.service" || fail "Mac mini does not keep the adapter disabled"

@@ -30,6 +30,23 @@ BROKER_SNAPSHOT_V1 = ("account.broker.snapshot", 1)   # BrokerSnapshotSchemaVers
 MARK = ("market.mark.recorded", 2)                    # MarkRecordedEvidenceVersion
 ADAPTER_KINDS = (ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT, BROKER_SNAPSHOT_V1, MARK)
 
+# The account snapshots that state an account's positions, which the data
+# job reads an IRA's holdings from (tidata.holdings): version 3, the one the
+# adapter writes today (Boost's book), and version 4, version 3 with the cash
+# an IRA's buys are budgeted from, the one the momentum engine reads
+# (AccountSnapshotCashVersion; ADR 0026 point 2). A snapshot of any other
+# version is refused there, never read as holding nothing (ADR 0015).
+ACCOUNT_SNAPSHOT_CASH = ("account.snapshot", 4)       # AccountSnapshotCashVersion
+POSITIONS_SNAPSHOTS = (ACCOUNT_SNAPSHOT, ACCOUNT_SNAPSHOT_CASH)
+# A target-weight account's fill (FillTargetWeightVersion), whose instrument
+# a holdings reading adds; version 4 is the Turtle reducer's.
+TARGET_WEIGHT_FILL = ("execution.fill", 5)
+# The owner's Run approval: versions 1 and 2 state no starting book, 3 to 6
+# may (OperatorRunApprovedSchemaVersion; a later version is refused until
+# this table names it).
+RUN_APPROVED_VERSIONS = (1, 2, 3, 4, 5, 6)
+RUN_APPROVED_BOOK_FROM = 3
+
 # Every input a run's stream delivers: the data job's KINDS plus the adapter's
 # own. A log holding any of these holds copied history, which a fresh run's
 # log cannot (ADR 0027); both readers of the log (the adapter's and the data

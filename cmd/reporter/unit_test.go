@@ -217,7 +217,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	// failure page is resolved by a clean firing.
 	for flag, value := range map[string]string{
 		"-units":         "ti-engine@boost.service,ti-adapter-boost.service,ti-gateway.service",
-		"-resolve-units": "ti-data.service",
+		"-resolve-units": "ti-data.service,ti-data@trad-ira.service",
 		"-self-unit":     "ti-reporter@boost.service",
 	} {
 		if i := indexOf(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != value {
@@ -462,7 +462,7 @@ func TestTheProvisionerStartsWhatItEnablesAndStopsWhatItRemoves(t *testing.T) {
 		}
 		return i
 	}
-	at("systemctl enable --now ti-data.timer ti-reporter@boost.timer")
+	at("systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer")
 	enable, restart := at("systemctl enable ti-dashboard.service"), at("systemctl restart ti-dashboard.service")
 	if enable >= 0 && restart >= 0 && restart < enable {
 		t.Error("the dashboard is restarted before it is enabled")

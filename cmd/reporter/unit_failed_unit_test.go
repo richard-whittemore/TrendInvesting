@@ -32,7 +32,7 @@ func directive(t *testing.T, path, section, key string) []string {
 // the reporter are never restarted by systemd (the reporter is fired by its
 // timer), so a failed one is paged by the hook with its own name.
 func TestEveryTradingUnitHandsItsFailureToTheHook(t *testing.T) {
-	for _, path := range []string{engineUnitPath, adapterUnitPath, reporterUnitPath} {
+	for _, path := range []string{engineUnitPath, adapterUnitPath, reporterUnitPath, "../../deploy/systemd/ti-data.service", "../../deploy/systemd/ti-data@.service"} {
 		if got := directive(t, path, "[Unit]", "OnFailure"); len(got) != 1 || got[0] != "ti-unit-failed@%n.service" {
 			t.Errorf("%s: OnFailure = %v, want ti-unit-failed@%%n.service", path, got)
 		}
@@ -175,9 +175,10 @@ func TestEveryUnitThatLoadsASecretRefusesToStartWhileTheSecretsAreLocked(t *test
 			}
 		}
 	}
-	// The gateway, the engines, the Boost adapter, the data job, the reporter,
-	// the failed-unit page and the Flex reader (secrets and account).
-	if loaders != 8 {
-		t.Errorf("%d LoadCredential= lines across the units, want 8", loaders)
+	// The gateway, the engines, the Boost adapter, the data job and its IRA
+	// instances, the reporter, the failed-unit page and the Flex reader
+	// (secrets and account).
+	if loaders != 9 {
+		t.Errorf("%d LoadCredential= lines across the units, want 9", loaders)
 	}
 }

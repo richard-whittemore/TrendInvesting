@@ -58,19 +58,33 @@ def backfill(client, directory, asof, sessions, max_weekdays=None, now=_now, set
             raise MissingData("found {} of {} sessions in {} weekdays up to {}".format(have, sessions, max_weekdays, asof))
         path = _path(directory, day)
         if os.path.exists(path):
-            if not record.read(path).get("bars"):
-                raise Gap("recording for {} has no bars".format(day))
+            _check_bars(path, day)
             have += 1
             continue
         require_settled(day, now, settle)
         bars = client.grouped(day).get("results") or []
         if not bars:
             raise MissingData("no bars for trading day {}".format(day))
-        record.write(directory, {"kind": "grouped", "source": SOURCE, "session": day.isoformat(),
-                                 "fetched_at": _stamp(now), "adjusted": False, "bars": bars})
+        try:
+            record.write(directory, {"kind": "grouped", "source": SOURCE, "session": day.isoformat(),
+                                     "fetched_at": _stamp(now), "adjusted": False, "bars": bars})
+        except record.AlreadyRecorded:
+            # Another job (Boost's and the IRAs' data jobs may run at once)
+            # recorded the session between the check above and this write: a
+            # recording is written once, so that one stands (record.py), and
+            # it is checked as one found on disk is.
+            _check_bars(path, day)
+            have += 1
+            continue
         fetched += 1
         have += 1
     return {"sessions": have, "fetched": fetched}
+
+
+def _check_bars(path, day):
+    """A grouped recording found on disk must read (record.read raises Corrupt) and hold bars."""
+    if not record.read(path).get("bars"):
+        raise Gap("recording for {} has no bars".format(day))
 
 
 def load(directory, first, last):
@@ -114,8 +128,16 @@ def record_actions(client, first, last, directory, now=_now, settle=SETTLE):
     written = {}
     for kind, pages in fetched:
         rows = [r for p in pages for r in (p.get("results") or ())]
-        written[kind] = record.write(directory, {"kind": kind, "source": SOURCE, "session": last.isoformat(),
-                                                 "from": first.isoformat(), "fetched_at": stamp, "rows": rows})
+        try:
+            written[kind] = record.write(directory, {"kind": kind, "source": SOURCE, "session": last.isoformat(),
+                                                     "from": first.isoformat(), "fetched_at": stamp, "rows": rows})
+        except record.AlreadyRecorded as e:
+            # Another job recorded this kind's window first (Boost's and the
+            # IRAs' data jobs may run at once): that recording stands, is
+            # checked as one found on disk is, and the other kind is still
+            # written.
+            record.read(str(e))
+            written[kind] = str(e)
     return [written.get(k, p) for k, p in zip(KINDS, paths)]
 
 

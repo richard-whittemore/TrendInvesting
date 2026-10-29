@@ -25,10 +25,11 @@ which you name on the server), and a fresh IRA run is approved with the
 rebalance its previous run left in progress, or none, and holds until you
 clear it ([restart](restart.md); `docs/runbooks/missed-rebalance.md`). It is
 shown on a synthetic month only (below, "Starting the Traditional IRA's
-engine in dry-run"). **The IRAs cannot trade yet**: the daily data job writes
-only the Boost stream (the IRAs' job is the next slice), there is no adapter
-service for an IRA (only `ti-adapter-boost`), and the Roth IRA has no
-configuration. The configuration's hard limits (`max_orders_per_decision`
+engine in dry-run"). **The IRAs cannot trade yet**: the daily data job
+writes the Traditional IRA's compact stream each weekday morning
+(`ti-data@trad-ira`, [market data](market-data.md), "A job for the IRAs"),
+but there is no adapter service for an IRA to deliver it (only
+`ti-adapter-boost`), and the Roth IRA has no configuration. The configuration's hard limits (`max_orders_per_decision`
 40, `max_order_fraction` 0.6) and its cash rule and share quantity
 (`settled-cash`, `minimum-lot`: decisions D5 and D7) are dry-run values for
 you to confirm before paper. So the "one IRA month" walk-through below stops
@@ -208,9 +209,9 @@ order's shape, account and mode, not these limits (`adapter/ibkr/sender.py`).
 
 | # | When | What happens | Built? |
 | --- | --- | --- | --- |
-| 1 | each session | The data step records the whole market, the sector labels, and SPY, IEF, SHY and every holding's bars ([market data](market-data.md)). | The commands are built; **no daily job runs them for the IRAs** |
-| 2 | last session of the month | `encode --ranker` writes the compact stream: bars for the named instruments, the universe snapshot, and the 500 ranked stocks' price histories ([momentum universe](momentum-universe.md)). | Built |
-| 3 | — | An IRA engine is started from its own configuration and settings (`trad-ira.config`, `trad-ira.env`), in dry-run, and fed that stream together with IBKR's account snapshot and marks. | The engine starts on the server from its configuration and decides a synthetic month fed by `deploy/feed-month.py`. **Stops here today**: no daily job writes the IRAs' stream and nothing merges it with IBKR's figures (no IRA adapter) |
+| 1 | each session, the next morning | The data job records the whole market, the latest session's universe and sector labels, and writes SPY's, IEF's, SHY's and every holding's bars, the holdings read from the engine's own log ([market data](market-data.md), "A job for the IRAs"). | Built for the Traditional IRA: `ti-data@trad-ira`, weekday mornings at 06:15, 07:15 and 08:15 New York |
+| 2 | the morning after the last session of the month | The same job writes the compact stream, exactly as `encode --ranker`: bars for the named instruments, the universe snapshot, and the 500 ranked stocks' price histories ([momentum universe](momentum-universe.md)). | Built |
+| 3 | — | An IRA engine is started from its own configuration and settings (`trad-ira.config`, `trad-ira.env`), in dry-run, and fed that stream together with IBKR's account snapshot and marks. | The engine starts on the server from its configuration and decides a synthetic month fed by `deploy/feed-month.py`; the data job writes its stream each morning. **Stops here today**: nothing delivers the stream to the engine with IBKR's figures (no IRA adapter) |
 | 4 | at the close | The engine decides the month and plans the sells, checked against the limits. | Built and tested on recorded inputs |
 | 5 | next session | The adapter sends the sells; when every sell has finished, the engine plans and releases the buys from the cash realised. | Engine side built. The adapter's sending, its real IBKR client and its paper switch are built and run for Boost only; no IRA adapter service exists |
 | 6 | after | Fills come back; the reporter and the dashboard show the month. | As for Boost ([boost](boost.md#one-boost-day-from-the-data-to-ibkr-and-back)) |

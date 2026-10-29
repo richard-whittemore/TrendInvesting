@@ -256,6 +256,53 @@ class MomentumMemoryBudgetTest(unittest.TestCase):
         self.check_peak("daily", peak)
         self.assertEqual(self.histories(out), {MOMENTUM_LAST.isoformat(): RANKED})
 
+    def test_the_iras_data_job_stays_inside_the_budget(self):
+        """The data job's own momentum run (ti-data --engine momentum) over the same recordings, with the Go
+        ranker it runs on the server: the warm-up, then the daily firing, which also checks the warm-up file
+        still re-encodes from its recordings, each inside MOMENTUM_BUDGET."""
+        from marketdata.tests.test_tidata_momentum import INSTANCE, MomentumJob, snapshot
+        config = json.loads(self.config.read_text())
+        with tempfile.TemporaryDirectory() as root:
+            job = MomentumJob(root, data=self.data, config=config, sectors_get=_sectors_down)
+            for name, now, extra in (("job warm-up", after_settle(self.days[-2]), ("--backfill-from", MOMENTUM_BASE.isoformat())),
+                                     ("job daily", after_settle(self.days[-1]), ())):
+                if name == "job daily":
+                    # The engine's log as a year of deliveries leaves it: a universe snapshot of every listed
+                    # stock each session, then the account's holdings. The job reads the holdings from it a
+                    # line at a time.
+                    job.write_log(long_engine_log(self.days[:LOG_SESSIONS]) + [snapshot("M00001")])
+                tracemalloc.start()
+                try:
+                    tracemalloc.reset_peak()
+                    status, _, err = job.main(now, *extra, ranker_path=str(self.ranker))
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertEqual(status, 0, err)
+                self.check_peak(name, peak)
+            self.assertEqual(self.histories(job.path(MOMENTUM_LAST)), {MOMENTUM_LAST.isoformat(): RANKED})
+            self.assertEqual(sorted(n for n in os.listdir(job.stream_dir()) if n.endswith(".jsonl")),
+                             ["{}-{}.jsonl".format(INSTANCE, d) for d in self.days[-2:]])
+
+
+# Sessions of universe snapshots in the long engine log: a year of an IRA's deliveries.
+LOG_SESSIONS = 252
+
+
+def long_engine_log(days):
+    """A momentum engine log's inputs for ``days``: one universe snapshot of every listed stock a session, as
+    the adapter delivers the stream (about 0.3 MB a session here, 2,000 rows; the real market's 5,000 rows
+    are about 0.6 MB). Synthetic tickers and prices only."""
+    names = ["M{:05d}".format(n) for n in range(MOMENTUM_INSTRUMENTS)]
+    return [("market.universe.snapshot", 1, {"session": day.isoformat(), "source": "massive", "rows": [
+        {"instrument_id": t, "type": "CS", "close": 20.5, "volume": 1000000.0 - n, "sector": "Technology",
+         "sector_source": "nasdaq-screener"} for n, t in enumerate(names)]}) for day in days]
+
+
+def _sectors_down(url):
+    """The fixture records its sector labels itself; the job's own fetch is refused, and it carries on."""
+    raise encode.MarketDataError("no sector source in this test")
+
 
 def record_stress_history(directory, days, names, broken=()):
     """Universe recordings of ``names`` for ``days``; each name in ``broken``
