@@ -14,7 +14,7 @@
 # window around its install, and deploy/rehearsal/inside.sh rehearses that);
 # a window that expires on its own stops holding by itself.
 rehearse_maintenance_window() {
-  local marker=$reports/maintenance.json n push0 ntfy0
+  local marker=/run/ti-maintenance/maintenance.json n push0 ntfy0
   /deploy/release.sh --install >/dev/null || fail "release.sh --install failed"
   test -x /usr/local/sbin/ti-maintenance || fail "release.sh --install did not install ti-maintenance"
 
@@ -41,12 +41,14 @@ rehearse_maintenance_window() {
   ti-maintenance end >/dev/null || fail "ti-maintenance end failed"
   test ! -e "$marker" || fail "ti-maintenance end left the marker"
   systemctl start ti-reporter@boost.service || fail "the reporter's firing after the window failed"
-  { test "$(ntfy_pages)" = "$((ntfy0 + 1))" && test "$(pushover_pages)" = "$((push0 + 1))"; } ||
-    fail "the unit still failed at the window's close did not page each channel once (ntfy $(ntfy_pages) from $ntfy0, Pushover $(pushover_pages) from $push0)"
+  # Each channel takes the page and the routine close summary.
+  { test "$(ntfy_pages)" = "$((ntfy0 + 2))" && test "$(pushover_pages)" = "$((push0 + 2))"; } ||
+    fail "the unit still failed at the window's close did not page once and get one close summary (ntfy $(ntfy_pages) from $ntfy0, Pushover $(pushover_pages) from $push0)"
+  decoded_bodies | grep -q 'maintenance window closed; held: .*still failed (paged)' || fail "the close summary does not say what the window held"
   decoded_bodies | grep -q "$engine failed" || fail "the page at the window's close does not name $engine"
   systemctl start ti-reporter@boost.service || fail "the second reporter firing after the window failed"
-  { test "$(ntfy_pages)" = "$((ntfy0 + 1))" && test "$(pushover_pages)" = "$((push0 + 1))"; } || fail "the unit paged again at the next firing"
-  pass "a unit that fails inside a window and stays failed is recorded, not paged, and pages each channel once at the firing after the window closes"
+  { test "$(ntfy_pages)" = "$((ntfy0 + 2))" && test "$(pushover_pages)" = "$((push0 + 2))"; } || fail "the unit paged or was summarised again at the next firing"
+  pass "a unit that fails inside a window and stays failed is recorded, not paged, and pages once, with one close summary, at the firing after the window closes"
 
   # A window that expires on its own: nobody ends it, and it holds nothing after.
   new_episode

@@ -246,16 +246,14 @@ type pageData struct {
 	Maintenance string
 }
 
-// maintenanceFileFor is the host's maintenance marker: maintenance.json in
-// the reports directory beside the engines folder, where ti-maintenance
-// writes it (internal/maintenance). The dashboard already reads
-// /var/lib/trend-investing, so no unit changes. Empty without an engine
-// directory.
+// maintenanceFileFor is the host's maintenance marker, where ti-maintenance
+// writes it (internal/maintenance): a folder only root can write, which the
+// dashboard only reads. Empty without an engine directory.
 func maintenanceFileFor(engineDirs []string) string {
 	if len(engineDirs) == 0 {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(filepath.Dir(engineDirs[0])), "reports", "maintenance.json")
+	return "/run/ti-maintenance/maintenance.json"
 }
 
 // maintenanceNote is the end of the window open at now, in UTC, or "".

@@ -131,7 +131,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that names the failed run when systemd did not (MONITOR_INVOCATION_ID)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
 	repeat := flags.Duration("repeat-interval", defaultRepeatInterval, "unused by a page that does not repeat; kept so the hook and the reporter share one delivery code")
-	maintenanceFile := flags.String("maintenance", "", "the host's maintenance window marker (default: maintenance.json beside -state): while a window is open the failure is recorded and not paged, and the first reporter firing after it closes pages the unit if it is still failed")
+	maintenanceFile := flags.String("maintenance", "", "the host's maintenance window marker (default: /run/ti-maintenance/maintenance.json): while a window is open the failure is recorded and not paged, and the first reporter firing after it closes pages the unit if it is still failed")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -145,7 +145,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	// Inside a maintenance window the failure is recorded and not paged: the
 	// reporter's first firing after the window closes pages it if the unit is
 	// still failed, and forgets it if the unit recovered (maintenance.go).
-	if until := windowEnd(maintenancePath(*maintenanceFile, *statePath), now()); !until.IsZero() {
+	if until := holdFor(report.KindUnitFailed, func() time.Time { return windowEnd(maintenancePath(*maintenanceFile), now()) }); !until.IsZero() {
 		at := now()
 		run := failedInvocation(getenv, *systemctl, unit, at)
 		return withUnitState(*statePath, at, func(u *unitState) error {
@@ -572,15 +572,30 @@ func splitUnits(list string) []string {
 // the next firing), and every other error, including any failure to persist
 // the record, is hard and fails the firing (ADR 0019: delivery state is
 // durable).
-func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, hold time.Time, current func(string) (unitSample, error)) (soft, hard error) {
+func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, window func() time.Time, current func(string) (unitSample, error)) (soft, hard error) {
 	var softErrs, hardErrs []error
 	err := withUnitState(path, at, func(u *unitState) error {
-		// Held records are a window's: inside one a failed unit is recorded
-		// and not paged; with none open each is judged afresh below, by the
-		// normal paths. A failed unit pages (failedRun), and one that recovered
-		// has its held runs marked handled before they are forgotten, so a
-		// stale redelivery of one never pages it (maintenance.go).
+		// Held records are a window's. Whether one holds a failed unit is asked
+		// of window at that unit's decision, under this lock, never once for
+		// the step. A failed unit inside a window is recorded and not paged; with
+		// none open it pages (failedRun). A unit that recovered has its older
+		// held runs marked handled, so a stale redelivery of one never pages it,
+		// and, once the window has closed, they are forgotten and told in one
+		// close summary. A record newer than the sample, or of a unit this
+		// instance does not sample, is left exactly as it is (maintenance.go).
 		changed := false
+		var recovered, stillFailed []string
+		var closedWindow time.Time
+		note := func(list *[]string, unit string, taken []held) {
+			if len(taken) > 0 && !slices.Contains(*list, unit) {
+				*list = append(*list, unit)
+			}
+			for _, h := range taken {
+				if closedWindow.IsZero() || h.until.After(closedWindow) {
+					closedWindow = h.until
+				}
+			}
+		}
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
 			resolves := slices.Contains(resolveOnly, unit)
@@ -616,10 +631,14 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				if sample.invocation == "" {
 					sample.invocation = unnamedRun
 				}
-				if !hold.IsZero() {
+				if hold := holdFor(report.KindUnitFailed, window); !hold.IsZero() {
 					holdAlert(u.sent, hold, at, report.UnitFailedKey(unit, sample.invocation))
 					changed = true
 					continue
+				}
+				if taken := takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), time.Time{}); len(taken) > 0 {
+					note(&stillFailed, unit, taken)
+					changed = true
 				}
 				if resolves {
 					if handledRun(u, unit, sample.invocation) {
@@ -631,9 +650,23 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
 				continue
 			}
-			for _, key := range dropHeld(u.sent, report.UnitFailedKeyPrefix(unit)) {
-				handleRuns(u, unit, key, strings.TrimPrefix(key, report.UnitFailedKeyPrefix(unit)), at)
+			// Only a sample newer than a held failure says anything about it.
+			cutoff := sampledAt
+			if resolves {
+				cutoff = time.Time{}
+			}
+			for _, h := range heldOf(u.sent, report.UnitFailedKeyPrefix(unit)) {
+				if !cutoff.IsZero() && !h.at.Before(cutoff) {
+					continue
+				}
+				handleRuns(u, unit, h.alertKey, strings.TrimPrefix(h.alertKey, report.UnitFailedKeyPrefix(unit)), at)
 				changed = true
+			}
+			if holdFor(report.KindUnitFailed, window).IsZero() {
+				if taken := takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), cutoff); len(taken) > 0 {
+					note(&recovered, unit, taken)
+					changed = true
+				}
 			}
 			for invocation, recorded := range unitRecords(u, unit) {
 				key := report.UnitFailedKey(unit, invocation)
@@ -644,10 +677,8 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				fail(resolveKey(u, key, senders, setAside, at))
 			}
 		}
-		// With no window open nothing is held: a unit the firing did not sample
-		// (the hook's own) is paged by the hook's next failure.
-		if hold.IsZero() && len(dropHeld(u.sent, "")) > 0 {
-			changed = true
+		if len(recovered)+len(stillFailed) > 0 {
+			hardErrs = append(hardErrs, closeSummary(u, senders, recovered, stillFailed, closedWindow, at, every))
 		}
 		if changed {
 			hardErrs = append(hardErrs, u.record())
@@ -809,4 +840,30 @@ func resolveKey(u *unitState, key string, senders []sender, setAside []channelFa
 		u.repeats[recoveredKey(key)] = 1
 	}
 	return errors.Join(resolveErr, u.record())
+}
+
+// kindMaintenanceClosed is the routine message that says what a maintenance
+// window held, once, when it closes.
+const kindMaintenanceClosed report.Kind = "maintenance-closed"
+
+// closeSummary sends the one routine message that tells what the window that
+// has closed held: "held: <unit> recovered, <unit> still failed (paged)". A
+// unit still failed has been paged by the normal path; one that recovered
+// pages no one. It goes by the ordinary channels, not as an urgent page.
+func closeSummary(u *unitState, senders []sender, recovered, stillFailed []string, window, at time.Time, every time.Duration) error {
+	sort.Strings(recovered)
+	sort.Strings(stillFailed)
+	var parts []string
+	for _, unit := range recovered {
+		parts = append(parts, unit+" recovered")
+	}
+	for _, unit := range stillFailed {
+		parts = append(parts, unit+" still failed (paged)")
+	}
+	body := "maintenance window closed; held: " + strings.Join(parts, ", ")
+	a := report.Alert{
+		Key: "maintenance-closed:" + window.UTC().Format(time.RFC3339) + ":" + strings.Join(append(append([]string{}, recovered...), stillFailed...), ","), Kind: kindMaintenanceClosed, Severity: report.Routine, AccountID: hostName(), At: at,
+		Title: hostName() + ": maintenance window closed", Body: body, PublicBody: body,
+	}
+	return deliver(senders, a, u.seen, u.sent, u.repeats, at, every, u.record)
 }

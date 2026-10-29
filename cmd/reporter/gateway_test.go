@@ -56,6 +56,7 @@ func newStandInGateway(t *testing.T) standInGateway {
 	g := standInGateway{dir: t.TempDir()}
 	script := `#!/bin/sh
 echo "$*" >>'` + g.dir + `/argv'
+if [ -e '` + g.dir + `/rmwin' ]; then rm -f "$(cat '` + g.dir + `/rmwin')"; fi
 unit=""; pattern=""
 while [ $# -gt 0 ]; do case $1 in -u) unit=$2; shift;; -g) pattern=$2; shift;; esac; shift; done
 if [ -e '` + g.dir + `/fail' ]; then echo "Failed to open journal files" >&2; exit 1; fi

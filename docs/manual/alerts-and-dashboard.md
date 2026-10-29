@@ -252,7 +252,9 @@ files with the window's end noted (`held:<end of window>` in
 `unit-failures.json`, `held_in_maintenance_until` in `host-gateway.json`), so
 you can see what a window held. The window is judged at each decision, not
 once per firing: one that closes while a firing is under way holds nothing
-from then on.
+from then on. A marker file that is there but is not a window in the one layout `ti-maintenance` writes is reported once in the reporter's output (once for each different content) and counts as no window; it is never a page and is never removed.
+
+**When a window closes.** The first reporter firing that finds the window closed sends one routine message (not an urgent page) naming what it held: "maintenance window closed; held: ti-adapter-boost.service recovered, ti-engine@boost.service still failed (paged)". A unit that recovered inside the window pages no one and its failed run is marked handled, so a late repeat of the same failure does not page it. A unit still failed pages once, as a new failure would. A held failure of a unit that a reporter instance does not itself watch is left as it is for the instance that does.
 
 **What never waits for a window.** Every capital-safety alert pages as it
 always does, inside a window too: an order refused (the kill switch is a

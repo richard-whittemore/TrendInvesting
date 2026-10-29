@@ -1,7 +1,9 @@
 #!/bin/bash
 # Tests for deploy/maintenance.sh (the server's `ti-maintenance`): the
 # marker it writes, its default and its 30-minute maximum, `end`, `status`,
-# and a marker that is past its expiry reading as closed and being removed.
+# and a marker that is past its expiry reading as closed and staying where it
+# is (no reader removes a marker). The one canonical layout is judged over the
+# fixtures that marker_test.go judges too.
 # The marker is a temporary file and the time is fixed with
 # TI_MAINTENANCE_NOW; no root, no systemd.
 set -euo pipefail
@@ -42,7 +44,7 @@ done
 rm -f "$TI_MAINTENANCE_FILE"
 run $t0 start 31m >"$work/out" 2>&1 || true
 grep -q 'at most 30 minutes' "$work/out" || fail "the refusal does not say the maximum: $(cat "$work/out")"
-# An expired marker reads as closed and is removed by status.
+# An expired marker reads as closed and is left in place.
 run $t0 start 5m >/dev/null
 run $((t0 + 301)) status >"$work/out"
 grep -q 'maintenance window closed' "$work/out" || fail "an expired marker was reported open: $(cat "$work/out")"
@@ -80,10 +82,29 @@ rm -f "$TI_MAINTENANCE_FILE"
 # No half-written marker is left behind.
 run $t0 start 5m >/dev/null
 for f in "$work"/.maintenance.*; do test ! -e "$f" || fail "a half-written marker was left: $f"; done
-# The marker is made in a folder only root can write, and published under a
-# name no one can guess, with no chown: the reports folder belongs to the
-# reporter's user, and root must not follow a path it could swap.
-if grep -v "^ *#" "$script" | grep -q chown; then fail "maintenance.sh changes ownership of a path in the reports folder"; fi
+# The marker is written by root into a folder only root can write, with no
+# chown, chmod or install -m on a path another user could swap, and the file
+# is created exclusively with the mode the umask gives.
+if grep -v "^ *#" "$script" | grep -Eq 'chown|chmod|install -m|install .*-m '; then fail "maintenance.sh changes the owner or mode of a path by name"; fi
+perm=$(stat -c %a "$TI_MAINTENANCE_FILE" 2>/dev/null || stat -f %Lp "$TI_MAINTENANCE_FILE")
+expect "marker mode from the umask" 644 "$perm"
+# The marker is the canonical layout, byte for byte, and names a window.
+run $t0 start 5m >"$work/out"
+expect "the marker's layout" "{\"id\":\"$(sed -n 's/^id //p' "$work/out")\",\"opened\":\"2026-10-28T15:06:40Z\",\"until\":\"2026-10-28T15:11:40Z\",\"opened_unix\":$t0,\"until_unix\":$((t0 + 300))}" "$(cat "$TI_MAINTENANCE_FILE")"
+id=$(sed -n 's/^id //p' "$work/out")
+[[ $id =~ ^[0-9a-f]{16}$ ]] || fail "start did not print a 16-digit hexadecimal id: $(cat "$work/out")"
+# end --id ends only the window with that id.
+run $t0 end --id 0000000000000000 >/dev/null || fail "end --id of another window failed"
+test -e "$TI_MAINTENANCE_FILE" || fail "end --id of another window ended this one"
+run $t0 end --id "$id" >/dev/null || fail "end --id failed"
+test ! -e "$TI_MAINTENANCE_FILE" || fail "end --id left its own window"
+run $t0 end --id "$id" >/dev/null || fail "end --id with no window failed"
+if run $t0 end --id >/dev/null 2>&1; then fail "end --id with no id was accepted"; fi
+run $t0 start 5m >/dev/null
+# A new marker is always in a folder that exists afterwards.
+rm -rf "$work/sub"
+TI_MAINTENANCE_FILE=$work/sub/maintenance.json run $t0 start 5m >/dev/null || fail "start did not make the marker's folder"
+test -s "$work/sub/maintenance.json" || fail "start made no marker in a new folder"
 # Not root and not the test escape: refused.
 if env -u TI_MAINTENANCE_NO_ROOT bash "$script" start 5m >/dev/null 2>&1 && test "$(id -u)" -ne 0; then fail "start ran without root"; fi
 test "$failures" -eq 0 || { echo "$failures failure(s)" >&2; exit 1; }

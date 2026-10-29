@@ -273,7 +273,7 @@ if test -z "$maint"; then
     if test -x "$c"; then maint=$c; break; fi
   done
 fi
-window_open=0
+window_id=
 sleep_cmd=${TI_RELEASE_SLEEP:-sleep}
 
 # seconds_to_quiet_mark: how long to wait before replacing a program. The
@@ -292,20 +292,29 @@ seconds_to_quiet_mark() {
   fi
 }
 
-# open_window: refuse, installing nothing, without a window; otherwise open
-# one for the wait plus five minutes (the install, the dashboard's three
-# checks, and putting the old build back if it fails), at most seven, and wait.
+# start_window: open a window of its own for the given seconds and keep its id,
+# the only window this run ever ends.
+start_window() {
+  local out
+  out=$("$maint" start "$1s") || die "could not open a maintenance window; nothing installed"
+  printf '%s\n' "$out" | grep -v '^id '
+  window_id=$(printf '%s\n' "$out" | sed -n 's/^id \([0-9a-f]\{16\}\)$/\1/p' | head -n 1)
+  test -n "$window_id" || die "ti-maintenance did not say which window it opened; nothing installed"
+}
+
+# open_window: refuse, installing nothing, without a window; otherwise use the
+# one already open (a window the owner opened is theirs: never replaced,
+# extended or ended) or open one for the wait plus five minutes (the install,
+# the dashboard's three checks, and putting the old build back if it fails), at
+# most seven, and wait.
 open_window() {
   local wait_for
   test -n "$maint" && test -x "$maint" || die "ti-maintenance is not installed beside ti-release, so no maintenance window can be opened; nothing installed. Run sudo deploy/release.sh --install from the checkout, then try again"
   wait_for=$(seconds_to_quiet_mark)
   if "$maint" is-open; then
-    # A window the owner opened is theirs: used as it is, never replaced,
-    # extended or ended by this run.
     log "a maintenance window is already open; using it (it is not extended and is left open): $("$maint" status)"
   else
-    "$maint" start "$((wait_for + 300))s" || die "could not open a maintenance window; nothing installed"
-    window_open=1
+    start_window "$((wait_for + 300))"
   fi
   if test "$wait_for" -gt 0; then
     log "waiting $wait_for seconds for a quiet moment after a 5-minute mark, so a reporter firing rarely overlaps the swap"
@@ -313,12 +322,25 @@ open_window() {
   fi
 }
 
-# close_window: runs as ti-release exits, on every path; a window that cannot
-# be closed ends by itself at its expiry, and says so.
+# ensure_window: right before the swap, a window must be open. One borrowed from
+# the owner, or this run's own, may have ended during the wait; then this run
+# opens one of its own (never past the 30 minutes ti-maintenance allows per
+# window) rather than install with none.
+ensure_window() {
+  if ! "$maint" is-open; then
+    log "the maintenance window ended during the wait; opening a new one before installing"
+    start_window 300
+  fi
+}
+
+# close_window: runs as ti-release exits, on every path, and ends only the
+# window this run opened, by its id; a window that cannot be closed ends by
+# itself at its expiry, and says so.
 close_window() {
-  if test "$window_open" = 1; then
-    window_open=0
-    "$maint" end >/dev/null || log "ALERT: the maintenance window could not be closed; it ends by itself within 7 minutes, and whatever is still broken pages then"
+  if test -n "$window_id"; then
+    local id=$window_id
+    window_id=
+    "$maint" end --id "$id" >/dev/null || log "ALERT: the maintenance window could not be closed; it ends by itself within 7 minutes, and whatever is still broken pages then"
   fi
 }
 
@@ -614,6 +636,7 @@ if test "$mode" = release; then
       die "could not keep the installed ti-gateway-start with $cur; nothing installed"
     fi
   fi
+  ensure_window
   if ! install_from "$stage" || ! restart_dashboard_verified; then
     log "$tag did not install, or the dashboard did not stay up on it; putting $cur back"
     put_back "$cur" || true
@@ -673,6 +696,7 @@ test -n "$cur" && test -d "$releases/$cur" || die "the current build's folder is
 check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) failed its checksums, so it could not be put back; nothing changed"
 open_window
 refuse_if_engine_busy
+ensure_window
 if ! install_from "$releases/$prev" || ! restart_dashboard_verified; then
   log "rolling back to $prev failed, or the dashboard did not stay up on it; putting $cur back"
   put_back "$cur" || true

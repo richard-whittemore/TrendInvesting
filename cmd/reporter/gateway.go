@@ -164,7 +164,7 @@ func loadHostGateway(path string) (hostGateway, error) {
 // seen in; it pages once the time passes gatewayPagesAfter outside a window,
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
-func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, hold time.Time, senders []sender, setAside []channelFault, clock func() time.Time) (retErr error) {
+func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, window func() time.Time, senders []sender, setAside []channelFault, clock func() time.Time) (retErr error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -289,7 +289,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	// count from it: an outage already that old pages at the first firing after
 	// the window closes, and a shorter one waits out the rest (restart windows
 	// still count).
-	if !hold.IsZero() {
+	if hold := holdFor(report.KindGatewayLoggedOut, window); !hold.IsZero() {
 		h.Held = &hold
 		return record()
 	}

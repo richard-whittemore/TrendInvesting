@@ -915,7 +915,7 @@ test "${TI_REHEARSAL:-}" = 1 || fail "the rehearsal container does not set TI_RE
 # Two minutes past a 5-minute mark: no wait for a quiet moment (the wait is
 # covered by deploy/rehearsal/test-release.sh with a fixed clock).
 export TI_RELEASE_NOW=120
-marker_file=/var/lib/trend-investing/reports/maintenance.json
+marker_file=/run/ti-maintenance/maintenance.json
 /root/deploy/release.sh --unverified v9.9.9 >/root/release.out 2>&1 || { cat /root/release.out; fail "ti-release --unverified v9.9.9 failed"; }
 grep -q WARNING /root/release.out || fail "ti-release --unverified did not warn"
 grep -q 'maintenance window open until' /root/release.out || fail "ti-release did not open a maintenance window: $(cat /root/release.out)"

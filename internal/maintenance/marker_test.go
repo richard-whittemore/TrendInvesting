@@ -14,14 +14,14 @@ var t0 = time.Date(2026, 10, 28, 19, 0, 0, 0, time.UTC)
 
 // marker is a marker file's content as ti-maintenance writes it.
 func marker(opened, until time.Time) []byte {
-	return []byte(`{"opened":"` + opened.Format(time.RFC3339) + `","until":"` + until.Format(time.RFC3339) +
-		`","opened_unix":` + strconv.FormatInt(opened.Unix(), 10) + `,"until_unix":` + strconv.FormatInt(until.Unix(), 10) + `}`)
+	return []byte(`{"id":"0123456789abcdef","opened":"` + opened.UTC().Format("2006-01-02T15:04:05Z") + `","until":"` + until.UTC().Format("2006-01-02T15:04:05Z") +
+		`","opened_unix":` + strconv.FormatInt(opened.Unix(), 10) + `,"until_unix":` + strconv.FormatInt(until.Unix(), 10) + "}\n")
 }
 
 func TestAMarkerWithinItsExpiryReadsOpen(t *testing.T) {
 	m, open := Read(marker(t0, t0.Add(15*time.Minute)), t0.Add(time.Minute))
-	if !open || !m.Until.Equal(t0.Add(15*time.Minute)) {
-		t.Fatalf("Read = %v, %v; want open until %v", m, open, t0.Add(15*time.Minute))
+	if !open || !m.Until.Equal(t0.Add(15*time.Minute)) || m.ID != "0123456789abcdef" {
+		t.Fatalf("Read = %v, %v; want open until %v with its id", m, open, t0.Add(15*time.Minute))
 	}
 }
 
@@ -46,7 +46,7 @@ func TestNoMarkerReadsClosed(t *testing.T) {
 func TestAMarkerThatCannotBeTrustedReadsClosed(t *testing.T) {
 	for name, raw := range map[string][]byte{
 		"garbage":              []byte("not json"),
-		"no expiry":            []byte(`{"opened":"2026-10-28T19:00:00Z"}`),
+		"no expiry":            []byte(`{"id":"0123456789abcdef","opened":"2026-10-28T19:00:00Z"}`),
 		"over the maximum":     marker(t0, t0.Add(Max+time.Second)),
 		"far future":           marker(t0, t0.Add(48*time.Hour)),
 		"ends before start":    marker(t0, t0.Add(-time.Minute)),
@@ -72,7 +72,7 @@ func TestTheLongestWindowIsThirtyMinutesAndTheDefaultFifteen(t *testing.T) {
 // A file named open-* is a window open at 2026-10-28T19:00:00Z, closed-* is not.
 func TestTheSharedFixturesAreJudgedAsTheirNamesSay(t *testing.T) {
 	files, err := filepath.Glob("testdata/markers/*.json")
-	if err != nil || len(files) < 10 {
+	if err != nil || len(files) < 20 {
 		t.Fatalf("fixtures: %v, %v", files, err)
 	}
 	for _, f := range files {

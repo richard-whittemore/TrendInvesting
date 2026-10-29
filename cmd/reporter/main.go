@@ -121,7 +121,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
 	runEnv := flags.String("run-env", "", "the engine's run.env (/var/lib/trend-investing/engines/<instance>/run.env): while it is missing or empty and nothing shows a run (no *.log in its folder, no <account>.ran marker beside -state; -account is required with it) the firing logs that it is waiting for the account's first run and skips only the journal step; every other check still runs, and the firing pings the outside heartbeat only when nothing else is wrong. With any sign of a run it is an urgent alert and a failed firing")
 	journalctl := flags.String("journalctl", "journalctl", "the journal reader that gives a failed unit's last line")
-	maintenanceFile := flags.String("maintenance", "", "the host's maintenance window marker (default: maintenance.json beside -state, written by ti-maintenance): while a window is open, failed units and a logged-out Gateway are recorded and not paged, the heartbeat is still pinged, and the first firing after the window closes pages what is still wrong; capital-safety alerts are never held")
+	maintenanceFile := flags.String("maintenance", "", "the host's maintenance window marker (default: /run/ti-maintenance/maintenance.json, written by ti-maintenance): while a window is open, failed units and a logged-out Gateway are recorded and not paged, the heartbeat is still pinged, and the first firing after the window closes pages what is still wrong; capital-safety alerts are never held")
 	err := flags.Parse(args)
 	if err != nil {
 		return err
@@ -214,15 +214,22 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		return errors.Join(append(failures, err)...)
 	}
 	// A maintenance window is open for this firing only if it was open when
-	// the firing started and is still open at the moment a decision is made
-	// (windowNow): one that ends mid-firing holds nothing from then on.
-	windowFile := maintenancePath(*maintenanceFile, *statePath)
-	windowOpen := !windowEnd(windowFile, sampledAt).IsZero()
+	// the firing started and is still open at the moment of each decision it
+	// holds (windowNow, asked at that moment with the clock at that moment):
+	// one that ends mid-firing holds nothing from then on.
+	windowFile := maintenancePath(*maintenanceFile)
+	windowUntil, windowProblem, windowPrint := windowRead(windowFile, sampledAt)
+	windowOpen := !windowUntil.IsZero()
 	windowNow := func() time.Time {
 		if !windowOpen {
 			return time.Time{}
 		}
 		return windowEnd(windowFile, now())
+	}
+	// A marker that is there and is not a window is said once, never paged.
+	if windowProblem != "" && !seen[channelKey("marker-note", windowPrint)] {
+		seen[channelKey("marker-note", windowPrint)] = true
+		_, _ = fmt.Fprintln(out, "reporter: the maintenance marker "+windowProblem+"; it counts as no window, so nothing is held (said once for this content)")
 	}
 	// The firing waits only on proof that the account has never run: nothing
 	// shows a run but the missing settings file. Any sign of one is a fault.
@@ -381,6 +388,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			}
 		}
 		for _, a := range report.Fresh(alerts, nil) {
+			if heldDuring(a, windowNow) {
+				holdAlert(sent, windowNow(), at, a.Key)
+				continue
+			}
 			current, starting := sendersFor(group, a, baselines, seen)
 			if err := deliver(current, a, seen, sent, repeats, at, *repeat, record); err != nil {
 				failures = append(failures, err)
@@ -410,7 +421,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// the page of a unit not failed at the sample. A systemctl that could not
 	// be run checked nothing, so no page is resolved on its word.
 	if unitsErr == nil && len(tradingUnits)+len(resolveOnly) > 0 {
-		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat, windowNow(), func(unit string) (unitSample, error) {
+		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat, windowNow, func(unit string) (unitSample, error) {
 			samples, err := sampleUnitsFor(*systemctl, []string{unit}, "the trading units were checked; only the data job's resolve and backup page are skipped at this firing")
 			return samples[unit], err
 		})
@@ -446,7 +457,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 		if sched, err := gatewayScheduleFrom(getenv); err != nil {
 			failures = append(failures, err)
-		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow(), senders, setAside, now); err != nil {
+		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, senders, setAside, now); err != nil {
 			failures = append(failures, err)
 		}
 	}
