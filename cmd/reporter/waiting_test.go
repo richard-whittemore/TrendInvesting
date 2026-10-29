@@ -79,13 +79,13 @@ func TestWaitingWithNoHeartbeatURLPingsNothingAndFailsNothing(t *testing.T) {
 	}
 }
 
-func TestWaitingSharedSecretsDoNotEnableHeartbeat(t *testing.T) {
+func TestWaitingHeartbeatOffOverridesSharedSecrets(t *testing.T) {
 	e, server := newStandInEndpoint(t)
 	dir := t.TempDir()
 	secrets := filepath.Join(dir, "secrets")
 	writeFileT(t, secrets, "TI_HEARTBEAT_URL="+server.URL+heartbeatPath+"\nTI_NTFY_TOPIC=t\nTI_NTFY_SERVER="+server.URL+"\n")
 	args := []string{"-journal", filepath.Join(dir, ".log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets, "-account", "boost", "-run-env", filepath.Join(dir, "run.env")}
-	if err := run(args, env(nil), func() time.Time { return t0 }, &bytes.Buffer{}, server.Client()); err != nil {
+	if err := run(args, env(map[string]string{"TI_HEARTBEAT": "off"}), func() time.Time { return t0 }, &bytes.Buffer{}, server.Client()); err != nil {
 		t.Fatal(err)
 	}
 	if e.count("ping") != 0 {

@@ -117,7 +117,7 @@ func env(m map[string]string) func(string) string { return func(k string) string
 
 func TestRunDeliversEachAlertOnceAcrossRuns(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
-	fakeEnv := env(map[string]string{"TI_NTFY_TOPIC": "topic", "TI_NTFY_SERVER": "https://ntfy.test"})
+	fakeEnv := env(map[string]string{"TI_NTFY_TOPIC": "topic", "TI_NTFY_SERVER": "https://ntfy.test", "TI_HEARTBEAT": "off", "TI_HEARTBEAT_URL": "https://heartbeat.test/ping/secret"})
 	fakeClient := &http.Client{Transport: r}
 	dir := t.TempDir()
 	journalPath := writeJournal(t, dir)

@@ -39,12 +39,8 @@ EnvironmentFile=-/etc/trend-investing/gateway.env
 # none, and -run-env below makes that a quiet wait.
 EnvironmentFile=-/var/lib/trend-investing/engines/%i/run.env
 # TI_NTFY_TOPIC, TI_NTFY_SERVER, TI_PUSHOVER_APP_TOKEN, TI_PUSHOVER_USER_KEY,
-# TI_GITHUB_ISSUES_TOKEN and TI_GITHUB_ISSUES_REPO are read from
-# %d/secrets and never printed. The shared environment also supplies
-# TI_HEARTBEAT_URL; trad-ira's provisioned drop-in clears it, because a second
-# pinger would mask the loss of the first. Boost's clean firing pings the
-# outside service (docs/manual/server.md, "The outside heartbeat").
-EnvironmentFile=/run/trend-investing/secrets/secrets.env
+# TI_GITHUB_ISSUES_TOKEN, TI_GITHUB_ISSUES_REPO and TI_HEARTBEAT_URL are read
+# from %d/secrets and never printed.
 LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # The clock check is run at every firing, after the incident alerts: two
 # failing checks in a row page once for the whole host, a passing check

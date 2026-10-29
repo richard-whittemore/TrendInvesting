@@ -99,8 +99,8 @@ func TestAFiringWithNoURLConfiguredPingsNothingAndFailsNothing(t *testing.T) {
 	if len(r.sent) != 1 || len(r.to("ntfy.test")) == 0 {
 		t.Errorf("unexpected destinations: %v", r.sent)
 	}
-	if strings.Count(out.String(), "heartbeat: not this instance") != 1 {
-		t.Errorf("missing single instance notice: %s", out.String())
+	if strings.Contains(out.String(), "heartbeat: not this instance") {
+		t.Errorf("missing URL must not imply instance opt-out: %s", out.String())
 	}
 }
 
@@ -217,8 +217,8 @@ func TestThePingCarriesNothingButTheEndpoint(t *testing.T) {
 	}
 }
 
-// A shared channel credential must not make another instance ping (ADR 0019).
-func TestSharedSecretsDoNotEnableHeartbeat(t *testing.T) {
+// An explicit instance switch suppresses even a shared credential URL (ADR 0019).
+func TestHeartbeatOffOverridesSharedSecrets(t *testing.T) {
 	for _, waiting := range []bool{false, true} {
 		r := &relay{sent: map[string][]string{}}
 		dir := t.TempDir()
@@ -233,7 +233,7 @@ func TestSharedSecretsDoNotEnableHeartbeat(t *testing.T) {
 			args = append(args, "-account", "trad-ira", "-run-env", filepath.Join(dir, "run.env"))
 		}
 		var out bytes.Buffer
-		if err := run(args, env(nil), func() time.Time { return t0.Add(time.Hour) }, &out, &http.Client{Transport: r}); err != nil {
+		if err := run(args, env(map[string]string{"TI_HEARTBEAT": "off", "TI_HEARTBEAT_URL": "https://heartbeat.test/ping/environment-secret"}), func() time.Time { return t0.Add(time.Hour) }, &out, &http.Client{Transport: r}); err != nil {
 			t.Fatal(err)
 		}
 		if len(r.to("heartbeat.test")) != 0 {
@@ -288,21 +288,21 @@ func TestProvisioningAssignsOnlyBoostTheHeartbeatEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ti-reporter@trad-ira.service.d/heartbeat.conf", "UnsetEnvironment=TI_HEARTBEAT_URL", "a second pinger would mask the loss of the first"} {
+	for _, want := range []string{"ti-reporter@trad-ira.service.d/heartbeat.conf", "Environment=TI_HEARTBEAT=off", "a second pinger would mask the loss of the first"} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("provisioning lacks %q", want)
 		}
 	}
 }
 
-// Boost uses the template's shared environment; only trad-ira needs an override.
-func TestHeartbeatUsesSharedEnvironmentWithoutBoostDropIn(t *testing.T) {
+// Boost reads its URL from the credential; only trad-ira needs an override.
+func TestHeartbeatUsesCredentialWithoutBoostDropIn(t *testing.T) {
 	raw, err := os.ReadFile("../../deploy/systemd/ti-reporter@.service")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), "\nEnvironmentFile=/run/trend-investing/secrets/secrets.env\n") {
-		t.Error("reporter template must load the shared heartbeat environment")
+	if strings.Contains(string(raw), "EnvironmentFile=/run/trend-investing/secrets/secrets.env") {
+		t.Error("reporter template must not load secrets into the environment")
 	}
 	raw, err = os.ReadFile("../../deploy/provision.sh")
 	if err != nil {
@@ -320,8 +320,8 @@ func TestHeartbeatEnvironmentSelectsOnePinger(t *testing.T) {
 		secrets := filepath.Join(dir, "secrets")
 		writeFileT(t, secrets, "TI_NTFY_TOPIC=t\nTI_NTFY_SERVER=https://ntfy.test\nTI_HEARTBEAT_URL=https://heartbeat.test/ping/secret\n")
 		environment := map[string]string{}
-		if account == "boost" {
-			environment["TI_HEARTBEAT_URL"] = "https://heartbeat.test/ping/secret"
+		if account == "trad-ira" {
+			environment["TI_HEARTBEAT"] = "off"
 		}
 		args := []string{"-journal", filepath.Join(dir, "waiting.log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets, "-account", account, "-run-env", filepath.Join(dir, "run.env")}
 		if err := run(args, env(environment), func() time.Time { return t0 }, &bytes.Buffer{}, &http.Client{Transport: r}); err != nil {

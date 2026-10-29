@@ -169,10 +169,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// what it touches: every other channel still delivers, and the run fails
 	// naming each fault (ADR 0019, "Alerting").
 	var failures []error
-	// Only this instance's environment opts into the outside heartbeat
-	// (ADR 0019, "Alerting"); shared channel credentials cannot enable a peer.
-	heartbeatEnv := getenv
-	if heartbeatEnv("TI_HEARTBEAT_URL") == "" {
+	// Only the per-instance switch disables the outside heartbeat; the URL
+	// remains a credential secret (ADR 0019, "Alerting").
+	heartbeatOff := getenv("TI_HEARTBEAT") == "off"
+	if heartbeatOff {
 		_, _ = fmt.Fprintln(out, "reporter: heartbeat: not this instance")
 	}
 	if *secretsFile != "" {
@@ -181,6 +181,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			failures = append(failures, secretsErr)
 		}
 	}
+	heartbeatEnv := getenv
 	// run.env missing or empty means no settings, and so no log path: the
 	// journal step alone is skipped for it. Whether that is a quiet wait or a
 	// fault is decided once the state is loaded (runEvidence). Every other
@@ -519,7 +520,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			return nil
 		}
 	}
-	pingHeartbeat(heartbeatEnv, &bounded, out)
+	if !heartbeatOff {
+		pingHeartbeat(heartbeatEnv, &bounded, out)
+	}
 	return nil
 }
 

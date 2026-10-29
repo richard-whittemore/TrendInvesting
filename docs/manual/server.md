@@ -494,14 +494,15 @@ quiet and is noticed from outside; nor for a firing that found the engine or
 the adapter failed, even when its page was delivered, so a trading unit left
 failed for 20 minutes also takes the check down.
 
-Only `ti-reporter@boost` pings this check. The reporter template loads
-`secrets.env` as its shared environment, including `TI_HEARTBEAT_URL`.
-Boost needs no drop-in. Provisioning writes only the trad-ira heartbeat
-drop-in, with `UnsetEnvironment=TI_HEARTBEAT_URL`: a second pinger would mask
-the loss of the first. The private channel credential cannot re-enable the
-heartbeat after systemd clears the environment variable. An instance without the URL
-logs `heartbeat: not this instance` once per firing. The stop-Boost-timer
-drill below therefore still pages even while the IRA reporter is healthy.
+Only `ti-reporter@boost` pings this check. The reporter reads
+`TI_HEARTBEAT_URL` from the private credential file (`%d/secrets`), never
+prints it, and needs no Boost drop-in. Provisioning writes only
+`ti-reporter@trad-ira.service.d/heartbeat.conf`, with
+`Environment=TI_HEARTBEAT=off`: a second pinger would mask the loss of the
+first. This switch suppresses the ping even with a URL in the credential.
+The instance logs `reporter: heartbeat: not this instance` once per firing,
+as information, never an alert. The stop-Boost-timer drill below therefore
+still pages even while the IRA reporter is healthy.
 
 **Set it up (once) [OWNER]:**
 

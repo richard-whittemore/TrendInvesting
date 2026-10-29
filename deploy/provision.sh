@@ -751,13 +751,13 @@ CONF
   # for its instance of the timer, replaced on every run as the units are.
   install -d -m 0755 "$unit_dir/ti-flex@trad-ira.timer.d"
   install -m 0644 "$here/systemd/ti-flex@trad-ira.timer.d/stagger.conf" "$unit_dir/ti-flex@trad-ira.timer.d/"
-  # Boost keeps the shared reporter environment (ADR 0019, "Alerting").
-  # Clear the URL for trad-ira: a second pinger would mask the loss of the first.
+  # Boost pings using its credential URL (ADR 0019, "Alerting").
+  # Disable trad-ira: a second pinger would mask the loss of the first.
   install -d -m 0755 "$unit_dir/ti-reporter@trad-ira.service.d"
   cat >"$unit_dir/ti-reporter@trad-ira.service.d/heartbeat.conf" <<'EOF'
 [Service]
 # a second pinger would mask the loss of the first
-UnsetEnvironment=TI_HEARTBEAT_URL
+Environment=TI_HEARTBEAT=off
 EOF
   if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
     rm -f "$unit_dir/ti-gateway.service"
