@@ -121,15 +121,17 @@ def no_sector_pages(url):
 class MomentumJob:
     """A temporary server layout for one IRA instance: data folder, configuration, the engine's log, secrets."""
 
-    def __init__(self, root, data=None, config=None, inputs=(), client=None, ranker=None, sectors_get=sector_pages):
+    def __init__(self, root, data=None, config=None, inputs=(), client=None, ranker=None, sectors_get=sector_pages,
+                 instance=INSTANCE):
+        self.instance = instance
         self.root = Path(root)
         self.data = Path(data) if data else self.root / "data"
         self.data.mkdir(parents=True, exist_ok=True)
         self.streams = self.root / "streams"
         self.cfg = config or momentum_config()
-        self.config = self.root / "trad-ira.config"
+        self.config = self.root / (instance + ".config")
         self.config.write_text(json.dumps(self.cfg, indent=2))
-        self.log = self.root / "engines" / INSTANCE / (RUN + ".log")
+        self.log = self.root / "engines" / instance / (RUN + ".log")
         self.write_log(inputs)
         self.env_file = self.root / "env"
         self.env_file.write_text("MASSIVE_API_KEY=" + SYNTHETIC_VALUE + "\n")
@@ -141,7 +143,7 @@ class MomentumJob:
         write_momentum_log(self.log, self.cfg, inputs)
 
     def argv(self, *extra, ranker=UNUSED_RANKER):
-        return ["--engine", "momentum", "--instance", INSTANCE, "--ranker", ranker, "--data", str(self.data),
+        return ["--engine", "momentum", "--instance", self.instance, "--ranker", ranker, "--data", str(self.data),
                 "--streams", str(self.streams), "--config", str(self.config), "--engine-log", str(self.log),
                 "--secrets-file", str(self.env_file)] + list(extra)
 
@@ -154,10 +156,10 @@ class MomentumJob:
         return status, out.getvalue(), err.getvalue()
 
     def stream_dir(self):
-        return self.streams / INSTANCE / RUN
+        return self.streams / self.instance / RUN
 
     def path(self, day):
-        return self.stream_dir() / "{}-{}.jsonl".format(INSTANCE, day)
+        return self.stream_dir() / "{}-{}.jsonl".format(self.instance, day)
 
     def envelopes(self, day):
         return [json.loads(line) for line in self.path(day).read_text().splitlines()]
@@ -971,6 +973,78 @@ class LabelsNotYetTest(unittest.TestCase):
             self.assertIn("written without the universe of 2026-11-30", err)
 
 
+class PublishedWithoutUniverseTest(unittest.TestCase):
+    def test_another_instances_late_labels_and_universe_do_not_change_the_published_file(self):
+        def down(url):
+            raise tidata.massive.MarketDataError("HTTP 503 from a sector source")
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data), sector_session=None)
+            os.remove(data / "universe_2026-11-30.json")
+            first = MomentumJob(root, data=data, ranker=FakeRanker(), sectors_get=down,
+                                client=FakeMassive({day: bars_for(day) for day in (D(2026, 11, 30), D(2026, 12, 1))}))
+            firing = dt.datetime(2026, 12, 1, 8, 15, tzinfo=nyse_calendar.NEW_YORK)
+            status, _, err = first.main(firing, "--backfill-from", "2026-11-23")
+            self.assertEqual(status, 0, err)
+            path = first.path(D(2026, 11, 30))
+            before = path.read_bytes()
+            self.assertNotIn("market.universe.snapshot", {e["type"] for e in first.envelopes(D(2026, 11, 30))})
+            second_root = Path(root) / "second"
+            second_root.mkdir()
+            second = MomentumJob(second_root, data=data, ranker=FakeRanker(), instance="roth-ira")
+            status, _, err = second.main(firing + dt.timedelta(seconds=5), "--backfill-from", "2026-11-23")
+            self.assertEqual(status, 0, err)
+            self.assertTrue((data / "sectors-iwv_2026-11-30.json").exists())
+            self.assertTrue((data / "sectors-nasdaq_2026-11-30.json").exists())
+            self.assertTrue((data / "universe_2026-11-30.json").exists())
+            self.assertIn("market.universe.snapshot", {e["type"] for e in second.envelopes(D(2026, 11, 30))})
+            status, _, err = first.main(firing + dt.timedelta(minutes=15))
+            self.assertEqual(status, 0, err)
+            self.assertIn("missing-universe", err)
+            self.assertEqual(path.read_bytes(), before)
+            # ADR 0027: action-triggered verification must preserve the same published inputs.
+            record.write(str(data), {"kind": "dividends", "source": "massive", "session": "2026-11-30",
+                                     "from": "2026-11-20", "fetched_at": "2026-12-01T14:00:00Z", "rows": []})
+            status, _, err = first.main(after_settle(D(2026, 12, 1)))
+            self.assertEqual(status, 0, err)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_a_published_universe_is_still_verified(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            path = job.path(D(2026, 11, 30))
+            before = path.read_bytes()
+            manifest = json.loads((job.stream_dir() / "manifest.json").read_text())
+            self.assertEqual(manifest["files"][-1]["without_universe"], [])
+            status, _, err = job.main(after_settle(D(2026, 11, 30)))
+            self.assertEqual(status, 0, err)
+            self.assertEqual(path.read_bytes(), before)
+            record.write(str(job.data), {"kind": "grouped", "source": "massive", "session": "2026-11-30",
+                                         "fetched_at": "2026-11-30T23:30:00Z", "adjusted": False,
+                                         "bars": bars_for(D(2026, 11, 30))})
+            os.remove(job.data / "universe_2026-11-30.json")
+            status, _, err = job.main(after_settle(D(2026, 11, 30)))
+            self.assertEqual(status, 1, err)
+            self.assertIn("differs", err)
+
+    def test_without_universe_must_match_the_sha256_checked_stream(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            path = job.stream_dir() / "manifest.json"
+            original = json.loads(path.read_text())
+            for index, without in ((-1, ["2026-11-30"]), (0, ["2026-11-23"]), (0, [])):
+                with self.subTest(index=index, without=without):
+                    manifest = json.loads(json.dumps(original))
+                    entry = manifest["files"][index]
+                    entry["without_universe"] = without
+                    path.write_text(json.dumps(manifest))
+                    status, _, err = job.main(after_settle(D(2026, 11, 30)))
+                    self.assertEqual(status, 1, err)
+                    self.assertIn("without_universe", err)
+                    self.assertIn("sha256", err)
+
+
 class InheritedBookTest(unittest.TestCase):
     """A fresh run approved without a starting book takes the previous run's book (ADR 0027): its holdings
     are the previous run's, read from the log its approval names, through the same reader, never nothing."""
@@ -1121,6 +1195,58 @@ class ManifestRecoveryTest(unittest.TestCase):
     """The manifest is written before the run's first file, so a stop between the two leaves a file the next
     firing takes in by the same rule; a manifest lost or damaged is rebuilt only by hand
     (--rebuild-manifest), every file taken in by that rule in chain order."""
+
+    def test_an_unlisted_file_keeps_its_omissions_after_another_instance_records_a_universe(self):
+        self.recover_without_universe(rebuild=False)
+
+    def test_a_rebuilt_manifest_keeps_omissions_after_another_instance_records_a_universe(self):
+        self.recover_without_universe(rebuild=True)
+
+    def recover_without_universe(self, rebuild):
+        def down(url):
+            raise tidata.massive.MarketDataError("HTTP 503 from a sector source")
+
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data), sector_session=None)
+            os.remove(data / "universe_2026-11-30.json")
+            job = MomentumJob(root, data=data, ranker=FakeRanker(), sectors_get=down,
+                              client=FakeMassive({D(2026, 11, 30): bars_for(D(2026, 11, 30))}))
+            firing = dt.datetime(2026, 12, 1, 8, 15, tzinfo=nyse_calendar.NEW_YORK)
+            status, _, err = job.main(firing, "--backfill-from", "2026-11-23")
+            self.assertEqual(status, 0, err)
+            path = job.path(D(2026, 11, 30))
+            before = path.read_bytes()
+            manifest_path = job.stream_dir() / "manifest.json"
+            published = json.loads(manifest_path.read_text())
+            self.assertIn("2026-11-30", published["files"][-1]["without_universe"])
+            if rebuild:
+                manifest_path.unlink()
+            else:
+                unlisted = json.loads(json.dumps(published))
+                unlisted["files"].pop()
+                manifest_path.write_text(json.dumps(unlisted))
+            second_root = Path(root) / "second"
+            second_root.mkdir()
+            second = MomentumJob(second_root, data=data, ranker=FakeRanker(), instance="roth-ira")
+            status, _, err = second.main(firing + dt.timedelta(seconds=5), "--backfill-from", "2026-11-23")
+            self.assertEqual(status, 0, err)
+            self.assertTrue((data / "universe_2026-11-30.json").exists())
+
+            status, _, err = job.main(firing + dt.timedelta(minutes=15),
+                                      *(("--rebuild-manifest",) if rebuild else ()))
+            self.assertEqual(status, 0, err)
+            recovered = json.loads(manifest_path.read_text())
+            self.assertEqual(recovered["files"], published["files"])
+            self.assertEqual(path.read_bytes(), before)
+            # ADR 0027: a present manifest remains authoritative and must agree with the stream.
+            recovered["files"][-1]["without_universe"] = []
+            manifest_path.write_text(json.dumps(recovered))
+            status, _, err = job.main(firing + dt.timedelta(minutes=20))
+            self.assertEqual(status, 1, err)
+            self.assertIn("manifest without_universe does not match its sha256-checked stream", err)
+            self.assertEqual(path.read_bytes(), before)
 
     def test_a_stop_after_the_first_file_is_linked_is_taken_in_by_the_next_firing(self):
         with tempfile.TemporaryDirectory() as root:
