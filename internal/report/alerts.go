@@ -36,8 +36,12 @@ const (
 	// always urgent and repeats until acknowledged
 	// (docs/live-trading/lessons-2026-10.md, L11; ADR 0019, "Alerting").
 	KindRebalanceWithheld Kind = "rebalance-withheld"
-	KindMissingData       Kind = "missing-data"
-	KindHeartbeat         Kind = "heartbeat-lost"
+	// KindPickWithheld is one momentum pick withheld for the month because
+	// its mark is missing; it pages until acknowledged (ADR 0026, amendment
+	// of 2026-10-29).
+	KindPickWithheld Kind = "pick-withheld"
+	KindMissingData  Kind = "missing-data"
+	KindHeartbeat    Kind = "heartbeat-lost"
 	// KindJournalRefused is the reporter's own failure to read the journal:
 	// every alert the journal holds is withheld until it reads.
 	KindJournalRefused Kind = "journal-refused"
@@ -182,7 +186,8 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //     state in force, Normal when none is, and states the difference, its
 //     day and when it becomes Degraded instead.
 //
-// Engine-state and reconciliation alerts repeat until acknowledged; an
+// Engine-state, reconciliation, and withheld monthly rebalance or pick alerts
+// repeat until acknowledged; an
 // operator.alert.acknowledged anywhere in the journal acknowledges the alert
 // whose key it names, provided it is for this account: the journal records an
 // acknowledgement for another account with no effect. The engine journals only
@@ -238,6 +243,10 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 	// paged holds the by-hand pages already raised: a sale withheld again
 	// for values that are not positive is the same incident.
 	paged := map[string]bool{}
+	// A missing-mark refusal and its recorded withheld pick are one page
+	// (ADR 0026, amendment of 2026-10-29). Earlier journals without the pick
+	// evidence retain their refusal alerts.
+	withheldPicks := map[[2]string]bool{}
 	// notAtClose is the latest broker snapshot stamped at its read time, if
 	// the latest one is: its ID and why it was not as of the close.
 	var notAtClose [2]string
@@ -317,7 +326,9 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 			if err := read(e, refusedVersions, &p); err != nil {
 				return nil, err
 			}
-			out = append(out, refusalAlerts(account, e, p, flagged[p.Reason])...)
+			if p.Reason != event.RefusedMissingMark || !withheldPicks[[2]string{p.Tag, p.InstrumentID}] {
+				out = append(out, refusalAlerts(account, e, p, flagged[p.Reason])...)
+			}
 			if a, ok := pending.refused(account, instance, e, p); ok {
 				out = append(out, a)
 			}
@@ -400,6 +411,14 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 			var p event.TargetsDecidedPayload
 			if err := read(e, decidedVersions, &p); err != nil {
 				return nil, err
+			}
+			for _, pick := range p.WithheldPicks {
+				withheldPicks[[2]string{e.ID, pick.InstrumentID}] = true
+				a := pickWithheldAlert(account, e, p, pick)
+				if !paged[a.Key] {
+					paged[a.Key] = true
+					out = append(out, a)
+				}
 			}
 			if w := p.Boost.ReplanWithheld; w.Cause != "" {
 				out = append(out, rejectionAlert(account, instance, e, w, p.Boost.RejectedInARow))
@@ -990,4 +1009,18 @@ func momentumDecisionSession(p event.TargetsDecidedPayload) string {
 		return p.Momentum.CloseSession
 	}
 	return p.SessionPeriodEnd.UTC().Format(time.DateOnly)
+}
+
+// pickWithheldAlert pages once per account, decision month and instrument:
+// the missing mark withholds only this pick, leaving its allocation in cash,
+// and never degrades the account (ADR 0026, amendment of 2026-10-29).
+// Failure is the recorded classification, never guessed from broker prose.
+func pickWithheldAlert(account string, e event.Envelope, p event.TargetsDecidedPayload, pick event.WithheldPick) Alert {
+	session := momentumDecisionSession(p)
+	month := session[:len("2006-01")]
+	key := fmt.Sprintf("%s:%s:%s@%s", KindPickWithheld, month, pick.InstrumentID, account)
+	body := fmt.Sprintf("The rebalance for the session ending %s withheld %s for this month because its mark was missing (%s): %s. Its unbought allocation stays in cash for the month and is not redistributed. This missing mark does not degrade the account; other picks proceed subject to the gate's other limits. Check the adapter's recorded contract lookup and the instrument at IBKR. Acknowledging this page stops repeats; it does not buy the pick or change the decision.", session, pick.InstrumentID, pick.Failure, pick.Detail)
+	return Alert{Key: key, Kind: KindPickWithheld, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
+		Title: fmt.Sprintf("%s: %s withheld this month (missing mark: %s — %s)", account, pick.InstrumentID, pick.Failure, pick.Detail),
+		Body:  body + acknowledgeLine(key)}
 }

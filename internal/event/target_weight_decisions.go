@@ -103,7 +103,9 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     run does (ADR 0026, point 5: recovered, never recomputed). Version 8
 //     recorded the sale only while it was live; a version 8 record is read
 //     as it was written.
-const TargetsDecidedSchemaVersion uint32 = 9
+//   - Version 10 records each momentum pick withheld for a missing mark,
+//     with its adapter evidence (ADR 0026, amendment of 2026-10-29).
+const TargetsDecidedSchemaVersion uint32 = 10
 
 // TargetsDecidedRetiredVersion is version 7, the last version before the
 // live sale's side, attempt, naming and executions were recorded; a reader
@@ -115,11 +117,15 @@ const TargetsDecidedRetiredVersion uint32 = 7
 // version (ADR 0015).
 const TargetsDecidedLiveSaleVersion uint32 = 8
 
+// TargetsDecidedEndedSaleVersion is version 9, before per-pick withholding
+// was recorded; historical decisions remain readable as written (ADR 0015).
+const TargetsDecidedEndedSaleVersion uint32 = 9
+
 // TargetsDecidedVersions are the schema versions a reader of the log reads
-// a decision at: versions 7 and 8, which earlier builds wrote, and the
+// a decision at: versions 7, 8 and 9, which earlier builds wrote, and the
 // current one.
 func TargetsDecidedVersions() []uint32 {
-	return []uint32{TargetsDecidedRetiredVersion, TargetsDecidedLiveSaleVersion, TargetsDecidedSchemaVersion}
+	return []uint32{TargetsDecidedRetiredVersion, TargetsDecidedLiveSaleVersion, TargetsDecidedEndedSaleVersion, TargetsDecidedSchemaVersion}
 }
 
 // The two outcomes of a target decision (ADR 0026, point 1).
@@ -699,6 +705,9 @@ type TargetsDecidedPayload struct {
 	Detail           string    `json:"detail,omitempty"`
 	// Targets is sorted strictly ascending by instrument.
 	Targets []TargetWeight `json:"targets"`
+	// WithheldPicks is sorted by instrument; the named targets stay in cash
+	// for the month (ADR 0026, amendment of 2026-10-29).
+	WithheldPicks []WithheldPick `json:"withheld_picks,omitempty"`
 	// Boost is set for StrategyID boost and Momentum for momentum; the other
 	// is zero and omitted.
 	Boost    BoostFigures    `json:"boost,omitzero"`
@@ -812,7 +821,7 @@ type MomentumName struct {
 // Validate checks the identity, the outcome and its reason, the targets and
 // the Boost figures.
 func (p TargetsDecidedPayload) Validate() error {
-	var errs []error
+	errs := p.withheldPickErrors()
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
 	}
@@ -1085,10 +1094,14 @@ func (p TargetsDecidedPayload) ValidateWritten() error {
 // the first being 1, which version 8 records; below version 8, no field of
 // the sale that only version 8 or later records; and below version 9, no
 // sale that ended or filled in full, which only version 9 records, so a
-// record carrying a later version's field is refused (ADR 0015; ADR 0026,
+// record carrying a later version's field is refused. Below version 10,
+// per-pick withholding is likewise refused (ADR 0015; ADR 0026,
 // point 2, "Order identity"). A version above the current one, or none, is
 // refused.
 func (p TargetsDecidedPayload) ValidateSchema(version uint32) error {
+	if version < TargetsDecidedSchemaVersion && len(p.WithheldPicks) > 0 {
+		return fmt.Errorf("a version %d decision records withheld picks, which only version 10 and later record", version)
+	}
 	r := p.Boost.RestoredSale
 	switch {
 	case version == 0 || version > TargetsDecidedSchemaVersion:
@@ -1097,7 +1110,7 @@ func (p TargetsDecidedPayload) ValidateSchema(version uint32) error {
 		if r != nil && r.Order != nil && r.Order.recordsVersion8() {
 			return fmt.Errorf("a version %d decision's restored sale records its side, attempt, naming, venue order ID, executions or end, which only version 8 and later record", version)
 		}
-	case version < TargetsDecidedSchemaVersion:
+	case version < TargetsDecidedEndedSaleVersion:
 		if r != nil && r.Order != nil && r.Order.recordsVersion9() {
 			return fmt.Errorf("a version %d decision's restored sale records a sale that ended or filled in full, which only version 9 records", version)
 		}

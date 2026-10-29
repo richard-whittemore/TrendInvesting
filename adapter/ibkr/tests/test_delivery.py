@@ -1919,12 +1919,14 @@ class StreamFolderRuleTests(unittest.TestCase):
         from delivery import DELIVERED_KINDS, kinds
         # The adapter's own inputs in a batch: the account snapshot (Boost's
         # version 3 or an IRA's 4), the broker snapshot (at either version a
-        # log may hold) and the mark (Boost's 2 or an IRA's 3, with its contract).
+        # log may hold), the mark (Boost's 2 or an IRA's 3, with its contract),
+        # and an unresolved name's missing-mark evidence (ADR 0026, amended 2026-10-29).
         self.assertEqual(set(DELIVERED_KINDS), set(kinds.KINDS) | {
             (snapshot.BROKER_SNAPSHOT_TYPE, 1), (snapshot.BROKER_SNAPSHOT_TYPE, snapshot.BROKER_SNAPSHOT_VERSION),
             (snapshot.ACCOUNT_SNAPSHOT_TYPE, snapshot.ACCOUNT_SNAPSHOT_VERSION),
             (snapshot.ACCOUNT_SNAPSHOT_TYPE, snapshot.ACCOUNT_SNAPSHOT_CASH_VERSION),
-            (snapshot.MARK_TYPE, snapshot.MARK_VERSION), (snapshot.MARK_TYPE, snapshot.MARK_CONTRACT_VERSION)})
+            (snapshot.MARK_TYPE, snapshot.MARK_VERSION), (snapshot.MARK_TYPE, snapshot.MARK_CONTRACT_VERSION),
+            ("market.mark.unavailable", 1)})
         self.assertIs(kinds.DELIVERED_KINDS, DELIVERED_KINDS)
 
     def test_a_true_fresh_run_with_no_folder_is_still_told_to_run_the_warm_up(self):

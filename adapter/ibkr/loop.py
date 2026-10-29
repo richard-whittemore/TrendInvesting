@@ -193,8 +193,8 @@ from book_basis import cash_change, fills_since, holdings_after, previous_close
 from book_basis import cents as _cents
 import flex
 from snapshot import (ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, CASH, NET, POSITIONS, RECONCILIATION_TYPE, Record,
-                      account_snapshot_record, broker_snapshot_record, close_valuation, mark_record, read_account,
-                      read_marks, reconciliation_record, resolve_contracts)
+                      account_snapshot_record, broker_snapshot_record, close_valuation, mark_record,
+                      mark_unavailable_record, read_account, read_marks, reconciliation_record, resolve_contracts)
 
 log = logging.getLogger("ibkr")
 
@@ -1071,6 +1071,7 @@ class AdapterLoop:
         summary = ""
         started = self._monotonic()
         contracts = None
+        refused = {}
         for attempt in range(1, BROKER_SNAPSHOT_ATTEMPTS + 1):
             if unread is not None:
                 wait = SNAPSHOT_RETRY_WAITS[attempt - 2]
@@ -1085,10 +1086,17 @@ class AdapterLoop:
                 log.info("ibkr broker snapshot waits: an execution awaits its commission, so its fill is not "
                          "recorded yet")
                 return None
-            if self.config.resolve_contracts and contracts is None:
-                contracts = self._contracts(closes)
-                if contracts is None:
-                    return None
+            if self.config.resolve_contracts:
+                # ADR 0026, amendment of 2026-10-29: each later reading
+                # re-asks unresolved names; a resolved contract remains
+                # cached only within this reading's unchanged connection.
+                pending = closes if contracts is None else {s: closes[s] for s in refused}
+                if pending:
+                    resolved = self._contracts(pending)
+                    if resolved is None:
+                        return None
+                    found, refused = resolved
+                    contracts = {**(contracts or {}), **found}
             before = self._activity()
             reading = read_account(self.conn)
             if self._unended(reading):
@@ -1166,7 +1174,8 @@ class AdapterLoop:
                 account=account, broker=snapshot,
                 marks=[mark_record(s, close, closes[s], MARK_SOURCE, last_prices.get(s),
                                    contract=None if contracts is None else contracts[s])
-                       for s in sorted(closes) if contracts is None or s in contracts],
+                       for s in sorted(closes) if contracts is None or s in contracts]
+                      + [mark_unavailable_record(s, close, refused[s]) for s in sorted(refused)],
                 reading=confirm, unverified=unverified)
         if unread is not None:
             raise SnapshotRefused(
@@ -1179,7 +1188,7 @@ class AdapterLoop:
         return None
 
     def _contracts(self, closes):
-        """The IBKR contract of each instrument closes marks (snapshot.resolve_contracts), or None if the link went.
+        """(contracts, refused) for instruments in closes, or None if the link went (snapshot.resolve_contracts).
 
         ADR 0026 point 3: the engine values every order it plans against a
         mark as of the close, and a mark states the contract it is for. A
@@ -1198,7 +1207,7 @@ class AdapterLoop:
         for symbol in sorted(refused):
             log.warning("ibkr contract for %s not resolved, so it has no mark and the engine refuses any order for "
                         "it (missing-mark): %s", symbol, refused[symbol])
-        return contracts
+        return contracts, refused
 
     def _broker_lists(self):
         """IBKR's open orders and executions for a broker snapshot: orders.BrokerOrders, "unread", or None to wait.

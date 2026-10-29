@@ -21,6 +21,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -351,6 +352,81 @@ class IraDeliveryTests(IraBatchHarness):
         self.assertEqual(marks, ["AAA", "IEF", "SHY", "SPY"])
         self.assertTrue(any("BBB" in line and "no mark" in line for line in logged.output), logged.output)
 
+    def test_unresolved_names_are_reasked_on_each_later_account_reading_attempt(self):
+        # ADR 0026, amendment of 2026-10-29: a later reading re-resolves
+        # an unresolved pick before its weight is left in cash for a month.
+        self.fake.contract_detail_errors = {"BBB": (200, "No security definition")}
+        retries = []
+
+        def incomplete_twice(conn):
+            reading = read_account(conn)
+            asks = [c for c in self.fake.called("req_contract_details") if c[2].symbol == "BBB"]
+            if asks and len(retries) < 2:
+                retries.append(len(asks))
+                if len(retries) == 2:
+                    self.fake.contract_detail_errors.clear()
+                return reading._replace(unread=frozenset({"settled-cash"}))
+            return reading
+
+        with mock.patch("loop.read_account", side_effect=incomplete_twice):
+            sent = self.run_loop()
+        asks = [c[2].symbol for c in self.fake.called("req_contract_details")]
+        self.assertEqual(asks.count("BBB"), 3)
+        self.assertEqual(asks.count("AAA"), 1, "resolved names remain cached within the reading")
+        self.assertIn("BBB", [e["payload"]["instrument_id"] for e in sent if e["type"] == MARK_TYPE])
+        self.assertFalse(any(e["type"] == "market.mark.unavailable" for e in sent))
+
+    def test_a_timed_out_name_resolves_on_the_next_reading_attempt(self):
+        request = self.fake.req_contract_details
+        asks = []
+        retries = []
+
+        def unended_twice(req_id, contract):
+            asks.append(contract.symbol)
+            self.fake.end_contract_details = contract.symbol != "BBB" or asks.count("BBB") > 2
+            request(req_id, contract)
+            self.fake.end_contract_details = True
+
+        def incomplete_once(conn):
+            reading = read_account(conn)
+            if asks and not retries:
+                retries.append(True)
+                return reading._replace(unread=frozenset({"settled-cash"}))
+            return reading
+
+        with mock.patch.object(self.fake, "req_contract_details", side_effect=unended_twice), \
+                mock.patch("loop.read_account", side_effect=incomplete_once):
+            sent = self.run_loop()
+        self.assertEqual(asks.count("BBB"), 3, "asked twice, then re-asked on the next reading")
+        self.assertEqual(asks.count("AAA"), 1)
+        self.assertIn("BBB", [e["payload"]["instrument_id"] for e in sent if e["type"] == MARK_TYPE])
+        self.assertFalse(any(e["type"] == "market.mark.unavailable" for e in sent))
+
+    def test_unresolved_name_records_final_adapter_detail_before_the_session_close(self):
+        self.fake.contract_detail_errors = {"BBB": (200, "No security definition")}
+        sent = self.run_loop()
+        failures = [e for e in sent if e["type"] == "market.mark.unavailable"]
+        self.assertEqual(len(failures), 1)
+        failure = failures[0]
+        self.assertEqual(failure["schema_version"], 1)
+        self.assertEqual(failure["payload"], {
+            "instrument_id": "BBB", "as_of": "2027-01-14T21:00:00Z", "source": "ibkr",
+            "failure": "final", "detail": "IBKR answered its contract request with error 200: No security definition",
+        })
+        closed = [n for n, e in enumerate(sent) if e["type"] == "market.session.closed"][-1]
+        self.assertLess(sent.index(failure), closed)
+
+    def test_unended_lookup_records_transient_detail_and_bounded_retries(self):
+        self.fake.end_contract_details = False
+        sent = self.run_loop()
+        failures = [e for e in sent if e["type"] == "market.mark.unavailable"]
+        self.assertEqual(len(failures), 5)
+        for failure in failures:
+            self.assertEqual(failure["payload"]["failure"], "transient")
+            self.assertIn("did not end within", failure["payload"]["detail"])
+            self.assertIn("asked twice", failure["payload"]["detail"])
+        self.assertEqual(len(self.fake.called("req_contract_details")), 10)
+
     def test_marks_are_asked_of_ibkr_in_batches_within_its_market_data_lines(self):
         self.run_loop()
         self.assertEqual(sorted(c[2].conId for c in self.fake.called("req_mkt_data")), sorted(CON_IDS.values()))
@@ -394,6 +470,7 @@ class DeliveredKindsTests(unittest.TestCase):
         from delivery import DELIVERED_KINDS
         self.assertIn(("account.snapshot", 4), DELIVERED_KINDS)
         self.assertIn(("market.mark.recorded", 3), DELIVERED_KINDS)
+        self.assertIn(("market.mark.unavailable", 1), DELIVERED_KINDS)
 
 
 REPO = tests_dir.parents[2]

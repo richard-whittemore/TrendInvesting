@@ -247,3 +247,32 @@ func TestAnIRAGateNamesNoSaleTag(t *testing.T) {
 		t.Errorf("an IRA gate names sale tag %q, want none", tag)
 	}
 }
+
+// ADR 0026, amendment of 2026-10-29: a missing IRA buy mark
+// withholds that pick alone, without spending its cash or degrading.
+func TestIRAMissingMarkWithholdsOnlyThatBuy(t *testing.T) {
+	g := iraGate(t, 0)
+	missing := iraOrder("AAA", event.OrderSideBuy, 100)
+	missing.MarkSet = false
+	out := checkBook(t, g, risklimit.Book{CashAvailable: 200}, missing, iraOrder("BBB", event.OrderSideBuy, 100))
+	if out[0].Refused == nil || out[0].Refused.Reason != event.RefusedMissingMark || out[0].State != nil {
+		t.Fatalf("missing mark outcome: %+v; want refusal without state change", out[0])
+	}
+	released(t, out[1])
+	if out[1].Released.Figures.CashAvailable != 200 || g.State() != risklimit.StateNormal {
+		t.Fatalf("cash/state changed on withheld buy: %+v, %s", out[1].Released, g.State())
+	}
+}
+
+func TestIRAMissingMarkDoesNotMaskAnotherBreach(t *testing.T) {
+	g := iraGate(t, 0)
+	missing := iraOrder("AAA", event.OrderSideBuy, 100)
+	missing.MarkSet = false
+	out := checkBook(t, g, risklimit.Book{CashAvailable: 200}, missing, iraOrder("BBB", event.OrderSideBuy, 300), iraOrder("CCC", event.OrderSideBuy, 1))
+	if out[1].Refused == nil || out[1].Refused.Reason != event.RefusedInsufficientCash || out[1].State == nil {
+		t.Fatalf("second breach must degrade on insufficient cash: %+v", out[1])
+	}
+	if out[2].Refused == nil || out[2].Refused.Reason != event.RefusedEngineDegraded {
+		t.Fatalf("later buy: %+v", out[2])
+	}
+}

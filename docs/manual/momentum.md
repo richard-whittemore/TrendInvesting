@@ -187,7 +187,7 @@ configuration error.
 | Exposure (`max_exposure`) | An order that **increases** exposure must not leave holdings, valued at the previous close, above this share of net liquidation. A sell is never refused by it | 1.5 (150%) | at most 1 (100%): an IRA configuration above 1 is refused | refused; Degraded on the instrument (`margin-exposure`, `ira-exposure`) |
 | Orders per decision (`max_orders_per_decision`) | Orders that are not risk-reducing at one decision time | 1 | from the IRA configuration (none exists yet) | the plan's buys refused; Degraded (`order-count`) |
 | Order size (`max_order_fraction`) | One order's value as a share of net liquidation | 1 (100%) | from the IRA configuration | refused; Degraded (`order-size`) |
-| Price band (`price_band`) | The order's reference price must be within this share of IBKR's latest recorded price (the mark), recorded at or after the close | 0.05 | from the IRA configuration | refused; Degraded (`price-band`, or `missing-mark` with no mark) |
+| Price band (`price_band`) | The order's reference price must be within this share of IBKR's latest recorded price (the mark), recorded at or after the close | 0.05 | from the IRA configuration | refused; Degraded (`price-band`); an IRA buy with no mark is withheld alone (`missing-mark`), with an urgent page and no degradation |
 | Cash (IRAs only) | A buy's worst-case cost must fit the cash still available | — | always | refused; Degraded (`insufficient-cash`) |
 | Holding | A sell must not exceed the shares held, net of sells already working, in the engine's book and in IBKR's latest snapshot | always | always | refused; Degraded (`sell-exceeds-holding`, `broker-holding`) |
 | Snapshot age (`execution.max_snapshot_age_minutes`) | IBKR's latest snapshot must be no older than this when a sell is checked against it | 30 | from the IRA configuration (required; 1 to 390) | refused, **no state change**, re-planned at the next decision (`stale-broker-snapshot`) |
@@ -215,23 +215,46 @@ order's shape, account and mode, not these limits (`adapter/ibkr/sender.py`).
 | 1 | each session, the next morning | The data job records the whole market, the latest session's universe and sector labels, and writes SPY's, IEF's, SHY's and every holding's bars, the holdings read from the engine's own log ([market data](market-data.md), "A job for the IRAs"). | Built for the Traditional IRA: `ti-data@trad-ira`, weekday mornings at 06:15, 07:15 and 08:15 New York |
 | 2 | the morning after the last session of the month | The same job writes the compact stream, exactly as `encode --ranker`: bars for the named instruments, the universe snapshot, and the 500 ranked stocks' price histories ([momentum universe](momentum-universe.md)). | Built |
 | 3 | the same morning | The IRA's own adapter, `ti-adapter@trad-ira` (client ID 12), reads the account once and delivers that stream behind it: the account snapshot the engine reads (version 4: positions, net liquidation, IBKR's settled and total cash, from the same reading), and, before the session's close, a mark for every name the engine can decide, each ranked stock at its universe close and SPY, IEF, SHY and the holdings at their bars, each with the IBKR contract the adapter resolved for it by name; a name IBKR cannot resolve to one US-dollar stock gets no mark ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter" and "Contracts and marks for an IRA"). The morning reading stands for the close only with the IRA's own Flex executions proof (`ti-flex@trad-ira`, 05:45, 06:45, 07:45). | Built; the order to start the engine, its warm-up, the adapter and the same-day probe is `docs/runbooks/first-dry-run-day.md`, "The Traditional IRA" |
-| 4 | at the close | The engine decides the month and plans the sells, checked against the limits; any order for a name without a mark as of the close is refused (`missing-mark`) before it is released. | Built and tested on recorded inputs, and against the real IRA adapter with the scripted Gateway |
+| 4 | at the close | The engine decides the month and plans the sells, checked against the limits; a buy for a name without a mark as of the close is refused (`missing-mark`) and recorded as a withheld pick. Its allocation stays in cash for the month; the account stays Normal and the other buys proceed subject to the other limits. | Built and tested on recorded inputs, and against the real IRA adapter with the scripted Gateway |
 | 5 | next session | In dry-run (now): nothing is sent; the engine records a synthetic cancel for each order it releases, so the buys are planned at the same close from the snapshot's settled cash. In paper (later): the adapter sends the sells; when every sell has finished, the engine plans and releases the buys from the cash realised. | Dry-run built and rehearsed: the IRA adapter runs and the engine decides a dry-run month. **Stops here today**: no IRA order is sent before the paper gate (AGENTS.md rule 5); sending one will need the adapter's sender to take the contract the journal records for a pick, which today names a contract only from `con_ids` |
 | 6 | after | Fills come back; the reporter and the dashboard show the month. | As for Boost ([boost](boost.md#one-boost-day-from-the-data-to-ibkr-and-back)) |
+
+A missing mark is a per-pick exception, under ADR 0026's amendment of
+2026-10-29. The decision keeps the intended target weight and records the
+withheld instrument, `missing-mark`, and the adapter's exact failure detail.
+Its unbought allocation is not redistributed, and a later mark does not
+restart that pick during the month, including while the sell phase completes.
+Other limit breaches still degrade the account as before.
+
+The adapter asks an unended contract lookup twice within one reading attempt.
+If the morning reading must be attempted again, it re-resolves every name
+still unresolved, including a name IBKR refused on the earlier attempt. A
+resolved name is cached within that reading on the unchanged connection.
+The final delivered reading journals the unresolved reason: `transient` for
+an unanswered lookup that timed out, `final` for an IBKR refusal or an
+unresolvable/ambiguous name. An older input with no reason is reported as
+`unknown`, never guessed. IBKR's last-price request remains bounded by
+`mark_timeout`; its absence alone does not remove a resolved official-close
+mark, which can still feed the price band.
+
+The urgent page is `<account>: <instrument> withheld this month (missing mark:
+<transient|final> …)`, with the recorded detail. It is one incident per month
+and instrument, repeated until acknowledged. Acknowledging it stops reminders;
+it does not buy the pick. See [alerts and dashboard](alerts-and-dashboard.md),
+"What pages for an IRA".
 
 ## What can go wrong, and what the program does then
 
 Every one of these refuses or withholds rather than guess. Alerts come from
 the reporter ([alerts and dashboard](alerts-and-dashboard.md)); `<account>`
 is the account the IRA's configuration names. An **urgent** alert pages
-you; a **routine** one only informs. A withheld month sends one alert when
-a run of withheld months with the same reason starts, and its text says
-held positions and orders are unchanged. The IRA's reporter is not running yet, so none of these alerts reaches you
+you; a **routine** one only informs. A wholly withheld month pages once per month and reason, repeating until acknowledged; its text says held positions and orders are unchanged. A withheld pick has its own page as described above. The IRA's reporter is not running yet, so none of these alerts reaches you
 for the IRA until it is; until then the same-day probe (`docs/runbooks/first-dry-run-day.md`, I-8) names the
 latest decision and any `missing-mark` refusal.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
+| `<account>: <instrument> withheld this month (missing mark: <transient\|final> …)` (urgent, repeated until acknowledged) | Only this pick's buy is withheld. Its unbought weight stays in cash for the month; the account is not degraded by the missing mark, and other buys still face every limit | Check the exact lookup reason and the instrument at IBKR; acknowledge the page after checking it. There is no mid-month catch-up |
 | The Traditional IRA's engine will not start, saying `glide birth value must be YYYY-MM with a month 01-12` | The shipped `trad-ira.config` names the placeholder `YYYY-MM`, never your birth month, so the engine refuses rather than decide from a made-up age. Nothing is recorded | Name your birth year and month on the server ("Starting the Traditional IRA's engine in dry-run", step 2) |
 | `ira-exposure`. Alert: `<account>: order refused (ira-exposure)` (urgent), its text naming the exposure after the order and the limit; then `<account>: engine degraded (risk-limit-breached)`, which repeats until you acknowledge it | The risk gate refused a buy that would have left the account's holdings, valued at the previous close, above `max_exposure` (at most 1: an IRA never borrows). Nothing was sent for it. The account is Degraded on that instrument: no buy goes, and the instrument is frozen | Compare holdings, cash and net liquidation at IBKR with the refusal's figures (`journal-query refusals`). Follow `docs/runbooks/halted-account.md`; the way out is a fresh run you approve ([restart](restart.md)) |
 | `insufficient-cash`. Alert: `<account>: order refused (insufficient-cash)` (urgent), naming the buy's worst-case cost and the cash available; then `<account>: engine degraded (risk-limit-breached)`, repeating until acknowledged | The gate refused a buy whose worst-case cost (its shares at the limit price plus the fee allowance) exceeds the cash still available after the buys released before it. The planner already scales buys to fit the budget, so this means the cash changed between the plan and the check. Degraded on that instrument | Check cash at IBKR against the last account snapshot. Follow `docs/runbooks/halted-account.md` |
@@ -244,7 +267,7 @@ latest decision and any `missing-mark` refusal.
 | `rebalance-in-progress`. Alert `<account>: decision withheld (rebalance-in-progress)` (routine): last month's rebalance is still working | The month's decision is withheld and nothing more is sent until IBKR reports every order of the rebalance finished or you clear it. An order settled `--never-sent` never finishes, so it holds the next rebalance until you clear it ([paper trading](paper-trading.md), the row "The link stayed down past the end of the order's day") | `docs/runbooks/missed-rebalance.md`; [operator](operator.md), "A rebalance clearance" |
 | The sells finish but `journal-query orders` shows smaller buys than planned, or a buy recorded as skipped | The buys were scaled down to fit the cash; a buy left with no share is recorded as skipped | Nothing; the next month decides afresh |
 | `journal-query orders` shows a sell failed or was cancelled part-filled | The buys wait for every sell to finish, then are budgeted from the cash actually raised; nothing is ever borrowed | Check the order at IBKR |
-| Any other refusal: `<account>: order refused (order-count)`, `(order-size)`, `(price-band)`, `(missing-mark)`, `(sell-exceeds-holding)`, `(broker-holding)`, `(stale-broker-snapshot)`, `(undecided-order)` or `(kill-switch)` | Refused; the state that follows (Degraded, Halted or none) is in the hard-limits table above. Explained in [states-and-kill-switch](states-and-kill-switch.md), "What can go wrong" | `docs/runbooks/halted-account.md` |
+| Any other refusal: `<account>: order refused (order-count)`, `(order-size)`, `(price-band)`, `(sell-exceeds-holding)`, `(broker-holding)`, `(stale-broker-snapshot)`, `(undecided-order)` or `(kill-switch)` | Refused; the state that follows (Degraded, Halted or none) is in the hard-limits table above. Explained in [states-and-kill-switch](states-and-kill-switch.md), "What can go wrong" | `docs/runbooks/halted-account.md` |
 | A fresh run started while a rebalance was working | `operator approve` states the rebalance in progress in the approval, the engine checks it against the previous log, and the fresh run sends nothing for it and withholds every month as `rebalance-in-progress` until you clear it (ADR 0026, point 5) | `docs/runbooks/missed-rebalance.md`, "A restart mid-rebalance" |
 
 ## Starting the Traditional IRA's engine in dry-run

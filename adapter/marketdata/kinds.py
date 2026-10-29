@@ -32,7 +32,9 @@ MARK = ("market.mark.recorded", 2)                    # MarkRecordedEvidenceVers
 # the account snapshot with its cash, and each mark with its IBKR contract.
 ACCOUNT_SNAPSHOT_CASH = ("account.snapshot", 4)       # AccountSnapshotCashVersion
 MARK_CONTRACT = ("market.mark.recorded", 3)           # MarkRecordedContractVersion
-ADAPTER_KINDS = (ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT, BROKER_SNAPSHOT_V1, MARK, ACCOUNT_SNAPSHOT_CASH, MARK_CONTRACT)
+MARK_UNAVAILABLE = ("market.mark.unavailable", 1)     # MarkUnavailableSchemaVersion
+ADAPTER_KINDS = (ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT, BROKER_SNAPSHOT_V1, MARK, ACCOUNT_SNAPSHOT_CASH, MARK_CONTRACT,
+                 MARK_UNAVAILABLE)
 
 # The account snapshots that state an account's positions, which the data
 # job reads an IRA's holdings from (tidata.holdings): version 3, the one the

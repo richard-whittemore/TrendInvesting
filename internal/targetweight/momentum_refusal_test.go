@@ -209,22 +209,33 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f4", unknown, "never released")
 }
 
-func TestMomentumMissingMarkRefusesAndDegrades(t *testing.T) {
-	// No CCC mark at the January decision: its buy is refused and the account
-	// is Degraded with CCC in scope; AAA's buy, checked first, is released.
-	r := simulateMomentum(t, momentumOptions{noMark: map[string]string{"2025-01-31": "CCC"}, stopAfter: "2025-01-31"})
+// ADR 0026, amendment of 2026-10-29: one missing buy mark leaves
+// its allocation in cash and does not stop the next instrument's buy.
+func TestMomentumMissingMarkWithholdsOnlyItsPick(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{noMark: map[string]string{"2025-01-31": "AAA"}, stopAfter: "2025-01-31"})
 	refused := ofType(r.decisions, event.OrderRefusedEventType)
 	states := ofType(r.decisions, event.EngineStateEventType)
-	if len(released(t, r.decisions)) != 1 || len(refused) != 1 || len(states) != 1 {
-		t.Fatalf("%d released, %d refused, %d states", len(released(t, r.decisions)), len(refused), len(states))
+	buys := released(t, r.decisions)
+	if len(buys) != 1 || buys[0].InstrumentID != "CCC" || len(refused) != 1 || len(states) != 0 {
+		t.Fatalf("%d released, %d refused, %d states", len(buys), len(refused), len(states))
 	}
 	var p event.OrderRefusedPayload
 	decode(t, refused[0], &p)
-	if p.Reason != event.RefusedMissingMark || p.InstrumentID != "CCC" {
+	if p.Reason != event.RefusedMissingMark || p.InstrumentID != "AAA" {
 		t.Errorf("refusal: %+v", p)
 	}
-	if states[0].SchemaVersion != event.EngineStateScopedVersion || !strings.HasPrefix(states[0].ID, "engine-state:"+iraAccount+":tw-") {
-		t.Errorf("state %s at schema %d", states[0].ID, states[0].SchemaVersion)
+	var decision struct {
+		WithheldPicks []struct{ InstrumentID, Reason, Detail string } `json:"withheld_picks"`
+	}
+	decode(t, ofType(r.decisions, event.TargetsDecidedEventType)[0], &decision)
+	if len(decision.WithheldPicks) != 1 || decision.WithheldPicks[0].Reason != "missing-mark" || decision.WithheldPicks[0].Detail == "" {
+		t.Fatalf("withheld picks: %+v", decision.WithheldPicks)
+	}
+	baseline := simulateMomentum(t, momentumOptions{stopAfter: "2025-01-31"})
+	for _, buy := range released(t, baseline.decisions) {
+		if buy.InstrumentID == "CCC" && buy.Quantity != buys[0].Quantity {
+			t.Fatalf("withheld weight redistributed: %d vs %d", buys[0].Quantity, buy.Quantity)
+		}
 	}
 }
 
@@ -233,7 +244,7 @@ func TestMomentumMissingMarkRefusesAndDegrades(t *testing.T) {
 // point 5). The restarted run, given the recorded state, refuses every buy
 // of the January decision and releases nothing.
 func TestAMomentumRestartWhileDegradedStaysDegraded(t *testing.T) {
-	full := simulateMomentum(t, momentumOptions{noMark: map[string]string{"2025-01-31": "CCC"}, stopAfter: "2025-01-31"})
+	full := simulateMomentum(t, momentumOptions{brokerLast: 2, stopAfter: "2025-01-31"})
 	states := ofType(full.decisions, event.EngineStateEventType)
 	restarted := simulateMomentum(t, momentumOptions{recorded: states, stopAfter: "2025-01-31"})
 	if n := len(released(t, restarted.decisions)); n != 0 {
@@ -253,7 +264,7 @@ func TestAMomentumRestartWhileDegradedStaysDegraded(t *testing.T) {
 }
 
 func TestMomentumRecordedStateComesFirst(t *testing.T) {
-	full := simulateMomentum(t, momentumOptions{noMark: map[string]string{"2025-01-31": "CCC"}, stopAfter: "2025-01-31"})
+	full := simulateMomentum(t, momentumOptions{brokerLast: 2, stopAfter: "2025-01-31"})
 	state := ofType(full.decisions, event.EngineStateEventType)[0]
 	h, s := momentumHandler(t)
 	at := closeOf("2025-01-02")
