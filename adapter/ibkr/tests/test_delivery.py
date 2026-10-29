@@ -1917,12 +1917,14 @@ class StreamFolderRuleTests(unittest.TestCase):
     def test_the_delivered_kinds_are_one_table_for_both_readers(self):
         import snapshot
         from delivery import DELIVERED_KINDS, kinds
-        # The adapter's own inputs in a batch: the account snapshot, the
-        # broker snapshot (at either version a log may hold) and the mark.
+        # The adapter's own inputs in a batch: the account snapshot (Boost's
+        # version 3 or an IRA's 4), the broker snapshot (at either version a
+        # log may hold) and the mark (Boost's 2 or an IRA's 3, with its contract).
         self.assertEqual(set(DELIVERED_KINDS), set(kinds.KINDS) | {
             (snapshot.BROKER_SNAPSHOT_TYPE, 1), (snapshot.BROKER_SNAPSHOT_TYPE, snapshot.BROKER_SNAPSHOT_VERSION),
             (snapshot.ACCOUNT_SNAPSHOT_TYPE, snapshot.ACCOUNT_SNAPSHOT_VERSION),
-            (snapshot.MARK_TYPE, snapshot.MARK_VERSION)})
+            (snapshot.ACCOUNT_SNAPSHOT_TYPE, snapshot.ACCOUNT_SNAPSHOT_CASH_VERSION),
+            (snapshot.MARK_TYPE, snapshot.MARK_VERSION), (snapshot.MARK_TYPE, snapshot.MARK_CONTRACT_VERSION)})
         self.assertIs(kinds.DELIVERED_KINDS, DELIVERED_KINDS)
 
     def test_a_true_fresh_run_with_no_folder_is_still_told_to_run_the_warm_up(self):

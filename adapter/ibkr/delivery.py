@@ -123,8 +123,9 @@ SESSION_OPEN = clock_time(9, 30)
 # How a person settles a refused file (docs/manual/market-data.md, "What
 # happens to the file").
 SETTLE = ("with the adapter stopped, move the file out of the run's stream folder (keep it: it is evidence, never "
-          "edit it), run the data job again (sudo systemctl start ti-data.service), and start the adapter again "
-          "(sudo systemctl start ti-adapter-boost) (docs/manual/market-data.md, \"What happens to the file\")")
+          "edit it), run the data job again (sudo systemctl start ti-data.service, or ti-data@<instance>.service "
+          "for an IRA), and start the adapter again (sudo systemctl start ti-adapter-boost, or "
+          "ti-adapter@<instance> for an IRA) (docs/manual/market-data.md, \"What happens to the file\")")
 
 
 # The data job's calendar and table of the inputs it writes, loaded by path
@@ -732,28 +733,66 @@ def _session_of(name):
 
 
 def last_session(streams, folder=""):
-    """(close, closes) of a batch's last session: its close (an aware datetime) and each bar's official close.
+    """(close, closes) of a batch's last session: its close (an aware datetime) and each marked instrument's close.
 
     closes maps each instrument the last file delivers a bar for, in that
     session, to the bar's raw close: the price the backtest marks at, which
     the adapter states as the mark (the owner's decision of 2026-10-18; ADR
     0026 point 1, amended). A bar with no raw close that is a positive number
     is refused, as a file not as the data job writes it (StreamRefused).
+
+    A compact IRA stream (docs/manual/market-data.md, "A job for the IRAs")
+    carries bars only for SPY, IEF, SHY and the holdings; on a decision
+    session it carries each ranked member's close history instead, and the
+    momentum engine values a pick at that member's universe row close, the
+    same unadjusted close its bar would carry (internal/targetweight,
+    rankedMembers). Every order it plans needs a mark as of the close, or the
+    risk gate refuses it (missing-mark; ADR 0026 point 3), and a stock newly
+    picked has no bar. So each member with a close history ending at the last
+    session is marked too, at its row in that session's universe snapshot; a
+    member with its own bar keeps the bar's close (the engine checks the two
+    agree). A history whose member has no row in the session's universe is
+    refused (StreamRefused): the data job writes histories only for members
+    ranked from that universe. Boost's stream carries no history, so its
+    closes are its bars' alone, as before.
     """
     last = streams[-1]
-    closes = {}
+    path = os.path.join(folder, last.name)
+    closes, histories, universe = {}, [], None
     for envelope in last.envelopes:
         payload = envelope["payload"]
-        if (envelope["type"], envelope["schema_version"]) != kinds.BAR or _closed_session(payload) != last.session:
+        kind = (envelope["type"], envelope["schema_version"])
+        if kind == kinds.HISTORY and payload.get("session") == last.session.isoformat():
+            if not _is_text(payload.get("instrument_id")):
+                raise _refused(path, "its close history {} names no instrument".format(envelope["id"]))
+            histories.append(payload["instrument_id"])
+            continue
+        if kind == kinds.UNIVERSE and payload.get("session") == last.session.isoformat():
+            rows = payload.get("rows")
+            universe = {r.get("instrument_id"): r.get("close") for r in rows if isinstance(r, dict)} \
+                if isinstance(rows, list) else {}
+            continue
+        if kind != kinds.BAR or _closed_session(payload) != last.session:
             continue
         raw = payload.get("raw")
         price = raw.get("close") if isinstance(raw, dict) else None
-        if (not isinstance(price, (int, float)) or isinstance(price, bool) or not price > 0
-                or not _is_text(payload.get("instrument_id"))):
-            raise _refused(os.path.join(folder, last.name), "its bar {} carries no instrument and raw close the mark can be taken from".format(
+        if not _is_price(price) or not _is_text(payload.get("instrument_id")):
+            raise _refused(path, "its bar {} carries no instrument and raw close the mark can be taken from".format(
                 envelope["id"]))
         closes[payload["instrument_id"]] = price
+    for instrument in histories:
+        if instrument in closes:
+            continue
+        price = (universe or {}).get(instrument)
+        if not _is_price(price):
+            raise _refused(path, "its close history for {} ends at {}, but that session's universe snapshot gives it "
+                                 "no positive close the mark can be taken from".format(instrument, last.session))
+        closes[instrument] = price
     return nyse_calendar.session_close(last.session), closes
+
+
+def _is_price(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 
 
 def _derived(snapshot_id, event_type, instrument=""):

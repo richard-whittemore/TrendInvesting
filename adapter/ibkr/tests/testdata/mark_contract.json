@@ -1,0 +1,14 @@
+{
+  "instrument_id": "AAA",
+  "as_of": "2027-01-14T21:00:00Z",
+  "price": 52.5,
+  "source": "marketdata",
+  "broker_last": 52.41,
+  "broker_last_set": true,
+  "contract": {
+    "con_id": 900001,
+    "exchange": "SMART",
+    "primary_exchange": "NASDAQ",
+    "currency": "USD"
+  }
+}

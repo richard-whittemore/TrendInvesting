@@ -3,6 +3,7 @@ package targetweight_test
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
@@ -100,11 +101,56 @@ func TestAReadingStampedAtItsReadTimeWithholds(t *testing.T) {
 func TestBrokerSnapshotsAndMarksAreReadAtEveryVersionWritten(t *testing.T) {
 	h, s := configured(t)
 	at := sessionEnd(0)
-	mustRefuse(t, h, s.envelope(t, event.MarkRecordedEventType, 3, "m", at, event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: 100, Source: "marketdata"}), "schema version")
+	mustRefuse(t, h, s.envelope(t, event.MarkRecordedEventType, 4, "m", at, event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: 100, Source: "marketdata"}), "schema version")
 	mustRefuse(t, h, s.envelope(t, event.BrokerSnapshotEventType, 3, "b", at, event.BrokerSnapshotPayload{}), "schema version")
 	evidence := event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: 100, Source: "marketdata", BrokerLast: 101, BrokerLastSet: true}
 	mustRefuse(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, "m", at, evidence), "version 1")
 	mustApply(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedEvidenceVersion, "m", at, evidence))
+	mustRefuse(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedContractVersion, "m3", at.Add(time.Second), evidence), "contract")
+	evidence.AsOf = at.Add(time.Second)
+	evidence.Contract = &event.MarkContract{ConID: 756733, Exchange: "SMART", PrimaryExchange: "ARCA", Currency: "USD"}
+	mustRefuse(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedEvidenceVersion, "m2c", at.Add(time.Second), evidence), "version 3")
+	mustApply(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedContractVersion, "m3", at.Add(time.Second), evidence))
+}
+
+// TestAMarkWithItsContractIsBandedAsAVersion2Mark: the IRA's adapter writes
+// each mark at version 3, version 2 with the IBKR contract it resolved for
+// the instrument (ADR 0026 point 3), so a stock newly picked has a mark and a
+// contract before any order is planned. The price band reads it as version
+// 2: against IBKR's last price beside it when set, so the run decides as with
+// version-2 marks, and a last price at twice the mark refuses a checked buy.
+func TestAMarkWithItsContractIsBandedAsAVersion2Mark(t *testing.T) {
+	v2 := simulateMomentum(t, momentumOptions{brokerLast: 1})
+	v3 := simulateMomentum(t, momentumOptions{brokerLast: 1, contracts: true})
+	if len(released(t, v3.decisions)) == 0 || len(released(t, v3.decisions)) != len(released(t, v2.decisions)) {
+		t.Fatalf("released: %d with contract marks, %d with version-2 marks", len(released(t, v3.decisions)), len(released(t, v2.decisions)))
+	}
+	for _, p := range released(t, v3.decisions) {
+		if !p.Figures.MarkSet || p.Figures.MarkSource != event.MarkSourceBrokerLast {
+			t.Errorf("released %s: figures %+v, want the band against IBKR's last price", p.ClientOrderID, p.Figures)
+		}
+	}
+	far := simulateMomentum(t, momentumOptions{brokerLast: 2, contracts: true})
+	band := 0
+	for _, e := range ofType(far.decisions, event.OrderRefusedEventType) {
+		var p event.OrderRefusedPayload
+		decode(t, e, &p)
+		if p.Reason == event.RefusedPriceBand {
+			band++
+		}
+	}
+	if band == 0 {
+		t.Fatal("IBKR's last price at twice a version-3 mark refused no momentum order")
+	}
+}
+
+// contractID is an invented IBKR contract ID for a fixture instrument.
+func contractID(instrument string) int64 {
+	var id int64 = 900000
+	for _, r := range instrument {
+		id = id*31 + int64(r)
+	}
+	return id%1_000_000_000 + 1
 }
 
 // TestAMomentumOrdersPriceBandComparesIBKRsLastPriceToo: the band's rule is

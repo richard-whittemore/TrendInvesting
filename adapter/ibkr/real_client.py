@@ -109,6 +109,8 @@ UNSET_DOUBLE = sys.float_info.max
 
 # The request shape tws.TWSApi.place_order promises, attribute for attribute.
 CONTRACT_REQUEST_FIELDS = ("conId", "symbol", "secType", "currency", "exchange")
+# The shape of a contract lookup by name (tws.TWSApi.req_contract_details).
+LOOKUP_FIELDS = ("symbol", "secType", "currency", "exchange")
 ORDER_REQUEST_FIELDS = ("orderRef", "account", "action", "totalQuantity", "orderType", "lmtPrice", "tif",
                         "transmit")
 
@@ -300,6 +302,12 @@ def _forwarder_class():
         def tickSnapshotEnd(self, reqId):
             self._send("tick_snapshot_end", reqId)
 
+        def contractDetails(self, reqId, contractDetails):
+            self._send("contract_details", reqId, contractDetails)
+
+        def contractDetailsEnd(self, reqId):
+            self._send("contract_details_end", reqId)
+
     return Forwarder
 
 
@@ -487,6 +495,24 @@ class IbapiClient(TWSApi):
 
     def cancel_mkt_data(self, req_id):
         self._client.cancelMktData(req_id)
+
+    def req_contract_details(self, req_id, contract):
+        """IBKR's contracts for a name (snapshot.resolve_contracts): a US-dollar stock on SMART, by symbol, no conId.
+
+        The lookup shape is exactly symbol, secType, currency and exchange
+        (OrderShapeRefused otherwise); ibapi's Contract keeps its conId unset
+        (0), so IBKR matches by name and every match comes back.
+        """
+        values = _fields(contract, LOOKUP_FIELDS, "contract lookup")
+        if not _is_text(values["symbol"]):
+            raise OrderShapeRefused("the contract lookup names no symbol")
+        if (values["secType"], values["currency"], values["exchange"]) != (SEC_TYPE, CURRENCY, EXCHANGE):
+            raise OrderShapeRefused("the contract lookup is not for a {} {} contract on {}".format(
+                CURRENCY, SEC_TYPE, EXCHANGE))
+        lookup = Contract()
+        for name in LOOKUP_FIELDS:
+            _assign(lookup, name, values[name])
+        self._client.reqContractDetails(req_id, lookup)
 
     def connection_time(self):
         """IB Gateway's connection time for this session, as ibapi keeps it from the connect handshake

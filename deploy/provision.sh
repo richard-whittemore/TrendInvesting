@@ -689,6 +689,20 @@ CONF
     mv "$etc/adapters/boost.json.new" "$etc/adapters/boost.json"
     log "created $etc/adapters/boost.json (owner step: set paper mode before the paper test)"
   fi
+  # The Traditional IRA's adapter (ti-adapter@trad-ira): its own client ID
+  # (12), the account snapshot the momentum engine reads (version 4) and a
+  # contract and mark for every name it can decide (ADR 0026 points 2 and 3).
+  # Created once, never overwritten, as Boost's is.
+  if ! test -e "$etc/adapters/trad-ira.json"; then
+    if mac_mini; then
+      sed 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' "$here/etc/adapters/trad-ira.json.example" >"$etc/adapters/trad-ira.json.new"
+    else
+      cat "$here/etc/adapters/trad-ira.json.example" >"$etc/adapters/trad-ira.json.new"
+    fi
+    chmod 0644 "$etc/adapters/trad-ira.json.new"
+    mv "$etc/adapters/trad-ira.json.new" "$etc/adapters/trad-ira.json"
+    log "created $etc/adapters/trad-ira.json (dry-run, sending off)"
+  fi
 
   log "systemd units"
   # The reporter is one instance per engine (ti-reporter@<instance>); an
@@ -717,6 +731,11 @@ CONF
     if mac_mini && test "$(basename "$unit")" = ti-gateway.service; then continue; fi
     install -m 0644 "$unit" "$unit_dir/"
   done
+  # The Traditional IRA's Flex reader fires at its own staggered times, 15
+  # minutes after Boost's (docs/live-trading/lessons-2026-10.md L3): a drop-in
+  # for its instance of the timer, replaced on every run as the units are.
+  install -d -m 0755 "$unit_dir/ti-flex@trad-ira.timer.d"
+  install -m 0644 "$here/systemd/ti-flex@trad-ira.timer.d/stagger.conf" "$unit_dir/ti-flex@trad-ira.timer.d/"
   if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
     rm -f "$unit_dir/ti-gateway.service"
   fi
@@ -761,8 +780,10 @@ CONF
     # links outlive it, so each instance is disabled too (ADR 0027, the
     # restart model). Disabling stops nothing that is running.
     systemctl disable ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service
-    # The adapter is started by the owner too, after its engine; never enabled.
-    systemctl disable ti-adapter-boost.service
+    # The adapters are started by the owner too, each after its engine and,
+    # for an IRA, after its warm-up; never enabled: the engine is never
+    # started at boot, so an adapter started then would only fail.
+    systemctl disable ti-adapter-boost.service ti-adapter@trad-ira.service
     # The gateway starts only once the owner has filled
     # the login file; the unit's own check refuses an empty one. The data
     # step, the reporter and the dashboard fail, each with a message, until

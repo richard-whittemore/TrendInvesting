@@ -668,8 +668,9 @@ class ReadOnceTests(ReadOnceHarness):
         self.assert_set_aside(fixture("statement.xml"), "starting book")
 
     def test_a_snapshot_the_reader_does_not_know_sets_it_aside(self):
-        commit(self.engine, "s9", kind="account.snapshot", version=4, payload={"as_of": "2027-01-15T21:00:00Z"})
-        self.assert_set_aside(fixture("statement.xml"), "version 4")
+        # Versions 3 (Boost) and 4 (an IRA) are read; any other is refused, never read as absent.
+        commit(self.engine, "s9", kind="account.snapshot", version=5, payload={"as_of": "2027-01-15T21:00:00Z"})
+        self.assert_set_aside(fixture("statement.xml"), "version 5")
 
     def test_a_late_added_earlier_transfer_is_written_and_says_a_later_one_was_written_first(self):
         # Evening of the 14th: X at 10:00, +1000, written from the 13th's close (8000). Evening of the 15th IBKR also

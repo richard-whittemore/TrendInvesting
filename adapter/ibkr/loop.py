@@ -188,13 +188,13 @@ from relay import (LOG_INPUT, OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInva
                    run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
-from account import NET_LIQUIDATION, TOTAL_CASH
+from account import NET_LIQUIDATION, SETTLED_CASH, TOTAL_CASH
 from book_basis import cash_change, fills_since, holdings_after, previous_close
 from book_basis import cents as _cents
 import flex
 from snapshot import (ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, CASH, NET, POSITIONS, RECONCILIATION_TYPE, Record,
                       account_snapshot_record, broker_snapshot_record, close_valuation, mark_record, read_account,
-                      read_marks, reconciliation_record)
+                      read_marks, reconciliation_record, resolve_contracts)
 
 log = logging.getLogger("ibkr")
 
@@ -395,8 +395,10 @@ def _batch_run(entry):
 
 
 def _holdings(reading):
-    """What a trade or an order changes in an account read: its positions, open orders and total cash."""
-    return reading.positions, reading.open_orders, reading.balances.get(TOTAL_CASH)
+    """What a trade or an order changes in an account read: its positions, open orders, total cash and, for an IRA's
+    reading (account.account_tags), its settled cash, which a settlement moves too (ADR 0019: one cutoff). A Boost
+    reading holds no settled cash, so its comparison is unchanged."""
+    return reading.positions, reading.open_orders, reading.balances.get(TOTAL_CASH), reading.balances.get(SETTLED_CASH)
 
 
 def _next_entry(entries):
@@ -1036,6 +1038,7 @@ class AdapterLoop:
         unread = None
         summary = ""
         started = self._monotonic()
+        contracts = None
         for attempt in range(1, BROKER_SNAPSHOT_ATTEMPTS + 1):
             if unread is not None:
                 wait = SNAPSHOT_RETRY_WAITS[attempt - 2]
@@ -1050,12 +1053,18 @@ class AdapterLoop:
                 log.info("ibkr broker snapshot waits: an execution awaits its commission, so its fill is not "
                          "recorded yet")
                 return None
+            if self.config.resolve_contracts and contracts is None:
+                contracts = self._contracts(closes)
+                if contracts is None:
+                    return None
             before = self._activity()
             reading = read_account(self.conn)
             if self._unended(reading):
                 return None
             symbols = set(closes) | set(reading.positions)
             con_ids = {s: self.config.con_ids[s] for s in symbols if s in self.config.con_ids}
+            if contracts is not None:
+                con_ids.update({s: contracts[s].con_id for s in symbols if s in contracts})
             last_prices = read_marks(self.conn, con_ids)
             # Read again after the marks: a trade IBKR reports to another
             # client only (an order placed in its own app) still changes
@@ -1108,13 +1117,14 @@ class AdapterLoop:
             # and the marks were read.
             if stamp:
                 marks = {s: closes[s] for s in confirm.positions}
-                account = account_snapshot_record(confirm, stamp, net_liquidation=valuation)
+                account = account_snapshot_record(confirm, stamp, net_liquidation=valuation,
+                                                  version=self.config.account_snapshot_version)
                 snapshot = broker_snapshot_record(confirm, market_open(stamp), marks, close=stamp,
                                                   net_liquidation=valuation, cash_drift=drift,
                                                   unexplained_cash=unexplained)
             else:
                 marks = {s: last_prices[s] for s in confirm.positions if s in last_prices}
-                account = account_snapshot_record(confirm, confirm.as_of)
+                account = account_snapshot_record(confirm, confirm.as_of, version=self.config.account_snapshot_version)
                 snapshot = broker_snapshot_record(confirm, market_open(confirm.as_of), marks, why=why)
             if unverified:
                 log.warning("ibkr broker snapshot read_at=%s: the engine holds no book and the reading is not the "
@@ -1122,7 +1132,9 @@ class AdapterLoop:
                             "the engine halts on it (docs/manual/reconciliation.md)", _stamp(confirm.as_of))
             return PostCloseReading(
                 account=account, broker=snapshot,
-                marks=[mark_record(s, close, closes[s], MARK_SOURCE, last_prices.get(s)) for s in sorted(closes)],
+                marks=[mark_record(s, close, closes[s], MARK_SOURCE, last_prices.get(s),
+                                   contract=None if contracts is None else contracts[s])
+                       for s in sorted(closes) if contracts is None or s in contracts],
                 reading=confirm, unverified=unverified)
         if unread is not None:
             raise SnapshotRefused(
@@ -1133,6 +1145,28 @@ class AdapterLoop:
                 "(docs/manual/ibkr-adapter.md, \"What can go wrong\")".format(
                     BROKER_SNAPSHOT_ATTEMPTS, self._monotonic() - started, ", ".join(unread), summary))
         return None
+
+    def _contracts(self, closes):
+        """The IBKR contract of each instrument closes marks (snapshot.resolve_contracts), or None if the link went.
+
+        ADR 0026 point 3: the engine values every order it plans against a
+        mark as of the close, and a mark states the contract it is for. A
+        name IBKR does not resolve to exactly one US-dollar stock on SMART is
+        left out of the marks, each named in a warning with why, so the
+        engine refuses any order for it (missing-mark), never sizes it on a
+        guessed contract (docs/manual/ibkr-adapter.md, "Contracts and marks
+        for an IRA").
+        """
+        resolved = resolve_contracts(self.conn, sorted(closes), self.config.con_ids)
+        if resolved is None:
+            log.info("ibkr link went while contracts were resolved; the stream waits until it is reconciled")
+            return None
+        contracts, refused = resolved
+        log.info("ibkr contracts resolved=%d of %d", len(contracts), len(closes))
+        for symbol in sorted(refused):
+            log.warning("ibkr contract for %s not resolved, so it has no mark and the engine refuses any order for "
+                        "it (missing-mark): %s", symbol, refused[symbol])
+        return contracts
 
     def _broker_lists(self):
         """IBKR's open orders and executions for a broker snapshot: orders.BrokerOrders, "unread", or None to wait.

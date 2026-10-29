@@ -403,3 +403,16 @@ func TestRulesVersionDeclaresTheRecordedApprovalAcceptance(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheContractMark pins ADR 0016's same-rules-version
+// replay guarantee for market.mark.recorded version 3, the mark with the IBKR
+// contract the IRA's adapter resolved for it (ADR 0026 point 3), which rules
+// 1.27.0 refused: a journal holding one decides differently under 1.27.0, so
+// the build must not claim it.
+func TestRulesVersionDeclaresTheContractMark(t *testing.T) {
+	t.Parallel()
+
+	if targetweight.RulesVersion == "1.27.0" {
+		t.Fatalf("targetweight.RulesVersion = %q, want 1.28.0 or later once a version-3 mark is read", targetweight.RulesVersion)
+	}
+}

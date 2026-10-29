@@ -292,7 +292,13 @@ import (
 //     (strategy.run.approval-accepted; ADR 0027, note of 2026-10-28): the
 //     fact a restart reads the carried rebalance from, never recomputing it.
 //     A refused approval records nothing. Boost records none.
-const RulesVersion = "1.27.0"
+//   - 1.28.0 reads market.mark.recorded version 3, the IRA adapter's mark
+//     with the IBKR contract it resolved for the instrument (ADR 0026, point
+//     3), so a stock newly picked has a mark before any order is planned; its
+//     price band reads it as version 2, against IBKR's last price beside it
+//     when set. 1.27.0 refused it, so a journal holding one decides
+//     differently.
+const RulesVersion = "1.28.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -1047,14 +1053,14 @@ func (h *Handler) applyMark(in event.Envelope) error {
 
 // bandMark is the price the gate's price band compares a checked order's
 // reference price with, from a mark recorded at schema version, and the
-// source the order's figures name: IBKR's last price when a version-2 mark
-// carries one, so the band checks the reference price against a price of
+// source the order's figures name: IBKR's last price when a version-2 mark,
+// or a version-3 one (version 2 with its IBKR contract), carries one, so the band checks the reference price against a price of
 // its own, else the mark, the official close; a version-1 mark names no
 // source, so its figures keep their bytes. One rule for Boost's and
 // momentum's orders alike (ADR 0026 point 3, amended 2026-10-18).
 func bandMark(p event.MarkRecordedPayload, version uint32) (price float64, source string) {
 	switch {
-	case version != event.MarkRecordedEvidenceVersion:
+	case version == event.MarkRecordedSchemaVersion:
 		return p.Price, ""
 	case p.BrokerLastSet:
 		return p.BrokerLast, event.MarkSourceBrokerLast

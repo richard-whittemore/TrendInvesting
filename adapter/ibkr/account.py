@@ -30,6 +30,19 @@ NET_LIQUIDATION = "NetLiquidation"
 TOTAL_CASH = "TotalCashValue"
 EXCESS_LIQUIDITY = "ExcessLiquidity"
 SUMMARY_TAGS = (NET_LIQUIDATION, TOTAL_CASH, EXCESS_LIQUIDITY)
+# IBKR's settled cash ("Cash recognized at the time of settlement", TWS API
+# "Account Value Keys"; sent as a string in the account's base currency, as
+# every account value is, adapter/ibkr/tests/testdata/ibapi_shapes.json), what
+# an IRA's buys are budgeted from (ADR 0026 point 2, "Budget"). Read only
+# for a configuration whose engine reads account.snapshot version 4
+# (config.account_snapshot_version): Boost's reading is unchanged.
+SETTLED_CASH = "SettledCash"
+CASH_TAGS = SUMMARY_TAGS + (SETTLED_CASH,)
+
+
+def account_tags(config):
+    """The balance keys a reading for config needs: SUMMARY_TAGS, and SettledCash for account.snapshot version 4."""
+    return CASH_TAGS if getattr(config, "account_snapshot_version", 3) == 4 else SUMMARY_TAGS
 # What IBKR documents of these keys (TWS API, EWrapper::updateAccountValue
 # and "Account Updates"; ibapi 10.51.01): each is the account's total ("no
 # suffix"; the -S and -C keys are its security and commodity segments, and
@@ -103,7 +116,7 @@ class AccountValues:
     - before the note, every account-values callback (a row, an end, IBKR's
       2100) is an earlier subscription's and is discarded;
     - between the note and the end, an updateAccountValue row for the
-      account's balance keys (SUMMARY_TAGS) or cash ledger (CASH_LEDGER) is
+      account's balance keys (tags: account_tags) or cash ledger (CASH_LEDGER) is
       the download's, other keys and accounts are skipped, and an error
       under no request ID that is not a notice (NOTICE_CODES) fails it;
     - after the end the download is frozen: later rows are IBKR's
@@ -120,9 +133,11 @@ class AccountValues:
     cannot be read is invalid, never guessed.
     """
 
-    def __init__(self, account, ticket=None):
+    def __init__(self, account, ticket=None, tags=SUMMARY_TAGS):
         self.account = account
         self.ticket = ticket
+        # The balance keys this download takes (account_tags).
+        self.tags = tuple(tags)
         self.open = ticket is None
         self.ended = False
         self.error = None  # (code, message)
@@ -153,7 +168,7 @@ class AccountValues:
             return is_value or is_end
         if is_value:
             key, value, currency, row_account = args
-            if row_account == self.account and (key in SUMMARY_TAGS or key in CASH_LEDGER):
+            if row_account == self.account and (key in self.tags or key in CASH_LEDGER):
                 self._add(key, value, currency)
             return True
         if is_end:
@@ -200,7 +215,8 @@ class AccountValues:
         is in neither: it is missing.
         """
         balances, invalid = {}, set()
-        for tag in (NET_LIQUIDATION, EXCESS_LIQUIDITY, TOTAL_CASH):
+        extra = tuple(t for t in self.tags if t not in SUMMARY_TAGS)
+        for tag in (NET_LIQUIDATION, EXCESS_LIQUIDITY, TOTAL_CASH) + extra:
             rows = self._rows.get(tag)
             if tag in self._invalid:
                 invalid.add(tag)
@@ -224,6 +240,12 @@ class AccountValues:
             if foreign or any(key in self._invalid for key in CASH_LEDGER):
                 del balances[TOTAL_CASH]
                 invalid.add(TOTAL_CASH)
+                # Settled cash is a cash total too: with cash held in another
+                # currency, or a ledger row that cannot be read, it is no
+                # more readable than the total (ADR 0019).
+                if SETTLED_CASH in balances:
+                    del balances[SETTLED_CASH]
+                    invalid.add(SETTLED_CASH)
         return balances, invalid
 
 
@@ -233,7 +255,7 @@ def ask_account_values(conn, account):
     The caller settles the link first (Connection.settle_account_values),
     before it asks for anything else.
     """
-    return AccountValues(account, conn.ask_account_values(account))
+    return AccountValues(account, conn.ask_account_values(account), account_tags(conn.config))
 
 
 def end_account_values(conn, account, values):

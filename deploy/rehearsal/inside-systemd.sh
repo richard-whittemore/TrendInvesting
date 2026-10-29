@@ -24,7 +24,7 @@ set +x
 
 fail() {
   echo "REHEARSAL FAIL: $*" >&2
-  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u ti-adapter-boost -u ti-data -u 'ti-data@*' -u ti-warmup -u ti-warmup-drill -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
+  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u ti-adapter-boost -u 'ti-adapter@*' -u ti-data -u 'ti-data@*' -u ti-warmup -u ti-warmup-drill -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
   exit 1
 }
 pass() { echo "REHEARSAL ok: $*"; }
@@ -71,7 +71,7 @@ test -z "$(on_disk "$marker")" || fail "the migrated secret is on disk: $(on_dis
 # Every unit that loads a secret, installed as provision.sh installs it, with
 # what its Condition= lines want in place (stand-ins), so that only the
 # locked secrets stand in its way.
-for u in ti-gateway.service ti-engine@.service ti-adapter-boost.service ti-data.service ti-data@.service ti-reporter@.service ti-flex@.service ti-unit-failed@.service; do
+for u in ti-gateway.service ti-engine@.service ti-adapter-boost.service ti-adapter@.service ti-data.service ti-data@.service ti-reporter@.service ti-flex@.service ti-unit-failed@.service; do
   cp "/deploy/systemd/$u" /etc/systemd/system/
 done
 install -D -m 0755 /dist/ti-engine /opt/trend-investing/bin/ti-engine
@@ -82,6 +82,7 @@ install -D -m 0644 /dev/null /opt/trend-investing/twsapi/INSTALLED
 install -D -m 0644 /dev/null /opt/trend-investing/adapter/adapter/ibkr/cli.py
 install -D -m 0644 /dev/null /opt/trend-investing/adapter/adapter/ibkr/flex.py
 install -D -m 0644 /deploy/etc/adapters/boost.json.example /etc/trend-investing/adapters/boost.json
+install -D -m 0644 /deploy/etc/adapters/trad-ira.json.example /etc/trend-investing/adapters/trad-ira.json
 systemctl daemon-reload
 # refused UNIT FILE: systemctl start UNIT fails on its assertion of the
 # decrypted FILE ("Assertion failed on job for UNIT", and in its journal
@@ -102,12 +103,14 @@ refused() {
 refused ti-gateway.service ibkr-login.env
 refused ti-engine@boost.service secrets.env
 refused ti-adapter-boost.service accounts/boost.env
+# A template's unit file names its instance's file by %i, as systemctl cat shows it.
+refused ti-adapter@trad-ira.service 'accounts/%i.env'
 refused ti-data.service secrets.env
 refused ti-data@trad-ira.service secrets.env
 refused ti-reporter@boost.service secrets.env
 refused ti-flex@trad-ira.service secrets.env
 refused ti-unit-failed@ti-engine@boost.service.service secrets.env
-pass "with the secrets locked, systemd refuses to start the Gateway, the engine, the adapter, the data job and its IRA instance, the reporter, the Flex reader and the failed-unit page, each on its assertion of the decrypted file it loads"
+pass "with the secrets locked, systemd refuses to start the Gateway, the engine, the adapters (Boost's and the IRA's template instance), the data job and its IRA instance, the reporter, the Flex reader and the failed-unit page, each on its assertion of the decrypted file it loads"
 
 # A timer whose firing is refused keeps firing: the reporter's timer fires
 # every 5 minutes, so a stand-in timer every 2 seconds fires a unit with the

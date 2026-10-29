@@ -208,6 +208,10 @@ nyse_calendar = marketdata_module("nyse_calendar")
 CASH_MOVEMENT = ("account.cash-movement", 2)   # internal/event CashMovementTransferVersion
 COST = ("account.cost", 1)                      # internal/event CostSchemaVersion
 ACCOUNT_SNAPSHOT = ("account.snapshot", 3)      # internal/event AccountSnapshotPositionsVersion
+# The account snapshots whose net liquidation the reader takes the equity before a transfer from: Boost's version 3
+# and an IRA's version 4 (AccountSnapshotCashVersion), version 3's fields with the cash beside them (ADR 0026 point 2).
+# Any other version is refused, never read as if absent (ADR 0015).
+ACCOUNT_SNAPSHOT_VERSIONS = (3, 4)
 FIRST_RUN_APPROVAL_VERSIONS = (3, 4, 5, 6)      # the operator.run.approved versions that state the starting book
 # internal/event EquityBeforeNextSnapshotLessAmount and EquityBeforeSameDaySnapshotLessAmount.
 NEXT_SNAPSHOT_LESS_AMOUNT = "next-snapshot-less-amount"
@@ -829,11 +833,11 @@ def read_chain(engine_log_path):
                     first = (path, envelope)
                 if envelope["type"] != ACCOUNT_SNAPSHOT[0]:
                     continue
-                if envelope["schema_version"] != ACCOUNT_SNAPSHOT[1]:
+                if envelope["schema_version"] not in ACCOUNT_SNAPSHOT_VERSIONS:
                     raise StatementRefused("the account snapshot {} in {} is at version {}, which this reader does not "
-                                           "read (it reads version {})".format(envelope["id"], path,
-                                                                               envelope["schema_version"],
-                                                                               ACCOUNT_SNAPSHOT[1]))
+                                           "read (it reads versions {})".format(
+                                               envelope["id"], path, envelope["schema_version"],
+                                               " and ".join(map(str, ACCOUNT_SNAPSHOT_VERSIONS))))
                 payload = envelope["payload"]
                 as_of = _parse_stamp(payload.get("as_of")) if isinstance(payload, dict) else None
                 value = payload.get("net_liquidation") if isinstance(payload, dict) else None

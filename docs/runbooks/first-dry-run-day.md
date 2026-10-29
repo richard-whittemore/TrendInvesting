@@ -763,3 +763,338 @@ After a recovery, read the new run's name for `run-2026-10-24` in the two paths 
 - If the file is not there by 08:30 Tuesday: `sudo journalctl -u
   ti-data.service -n 20`, then `sudo systemctl start ti-data.service` once
   the cause is gone.
+
+## The Traditional IRA: its engine, warm-up, adapter and same-day probe
+
+*After Boost's day is running. Dry-run only: the IRA's adapter, like
+Boost's, sends nothing to IBKR, ever.*
+
+The Traditional IRA's momentum engine needs four things running, in this
+order, and the order matters (`docs/manual/market-data.md`, "A job for the
+IRAs"): **the engine** (its durable log is the run's identity), then **the
+one-time warm-up** of the IRA's data job (it reads that log and writes the
+run's stream folder), then **the IRA's adapter**, `ti-adapter@trad-ira`
+(client ID 12; it refuses to start until the stream folder exists), then
+**the daily firings** (`ti-data@trad-ira.timer`, already enabled by
+provisioning, and the Flex reader `ti-flex@trad-ira.timer`). Install first, from
+the checkout (each is an explicit step; never a timer's doing):
+`sudo deploy/provision.sh services` (the adapter template
+`ti-adapter@.service`, `/etc/trend-investing/adapters/trad-ira.json` once,
+the Flex reader's staggered times), `sudo deploy/provision.sh adapter` (the
+adapter's code) and the engine and reporter binaries built on the Mac
+(`sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine`
+and the same for `ti-reporter`). Install binaries at :01 to :03 past a
+5-minute mark (the reporter fires every 5 minutes) or with
+`ti-reporter@boost.timer` stopped; a running Boost engine is not touched by
+a new binary until it is next started.
+
+Every block below except the warm-up is run by `deploy/rehearse.sh` as
+written, as for Boost's steps. The warm-up block is not: the rehearsal's
+container has no Massive, sector sources or two years of recordings, so a
+stand-in writes the run's first file there (`deploy/rehearsal/ira-stream.py`),
+and the warm-up command itself is rehearsed on its own, on synthetic
+recordings (`deploy/rehearsal/inside.sh`).
+
+### I-0. Where the server stands
+
+<!-- rehearsed: ira-preflight -->
+```sh
+( set -euo pipefail
+sudo ti-secrets status | grep -E '^accounts/trad-ira\.env'
+sudo grep -c '^IBKR_ACCOUNT_TRAD_IRA=DU' /run/trend-investing/secrets/accounts/trad-ira.env
+test -f /etc/systemd/system/ti-adapter@.service || { echo "STOP: the IRA adapter's unit is not installed: run sudo deploy/provision.sh services"; exit 1; }
+echo ira-adapter-unit-installed
+grep -E '"(client_id|account_snapshot_version|resolve_contracts)"' /etc/trend-investing/adapters/trad-ira.json
+grep -E '^TI_ADAPTER_(CLIENT_ID|ACCOUNT_KEY)=' /etc/trend-investing/engines/trad-ira.env
+sudo test ! -e /var/lib/trend-investing/engines/trad-ira/run.env || { echo "STOP: the IRA's run.env already exists: this is not its first start"; exit 1; }
+echo no-ira-run-env
+)
+```
+
+<!-- expect: ira-preflight -->
+```text
+accounts/trad-ira.env    encrypted, unlocked
+1
+ira-adapter-unit-installed
+  "client_id": 12,
+  "account_snapshot_version": 4,
+  "resolve_contracts": true
+TI_ADAPTER_CLIENT_ID=12
+TI_ADAPTER_ACCOUNT_KEY=IBKR_ACCOUNT_TRAD_IRA
+no-ira-run-env
+```
+
+If the `1` is a `0`, put the IRA's paper account number in its own file:
+`sudo ti-secrets edit accounts/trad-ira.env` (`IBKR_ACCOUNT_TRAD_IRA=DU...`,
+no quotes, no spaces). It goes there and nowhere else: never in the
+repository, a chat or a ticket (`docs/live-trading/lessons-2026-10.md` L12).
+
+### I-1. Name the account and your birth month in the IRA's configuration
+
+The shipped `trad-ira.config` names the placeholder account `trad-ira` and the
+placeholder birth `YYYY-MM` (the glide path's age; the engine refuses to
+start on the placeholder). Replace `1975-06` below with your year and month
+of birth before you paste the block. As in step 1, the account number is
+read from the unlocked file and never printed; it is then in
+`/etc/trend-investing/engines/trad-ira.config` on the server only.
+
+<!-- rehearsed: ira-account -->
+```sh
+sudo bash -eu <<'EOF2'
+config=/etc/trend-investing/engines/trad-ira.config
+birth=1975-06
+account=$(sed -n 's/^IBKR_ACCOUNT_TRAD_IRA=//p' /run/trend-investing/secrets/accounts/trad-ira.env)
+if ! printf '%s\n' "$account" | grep -qE '^DU[A-Z0-9]{5,9}$' || ! printf '%s\n' "$account" | grep -q '[0-9]'; then
+  echo "STOP: accounts/trad-ira.env has no IBKR_ACCOUNT_TRAD_IRA=DU... line."
+  exit 1
+fi
+printf '%s\n' "$birth" | grep -qE '^(19|20)[0-9]{2}-(0[1-9]|1[0-2])$' || { echo "STOP: birth is not YYYY-MM."; exit 1; }
+current=$(sed -n 's/^ *"account_id": *"\([^"]*\)".*/\1/p' "$config")
+if [ "$current" = trad-ira ]; then
+  sed -i "s/\"account_id\": \"trad-ira\"/\"account_id\": \"$account\"/" "$config"
+elif [ "$current" != "$account" ]; then
+  echo "STOP: trad-ira.config already names a different account than accounts/trad-ira.env."
+  exit 1
+fi
+sed -i "s/\"birth\": \"YYYY-MM\"/\"birth\": \"$birth\"/" "$config"
+[ "$(sed -n 's/^ *"account_id": *"\([^"]*\)".*/\1/p' "$config")" = "$account" ] || { echo "STOP: the account was not named."; exit 1; }
+echo account-named
+grep -c '"birth": "YYYY-MM"' "$config" || true
+grep -c '"mode": "dry-run"' "$config"
+EOF2
+```
+
+<!-- expect: ira-account -->
+```text
+account-named
+0
+1
+```
+
+### I-2. Approve the IRA's first run with its starting book
+
+In IBKR, read the IRA paper account's holdings and its total cash, and use
+them here exactly as in step 2 (`-positions ""` only when it holds nothing).
+`-strategy momentum` records the IRA's approval.
+
+<!-- rehearsed: ira-approve -->
+```sh
+( set -euo pipefail
+cash=100000.00
+account=$(sudo sed -n 's/^IBKR_ACCOUNT_TRAD_IRA=//p' /run/trend-investing/secrets/accounts/trad-ira.env)
+sudo -u ti-trader operator approve -first-run -strategy momentum -account "$account" -by owner -positions "" -cash "$cash" -currency USD -out /var/lib/trend-investing/engines/trad-ira/first-run-approval.json
+)
+```
+
+<!-- expect: ira-approve -->
+```text
+wrote /var/lib/trend-investing/engines/trad-ira/first-run-approval.json: start the first run with -approval /var/lib/trend-investing/engines/trad-ira/first-run-approval.json (docs/runbooks/first-paper-order.md)
+```
+
+### I-3. The run file
+
+`TI_AS_OF` is the close of the first month-end the engine decides; every
+session before it only warms the histories. `2026-11-30T21:00:00Z` is
+Monday 30 November's 16:00 close in New York (standard time, so 21:00 UTC):
+the last session of November, decided from the reading the adapter takes on
+the morning of Tuesday 1 December. To decide October's month-end instead,
+use `2026-10-30T20:00:00Z` (Friday 30 October, still daylight time), decided
+the morning of Monday 2 November. Name the run after the day you start it.
+
+<!-- rehearsed: ira-run-env -->
+```sh
+( set -euo pipefail
+sudo -u ti-trader tee /var/lib/trend-investing/engines/trad-ira/run.env >/dev/null <<'EOF2'
+TI_RUN=run-ira-2026-10-29
+TI_AS_OF=2026-11-30T21:00:00Z
+TI_RESTART_ARGS=-approval /var/lib/trend-investing/engines/trad-ira/first-run-approval.json
+EOF2
+sudo cat /var/lib/trend-investing/engines/trad-ira/run.env
+)
+```
+
+<!-- expect: ira-run-env -->
+```text
+TI_RUN=run-ira-2026-10-29
+TI_AS_OF=2026-11-30T21:00:00Z
+TI_RESTART_ARGS=-approval /var/lib/trend-investing/engines/trad-ira/first-run-approval.json
+```
+
+### I-4. Start the IRA's engine
+
+<!-- rehearsed: ira-engine -->
+```sh
+( set -euo pipefail
+sudo systemctl start ti-engine@trad-ira
+sleep 3
+systemctl is-active ti-engine@trad-ira
+sudo journalctl -u ti-engine@trad-ira -n 3 --no-pager -o cat
+sudo ls /var/lib/trend-investing/engines/trad-ira/
+)
+```
+
+<!-- expect: ira-engine -->
+```text
+active
+~ Started ti-engine@trad-ira\.service
+listening on /run/ti-engine-trad-ira/engine.sock
+run-ira-2026-10-29.log
+```
+
+### I-5. The IRA's one-time warm-up (not rehearsed here; see above)
+
+After the engine and before the adapter. It records what Boost's warm-up has
+not, ranks the universe with the Go ranker and writes the run's first file;
+`docs/manual/market-data.md`, "A job for the IRAs", "The one-time warm-up",
+gives what it does and how long it takes. Then wait for it as for Boost's
+(`sudo journalctl -fu ti-warmup-ira` until `Deactivated successfully`):
+
+```sh
+sudo systemd-run --unit=ti-warmup-ira --collect -p User=ti-trader -p Group=ti-trader -p RuntimeMaxSec=4h \
+  -p LoadCredential=secrets:/run/trend-investing/secrets/secrets.env \
+  /opt/trend-investing/bin/ti-data --engine momentum --instance trad-ira \
+  --ranker /opt/trend-investing/bin/universe-rank --data /var/lib/trend-investing/data \
+  --config /etc/trend-investing/engines/trad-ira.config \
+  --engine-log /var/lib/trend-investing/engines/trad-ira/run-ira-2026-10-29.log \
+  --backfill-from 2025-01-02
+```
+
+The last line of its journal is the file it wrote:
+`/var/lib/trend-investing/data/streams/trad-ira/run-ira-2026-10-29/trad-ira-<last session>.jsonl`.
+
+### I-6. Start the IRA's adapter, in dry-run
+
+`ti-adapter@trad-ira` connects with client ID 12 (Boost's is 11, on the same
+Gateway), reads the account's positions and balances, its settled cash
+among them, compares them with the book you approved, and delivers the
+warm-up. The block waits for the warm-up's last session to reach the engine.
+
+<!-- rehearsed: ira-adapter -->
+```sh
+( set -euo pipefail
+sudo grep -E '"(client_id|mode|paper_sending_enabled|account_snapshot_version|resolve_contracts)"' /etc/trend-investing/adapters/trad-ira.json
+run=$(sudo sed -n 's/^TI_RUN=//p' /var/lib/trend-investing/engines/trad-ira/run.env)
+last=$(sudo ls /var/lib/trend-investing/data/streams/trad-ira/"$run"/ | grep '^trad-ira-.*\.jsonl$' | tail -n 1)
+test -n "$last" || { echo "STOP: no stream file yet: run the warm-up (I-5) first"; exit 1; }
+session=${last#trad-ira-}
+session=${session%.jsonl}
+sudo systemctl start ti-adapter@trad-ira
+invocation=$(systemctl show -p InvocationID --value ti-adapter@trad-ira)
+ready=0
+for _ in $(seq 60); do
+  seen=$(sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat || true)
+  if grep -q "session-closed:$session" <<<"$seen"; then ready=1; break; fi
+  sleep 5
+done
+if [ "$ready" != 1 ]; then
+  echo "NOT READY: this start of the IRA's adapter has not delivered the warm-up after 5 minutes; read sudo journalctl -u ti-adapter@trad-ira -n 30"
+  exit 1
+fi
+systemctl is-active ti-adapter@trad-ira
+grep -E 'adapter starting|link connected|reconciled|contracts resolved|stream queued|stopped|refused' <<<"$seen"
+sudo grep -c '"state":"halted"' /var/lib/trend-investing/engines/trad-ira/"$run".log || true
+)
+```
+
+<!-- expect: ira-adapter -->
+```text
+  "client_id": 12,
+  "mode": "dry-run",
+  "paper_sending_enabled": false,
+  "account_snapshot_version": 4,
+  "resolve_contracts": true
+active
+~ ibkr adapter starting mode=dry-run client_id=12 sending=off
+~ ibkr link connected
+~ ibkr reconciled client_id=12 positions=[0-9]+ open_orders=0 executions=0
+~ ibkr contracts resolved=[0-9]+ of [0-9]+
+~ ibkr stream queued run=run-ira-2026-10-29 files=trad-ira-[0-9-]+\.jsonl inputs=[0-9]+
+0
+```
+
+`halted` must stay `0`; a `1` means the book you approved is not the one the
+adapter read: follow "If the engine halts on its first reading" with the
+IRA's names (`ti-engine@trad-ira`, `ti-adapter@trad-ira`, the folder
+`engines/trad-ira`, the warm-up of I-5). A `contract for <name> not
+resolved` warning in its journal is not a stop: that name gets no mark, so
+the engine refuses any order for it (`missing-mark`) rather than size it on
+a guessed contract (`docs/manual/ibkr-adapter.md`, "Contracts and marks for
+an IRA").
+
+### I-7. The same-day probe
+
+Run it right after I-6, the same day (`docs/live-trading/lessons-2026-10.md`
+L10), and after every later install of the adapter. It reads this start's
+journal and the engine's log, talks to nothing, and prints one line per
+check; it prints no account number.
+
+<!-- rehearsed: ira-probe -->
+```sh
+( set -euo pipefail
+run=$(sudo sed -n 's/^TI_RUN=//p' /var/lib/trend-investing/engines/trad-ira/run.env)
+invocation=$(systemctl show -p InvocationID --value ti-adapter@trad-ira)
+sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat >/tmp/ti-adapter-trad-ira.journal
+cd /opt/trend-investing/adapter
+sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr probe --journal /tmp/ti-adapter-trad-ira.journal \
+  --engine-log /var/lib/trend-investing/engines/trad-ira/"$run".log --client-id 12 --snapshot-version 4
+)
+```
+
+<!-- expect: ira-probe -->
+```text
+~ probe: ok the adapter started: mode=dry-run client_id=12 sending=off ibapi=
+~ probe: ok connected to IB Gateway as client_id=12
+~ probe: ok reconciled client_id=12: positions=[0-9]+ open_orders=0 executions=0
+~ probe: ok queued run=run-ira-2026-10-29 files=trad-ira-[0-9-]+\.jsonl
+~ probe: ok account snapshot version 4 as of .*settled_cash .*total_cash
+~ probe: ok reconciliation journalled
+~ probe: ok [0-9]+ mark\(s\) at version 3
+probe: ok no order sent and none refused for a missing mark
+~ probe: (no decision yet|latest decision)
+probe: passed
+```
+
+Paste its output into the ticket's testing evidence as it stands (it carries
+no account number). A `probe: FAIL` line says what is missing; the last line
+then reads `probe: FAILED, <n> check(s)` and the command exits 1. The
+manual's "The same-day probe" says what each check means and what to do.
+
+### I-8. The daily firings and the Flex reader
+
+`ti-data@trad-ira.timer` is enabled by provisioning; once `run.env` exists its
+06:15, 07:15 and 08:15 firings write each session's file and the adapter,
+still running, delivers it behind that morning's reading. That reading
+stands for the close only with the IRA's own executions proof (ADR 0019,
+amended 2026-10-27), written by its own Flex reader, which fires at 05:45,
+06:45 and 07:45, after Boost's (the drop-in provisioning installs). Turn it
+on once, as for Boost ("Monday after the close"), with the IRA's names:
+
+```sh
+sudo systemctl start ti-flex@trad-ira
+sudo journalctl -u ti-flex@trad-ira -n 20 --no-pager
+sudo cat /var/lib/trend-investing/flex/trad-ira/executions.json
+sudo systemctl enable --now ti-flex@trad-ira.timer
+systemctl list-timers ti-flex@trad-ira.timer --no-pager
+```
+
+The journal says it read, `executions.json` shows `"state": "read"`, and the
+timer's next firing is at 05:45, 06:45 or 07:45 New York.
+
+### The first IRA month-end, in dry-run (the slice's acceptance)
+
+For `TI_AS_OF=2026-11-30T21:00:00Z`:
+
+| When (New York) | What happens | What to look at |
+|---|---|---|
+| Mon 30 Nov 16:00 | The month's last session closes | nothing |
+| Tue 1 Dec 05:45 | `ti-flex@trad-ira` writes the executions proof | `sudo cat /var/lib/trend-investing/flex/trad-ira/executions.json` shows `"state": "read"` |
+| Tue 1 Dec 06:15 | `ti-data@trad-ira` writes `trad-ira-2026-11-30.jsonl`: SPY, IEF, SHY and the holdings' bars, the month-end universe and the 500 ranked stocks' histories | `sudo journalctl -u ti-data@trad-ira -n 5 --no-pager`, last line the file |
+| Tue 1 Dec, minutes after | The adapter reads the account once, resolves the contract of every name it will mark (each ranked stock, SPY, IEF, SHY and the holdings: about 500 names, in batches of 40 a second apart), asks IBKR's last price for each in batches of 50, and delivers the file with a mark and contract for each, before the session's close | `sudo journalctl -u ti-adapter@trad-ira -n 40 --no-pager`: `contracts resolved=N of M`, then `stream queued`; each `contract for X not resolved` names a stock that gets no mark |
+| Then | The engine decides the month, or withholds it with a stated reason; a dry-run records a synthetic cancel for each order it releases, so the buy phase is planned at the same close | the probe (I-7) again: its `latest decision` line |
+
+The slice is accepted when that first month-end is decided, or withheld
+with a stated reason (`stale-account-snapshot` without the proof by 09:00,
+`missing-universe`, `histories-missing`, and so on;
+`docs/manual/momentum.md`). The IRA's reporter and dashboard view are not
+part of this slice, so no page comes for a withheld IRA month yet: run the
+probe on the morning of 1 December and record its output.

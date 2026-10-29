@@ -15,6 +15,7 @@ _FIELDS = (
     "heartbeat_interval", "heartbeat_timeout", "restore_timeout",
     "backoff_initial", "backoff_max", "max_connect_attempts", "commission_wait",
     "con_ids", "paper_sending_enabled", "mark_timeout",
+    "account_snapshot_version", "resolve_contracts",
 )
 # The recommended mark_timeout, as the deployed example sets it: IBKR ends a
 # market-data snapshot only at the end of its 11-second snapshot window (TWS
@@ -25,7 +26,15 @@ MARK_TIMEOUT = 15
 # The keys a configuration may leave out, with the value an omission means.
 # paper_sending_enabled is the switch that lets the real IBKR client place
 # an order (real_client.IbapiClient.can_place_orders): left out, it is off.
-_OPTIONAL = {"paper_sending_enabled": False}
+# account_snapshot_version and resolve_contracts are the momentum engine's
+# inputs (ADR 0026 points 2 and 3): left out, they are Boost's, so a Boost
+# configuration written before them reads exactly as it did.
+_OPTIONAL = {"paper_sending_enabled": False, "account_snapshot_version": 3, "resolve_contracts": False}
+# The account.snapshot versions the adapter writes: 3, positions and net
+# liquidation, which Boost reads (internal/event AccountSnapshotPositionsVersion),
+# and 4, with IBKR's settled and total cash, which the momentum engine reads
+# (AccountSnapshotCashVersion). Each engine refuses the other's (ADR 0015).
+ACCOUNT_SNAPSHOT_VERSIONS = (3, 4)
 
 # Any key containing one of these is refused outright. The adapter never
 # handles the IBKR password: IBC holds it on the server (ADR 0025 point 6).
@@ -59,6 +68,15 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     from request_timeout, which bounds the account reads: IBKR ends a
     snapshot only at the end of its 11-second window, so MARK_TIMEOUT (15
     seconds) is the recommended value; a value at or under 11 seconds can give no mark for a price IBKR did send.
+    account_snapshot_version is the account.snapshot version the engine
+    reads (ACCOUNT_SNAPSHOT_VERSIONS): 3 for Boost, 4 for an IRA's momentum
+    engine, which then needs IBKR's SettledCash as well as its TotalCashValue
+    in every reading (snapshot.read_account). resolve_contracts, for an IRA,
+    resolves each instrument the batch marks to its IBKR contract by name
+    (snapshot.resolve_contracts) and states it with the mark, so a stock
+    newly picked has a contract and a mark before any order is planned (ADR
+    0026 point 3); a name that does not resolve to one contract gets no mark.
+    Both are optional, Boost's values when left out, and strictly typed.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -123,6 +141,12 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
         # Strictly a JSON true or false: a 1 or "yes" is a typo, not a decision.
         if not isinstance(self.paper_sending_enabled, bool):
             raise ConfigError("paper_sending_enabled must be true or false")
+        if (not _is_int(self.account_snapshot_version)
+                or self.account_snapshot_version not in ACCOUNT_SNAPSHOT_VERSIONS):
+            raise ConfigError("account_snapshot_version must be one of {}".format(
+                ", ".join(map(str, ACCOUNT_SNAPSHOT_VERSIONS))))
+        if not isinstance(self.resolve_contracts, bool):
+            raise ConfigError("resolve_contracts must be true or false")
         if self.paper_sending_enabled and self.mode != "paper":
             raise ConfigError("paper_sending_enabled is set on a {} configuration; only paper "
                               "sends".format(self.mode))

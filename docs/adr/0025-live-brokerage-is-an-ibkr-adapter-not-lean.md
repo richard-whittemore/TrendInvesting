@@ -226,3 +226,34 @@ up to the midnight `reqExecutions` starts at and none after the close, and
 no fill is journalled after the close. The rules, IBKR's documentation they
 rest on, and why an Activity statement cannot serve are in ADR 0019's
 amendment of 2026-10-27.
+
+## Amendment (2026-10-29, the implementer's reading, put to the owner): an IRA's account snapshot, marks and contracts
+
+To point 5 and the amendment of 2026-10-18, for the IRAs' momentum engines
+(ADR 0026, points 2 and 3). Boost's adapter is unchanged.
+
+- **One adapter per account, one template.** Each IRA's adapter is an
+  instance of `ti-adapter@<instance>.service` with its own client ID (12 for
+  the Traditional IRA), configuration, account file, socket, streams and
+  Flex ledger; Boost keeps `ti-adapter-boost.service`, which the template
+  refuses to duplicate.
+- **The account snapshot it sends is version 4** (`account_snapshot_version`
+  4): version 3's positions and net liquidation with IBKR's `SettledCash` and
+  `TotalCashValue` from the same account-updates download, both or no
+  snapshot at all, with version 3's fail-closed rules.
+- **A mark for every name the engine can decide.** On a decision session the
+  compact stream carries the ranked members' close histories and no bar for a
+  stock newly picked, so the adapter marks each ranked member at its
+  universe row's close in that session (the price the engine values it at),
+  as well as each instrument with a bar.
+- **Each such mark states its IBKR contract** (`market.mark.recorded`
+  version 3), resolved by name with IBKR's contract details as a US-dollar
+  stock on SMART: exactly one answer, that name's own, agreeing with
+  `con_ids` where `con_ids` names it. A name that does not resolve gets no
+  mark, with a warning naming IBKR's reason, so the engine refuses any order
+  for it (`missing-mark`) and never sizes it on a guessed contract. IBKR's
+  last price beside the mark is the price band's comparison, as for Boost.
+- **Not decided here:** sending an IRA order (paper) will need the sender to
+  name the contract the journal records for the pick; today it names one
+  only from `con_ids`, and no IRA order is sent before the paper gate
+  (AGENTS.md rule 5).

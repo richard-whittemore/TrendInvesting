@@ -1,0 +1,81 @@
+[Unit]
+Description=IBKR adapter for account %i, an IRA's momentum engine (sends only in paper, with paper_sending_enabled on)
+# One adapter per account, each with its own client ID on the one IB Gateway
+# (ADR 0026 point 8; docs/live-trading/lessons-2026-10.md L6): ti-adapter@trad-ira
+# (client ID 12), and ti-adapter@roth-ira once that account has a
+# configuration. Boost's adapter keeps its own unit, ti-adapter-boost.service,
+# which this template leaves unchanged; the template refuses the boost
+# instance (ExecStartPre below), so the Boost account can never get a second
+# adapter.
+After=ti-gateway.service ti-engine@%i.service
+Wants=ti-gateway.service
+# When this unit fails, ti-unit-failed@%n sends one urgent page through the
+# reporter's channels naming it, the failed run's last journal line and the
+# manual row to read (ADR 0019, "Alerting"; docs/manual/server.md, "A failed
+# unit"; lessons L8).
+OnFailure=ti-unit-failed@%n.service
+# Skipped, not failed, until ibapi is installed and recorded (provision.sh
+# twsapi), the adapter's code is installed (provision.sh adapter), and the
+# instance's configuration exists (provision.sh services creates it from the
+# example, deploy/etc/adapters/<instance>.json.example).
+ConditionFileIsExecutable=/opt/trend-investing/adapter-venv/bin/python3
+ConditionPathExists=/opt/trend-investing/twsapi/INSTALLED
+ConditionPathExists=/opt/trend-investing/adapter/adapter/ibkr/cli.py
+ConditionPathExists=/etc/trend-investing/adapters/%i.json
+# The secrets rest on disk only encrypted; ti-unlock decrypts them after
+# each boot into a root-only tmpfs, and this unit loads its credential
+# from there. Until then systemd refuses to start it ("Assertion failed")
+# (ADR 0028; docs/manual/server.md, "Unlocking the
+# secrets after a boot").
+AssertPathExists=/run/trend-investing/secrets/accounts/%i.env
+
+[Service]
+Type=simple
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+# TI_ADAPTER_CLIENT_ID and TI_ADAPTER_ACCOUNT_KEY: the instance's repo-managed
+# settings (deploy/etc/engines/<instance>.env), no secret. The adapter refuses
+# to start unless its configuration names the same client ID (--client-id).
+EnvironmentFile=/etc/trend-investing/engines/%i.env
+# TI_RUN names the engine's durable log, which the adapter reads: the same
+# run file the engine starts from (docs/runbooks/durable-log.md). Start the
+# engine first; the adapter refuses to start without its log.
+EnvironmentFile=/var/lib/trend-investing/engines/%i/run.env
+ExecStartPre=/bin/sh -c 'test "%i" != boost || { echo "ti-adapter@boost: the Boost account has its own adapter unit, ti-adapter-boost.service; this template is for the IRAs only" >&2; exit 1; }'
+# The account number is read from the instance's line (TI_ADAPTER_ACCOUNT_KEY,
+# IBKR_ACCOUNT_TRAD_IRA for trad-ira) of its own root-only account file,
+# handed to this service as a private copy; nothing else (no other account's
+# number, no alert URL) is. The configuration names no account.
+# --streams: the instance's data job writes ${TI_DATA_DIR}/streams/%i/${TI_RUN}/
+# (ti-data@.service); the adapter delivers the run's own folder, and refuses
+# to start until it exists: run the IRA's warm-up after the engine starts and
+# before this unit (docs/manual/market-data.md, "A job for the IRAs").
+# --cash-ledger: the instance's Flex ledger (ti-flex@%i), read only; beside it,
+# executions.json, the executions proof a morning reading needs (ADR 0019,
+# amended 2026-10-27).
+LoadCredential=account:/run/trend-investing/secrets/accounts/%i.env
+WorkingDirectory=/opt/trend-investing/adapter
+ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/%i.json --client-id ${TI_ADAPTER_CLIENT_ID} --secrets %d/account --account-key ${TI_ADAPTER_ACCOUNT_KEY} --pending /var/lib/trend-investing/adapters/%i/pending.json --engine-log /var/lib/trend-investing/engines/%i/${TI_RUN}.log --socket /run/ti-engine-%i/engine.sock --streams /var/lib/trend-investing/data/streams/%i --cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
+# Never restarted by systemd: every stop is for a person to read (the reason
+# is in the journal: journalctl -u ti-adapter@%i), and every start is the
+# owner's (ADR 0027, the restart model). SIGTERM stops it cleanly.
+Restart=no
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/adapters/%i
+ReadOnlyPaths=/var/lib/trend-investing/engines/%i -/var/lib/trend-investing/data/streams/%i -/var/lib/trend-investing/flex/%i
+# No instruction can come from this unit: it runs as ti-trader, the engine's
+# user, and reads data from outside, so the operator inboxes are hidden from
+# it, and nothing under the engines' state is writable (ProtectSystem=strict;
+# ADR 0026, kill-switch amendment; docs/manual/server.md).
+InaccessiblePaths=-/var/lib/trend-investing/engines/boost/operator -/var/lib/trend-investing/engines/trad-ira/operator -/var/lib/trend-investing/engines/roth-ira/operator
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -54,6 +54,12 @@ class TWSApi:
     req_id and ends it with tick_snapshot_end, or answers error under
     req_id. cancel_mkt_data cancels one not yet ended.
 
+    req_contract_details asks IBKR for the contracts matching a name (a
+    plain object with symbol, secType, currency and exchange, and no conId:
+    the one lookup by name the adapter makes, snapshot.resolve_contracts):
+    IBKR answers each match as contract_details under req_id and ends the
+    list with contract_details_end, or answers error under req_id.
+
     can_place_orders is the sending switch alone (configuration and login);
     is_connected reports the link, and the sender asks it first, so a link
     down holds the input rather than read as the switch being off.
@@ -90,6 +96,9 @@ class TWSApi:
         raise NotImplementedError
 
     def cancel_mkt_data(self, req_id):
+        raise NotImplementedError
+
+    def req_contract_details(self, req_id, contract):
         raise NotImplementedError
 
     def can_place_orders(self):
@@ -139,6 +148,8 @@ class Inbox:
         "commission_report",    # (report)
         "tick_price",           # (req_id, tick_type, price, attrib)
         "tick_snapshot_end",    # (req_id)
+        "contract_details",     # (req_id, contract_details): ibapi's ContractDetails, its contract inside
+        "contract_details_end",  # (req_id)
     )
 
     def __init__(self):

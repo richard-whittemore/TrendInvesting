@@ -43,3 +43,20 @@ func TestEveryDataJobIsOnlyResolvedAndNeverReminded(t *testing.T) {
 		}
 	}
 }
+
+// An IRA's adapter runs as an instance of the adapter template,
+// ti-adapter@<instance>.service (Boost's keeps its own unit,
+// ti-adapter-boost.service): its OnFailure hook names it so, and the
+// reporter samples it, so its name is a trading unit's (lessons L8).
+func TestAnIRAAdaptersTemplateInstanceIsATradingUnit(t *testing.T) {
+	for _, good := range []string{"ti-adapter@trad-ira.service", "ti-adapter@roth-ira.service", "ti-adapter-boost.service"} {
+		if !tradingUnit.MatchString(good) {
+			t.Errorf("%q is refused as a trading unit's name", good)
+		}
+	}
+	for _, bad := range []string{"ti-adapter@.service", "ti-adapter@Trad.service", "ti-adapter@-x.service", "ti-adapter@trad-ira.timer"} {
+		if tradingUnit.MatchString(bad) {
+			t.Errorf("%q is accepted as a unit name", bad)
+		}
+	}
+}

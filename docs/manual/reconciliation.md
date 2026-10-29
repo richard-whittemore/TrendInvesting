@@ -623,19 +623,27 @@ morning reads again and writes nothing twice.
 **The IRA readers fire later than Boost's.** Every account's reader uses the
 one Flex token, and only one reading holds it at a time (another waits at
 most 4 minutes, then sets itself aside), so the IRA readers, when you turn
-them on, must not fire at Boost's 5:30, 6:30 and 7:30. Give each its own
-times with a drop-in before enabling its timer, 15 and 30 minutes later:
-`sudo systemctl edit ti-flex@trad-ira.timer` and put
+them on, must not fire at Boost's 5:30, 6:30 and 7:30. The Traditional
+IRA's times, 15 minutes later, come with provisioning: `sudo
+deploy/provision.sh services` installs the drop-in
+`/etc/systemd/system/ti-flex@trad-ira.timer.d/stagger.conf`
+(`deploy/systemd/ti-flex@trad-ira.timer.d/stagger.conf`), so `systemctl
+list-timers ti-flex@trad-ira.timer` shows 05:45, 06:45 or 07:45 once you
+enable it. It reads the IRA engine's log as it reads Boost's: the IRA's
+account snapshots are version 4 (version 3's net liquidation with the cash
+beside it), and the reader takes the equity before a transfer from either
+version. The Roth IRA's, until it ships its own, is a drop-in you write
+before enabling its timer, 30 minutes later: `sudo systemctl edit
+ti-flex@roth-ira.timer` and put
 
 ```
 [Timer]
 OnCalendar=
-OnCalendar=Mon..Fri 05:45 America/New_York
-OnCalendar=Mon..Fri 06:45 America/New_York
-OnCalendar=Mon..Fri 07:45 America/New_York
+OnCalendar=Mon..Fri 06:00 America/New_York
+OnCalendar=Mon..Fri 07:00 America/New_York
+OnCalendar=Mon..Fri 08:00 America/New_York
 ```
 
-then the same for `ti-flex@roth-ira.timer` with 06:00, 07:00 and 08:00
 (the empty `OnCalendar=` clears the shared times first). Every reader, once
 it holds the token, waits a full 61 seconds before its first request to
 IBKR, so its requests never share a minute with the reader's before it,

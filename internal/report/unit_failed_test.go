@@ -14,9 +14,10 @@ import (
 func TestAFailedUnitPagesUrgentlyWithTheUnitTheReasonAndTheManualRow(t *testing.T) {
 	at := time.Date(2026, 10, 22, 15, 4, 0, 0, time.UTC)
 	for unit, row := range map[string]string{
-		"ti-adapter-boost.service":  `docs/manual/ibkr-adapter.md, "What can go wrong", the row "The adapter's unit failed"`,
-		"ti-engine@boost.service":   `docs/manual/engine.md, "While it runs", the row "The engine's unit failed"`,
-		"ti-reporter@boost.service": `docs/manual/alerts-and-dashboard.md, "The reporter itself", the row "<host>: <unit> failed"`,
+		"ti-adapter-boost.service":    `docs/manual/ibkr-adapter.md, "What can go wrong", the row "The adapter's unit failed"`,
+		"ti-adapter@trad-ira.service": `docs/manual/ibkr-adapter.md, "What can go wrong", the row "The adapter's unit failed"`,
+		"ti-engine@boost.service":     `docs/manual/engine.md, "While it runs", the row "The engine's unit failed"`,
+		"ti-reporter@boost.service":   `docs/manual/alerts-and-dashboard.md, "The reporter itself", the row "<host>: <unit> failed"`,
 	} {
 		const run = "0123456789abcdef0123456789abcdef"
 		a := report.UnitFailedAlert("lightsail", unit, run, "reconcile incomplete: open orders unread", at)

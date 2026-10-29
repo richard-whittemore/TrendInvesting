@@ -250,6 +250,10 @@ type momentumOptions struct {
 	// price beside it at brokerLast times the mark (the IBKR adapter's mark,
 	// ADR 0026 point 1, amended 2026-10-18).
 	brokerLast float64
+	// contracts, with brokerLast, feeds every mark at version 3: version 2
+	// with the IBKR contract the IRA's adapter resolved for it (ADR 0026
+	// point 3; adapter/ibkr snapshot.resolve_contracts).
+	contracts bool
 	// approval, when set, is the owner's operator.run.approved of a fresh
 	// run, recorded straight after the configuration of a handler told to
 	// await it, as cmd/engine records it (ADR 0027, amended 2026-10-17).
@@ -503,6 +507,10 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			mark, version := event.MarkRecordedPayload{InstrumentID: id, AsOf: end, Price: prices[id], Source: event.AdapterIBKR}, event.MarkRecordedSchemaVersion
 			if opts.brokerLast != 0 {
 				mark.BrokerLast, mark.BrokerLastSet, version = float64(prices[id]*opts.brokerLast), true, event.MarkRecordedEvidenceVersion
+			}
+			if opts.contracts {
+				mark.Contract = &event.MarkContract{ConID: contractID(id), Exchange: "SMART", PrimaryExchange: "NASDAQ", Currency: "USD"}
+				version = event.MarkRecordedContractVersion
 			}
 			apply(s.envelope(t, event.MarkRecordedEventType, version, fmt.Sprintf("mark:%s:%s", id, session), end, mark))
 		}
