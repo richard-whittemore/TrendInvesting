@@ -20,7 +20,7 @@ import (
 // "Alerts analysed by Claude") is one GET route serving journal-query's
 // own reports over each account's current run, as text, and nothing else.
 func TestTheJournalSliceServesTheJournalQueryReportsOfEachCurrentRun(t *testing.T) {
-	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil)
 	rec := get(h, http.MethodGet, "/api/journal-slice")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
@@ -56,7 +56,7 @@ func TestTheJournalSliceFollowsTheEngineDirectoryAndCutsEachReport(t *testing.T)
 	if err := os.Mkdir(empty, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body := get(newHandlerFor(nil, []string{dir, empty}, nil, "SPY"), http.MethodGet, "/api/journal-slice").Body.String()
+	body := get(newHandlerFor(nil, []string{dir, empty}), http.MethodGet, "/api/journal-slice").Body.String()
 	if !strings.Contains(body, "## run1.log: journal-query reconcile") {
 		t.Errorf("slice does not name the current run:\n%s", body)
 	}
@@ -86,7 +86,7 @@ func TestTailKeepsTheLastRows(t *testing.T) {
 // reporter's own redactor, so a figure never reaches the triage job, Claude
 // or a push. The rows' words stay.
 func TestTheJournalSliceCarriesNoFigure(t *testing.T) {
-	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil)
 	body := get(h, http.MethodGet, "/api/journal-slice").Body.String()
 	for _, leak := range []string{"101.00", " 39 ", "quantity", "price", "commission", "account  instrument", "joint  SPY"} {
 		if strings.Contains(body, leak) {
@@ -105,7 +105,7 @@ func TestTheJournalSliceCarriesNoFigure(t *testing.T) {
 // section first says the span its records cover, so the job can tell
 // whether the slice covers the alert's run and time at all.
 func TestTheJournalSliceTakesAWindowAndSaysWhatEachRunCovers(t *testing.T) {
-	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil)
 	body := get(h, http.MethodGet, "/api/journal-slice?from=2024-01-05T00:00:00Z&to=2024-01-06T00:00:00Z").Body.String()
 	if !strings.Contains(body, "## joint.journal: covers 2024-01-02T21:00:00Z to 2024-01-02T21:00:00Z") {
 		t.Errorf("slice does not say what the run covers:\n%s", body)
@@ -144,7 +144,7 @@ func TestTheJournalSliceSaysWhichJournalRaisedTheAlert(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(alerts[0].Key))
 	own := hex.EncodeToString(sum[:])
-	h := newHandlerFor([]string{path}, nil, nil, "SPY")
+	h := newHandlerFor([]string{path}, nil)
 	body := get(h, http.MethodGet, "/api/journal-slice?alert="+own).Body.String()
 	if !strings.Contains(body, "## joint.journal: covers 2024-01-02T21:00:00Z to 2024-01-02T21:00:00Z, and raised the alert\n") {
 		t.Errorf("the journal that raised the alert is not marked:\n%s", body)
@@ -171,7 +171,7 @@ func TestTheJournalSliceRedactsTheLogsNames(t *testing.T) {
 	if err := os.WriteFile(broken, []byte("not a journal"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	body := get(newHandlerFor([]string{path, broken}, nil, nil, "SPY"), http.MethodGet, "/api/journal-slice").Body.String()
+	body := get(newHandlerFor([]string{path, broken}, nil), http.MethodGet, "/api/journal-slice").Body.String()
 	for _, leak := range []string{"U1234567", "DU7654321"} {
 		if strings.Contains(body, leak) {
 			t.Errorf("the slice names %s:\n%s", leak, body)

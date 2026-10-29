@@ -203,9 +203,10 @@ type alertView struct {
 // the dashboard. Each is shown with the runs before it, followed back to the
 // first (report.EarlierRunsOfRecovery). Every request re-reads and
 // re-verifies the current log, so the page is never staler than the file.
-// ledgers names each account's Flex ledger (source).
-func newHandlerFor(journals, engineDirs []string, ledgers map[string]string, benchmark string) http.Handler {
-	return newHandlerWith(source{journals: journals, dirs: engineDirs, ledgers: ledgers, maintenance: maintenanceFileFor(engineDirs)}, benchmark, os.ReadFile)
+// Tests use it with no Flex ledgers and SPY as the benchmark; main wires the
+// ledgers and the benchmark flag through newHandlerWith.
+func newHandlerFor(journals, engineDirs []string) http.Handler {
+	return newHandlerWith(source{journals: journals, dirs: engineDirs, maintenance: maintenanceFileFor(engineDirs)}, "SPY", os.ReadFile)
 }
 
 // newHandlerWith is newHandlerFor reading each file whole with readFile.

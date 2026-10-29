@@ -68,7 +68,7 @@ func TestDashboardShowsIncompleteSellInHTMLAndJSON(t *testing.T) {
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := newHandlerFor([]string{path}, nil, nil, "SPY")
+	h := newHandlerFor([]string{path}, nil)
 	for _, url := range []string{"/", "/api/summary.json"} {
 		rec := get(h, http.MethodGet, url)
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "sell of AAA incomplete") {

@@ -74,7 +74,7 @@ func get(h http.Handler, method, path string) *httptest.ResponseRecorder {
 }
 
 func TestDashboardShowsEachAccountEscapedAndNeverCached(t *testing.T) {
-	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil)
 	rec := get(h, http.MethodGet, "/")
 	body := rec.Body.String()
 	if rec.Code != http.StatusOK {
@@ -100,14 +100,14 @@ func TestDashboardSaysWhenAnInputWasNotRead(t *testing.T) {
 	rejected := event.AccountPositionsSnapshotPayload{AccountID: "joint <b>", AsOf: t0, Currency: "USD", NetLiquidation: -1}
 	path := writeJournalWith(t, t.TempDir(),
 		journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 4, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "snap-bad", rejected)})
-	body := get(newHandlerFor([]string{path}, nil, nil, "SPY"), http.MethodGet, "/").Body.String()
+	body := get(newHandlerFor([]string{path}, nil), http.MethodGet, "/").Body.String()
 	if !strings.Contains(body, "Inputs not read: 1") || !strings.Contains(body, "4000.00") {
 		t.Fatalf("the page must show the figures without the rejected input, and say it left one out:\n%s", body)
 	}
 }
 
 func TestDashboardShowsEachAlertsBody(t *testing.T) {
-	body := get(newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY"), http.MethodGet, "/").Body.String()
+	body := get(newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil), http.MethodGet, "/").Body.String()
 	if !strings.Contains(body, "Risk gate refused buy 39 SPY") {
 		t.Fatalf("the page must show what the alert says, not only its title:\n%s", body)
 	}
@@ -132,7 +132,7 @@ func TestDashboardDatesTheEquityComparison(t *testing.T) {
 }
 
 func TestDashboardJSONCarriesTheSummariesAndAlerts(t *testing.T) {
-	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil)
 	rec := get(h, http.MethodGet, "/api/summary.json")
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" {
 		t.Fatalf("status %d type %q", rec.Code, rec.Header().Get("Content-Type"))
@@ -150,7 +150,7 @@ func TestDashboardJSONCarriesTheSummariesAndAlerts(t *testing.T) {
 }
 
 func TestEveryRouteRefusesEveryWritingMethod(t *testing.T) {
-	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil)
 	for _, path := range []string{"/", "/api/summary.json", "/api/journal-slice", "/healthz", "/nowhere"} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, "PURGE"} {
 			rec := get(h, method, path)
@@ -174,12 +174,12 @@ func TestDashboardRefusesAJournalThatDoesNotVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/", "/api/summary.json"} {
-		rec := get(newHandlerFor([]string{bad}, nil, nil, "SPY"), http.MethodGet, path)
+		rec := get(newHandlerFor([]string{bad}, nil), http.MethodGet, path)
 		if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "does not verify") {
 			t.Errorf("%s = %d %q", path, rec.Code, rec.Body.String())
 		}
 	}
-	rec := get(newHandlerFor([]string{filepath.Join(dir, "none")}, nil, nil, "SPY"), http.MethodGet, "/")
+	rec := get(newHandlerFor([]string{filepath.Join(dir, "none")}, nil), http.MethodGet, "/")
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("missing journal = %d", rec.Code)
 	}

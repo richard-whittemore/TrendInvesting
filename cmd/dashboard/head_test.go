@@ -67,7 +67,7 @@ func TestDashboardFindsTheCurrentRunByTheChainNotTheModificationTime(t *testing.
 	if err := os.Chtimes(filepath.Join(dir, "run1.log"), restored, restored); err != nil {
 		t.Fatal(err)
 	}
-	h := newHandlerFor(nil, []string{dir}, nil, "SPY")
+	h := newHandlerFor(nil, []string{dir})
 	got := summaryOf(t, h)
 	if got.Summary.Date != at(5).Format(time.DateOnly) || len(got.Summary.Equity.Points) != 6 {
 		t.Fatalf("the page shows %s with %d points, want run3.log's day and the whole history", got.Summary.Date, len(got.Summary.Equity.Points))
@@ -190,7 +190,7 @@ func writeStart(t *testing.T, dir, name string, modified time.Time) {
 func TestDashboardOfARunStillStartingSaysSo(t *testing.T) {
 	dir := t.TempDir()
 	writeStart(t, dir, "run1.log", time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC))
-	h := newHandlerFor(nil, []string{dir}, nil, "SPY")
+	h := newHandlerFor(nil, []string{dir})
 	got := summaryOf(t, h)
 	if got.Summary.Equity.HistoryUnavailable != "" || got.Summary.Equity.HistoryStarting != "the run is starting; no history yet" {
 		t.Fatalf("equity = %+v", got.Summary.Equity)
