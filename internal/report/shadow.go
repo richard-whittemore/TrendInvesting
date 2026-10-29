@@ -26,6 +26,7 @@ const levelBand = 0.1
 // which is the price as quoted, and, from a version 2 bar, the split- and
 // dividend-adjusted close and the session it is based at.
 type benchBar struct {
+	at       time.Time
 	split    float64
 	adjusted float64
 	base     string

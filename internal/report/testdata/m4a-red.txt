@@ -1,0 +1,66 @@
+M4a red evidence, captured before production edits
+Command: GOCACHE=/private/tmp/ti-m4a-go-cache go test ./internal/report -run "TestIRASummaryReads|TestBoostFixture|TestAccountReturnsPair|TestEarlierRunsPairOnly|TestReadTimeAndWithheld" -count=1
+Exit status: 1
+The Boost byte-identity test passed in this same run.
+
+--- FAIL: TestIRASummaryReadsItsRecordVersionsAndShowsItsBook (0.03s)
+    ira_summary_test.go:92: IRA inputs not read = 1, want 0
+    ira_summary_test.go:95: IRA holdings = [], want all 25 synthetic names and IEF/SHY/SPY
+    ira_summary_test.go:100: IRA summary lacks "Net liquidation 100000.00"
+    ira_summary_test.go:100: IRA summary lacks "Settled cash 1234.00; total cash 2345.00"
+    ira_summary_test.go:105: holding or target missing for AAA
+    ira_summary_test.go:105: holding or target missing for CCC
+    ira_summary_test.go:105: holding or target missing for DDD
+    ira_summary_test.go:105: holding or target missing for EEE
+    ira_summary_test.go:105: holding or target missing for FFF
+    ira_summary_test.go:105: holding or target missing for GGG
+    ira_summary_test.go:105: holding or target missing for HHH
+    ira_summary_test.go:105: holding or target missing for IEF
+    ira_summary_test.go:105: holding or target missing for III
+    ira_summary_test.go:105: holding or target missing for JJJ
+    ira_summary_test.go:105: holding or target missing for KKK
+    ira_summary_test.go:105: holding or target missing for LLL
+    ira_summary_test.go:105: holding or target missing for MMM
+    ira_summary_test.go:105: holding or target missing for NNN
+    ira_summary_test.go:105: holding or target missing for OOO
+    ira_summary_test.go:105: holding or target missing for PPP
+    ira_summary_test.go:105: holding or target missing for QQQ
+    ira_summary_test.go:105: holding or target missing for RRR
+    ira_summary_test.go:105: holding or target missing for SHY
+    ira_summary_test.go:105: holding or target missing for SPY
+    ira_summary_test.go:105: holding or target missing for SSS
+    ira_summary_test.go:105: holding or target missing for TTT
+    ira_summary_test.go:105: holding or target missing for UUU
+    ira_summary_test.go:105: holding or target missing for VVV
+    ira_summary_test.go:105: holding or target missing for WWW
+    ira_summary_test.go:105: holding or target missing for XXX
+    ira_summary_test.go:105: holding or target missing for YYY
+--- FAIL: TestAccountReturnsPairOnlyStandingClosesAcrossAWithheldDay (0.00s)
+    standing_close_test.go:42: flat standing closes must print 0.00% account returns:
+        joint (boost) daily summary, 2024-01-04
+        Engine state: normal
+        Net liquidation 4000.00 as of 2024-01-04 21:00Z
+        Behind SPY by 1.8 points since 2024-01-02; dollar gap -80.99 (account 4000.00, SPY shadow 4080.99)
+        Holdings: none
+        Targets:
+          SPY 98%
+        Orders:
+          none
+        Refusals: 0
+        Fills: none
+        Costs this month: commissions 0.00, fees 0.00, interest 0.00 (fees and interest not yet recorded by the Flex reader)
+        Equity vs SPY, 2024-01-02 to 2024-01-04, time-weighted: account +0.22%, SPY +2.00%, difference -1.78 points
+        Day, 2024-01-03 to 2024-01-04: account -8.89%, SPY +0.99%
+        Counted: SPY price return only: dividends not counted; your deposits and withdrawals mirrored as recorded by the Flex reader (2 in this period: 100.00 in, 100.00 out); how far the Flex reader has recorded is not known; deposits or withdrawals from the last two trading sessions may not be recorded yet. Both returns are time-weighted; fees and interest stay in the account's own result.
+    standing_close_test.go:45: account points = 3, want 2 (withheld session omitted)
+    standing_close_test.go:52: withheld reading supplied a close: {Available:true StartDate:2024-01-02 EndDate:2024-01-03 AccountReturn:0.10000000000000009 BenchmarkReturn:0.010000000000000009 Excess:0.09000000000000008 DayAvailable:true DayStartDate:2024-01-02 DayAccountReturn:0.10000000000000009 DayBenchmarkReturn:0.010000000000000009 Points:[{Date:2024-01-02 Net:4000 Benchmark:100 Shadow:4000 Transfers:0 AccountGrowth:100 BenchmarkGrowth:100} {Date:2024-01-03 Net:4500 Benchmark:101 Shadow:4140 Transfers:100 AccountGrowth:110.00000000000001 BenchmarkGrowth:101}] ShadowValue:4140 Gap:360 DollarNote: DollarsWithheld:false Verdict:Beating SPY by 9.0 points since 2024-01-02 VerdictTone:ahead TransferCount:1 Deposits:100 Withdrawals:0 Assumption:Counted: SPY price return only: dividends not counted; your deposits and withdrawals mirrored as recorded by the Flex reader (1 in this period: 100.00 in, 0.00 out); how far the Flex reader has recorded is not known; deposits or withdrawals from the last two trading sessions may not be recorded yet. Both returns are time-weighted; fees and interest stay in the account's own result. HistoryUnavailable: HistoryStartsAt: HistorySince: HistoryStarting:}
+--- FAIL: TestEarlierRunsPairOnlyStandingCloses (0.00s)
+    standing_close_test.go:65: earlier read-time snapshot entered account returns: {Available:true StartDate:2024-01-02 EndDate:2024-01-04 AccountReturn:0.0022222222222223476 BenchmarkReturn:0.020000000000000018 Excess:-0.01777777777777767 DayAvailable:true DayStartDate:2024-01-03 DayAccountReturn:-0.0888888888888889 DayBenchmarkReturn:0.00990099009900991 Points:[{Date:2024-01-02 Net:4000 Benchmark:100 Shadow:4000 Transfers:0 AccountGrowth:100 BenchmarkGrowth:100} {Date:2024-01-03 Net:4500 Benchmark:101 Shadow:4140 Transfers:100 AccountGrowth:110.00000000000001 BenchmarkGrowth:101} {Date:2024-01-04 Net:4000 Benchmark:102 Shadow:4080.990099009901 Transfers:-100 AccountGrowth:100.22222222222223 BenchmarkGrowth:102}] ShadowValue:4080.990099009901 Gap:-80.99009900990086 DollarNote: DollarsWithheld:false Verdict:Behind SPY by 1.8 points since 2024-01-02 VerdictTone:behind TransferCount:2 Deposits:100 Withdrawals:100 Assumption:Counted: SPY price return only: dividends not counted; your deposits and withdrawals mirrored as recorded by the Flex reader (2 in this period: 100.00 in, 100.00 out); how far the Flex reader has recorded is not known; deposits or withdrawals from the last two trading sessions may not be recorded yet. Both returns are time-weighted; fees and interest stay in the account's own result. HistoryUnavailable: HistoryStartsAt: HistorySince: HistoryStarting:}
+--- FAIL: TestReadTimeAndWithheldSnapshotsNeverSupplyAnAccountPoint (0.00s)
+    --- FAIL: TestReadTimeAndWithheldSnapshotsNeverSupplyAnAccountPoint/read_time_without_a_decision (0.00s)
+        standing_close_test.go:97: not a standing close: {Available:true StartDate:2024-01-02 EndDate:2024-01-04 AccountReturn:0 BenchmarkReturn:0.020000000000000018 Excess:-0.020000000000000018 DayAvailable:true DayStartDate:2024-01-03 DayAccountReturn:-0.11111111111111116 DayBenchmarkReturn:0.00990099009900991 Points:[{Date:2024-01-02 Net:4000 Benchmark:100 Shadow:4000 Transfers:0 AccountGrowth:100 BenchmarkGrowth:100} {Date:2024-01-03 Net:4500 Benchmark:101 Shadow:4040 Transfers:0 AccountGrowth:112.5 BenchmarkGrowth:101} {Date:2024-01-04 Net:4000 Benchmark:102 Shadow:4080 Transfers:0 AccountGrowth:100 BenchmarkGrowth:102}] ShadowValue:4080 Gap:-80 DollarNote: DollarsWithheld:false Verdict:Behind SPY by 2.0 points since 2024-01-02 VerdictTone:behind TransferCount:0 Deposits:0 Withdrawals:0 Assumption:Counted: SPY price return only: dividends not counted; deposits and withdrawals not yet recorded: the comparison assumes none, so money you add or take out counts as the account's own gain or loss. Both returns are time-weighted; fees and interest stay in the account's own result. HistoryUnavailable: HistoryStartsAt: HistorySince: HistoryStarting:}
+    --- FAIL: TestReadTimeAndWithheldSnapshotsNeverSupplyAnAccountPoint/exact_timestamp_on_a_withheld_session (0.00s)
+        standing_close_test.go:97: not a standing close: {Available:true StartDate:2024-01-02 EndDate:2024-01-04 AccountReturn:0 BenchmarkReturn:0.020000000000000018 Excess:-0.020000000000000018 DayAvailable:true DayStartDate:2024-01-03 DayAccountReturn:-0.11111111111111116 DayBenchmarkReturn:0.00990099009900991 Points:[{Date:2024-01-02 Net:4000 Benchmark:100 Shadow:4000 Transfers:0 AccountGrowth:100 BenchmarkGrowth:100} {Date:2024-01-03 Net:4500 Benchmark:101 Shadow:4040 Transfers:0 AccountGrowth:112.5 BenchmarkGrowth:101} {Date:2024-01-04 Net:4000 Benchmark:102 Shadow:4080 Transfers:0 AccountGrowth:100 BenchmarkGrowth:102}] ShadowValue:4080 Gap:-80 DollarNote: DollarsWithheld:false Verdict:Behind SPY by 2.0 points since 2024-01-02 VerdictTone:behind TransferCount:0 Deposits:0 Withdrawals:0 Assumption:Counted: SPY price return only: dividends not counted; deposits and withdrawals not yet recorded: the comparison assumes none, so money you add or take out counts as the account's own gain or loss. Both returns are time-weighted; fees and interest stay in the account's own result. HistoryUnavailable: HistoryStartsAt: HistorySince: HistoryStarting:}
+FAIL
+FAIL	github.com/richard-whittemore/TrendInvesting/internal/report	0.187s
+FAIL

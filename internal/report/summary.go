@@ -183,15 +183,19 @@ type Summary struct {
 	HaveSnapshot   bool
 	HoldingsAsOf   time.Time
 	NetLiquidation float64
-	Holdings       []event.AccountPosition
-	Decisions      []DecisionLine
-	Orders         []OrderLine
-	Refusals       int
-	Fills          []FillLine
-	SalesWithheld  []SaleWithheldLine
-	Skipped        []SkippedLine
-	EngineState    string
-	Equity         Equity
+	// HaveCash identifies a version-4 IRA snapshot (ADR 0026 point 2).
+	HaveCash      bool
+	SettledCash   float64
+	TotalCash     float64
+	Holdings      []event.AccountPosition
+	Decisions     []DecisionLine
+	Orders        []OrderLine
+	Refusals      int
+	Fills         []FillLine
+	SalesWithheld []SaleWithheldLine
+	Skipped       []SkippedLine
+	EngineState   string
+	Equity        Equity
 	// Costs is what the account has paid in commissions, fees and broker
 	// interest (Costs).
 	Costs Costs
@@ -278,7 +282,13 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 	closes := map[string]benchBar{}
 	var points []equityPoint
 	netBy := map[string]float64{}
-	pairEarlier(earlier, end, account, benchmark, netBy, closes)
+	// Close timestamps must match, not merely their dates: a reading stamped
+	// at read time cannot value the session (ADR 0026 point 1; ADR 0019,
+	// amendment of 2026-10-18). A withheld session supplies no account point
+	// (Boost lessons L11); netBy remains the dated cost denominator.
+	closeNet := map[time.Time]float64{}
+	withheld := map[time.Time]bool{}
+	pairEarlier(earlier, end, account, strategy, benchmark, netBy, closeNet, closes, withheld)
 	for _, e := range envelopes {
 		if !e.EventTime.Before(end) {
 			continue
@@ -289,13 +299,15 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 			if e.SchemaVersion == event.AccountSnapshotSchemaVersion {
 				continue // equity and cash only: no positions to show
 			}
-			var p event.AccountPositionsSnapshotPayload
-			if read(e, snapshotVersions, &p) != nil || !s.snapshotFollows(p) {
+			p, cash, err := readSnapshot(e, strategy)
+			if err != nil || !s.snapshotFollows(p.AccountPositionsSnapshotPayload) {
 				s.RejectedInputs++
 				continue
 			}
 			s.HaveSnapshot, s.HoldingsAsOf, s.NetLiquidation, s.Holdings = true, p.AsOf, p.NetLiquidation, p.Positions
+			s.HaveCash, s.SettledCash, s.TotalCash = cash, p.SettledCash, p.TotalCash
 			netBy[dateOf(p.AsOf)] = p.NetLiquidation
+			closeNet[p.AsOf.UTC()] = p.NetLiquidation
 		case event.BrokerSnapshotEventType:
 			var p event.BrokerSnapshotPayload
 			if read(e, brokerSnapshotVersions, &p) != nil {
@@ -321,12 +333,15 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 			}
 			s.EngineState = p.State
 		case event.TargetsDecidedEventType:
-			if !today {
-				continue
-			}
 			var p event.TargetsDecidedPayload
 			if err := read(e, decidedVersions, &p); err != nil {
 				return Summary{}, err
+			}
+			if p.AccountID == account {
+				withheld[p.SessionPeriodEnd.UTC()] = p.Outcome == event.TargetsOutcomeWithheld
+			}
+			if !today {
+				continue
 			}
 			s.Decisions = append(s.Decisions, DecisionLine{At: e.EventTime, Outcome: p.Outcome, WithheldReason: p.WithheldReason, Targets: p.Targets})
 		case event.OrderPlannedEventType:
@@ -393,8 +408,8 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 				Side: p.Side, Reason: p.Reason, Shares: p.Shares})
 		}
 	}
-	for d, net := range netBy {
-		if c, ok := closes[d]; ok && c.split > 0 && net > 0 {
+	for d, c := range closes {
+		if net, ok := closeNet[c.at.UTC()]; ok && !withheld[c.at.UTC()] && c.split > 0 && net > 0 {
 			points = append(points, equityPoint{date: d, net: net, benchmark: c.split})
 		}
 	}
@@ -413,8 +428,10 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 // closes the earlier runs recorded before end, by the rules the current run
 // reads its own by: a positions snapshot names this account and is later than
 // the last taken, and a bar or snapshot that does not read is skipped. The
-// current run's own records then replace a date both hold.
-func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark string, netBy map[string]float64, closes map[string]benchBar) {
+// current run's own records then replace a date both hold. Close timestamps
+// and withheld decisions are kept too, for the same pairing as this run's
+// (ADR 0026 point 1; Boost lessons L11).
+func pairEarlier(earlier []event.Envelope, end time.Time, account, strategy, benchmark string, netBy map[string]float64, closeNet map[time.Time]float64, closes map[string]benchBar, withheld map[time.Time]bool) {
 	var last time.Time
 	taken := false
 	for _, e := range earlier {
@@ -426,12 +443,18 @@ func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark str
 			if e.SchemaVersion == event.AccountSnapshotSchemaVersion {
 				continue
 			}
-			var p event.AccountPositionsSnapshotPayload
-			if read(e, snapshotVersions, &p) != nil || p.AccountID != account || (taken && !p.AsOf.After(last)) {
+			p, _, err := readSnapshot(e, strategy)
+			if err != nil || p.AccountID != account || (taken && !p.AsOf.After(last)) {
 				continue
 			}
 			taken, last = true, p.AsOf
 			netBy[dateOf(p.AsOf)] = p.NetLiquidation
+			closeNet[p.AsOf.UTC()] = p.NetLiquidation
+		case event.TargetsDecidedEventType:
+			var p event.TargetsDecidedPayload
+			if read(e, decidedVersions, &p) == nil && p.AccountID == account {
+				withheld[p.SessionPeriodEnd.UTC()] = p.Outcome == event.TargetsOutcomeWithheld
+			}
 		case event.CompletedBarEventType:
 			if p, bar, err := readBar(e); err == nil && p.InstrumentID == benchmark {
 				closes[dateOf(p.PeriodEnd)] = bar
@@ -445,7 +468,8 @@ func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark str
 // reads: its header and final record hash, its first two records (its
 // configuration and approval, ADR 0027), every configuration and approval
 // input after them (FollowChain refuses a second approval), every account
-// snapshot, of every fill only its ID, commission, time and version, which
+// snapshot and target decision (a withheld session supplies no account
+// point), of every fill only its ID, commission, time and version, which
 // the costs block counts (earlierFillOf), and every bar of benchmark
 // (pairEarlier). A log holding nothing
 // past its configuration keeps that one record, so restart.CutShort reads it
@@ -457,6 +481,8 @@ func ForHistory(recovery journal.Recovery, benchmark string) journal.Recovery {
 		env := e.Envelope
 		keep := i < 2
 		switch {
+		case env.Type == event.TargetsDecidedEventType:
+			keep = true
 		case e.Kind != journal.KindInput:
 		case env.Type == event.TargetWeightConfigurationEventType, env.Type == event.OperatorRunApprovedEventType, env.Type == event.AccountSnapshotEventType:
 			keep = true
@@ -506,13 +532,13 @@ func readBar(e event.Envelope) (event.CompletedBarPayload, benchBar, error) {
 		if err := read(e, barVersions, &p); err != nil {
 			return event.CompletedBarPayload{}, benchBar{}, err
 		}
-		return p.CompletedBarPayload, benchBar{split: p.SplitAdjusted.Close, adjusted: p.Adjusted.Close, base: p.AdjustedBase, v2: true}, nil
+		return p.CompletedBarPayload, benchBar{at: p.PeriodEnd, split: p.SplitAdjusted.Close, adjusted: p.Adjusted.Close, base: p.AdjustedBase, v2: true}, nil
 	}
 	var p event.CompletedBarPayload
 	if err := read(e, barVersions, &p); err != nil {
 		return event.CompletedBarPayload{}, benchBar{}, err
 	}
-	return p, benchBar{split: p.SplitAdjusted.Close}, nil
+	return p, benchBar{at: p.PeriodEnd, split: p.SplitAdjusted.Close}, nil
 }
 
 // snapshotFollows applies the engine's own rule for a positions snapshot
