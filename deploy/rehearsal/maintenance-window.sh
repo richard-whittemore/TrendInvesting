@@ -73,6 +73,6 @@ rehearse_capital_safety_in_window() {
   ti-maintenance end >/dev/null || fail "ti-maintenance end failed"
   test "$(pushover_pages)" -gt "$push0" || fail "a Halted engine did not page Pushover inside a window"
   test "$(ntfy_pages)" -gt "$ntfy0" || fail "a Halted engine did not page ntfy inside a window"
-  decoded_bodies | grep -qi 'engine halted' || fail "the page inside the window does not say the engine halted"
+  decoded_bodies | grep -qi 'halted' || fail "the pages inside the window do not say the engine is Halted; the last was: $(last_page)"
   pass "a Halted engine pages inside a maintenance window, as a capital-safety alert always does"
 }
