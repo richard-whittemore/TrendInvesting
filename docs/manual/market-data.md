@@ -882,7 +882,11 @@ wait; one still there at 08:15 is a failure that pages, as for Boost.
    list yet (the job stopped between the two writes) is taken in only if it
    encodes again byte for byte. One run of the instance's job at a time
    holds its lock (`streams/trad-ira/.ti-data.lock`); a firing that finds it
-   held prints one line and writes nothing.
+   held writes nothing: quietly at 06:15 and 07:15, which the next firing
+   follows, and as a failure that pages at 08:15, the last before the 09:00
+   cutoff. The manifest is written before the run's first file too, so a stop
+   between the two is taken in the same way. The requested file of a firing
+   that finds its session already written is always encoded again.
 5. Records first, before asking Massive anything, the latest session's
    sector labels (the sources serve only that session's files, so a morning
    when Massive fails still keeps them; a source that is down is named in a
@@ -895,10 +899,11 @@ wait; one still there at 08:15 is a failure that pages, as for Boost.
    when every firing of a month's first morning failed, the next morning's
    catch-up still writes the month-end universe and histories. A session
    with no labels within a week gets no universe. For the latest session
-   the labels can still be fetched until its next close, so before 08:00
-   (the last morning firing) the job writes nothing and the next firing asks
-   again (`the sector labels of ... are not recorded yet`). From the last
-   firing on it writes the file without that universe, one warning line names
+   the labels can still be fetched until its next close, so before 08:00 on
+   the next trading day (the firings at 06:15 and 07:15) the job writes
+   nothing and the next firing asks again (`the sector labels of ... are not
+   recorded yet`). From 08:00 on (the last morning firing at 08:15, or a run
+   you start by hand after 08:00) it writes the file without that universe, one warning line names
    every session left without one, a decision on any of them is withheld
    (`missing-universe`) and the next mornings carry on. A published file is
    never rewritten, so a month-end universe published without its labels is
@@ -952,7 +957,7 @@ must still lie within two years of the day its warm-up runs, unless its
 sessions are already recorded.
 
 ```sh
-sudo systemd-run --unit=ti-warmup-ira --collect -p User=ti-trader -p Group=ti-trader \
+sudo systemd-run --unit=ti-warmup-ira --collect -p User=ti-trader -p Group=ti-trader -p RuntimeMaxSec=4h \
   -p LoadCredential=secrets:/run/trend-investing/secrets/secrets.env \
   /opt/trend-investing/bin/ti-data --engine momentum --instance trad-ira \
   --ranker /opt/trend-investing/bin/universe-rank --data /var/lib/trend-investing/data \
@@ -976,30 +981,44 @@ waiting for the account's first run: ... (start the trad-ira engine once)`.
   only.
 - "the momentum configuration ... is not the one the engine's durable log
   ... holds": the file was edited after the engine started; put it back.
-- "the sector labels of ... were not recorded", then "the universe of ...
-  is not recorded": iShares or Nasdaq was down this morning and no labels
-  from the past week are recorded. The day's file is written without that
-  session's universe. Run `sudo systemctl start ti-data@trad-ira` again
-  before the session's next close if it is a month's last session; after
-  that the sources serve only the next day's file, that session's universe
-  stays unwritten, and a decision on it is withheld as `missing-universe`
-  ([momentum universe](momentum-universe.md)); the next mornings carry on.
+- "the sector labels of ... are not recorded yet": iShares or Nasdaq is
+  down this morning. Before 08:00 nothing is written and the next firing
+  (or `sudo systemctl start ti-data@trad-ira`) asks the sources again.
+- "no universe is recorded for ... session(s)": the labels were still
+  missing at the 08:15 firing (or a start after 08:00), so the file was
+  written without that session's universe. A published file is never
+  rewritten: that session's universe is lost for the run, a decision on it
+  is withheld as `missing-universe` ([momentum universe](momentum-universe.md)),
+  a start after that changes nothing, and the next mornings carry on. The
+  remedy is to keep the sector sources healthy (a renamed column or page
+  needs a new build), not to run the job again.
 - "cannot read holdings: account.snapshot version ..." (or a fill's or an
   approval's), or "does not follow its record hash chain": the engine's log
   holds an input this build does not read, or was changed after the engine
   wrote it. Nothing is written; restore the log from the backup, or install
   the build that reads that version.
 - "the run's files are not one unbroken chain", "... is missing: the job
-  published it", "... changed since it was published", or "holds stream
-  files but no manifest": a file the job wrote for the run, or its manifest,
-  is gone or changed. Restore it from the backup, unchanged; never write
-  it again.
+  published it", "... changed since it was published", or "ends at ...,
+  not at the ... its manifest lists": a file the job wrote for the run is
+  gone or changed. Restore it from the backup, unchanged; never write it
+  again.
+- "holds stream files but no manifest" or "the run's manifest ... cannot
+  be read": restore `manifest.json` from the backup, unchanged. Without
+  one, rebuild it by hand: the warm-up command below with
+  `--rebuild-manifest` in place of `--backfill-from ...` takes in every
+  file in chain order, each only if it encodes again byte for byte, and
+  refuses, writing no manifest, if any differs (then the run's history no
+  longer comes from its recordings: start a fresh run with its own warm-up).
 - "split and dividend recordings appeared or changed ... more than one
   firing checks": run the job once by hand with `--reencode-all` (it names
   the recordings); if a file then differs, see "A file already written
   differs".
 - "another run of the trad-ira data job holds its lock": a warm-up or a
-  start by hand is running; the firing wrote nothing and succeeded.
+  start by hand is running. At 06:15 and 07:15 the firing wrote nothing and
+  succeeded; at 08:15 it fails and pages ("... this is the last morning
+  firing"): check the run holding the lock (`systemctl list-units
+  'ti-warmup-ira*'`). A run by hand is stopped after four hours
+  (`RuntimeMaxSec=4h` below), so a hung one cannot hold the lock for days.
 - "cannot read holdings: ... previous log ...": the fresh run took the
   previous run's book, and that log is missing or not the one its approval
   names. Restore it beside the run's log, as the engine wrote it.

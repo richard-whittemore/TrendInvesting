@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -1032,6 +1033,157 @@ class SharedRecordingCheckTest(unittest.TestCase):
                                            now=lambda: after_settle(D(2026, 11, 27)))
             self.assertTrue(all(os.path.exists(p) for p in paths))
             self.assertTrue(os.path.exists(os.path.join(d, "dividends_2026-11-13_2026-11-27.json")))
+
+
+
+class RepeatFiringTest(unittest.TestCase):
+    def test_a_retraction_recorded_inside_a_published_file_stops_the_firing_that_finds_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            encode.record_retraction(str(job.data), D(2026, 11, 24), "NYSE closed (rehearsed)",
+                                     recorded_at="2026-11-28T12:00:00Z")
+            status, _, err = job.main(after_settle(D(2026, 11, 25), minutes=600))
+            self.assertEqual(status, 1, err)
+            self.assertIn(str(job.path(D(2026, 11, 25))), err)
+            self.assertIn("a person", err)
+
+
+class ManifestEntryTest(unittest.TestCase):
+    """A manifest entry is checked against the file it names: its name's session, and the first and last
+    sessions the file itself holds."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.job = warmed(self.tmp.name)
+        self.manifest = self.job.stream_dir() / "manifest.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def edit(self, change):
+        manifest = json.loads(self.manifest.read_text())
+        change(manifest)
+        self.manifest.write_text(json.dumps(manifest))
+
+    def test_a_last_session_the_file_does_not_end_at_is_refused(self):
+        self.edit(lambda m: m["files"][-1].update(last="2026-12-01"))
+        status, _, err = self.job.main(after_settle(D(2026, 12, 1)))
+        self.assertEqual(status, 1, err)
+        self.assertIn("trad-ira-2026-11-30.jsonl", err)
+        self.assertFalse(self.job.path(D(2026, 12, 2)).exists())
+
+    def test_a_manifest_missing_a_field_is_refused_plainly(self):
+        self.edit(lambda m: m["files"][0].pop("without_universe"))
+        status, _, err = self.job.main(after_settle(D(2026, 11, 30)))
+        self.assertEqual(status, 1, err)
+        self.assertIn("cannot be read", err)
+        self.assertIn("without_universe", err)
+        self.assertNotIn("KeyError", err)
+
+
+class TakeInRefusalTest(unittest.TestCase):
+    """The take-in rule lists only one newest unlisted file, and only one that encodes again byte for byte."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.job = warmed(self.tmp.name)
+        self.manifest = self.job.stream_dir() / "manifest.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def refused(self, *words):
+        status, _, err = self.job.main(after_settle(D(2026, 11, 30), minutes=600))
+        self.assertEqual(status, 1, err)
+        for w in words:
+            self.assertIn(w, err)
+
+    def test_an_unlisted_newest_file_that_differs_is_refused_and_stays_unlisted(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["files"].pop()
+        self.manifest.write_text(json.dumps(manifest))
+        with open(self.job.path(D(2026, 11, 30)), "a") as f:
+            f.write("\n")
+        self.refused("differs")
+        self.assertEqual(len(json.loads(self.manifest.read_text())["files"]), 2)
+
+    def test_two_unlisted_files_are_refused(self):
+        shutil.copy(self.job.path(D(2026, 11, 30)), self.job.stream_dir() / "trad-ira-2026-12-01.jsonl")
+        shutil.copy(self.job.path(D(2026, 11, 30)), self.job.stream_dir() / "trad-ira-2026-12-02.jsonl")
+        self.refused("does not list")
+
+    def test_an_unlisted_file_older_than_the_newest_listed_is_refused(self):
+        shutil.copy(self.job.path(D(2026, 11, 27)), self.job.stream_dir() / "trad-ira-2026-11-26.jsonl")
+        self.refused("does not list", "trad-ira-2026-11-26.jsonl")
+
+
+class ManifestRecoveryTest(unittest.TestCase):
+    """The manifest is written before the run's first file, so a stop between the two leaves a file the next
+    firing takes in by the same rule; a manifest lost or damaged is rebuilt only by hand
+    (--rebuild-manifest), every file taken in by that rule in chain order."""
+
+    def test_a_stop_after_the_first_file_is_linked_is_taken_in_by_the_next_firing(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data))
+            job = MomentumJob(root, data=data, ranker=FakeRanker())
+            original = tidata.encode.write_stream
+
+            def stopped(path, envelopes):
+                original(path, envelopes)
+                raise RuntimeError("the job stopped here")
+            with mock.patch.object(tidata.encode, "write_stream", stopped):
+                status, _, _ = job.main(after_settle(D(2026, 11, 25)), "--backfill-from", "2026-11-23")
+            self.assertEqual(status, 1)
+            self.assertTrue(job.path(D(2026, 11, 25)).exists())
+            status, out, err = job.main(after_settle(D(2026, 11, 25), minutes=600), "--backfill-from", "2026-11-23")
+            self.assertEqual(status, 0, err)
+            self.assertEqual(out.strip(), str(job.path(D(2026, 11, 25))))
+            manifest = json.loads((job.stream_dir() / "manifest.json").read_text())
+            self.assertEqual([f["name"] for f in manifest["files"]], ["trad-ira-2026-11-25.jsonl"])
+
+    def test_a_lost_manifest_is_refused_naming_the_remedy_and_rebuilt_by_hand(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            manifest = job.stream_dir() / "manifest.json"
+            before = json.loads(manifest.read_text())
+            os.remove(manifest)
+            status, _, err = job.main(after_settle(D(2026, 11, 30), minutes=600))
+            self.assertEqual(status, 1)
+            self.assertIn("--rebuild-manifest", err)
+            manifest.write_text("{not json")
+            status, _, err = job.main(after_settle(D(2026, 11, 30), minutes=600))
+            self.assertEqual(status, 1)
+            self.assertIn("--rebuild-manifest", err)
+            status, _, err = job.main(after_settle(D(2026, 11, 30), minutes=600), "--rebuild-manifest")
+            self.assertEqual(status, 0, err)
+            self.assertEqual([f["sha256"] for f in json.loads(manifest.read_text())["files"]],
+                             [f["sha256"] for f in before["files"]])
+
+    def test_a_rebuild_refuses_a_file_that_differs(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            os.remove(job.stream_dir() / "manifest.json")
+            with open(job.path(D(2026, 11, 27)), "a") as f:
+                f.write("\n")
+            status, _, err = job.main(after_settle(D(2026, 11, 30), minutes=600), "--rebuild-manifest")
+            self.assertEqual(status, 1)
+            self.assertIn("trad-ira-2026-11-27.jsonl differs", err)
+            self.assertFalse((job.stream_dir() / "manifest.json").exists())
+
+
+class LastFiringLockTest(unittest.TestCase):
+    def test_at_the_last_morning_firing_a_held_lock_fails_the_firing(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            with open(job.streams / INSTANCE / ".ti-data.lock", "a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                status, _, err = job.main(dt.datetime(2026, 12, 1, 8, 15, tzinfo=nyse_calendar.NEW_YORK))
+            self.assertEqual(status, 1, err)
+            self.assertIn("holds its lock", err)
+            self.assertIn("last morning firing", err)
 
 
 if __name__ == "__main__":

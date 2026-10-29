@@ -991,7 +991,7 @@ def _record_universe(client, data, day, now, settle, warn):
 
 def run_momentum(data, streams, config, engine_log, key, now, settle, instance, ranker_bin=None, ranker=None,
                  session=None, backfill_from=None, client_factory=massive.Client, sectors_get=sectors.http_get,
-                 warn=None, reencode_all=False):
+                 warn=None, reencode_all=False, rebuild_manifest=False):
     """Runs the momentum engine's job once (see above) and returns the stream's path. The ranker is
     ``ranker`` if given, else cmd/universe-rank at ``ranker_bin``, run on a private copy of the configuration's
     bytes checked against the engine's log, never on the file's path, which may change while the job runs."""
@@ -1014,14 +1014,24 @@ def run_momentum(data, streams, config, engine_log, key, now, settle, instance, 
     if log.boost != cfg:
         raise Refused("the momentum configuration {} is not the one the engine's durable log {} holds: the stream "
                       "would carry the run's configuration hash over another ranking".format(config, engine_log))
-    with tempfile.TemporaryDirectory(prefix="ti-data-") as private, _instance_lock(streams, instance):
-        if ranker is None:
-            checked = os.path.join(private, "configuration.json")
-            with open(checked, "wb") as f:
-                f.write(raw)
-            ranker = encode.go_ranker([ranker_bin, "-config", checked])
-        return _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session, backfill_from,
-                             client_factory, sectors_get, warn, cfg, log, reencode_all)
+    try:
+        with tempfile.TemporaryDirectory(prefix="ti-data-") as private, _instance_lock(streams, instance):
+            if ranker is None:
+                checked = os.path.join(private, "configuration.json")
+                with open(checked, "wb") as f:
+                    f.write(raw)
+                ranker = encode.go_ranker([ranker_bin, "-config", checked])
+            return _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session,
+                                 backfill_from, client_factory, sectors_get, warn, cfg, log, reencode_all,
+                                 rebuild_manifest)
+    except Busy as e:
+        # At the last morning firing nothing asks again before the 09:00 cutoff, and the run holding the lock
+        # (a warm-up or a run by hand) has no OnFailure of its own: the firing fails, so it pages
+        # (docs/live-trading/lessons-2026-10.md L2; ADR 0019, "Alerting").
+        if now() >= quiet_until(settled_session(now(), settle)):
+            raise Refused("{}, and this is the last morning firing: nothing asks again before the 09:00 cutoff, "
+                          "so it fails (check the run holding the lock)".format(e)) from None
+        raise
 
 
 class Busy(Exception):
@@ -1032,7 +1042,9 @@ class Busy(Exception):
 def _instance_lock(streams, instance):
     """The instance's lock (STREAMS/<instance>/.ti-data.lock), held from the reading of the run's folder to the
     publication of its file and manifest, so a start by hand, a warm-up and a timer firing never publish
-    overlapping files. Not waited for: the run holding it writes the file or fails and pages."""
+    overlapping files (ADR 0027: one run's stream is one chain of files). Not waited for: a firing that finds
+    it held writes nothing, quietly before the last morning firing, which asks again, and as a failure that
+    pages at the last one (run_momentum; docs/live-trading/lessons-2026-10.md L2)."""
     folder = os.path.join(streams, instance)
     os.makedirs(folder, exist_ok=True)
     with open(os.path.join(folder, LOCK), "a") as f:
@@ -1067,26 +1079,76 @@ def _manifest_entry(path, first, last, without):
             "without_universe": [d.isoformat() for d in without]}
 
 
+MANIFEST_REMEDY = ("restore manifest.json from the backup, unchanged, or, without one, rebuild it by hand with "
+                   "--rebuild-manifest, which takes in every file only if it encodes again byte for byte "
+                   "(docs/manual/market-data.md, \"A job for the IRAs\")")
+
+
 def _read_manifest(directory):
+    """The run's manifest, every field checked; None when there is none; Refused, naming the field and the
+    remedy, for one that cannot be read (a hand edit, a later version, a disk fault)."""
     path = os.path.join(directory, MANIFEST)
+
+    def need(table, key, kind, where):
+        if not isinstance(table, dict) or key not in table:
+            raise ValueError("{} lacks the field {}".format(where, key))
+        value = table[key]
+        if kind == "date":
+            if not isinstance(value, str):
+                raise ValueError("{}'s {} is not a date".format(where, key))
+            dt.date.fromisoformat(value)
+        elif not isinstance(value, kind) or isinstance(value, bool):
+            raise ValueError("{}'s {} is not a {}".format(where, key, kind.__name__))
+        return value
     try:
         with open(path) as f:
             manifest = json.load(f)
-        if manifest.get("manifest_version") != MANIFEST_VERSION:
-            raise ValueError("version {!r}".format(manifest.get("manifest_version")))
-        dt.date.fromisoformat(manifest["base"])
-        for e in manifest["files"]:
-            dt.date.fromisoformat(e["first"]), dt.date.fromisoformat(e["last"])
-            if not isinstance(e["name"], str) or not isinstance(e["bytes"], int) or not isinstance(e["sha256"], str):
-                raise ValueError("an entry is not a file's")
-        if not isinstance(manifest["actions"], dict):
-            raise ValueError("its action recordings are not a table")
+        if need(manifest, "manifest_version", int, "it") != MANIFEST_VERSION:
+            raise ValueError("its version is {!r}, not {}".format(manifest["manifest_version"], MANIFEST_VERSION))
+        need(manifest, "base", "date", "it")
+        need(manifest, "actions", dict, "it")
+        for n, e in enumerate(need(manifest, "files", list, "it"), 1):
+            where = "its file entry {}".format(n)
+            need(e, "name", str, where)
+            need(e, "first", "date", where)
+            need(e, "last", "date", where)
+            need(e, "bytes", int, where)
+            need(e, "sha256", str, where)
+            for d in need(e, "without_universe", list, where):
+                if not isinstance(d, str):
+                    raise ValueError("{}'s without_universe holds {!r}, not a date".format(where, d))
+                dt.date.fromisoformat(d)
     except FileNotFoundError:
         return None
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        raise Refused("the run's manifest {} cannot be read ({}); this stops the job for a person".format(
-            path, e)) from None
+    except (OSError, ValueError, TypeError) as e:
+        raise Refused("the run's manifest {} cannot be read: {}; this stops the job for a person: {}".format(
+            path, e, MANIFEST_REMEDY)) from None
     return manifest
+
+
+def _last_session_of(path):
+    """The session of a stream file's last line, its market.session.closed (encode.py writes each session's
+    close last)."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        end = f.tell()
+        size, tail = 1 << 16, b""
+        while True:
+            start = max(0, end - size)
+            f.seek(start)
+            tail = f.read(end - start)
+            lines = tail.rstrip(b"\n").split(b"\n")
+            if len(lines) > 1 or start == 0:
+                break
+            size *= 2
+    try:
+        envelope = json.loads(lines[-1])
+        if envelope["type"] != encode.SESSION_CLOSED[0]:
+            raise ValueError("its last input is {}, not a session's close".format(envelope["type"]))
+        return dt.date.fromisoformat(envelope["event_time"][:10])
+    except (ValueError, KeyError, TypeError) as e:
+        raise Refused("the run's file {} does not end with a session's close ({}); this stops the job for a "
+                      "person".format(path, e)) from None
 
 
 def _write_manifest(directory, manifest):
@@ -1107,26 +1169,38 @@ def _write_manifest(directory, manifest):
     record._sync_dir(directory)
 
 
-def _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker, retracted):
-    """The run's published files as its manifest lists them, checked: every listed file is there with the
-    length and digest the manifest gives, the files form one unbroken chain from the base, and no other
-    stream file is in the folder, except one newest file published by a run that stopped before its manifest
-    was written, which is taken in only if it re-encodes byte for byte. Returns (manifest, [(first, last,
-    path)]); refuses anything else, so a published file truncated, changed or gone, the newest included, is
-    never written again from today's recordings and holdings."""
-    manifest = _read_manifest(directory)
+def _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker, retracted,
+               rebuild=False):
+    """The run's published files as its manifest lists them, checked (AGENTS.md rule 5; ADR 0027: an input
+    the engine may have read is never rewritten): every listed file is there with the length and digest the
+    manifest gives, named for its last session and holding exactly the first and last sessions it lists
+    (its own calendar and its own last close), the files form one unbroken chain from the base, and no
+    other stream file is in the folder, except one newest file published by a run that stopped before its
+    manifest was updated (the first file included: the manifest is written before it), which is taken in
+    only if it encodes again byte for byte. With ``rebuild`` (by hand, --rebuild-manifest) every file is
+    taken in by that rule, in chain order, into a new manifest. Returns (manifest, [(first, last, path)]);
+    refuses anything else, so a published file truncated, changed or gone, the newest included, is never
+    written again from today's recordings and holdings."""
+    manifest = None if rebuild else _read_manifest(directory)
     if manifest is None:
-        if existing:
+        if existing and not rebuild:
             raise Refused("the run's folder {} holds stream files but no manifest of what the job published; this "
-                          "stops the job for a person (restore the manifest with the files from the backup)".format(
-                              directory))
-        return None, []
+                          "stops the job for a person: {}".format(directory, MANIFEST_REMEDY))
+        if not existing:
+            return None, []
+        manifest = {"manifest_version": MANIFEST_VERSION, "base": base.isoformat(), "files": [], "actions": {}}
     if dt.date.fromisoformat(manifest["base"]) != base:
         raise Refused("the run's manifest gives the base {}, but its first file's calendar {}".format(
             manifest["base"], base))
+    pattern = re.compile(re.escape(instance) + r"-(\d{4}-\d{2}-\d{2})\.jsonl")
     listed = []
     for e in manifest["files"]:
         path = os.path.join(directory, e["name"])
+        first, last = dt.date.fromisoformat(e["first"]), dt.date.fromisoformat(e["last"])
+        named = pattern.fullmatch(e["name"])
+        if not named or dt.date.fromisoformat(named.group(1)) != last or first > last:
+            raise Refused("the run's manifest lists {} for {}..{}, which is not that file's name or a span of "
+                          "sessions; this stops the job for a person: {}".format(path, first, last, MANIFEST_REMEDY))
         if not os.path.exists(path):
             raise Refused("{} is missing: the job published it for the run (its manifest lists it), so nothing more "
                           "is written for the run: this stops the job for a person (restore it from the backup, "
@@ -1135,25 +1209,34 @@ def _published(directory, instance, existing, base, data, cfg, identity, engine_
             raise Refused("{} changed since it was published (its manifest gives {} bytes, sha256 {}); nothing more is "
                           "written for the run: this stops the job for a person (restore it from the backup, "
                           "unchanged)".format(path, e["bytes"], e["sha256"]))
-        listed.append((dt.date.fromisoformat(e["first"]), dt.date.fromisoformat(e["last"]), path))
+        if _last_session_of(path) != last:
+            raise Refused("{} ends at {}, not at the {} its manifest lists; this stops the job for a person: {}".format(
+                path, _last_session_of(path), last, MANIFEST_REMEDY))
+        listed.append((first, last, path))
     names = {os.path.basename(p) for _, _, p in listed}
     unlisted = [(last, path) for last, path in existing if os.path.basename(path) not in names]
     spans = _spans([(last, path) for _, last, path in listed], base)
     if [(a, b) for a, b, _ in spans] != [(a, b) for a, b, _ in listed]:
         raise Refused("the run's manifest {} does not list one unbroken chain of files from the base {}; this stops "
-                      "the job for a person".format(os.path.join(directory, MANIFEST), base))
-    if unlisted:
-        last, path = unlisted[0]
-        newest = listed[-1][1] if listed else None
-        if len(unlisted) > 1 or (newest is not None and last <= newest):
-            raise Refused("the run's folder {} holds stream files its manifest does not list ({}); this stops the "
-                          "job for a person".format(directory, ", ".join(os.path.basename(p) for _, p in unlisted)))
+                      "the job for a person: {}".format(os.path.join(directory, MANIFEST), base, MANIFEST_REMEDY))
+    _check_chain(spans, retracted)
+    newest = spans[-1][1] if spans else None
+    if unlisted and not rebuild and (len(unlisted) > 1 or (newest is not None and unlisted[0][0] <= newest)):
+        raise Refused("the run's folder {} holds stream files its manifest does not list ({}); this stops the "
+                      "job for a person".format(directory, ", ".join(os.path.basename(p) for _, p in unlisted)))
+    for last, path in unlisted:
         first = base if newest is None else nyse_calendar.sessions_after(newest, 1)[0]
         _check_chain(spans + [(first, last, path)], retracted)
+        if _last_session_of(path) != last:
+            raise Refused("{} ends at {}, not at the session its name gives; this stops the job for a person".format(
+                path, _last_session_of(path)))
         _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker)
         manifest["files"].append(_manifest_entry(path, first, last, _without_universe(data, first, last, retracted)))
         spans.append((first, last, path))
-    _check_chain(spans, retracted)
+        newest = last
+    if rebuild:
+        manifest["actions"] = _action_set(data)
+        _write_manifest(directory, manifest)
     return manifest, spans
 
 
@@ -1176,10 +1259,12 @@ def _runs(days):
 
 
 def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ranker, reencode_all):
-    """Encodes again every published file that a split or dividend recording which appeared, changed or went
+    """Encodes again (AGENTS.md rule 5; ADR 0027: an input the engine may have read is never rewritten, only
+    checked) every published file that a split or dividend recording which appeared, changed or went
     since the manifest's check could reach (its last session on or after the earliest window start among
     them), however old, and returns the action recordings now read. More than MAX_REENCODED files is more
-    than one morning firing can check before the open: refused, naming the remedy (a run by hand with
+    than one morning firing can check before the open (docs/live-trading/lessons-2026-10.md L1 and L2):
+    refused, naming the remedy (a run by hand with
     --reencode-all), unless ``reencode_all``."""
     now_set = _action_set(data)
     before = manifest["actions"] if manifest else {}
@@ -1199,7 +1284,7 @@ def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ra
 
 
 def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session, backfill_from,
-                  client_factory, sectors_get, warn, cfg, log, reencode_all):
+                  client_factory, sectors_get, warn, cfg, log, reencode_all, rebuild_manifest=False):
     run_id = stream_run(os.path.join(streams, instance), engine_log, log, engine=MOMENTUM)
     identity = encode.Identity(log.configuration_hash, log.strategy_version, run_id)
     directory = os.path.join(streams, instance, run_id)
@@ -1218,10 +1303,13 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
         raise Refused("session {} precedes the run's base {}".format(session, base))
     retracted = encode.load_retractions(data)
     manifest, spans = _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker,
-                                 retracted)
+                                 retracted, rebuild=rebuild_manifest)
     latest = settled_session(now(), settle)
     for first, last, path in spans:
         if first <= session <= last:
+            # The requested file is always encoded again: any recording it reads (a retraction, a bar, a
+            # universe or a sector recording) may have changed, not only the action recordings tracked.
+            _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker)
             manifest["actions"] = _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ranker,
                                                     reencode_all)
             _write_manifest(directory, manifest)
@@ -1279,8 +1367,12 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
                                    optional=[t for t in log.holdings if t not in cfg.required], base=base,
                                    first_sequence=1, engine=MOMENTUM, excluded=excluded, ranker=ranker)
     os.makedirs(directory, exist_ok=True)
+    if manifest is None:
+        # Written before the run's first file, so a stop between the two leaves a file the next firing takes
+        # in by the rule of _published (ADR 0018: each write is whole or not at all).
+        manifest = {"manifest_version": MANIFEST_VERSION, "base": base.isoformat(), "files": [], "actions": {}}
+        _write_manifest(directory, manifest)
     path = encode.write_stream(os.path.join(directory, "{}-{}.jsonl".format(instance, session)), envelopes)
-    manifest = manifest or {"manifest_version": MANIFEST_VERSION, "base": base.isoformat(), "files": []}
     manifest["files"].append(_manifest_entry(path, first, session, without))
     manifest["actions"] = actions
     _write_manifest(directory, manifest)
@@ -1318,12 +1410,15 @@ def parse(argv):
                     help="the engine whose stream is written (default boost; momentum: an IRA's compact stream)")
     ap.add_argument("--instance", help="momentum: the engine's instance (trad-ira), its stream folder and file prefix")
     ap.add_argument("--ranker", help="momentum: cmd/universe-rank, run with -config CONFIG")
+    ap.add_argument("--rebuild-manifest", action="store_true",
+                    help="momentum, by hand: rebuild the run's lost or damaged manifest, taking in every file only if "
+                         "it encodes again byte for byte")
     ap.add_argument("--reencode-all", action="store_true",
                     help="momentum, by hand: encode again every published file that changed split or dividend "
                          "recordings reach, however many (a morning firing checks at most {})".format(MAX_REENCODED))
     args = ap.parse_args(argv)
-    if args.engine == ENGINE and (args.instance or args.ranker or args.reencode_all):
-        ap.error("--instance, --ranker and --reencode-all are for --engine momentum")
+    if args.engine == ENGINE and (args.instance or args.ranker or args.reencode_all or args.rebuild_manifest):
+        ap.error("--instance, --ranker, --reencode-all and --rebuild-manifest are for --engine momentum")
     if args.engine == MOMENTUM:
         if not args.instance or not INSTANCE.fullmatch(args.instance) or args.instance == ENGINE:
             ap.error("--engine momentum needs --instance, an IRA's name such as trad-ira")
@@ -1434,6 +1529,7 @@ def main(argv, now=steps._now, client_factory=massive.Client, ranker=None, secto
             path = run_momentum(args.data, args.streams, args.config, args.engine_log, key, now,
                                 dt.timedelta(minutes=args.settle_minutes), args.instance,
                                 ranker_bin=args.ranker, ranker=ranker, reencode_all=args.reencode_all,
+                                rebuild_manifest=args.rebuild_manifest,
                                 session=args.session, backfill_from=args.backfill_from,
                                 client_factory=client_factory, sectors_get=sectors_get)
         else:
