@@ -160,3 +160,31 @@ func TestReporterRefusesIRAUnitsWithoutInstance(t *testing.T) {
 		t.Fatalf("missing instance was not refused: err=%v output=%s", err, out.String())
 	}
 }
+
+func TestReporterInvalidInstanceOmitsUnitCommands(t *testing.T) {
+	for _, instance := range []string{"trad ira", "trad;ira", "trad/ira"} {
+		t.Run(instance, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0.Add(24*time.Hour)), iraEntries(t, "DU0000001")); err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "run.log")
+			writeFileT(t, path, buf.String())
+			var out bytes.Buffer
+			args := []string{"-journal", path, "-account", instance, "-state", filepath.Join(dir, "state.json"), "-channel", "stdout,ntfy"}
+			if err := run(args, env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.test"}), func() time.Time { return t0.Add(48 * time.Hour) }, &out, &http.Client{Transport: &relay{sent: map[string][]string{}}}); err != nil {
+				t.Fatal(err)
+			}
+			text := out.String()
+			if !strings.Contains(text, "instance unknown: run the reporter for the account to get the exact units") {
+				t.Error("missing unknown-instance line")
+			}
+			for _, forbidden := range []string{"systemctl stop", "ti-adapter", "ti-engine"} {
+				if strings.Contains(text, forbidden) {
+					t.Errorf("invalid instance contains %s", forbidden)
+				}
+			}
+		})
+	}
+}

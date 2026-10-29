@@ -244,3 +244,57 @@ func TestDashboardHandSaleWithUnknownInstanceOmitsUnits(t *testing.T) {
 		}
 	}
 }
+
+func TestAlertCommandsValidateDeploymentInstance(t *testing.T) {
+	for _, momentum := range []bool{true, false} {
+		var s *stream
+		if momentum {
+			s = newIRAStream(t)
+		} else {
+			s = newStream(t)
+		}
+		s.saleWithheld(0, "sale-instance", event.SaleWithheldNotPositive)
+		for _, instance := range []string{"trad ira", "trad;ira", "trad/ira", "Trad-ira", "1ira", "-ira", "trad_ira", "trad\\ira", "trad-ira\n", strings.Repeat("a", 33), "trad-ira", "boost", "a", "a" + strings.Repeat("0-", 15) + "0"} {
+			for _, render := range []func([]event.Envelope, string) ([]report.Alert, error){report.Alerts, report.AlertsForDashboard} {
+				got, err := render(s.out, instance)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pages := ofKind(got, report.KindSaleByHand)
+				if len(pages) != 1 {
+					t.Fatalf("pages: %+v", got)
+				}
+				body := pages[0].Body
+				valid := instance == "trad-ira" || instance == "boost" || instance == "a" || len(instance) == 32
+				if !valid {
+					if !strings.Contains(body, "instance unknown: run the reporter for the account to get the exact units") {
+						t.Errorf("%q: missing unknown line", instance)
+					}
+					for _, forbidden := range []string{"systemctl stop", "ti-adapter", "ti-engine"} {
+						if strings.Contains(body, forbidden) {
+							t.Errorf("%q: contains %s", instance, forbidden)
+						}
+					}
+				} else {
+					unit := instance
+					if !momentum {
+						unit = "boost"
+					}
+					adapter := "ti-adapter@" + unit
+					if unit == "boost" {
+						adapter = "ti-adapter-boost"
+					}
+					if !strings.Contains(body, "sudo systemctl stop "+adapter) {
+						t.Errorf("%q: missing adapter command", instance)
+					}
+					if strings.Contains(body, "instance unknown") {
+						t.Errorf("%q: valid instance marked unknown", instance)
+					}
+					if !strings.Contains(body, "sudo systemctl stop ti-engine@"+unit) {
+						t.Errorf("%q: missing engine command", instance)
+					}
+				}
+			}
+		}
+	}
+}

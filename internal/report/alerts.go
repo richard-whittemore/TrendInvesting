@@ -2,6 +2,7 @@ package report
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -191,13 +192,15 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 // instance is the caller's deployment name, never the journal's broker
 // account ID (ADR 0019, "Alerting"; docs/live-trading/lessons-2026-10.md L8).
 // Momentum callers must supply it; Boost retains its fixed unit names.
+// Invalid nonempty names are unknown and omit unit commands.
 func Alerts(envelopes []event.Envelope, instance string) ([]Alert, error) {
 	return alerts(envelopes, instance, true)
 }
 
 // AlertsForDashboard preserves incidents when the deployment instance is
 // unknown, omitting unit commands (ADR 0019, "Alerting"). A nonempty instance
-// must come from a provisioned engine folder (docs/manual/server.md).
+// must come from a provisioned engine folder (docs/manual/server.md); invalid
+// names are treated as unknown.
 func AlertsForDashboard(envelopes []event.Envelope, instance string) ([]Alert, error) {
 	return alerts(envelopes, instance, false)
 }
@@ -210,7 +213,9 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 	if requireInstance && isMomentum(strategy) && instance == "" {
 		return nil, fmt.Errorf("report: momentum alerts require an engine instance")
 	}
-	if requireInstance || instance != "" {
+	if instance != "" && !deploymentInstancePattern.MatchString(instance) {
+		instance = ""
+	} else if requireInstance || instance != "" {
 		instance = instanceOf(strategy, instance)
 	}
 	var out []Alert
@@ -638,6 +643,11 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 	return Alert{Key: key, Kind: kind, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
 }
+
+// deploymentInstancePattern restricts caller-supplied deployment names before
+// naming units (ADR 0019, "Alerting"). Invalid names remain unknown and never
+// enter commands, whether supplied by the reporter flag or dashboard folder.
+var deploymentInstancePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // instanceOf selects the deployment instance for alert commands (ADR 0019,
 // "Alerting"; docs/live-trading/lessons-2026-10.md L8). Momentum callers supply

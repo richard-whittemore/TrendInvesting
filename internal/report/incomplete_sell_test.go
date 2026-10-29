@@ -262,17 +262,19 @@ func TestIncompleteSellWithUnknownInstanceOmitsUnitCommands(t *testing.T) {
 	r.session(0)
 	r.release(0, iraSell("tw-unknown"))
 	r.session(1)
-	got := report.IncompleteSellAlerts("", r.out, event.TargetWeightStrategyMomentum)
-	if len(got) != 1 {
-		t.Fatalf("pages: %+v", got)
-	}
-	body := got[0].Body
-	if !strings.Contains(body, "instance unknown: run the reporter for the account to get the exact units") {
-		t.Error("missing unknown-instance instruction")
-	}
-	for _, forbidden := range []string{"systemctl stop", "ti-adapter", "ti-engine"} {
-		if strings.Contains(body, forbidden) {
-			t.Errorf("unknown instance contains %q", forbidden)
+	for _, instance := range []string{"", "trad ira", "trad;ira", "trad/ira"} {
+		got := report.IncompleteSellAlerts(instance, r.out, event.TargetWeightStrategyMomentum)
+		if len(got) != 1 {
+			t.Fatalf("pages: %+v", got)
+		}
+		body := got[0].Body
+		if !strings.Contains(body, "instance unknown: run the reporter for the account to get the exact units") {
+			t.Error("missing unknown-instance instruction")
+		}
+		for _, forbidden := range []string{"systemctl stop", "ti-adapter", "ti-engine"} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("unknown instance contains %q", forbidden)
+			}
 		}
 	}
 }

@@ -45,7 +45,8 @@ func main() {
 // with `tailscale serve` (deploy/systemd/ti-dashboard.service).
 const defaultAddr = "127.0.0.1:8088"
 
-// defaultEnginesRoot holds provisioned deployment instances (docs/manual/server.md).
+// defaultEnginesRoot holds provisioned deployment instances for alert commands
+// (ADR 0019, "Alerting"; docs/manual/server.md).
 const defaultEnginesRoot = "/var/lib/trend-investing/engines"
 
 type stringList []string

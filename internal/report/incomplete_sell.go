@@ -21,12 +21,15 @@ const KindSellIncomplete Kind = "sell-incomplete"
 // completes nothing. A dry-run release ends by its synthetic report, and a
 // run of any other strategy has no such sells, so neither pages. entries are
 // the log's committed records in recording order. The caller supplies the
-// deployment instance, never the journal's broker account ID; empty means
+// deployment instance, never the journal's broker account ID; empty or invalid means
 // unknown and omits unit commands (ADR 0019, "Alerting";
 // docs/live-trading/lessons-2026-10.md L8).
 func IncompleteSellAlerts(instance string, entries []journal.Entry, strategyID string) []Alert {
 	if !isMomentum(strategyID) {
 		return nil
+	}
+	if !deploymentInstancePattern.MatchString(instance) {
+		instance = ""
 	}
 	reports := event.NewOrderReports()
 	released := map[string]time.Time{} // sell client order ID -> the session closed when it was released
