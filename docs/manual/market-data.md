@@ -892,7 +892,11 @@ wait; one still there at 08:15 is a failure that pages, as for Boost.
    when Massive fails still keeps them; a source that is down is named in a
    warning line). Then each session since the run's last file: the
    whole-market bars once (skipped if Boost's job already recorded them; a
-   cancelled session recorded with `retract` is never asked for), and the
+   cancelled session recorded with `retract` is never asked for, and a file
+   is never named after one: when the latest session is cancelled, the
+   firing's session is the last real close before it, which is already
+   written, and the next file begins after the cancelled day and carries its
+   retraction), and the
    universe (the common-stock listing dated that session, written with the
    very bars just recorded, so the two recordings agree) of every such
    session that has labels from both sources within the week up to it. So
@@ -1004,11 +1008,14 @@ waiting for the account's first run: ... (start the trad-ira engine once)`.
   again.
 - "holds stream files but no manifest" or "the run's manifest ... cannot
   be read": restore `manifest.json` from the backup, unchanged. Without
-  one, rebuild it by hand: the warm-up command below with
+  one, rebuild it by hand: the warm-up command above with
   `--rebuild-manifest` in place of `--backfill-from ...` takes in every
   file in chain order, each only if it encodes again byte for byte, and
   refuses, writing no manifest, if any differs (then the run's history no
-  longer comes from its recordings: start a fresh run with its own warm-up).
+  longer comes from its recordings: start a fresh run with its own warm-up),
+  or if a split or dividend recording appears while it runs (run it again).
+  It refuses while the manifest can be read: a file the manifest lists that
+  is gone is restored from the backup, never forgotten by a rebuild.
 - "split and dividend recordings appeared or changed ... more than one
   firing checks": run the job once by hand with `--reencode-all` (it names
   the recordings); if a file then differs, see "A file already written
@@ -1018,7 +1025,7 @@ waiting for the account's first run: ... (start the trad-ira engine once)`.
   succeeded; at 08:15 it fails and pages ("... this is the last morning
   firing"): check the run holding the lock (`systemctl list-units
   'ti-warmup-ira*'`). A run by hand is stopped after four hours
-  (`RuntimeMaxSec=4h` below), so a hung one cannot hold the lock for days.
+  (`RuntimeMaxSec=4h` above), so a hung one cannot hold the lock for days.
 - "cannot read holdings: ... previous log ...": the fresh run took the
   previous run's book, and that log is missing or not the one its approval
   names. Restore it beside the run's log, as the engine wrote it.

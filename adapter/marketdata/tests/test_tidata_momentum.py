@@ -1186,5 +1186,105 @@ class LastFiringLockTest(unittest.TestCase):
             self.assertIn("last morning firing", err)
 
 
+
+class FileEndsEarlyTest(unittest.TestCase):
+    def test_a_listed_file_that_ends_before_its_last_session_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            path = job.path(D(2026, 11, 25))
+            lines = path.read_text().splitlines(keepends=True)
+            cut = max(i for i, line in enumerate(lines)
+                      if '"type":"market.session.closed"' in line and '"2026-11-24T' in line)
+            path.write_text("".join(lines[:cut + 1]))
+            manifest_path = job.stream_dir() / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["files"][0].update(bytes=path.stat().st_size, sha256=sha256_of(path))
+            manifest_path.write_text(json.dumps(manifest))
+            status, _, err = job.main(after_settle(D(2026, 11, 30), minutes=600))
+            self.assertEqual(status, 1, err)
+            self.assertIn("ends at 2026-11-24, not at the 2026-11-25 its manifest lists", err)
+
+
+class RebuildGuardTest(unittest.TestCase):
+    """--rebuild-manifest is for a lost or unreadable manifest only, and acknowledges only the split and
+    dividend recordings it encoded the files against."""
+
+    def test_a_rebuild_with_a_readable_manifest_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            manifest = job.stream_dir() / "manifest.json"
+            before = manifest.read_bytes()
+            os.remove(job.path(D(2026, 11, 30)))
+            status, _, err = job.main(after_settle(D(2026, 11, 30), minutes=600), "--rebuild-manifest")
+            self.assertEqual(status, 1, err)
+            self.assertIn("can be read", err)
+            self.assertEqual(manifest.read_bytes(), before)
+
+    def test_a_recording_written_during_a_rebuild_is_never_acknowledged(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            os.remove(job.stream_dir() / "manifest.json")
+            original = tidata._verify_momentum
+
+            def racing(files, *args, **kw):
+                name = "dividends_2026-11-20_{}.json".format(os.path.basename(files[0][2])[9:19])
+                if not (job.data / name).exists():
+                    record.write(str(job.data), {"kind": "dividends", "source": "massive",
+                                                 "session": os.path.basename(files[0][2])[9:19], "from": "2026-11-20",
+                                                 "fetched_at": "2026-12-01T06:05:00Z", "rows": []})
+                return original(files, *args, **kw)
+            with mock.patch.object(tidata, "_verify_momentum", racing):
+                status, _, err = job.main(after_settle(D(2026, 11, 30), minutes=600), "--rebuild-manifest")
+            self.assertEqual(status, 1, err)
+            self.assertIn("changed during the rebuild", err)
+            self.assertFalse((job.stream_dir() / "manifest.json").exists())
+
+
+class RetractedLatestSessionTest(unittest.TestCase):
+    """A file is never named after a session the exchange cancelled: when the latest settled session is
+    retracted, the job's session is the last real close before it, and the next file begins after it."""
+
+    def test_a_retracted_latest_session_writes_nothing_new_and_the_next_session_follows(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data))
+            os.remove(data / "universe_2026-11-30.json")
+            client = FakeMassive({D(2026, 12, 1): bars_for(D(2026, 12, 1))})
+            job = MomentumJob(root, data=data, client=client, ranker=FakeRanker())
+            self.assertEqual(job.main(after_settle(D(2026, 11, 25)), "--backfill-from", "2026-11-23")[0], 0)
+            self.assertEqual(job.main(after_settle(D(2026, 11, 27)))[0], 0)
+            encode.record_retraction(str(data), D(2026, 11, 30), "NYSE closed (rehearsed)",
+                                     recorded_at="2026-11-30T15:00:00Z")
+            for _ in range(2):
+                status, out, err = job.main(after_settle(D(2026, 11, 30)))
+                self.assertEqual(status, 0, err)
+                self.assertEqual(out.strip(), str(job.path(D(2026, 11, 27))))
+            self.assertNotIn(("grouped", D(2026, 11, 30)), client.calls)
+            status, out, err = job.main(after_settle(D(2026, 12, 1)))
+            self.assertEqual(status, 0, err)
+            self.assertEqual(out.strip(), str(job.path(D(2026, 12, 1))))
+            status, _, err = job.main(after_settle(D(2026, 12, 1), minutes=600))
+            self.assertEqual(status, 0, err)
+
+
+class RepeatFiringOnceTest(unittest.TestCase):
+    def test_the_requested_file_is_encoded_once_when_changed_recordings_also_reach_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = warmed(root)
+            record.write(str(job.data), {"kind": "dividends", "source": "massive", "session": "2026-11-30",
+                                         "from": "2026-11-20", "fetched_at": "2026-12-01T06:05:00Z", "rows": []})
+            checked = []
+            original = tidata._verify_momentum
+
+            def spy(files, *args, **kw):
+                checked.extend(os.path.basename(f[2]) for f in files)
+                return original(files, *args, **kw)
+            with mock.patch.object(tidata, "_verify_momentum", spy):
+                status, _, err = job.main(after_settle(D(2026, 11, 30), minutes=600))
+            self.assertEqual(status, 0, err)
+            self.assertEqual(checked.count("trad-ira-2026-11-30.jsonl"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

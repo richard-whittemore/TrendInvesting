@@ -125,6 +125,10 @@ the same file contract, with these differences:
   record a window long past) is re-encoded alone, each with the holdings its
   own bars name, and must match byte for byte (_reencode_changed; more than
   MAX_REENCODED is a run by hand, --reencode-all);
+- a file is never named after a cancelled session: when the latest settled
+  session is retracted, the job's session is the last real close before
+  it, and a file is checked only against the retractions up to its last
+  session (a later one is delivered with the next file);
 - the latest session is not published without its universe before the last
   morning firing (its labels can still be fetched); once published without
   it, a file is never rewritten;
@@ -882,7 +886,7 @@ def _verify_momentum(files, data, cfg, base, identity, engine_log, ranker):
         try:
             envelopes = encode.iter_encode(data, first, last, identity, required=list(cfg.required),
                                            optional=_named_in(path, cfg.required), base=base, first_sequence=1,
-                                           engine=MOMENTUM, ranker=ranker)
+                                           engine=MOMENTUM, ranker=ranker, retracted_through=last)
             again = _digest_of(envelopes)
         except Exception as e:   # a recording missing, a gap or a conflict: the file cannot be re-derived
             raise Refused("the run's file {} cannot be encoded again from its recordings ({}: {}); this stops the "
@@ -943,6 +947,14 @@ def _check_chain(spans, retracted):
                           "are in no file, so a file written for the run is missing; nothing more is written for "
                           "the run: this stops the job for a person (restore the file from the backup, unchanged: "
                           "docs/manual/market-data.md, \"A job for the IRAs\")".format(path, begins, expected))
+
+
+def _session_before(day):
+    """The NYSE session before ``day``."""
+    day -= dt.timedelta(days=1)
+    while not nyse_calendar.is_trading_day(day):
+        day -= dt.timedelta(days=1)
+    return day
 
 
 def _labelled(day, kinds_dates):
@@ -1086,7 +1098,10 @@ MANIFEST_REMEDY = ("restore manifest.json from the backup, unchanged, or, withou
 
 def _read_manifest(directory):
     """The run's manifest, every field checked; None when there is none; Refused, naming the field and the
-    remedy, for one that cannot be read (a hand edit, a later version, a disk fault)."""
+    remedy, for one that cannot be read (a hand edit, a later version, a disk fault). The manifest is the
+    job's record of the inputs it published to the run (ADR 0027: an input the engine may have read is never
+    rewritten), written whole or not at all (ADR 0018), so a manifest that does not read is never guessed at
+    (AGENTS.md rule 5)."""
     path = os.path.join(directory, MANIFEST)
 
     def need(table, key, kind, where):
@@ -1127,8 +1142,10 @@ def _read_manifest(directory):
 
 
 def _last_session_of(path):
-    """The session of a stream file's last line, its market.session.closed (encode.py writes each session's
-    close last)."""
+    """The session of a stream file's last line, its market.session.closed: each session's close is its last
+    input (ADR 0021: a session closes before its decision), so a file that ends otherwise, or at another
+    session than its manifest lists, is not the file the job published (AGENTS.md rule 5). Only the end of
+    the file is read (docs/live-trading/lessons-2026-10.md L1)."""
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
         end = f.tell()
@@ -1181,7 +1198,19 @@ def _published(directory, instance, existing, base, data, cfg, identity, engine_
     taken in by that rule, in chain order, into a new manifest. Returns (manifest, [(first, last, path)]);
     refuses anything else, so a published file truncated, changed or gone, the newest included, is never
     written again from today's recordings and holdings."""
-    manifest = None if rebuild else _read_manifest(directory)
+    try:
+        manifest = _read_manifest(directory)
+    except Refused:
+        if not rebuild:
+            raise
+        manifest = None   # unreadable: what --rebuild-manifest is for
+    if rebuild and manifest is not None:
+        raise Refused("--rebuild-manifest refused: the run's manifest {} can be read, so it is kept as the record of "
+                      "what the job published (a file it lists that is gone is restored from the backup, never "
+                      "forgotten); the rebuild is only for a lost or unreadable manifest".format(
+                          os.path.join(directory, MANIFEST)))
+    # The split and dividend recordings the rebuild checks the files against, read before it encodes any.
+    checked_actions = _action_set(data) if rebuild else None
     if manifest is None:
         if existing and not rebuild:
             raise Refused("the run's folder {} holds stream files but no manifest of what the job published; this "
@@ -1190,8 +1219,8 @@ def _published(directory, instance, existing, base, data, cfg, identity, engine_
             return None, []
         manifest = {"manifest_version": MANIFEST_VERSION, "base": base.isoformat(), "files": [], "actions": {}}
     if dt.date.fromisoformat(manifest["base"]) != base:
-        raise Refused("the run's manifest gives the base {}, but its first file's calendar {}".format(
-            manifest["base"], base))
+        raise Refused("the run's manifest gives the base {}, but {} {}".format(
+            manifest["base"], "the run's first file's calendar" if existing else "--backfill-from", base))
     pattern = re.compile(re.escape(instance) + r"-(\d{4}-\d{2}-\d{2})\.jsonl")
     listed = []
     for e in manifest["files"]:
@@ -1235,7 +1264,11 @@ def _published(directory, instance, existing, base, data, cfg, identity, engine_
         spans.append((first, last, path))
         newest = last
     if rebuild:
-        manifest["actions"] = _action_set(data)
+        if _action_set(data) != checked_actions:
+            raise Refused("split or dividend recordings changed during the rebuild (another job recorded one), so "
+                          "the files were not all checked against them; nothing is written: run --rebuild-manifest "
+                          "again")
+        manifest["actions"] = checked_actions
         _write_manifest(directory, manifest)
     return manifest, spans
 
@@ -1302,15 +1335,24 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
     if session < base:
         raise Refused("session {} precedes the run's base {}".format(session, base))
     retracted = encode.load_retractions(data)
+    # A file is never named after a session the exchange cancelled: the job's session, and the latest, are
+    # the last real closes on or before them (encode.py treats a retracted day as no session).
+    while session in retracted:
+        session = _session_before(session)
+    if session < base:
+        raise Refused("session {} precedes the run's base {}".format(session, base))
     manifest, spans = _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker,
                                  retracted, rebuild=rebuild_manifest)
     latest = settled_session(now(), settle)
+    while latest in retracted:
+        latest = _session_before(latest)
     for first, last, path in spans:
         if first <= session <= last:
             # The requested file is always encoded again: any recording it reads (a retraction, a bar, a
             # universe or a sector recording) may have changed, not only the action recordings tracked.
             _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker)
-            manifest["actions"] = _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ranker,
+            others = [s for s in spans if s[2] != path]   # the requested file is encoded once, above
+            manifest["actions"] = _reencode_changed(manifest, others, data, cfg, base, identity, engine_log, ranker,
                                                     reencode_all)
             _write_manifest(directory, manifest)
             entry = next(e for e in manifest["files"] if e["name"] == os.path.basename(path))
