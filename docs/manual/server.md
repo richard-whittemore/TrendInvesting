@@ -125,7 +125,7 @@ the same disk as the files, and a snapshot would carry both.
 | File | What it holds | Who reads it |
 | --- | --- | --- |
 | `ibkr-login.env` | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
-| `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY`, `TI_PAGERDUTY_ROUTING_KEY` (unused: the server pages through Pushover), `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL`, and the Flex reader's `TI_IBKR_FLEX_TOKEN`, `TI_IBKR_FLEX_QUERY_ID` and `TI_IBKR_FLEX_TRADES_QUERY_ID` | handed as a private credential file (`LoadCredential`) to the data job, the engines, the reporter and the Flex readers; the dashboard is given none |
+| `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY`, `TI_PAGERDUTY_ROUTING_KEY` (unused: the server pages through Pushover), `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL`, and the Flex reader's `TI_IBKR_FLEX_TOKEN`, `TI_IBKR_FLEX_QUERY_ID` and `TI_IBKR_FLEX_TRADES_QUERY_ID` | handed as a private credential file (`LoadCredential`) to the data job, the engines, the reporter and the Flex readers; also loaded as the shared reporter environment; the dashboard is given none |
 | `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
 | `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's adapter (`ti-adapter@trad-ira.service`) and its Flex reader (`ti-flex@trad-ira.service`) |
 | `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@roth-ira.service`) |
@@ -151,7 +151,7 @@ What each program actually reads today:
   deliver, including the GitHub issues, and its unit exits non-zero, so it
   shows as failed. Fill them in with `sudo ti-secrets edit secrets.env`; the
   next firing uses them. Only the Boost instance also reads `TI_HEARTBEAT_URL`
-  from its environment, the address of your check at the outside heartbeat service; that one is optional for the run, but without
+  from the shared secrets environment loaded by its unit, the address of your check at the outside heartbeat service; that one is optional for the run, but without
   it nothing outside the server notices the server dying
   ("The outside heartbeat", below).
 - The reporter's `github-issues` channel reads `TI_GITHUB_ISSUES_TOKEN`, a
@@ -494,11 +494,12 @@ quiet and is noticed from outside; nor for a firing that found the engine or
 the adapter failed, even when its page was delivered, so a trading unit left
 failed for 20 minutes also takes the check down.
 
-Only `ti-reporter@boost` pings this check. Provisioning gives that instance
-`TI_HEARTBEAT_URL` through its environment from the unlocked tmpfs secrets
-file. The trad-ira reporter does not ping: its environment leaves the URL
-unset, because a second pinger would mask the loss of the first. The shared
-channel credential never enables a heartbeat. An instance without the URL
+Only `ti-reporter@boost` pings this check. The reporter template loads
+`secrets.env` as its shared environment, including `TI_HEARTBEAT_URL`.
+Boost needs no drop-in. Provisioning writes only the trad-ira heartbeat
+drop-in, with `UnsetEnvironment=TI_HEARTBEAT_URL`: a second pinger would mask
+the loss of the first. The private channel credential cannot re-enable the
+heartbeat after systemd clears the environment variable. An instance without the URL
 logs `heartbeat: not this instance` once per firing. The stop-Boost-timer
 drill below therefore still pages even while the IRA reporter is healthy.
 

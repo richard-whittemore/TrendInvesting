@@ -316,8 +316,13 @@ file of `KEY=VALUE` lines, from that file for any name the environment leaves
 empty. On the server the secrets go in `secrets.env` (stored encrypted under
 `/etc/trend-investing`; edit it with `sudo ti-secrets edit secrets.env`; the
 names are in `deploy/etc/secrets.env.example`), whose unlocked copy systemd
-hands the reporter as a private credential file; nothing puts them in its
-environment. A secrets file that cannot be read, or a line in it
+hands the reporter as a private credential file and loads into the shared
+reporter environment. Boost uses `TI_HEARTBEAT_URL` from that environment
+without a drop-in. Provisioning writes only trad-ira's heartbeat drop-in,
+`UnsetEnvironment=TI_HEARTBEAT_URL`, because a second pinger would mask the
+loss of the first. With the URL empty or unset the reporter pings nothing
+and prints `reporter: heartbeat: not this instance` once per firing; the
+private credential file does not override that selection. A secrets file that cannot be read, or a line in it
 that is not `KEY=VALUE`, is reported in the run's error, naming the line's
 number, never its text; every line that reads is still used.
 

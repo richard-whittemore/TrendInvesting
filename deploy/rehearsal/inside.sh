@@ -364,6 +364,13 @@ rm -rf /dev/shm/ti-edit
 source=$(sed -n 's/^LoadCredential=secrets://p' /etc/systemd/system/ti-reporter@.service)
 test "$source" = "$unlocked/secrets.env" || fail "the reporter's unit loads its secrets from $source, not the unlocked copy"
 install -o ti-trader -g ti-trader -m 0400 "$source" "$rep/creds/secrets"
+# Mirror the template's shared environment when running Boost without systemd.
+grep -qx "EnvironmentFile=$source" /etc/systemd/system/ti-reporter@.service || fail "the reporter does not load the shared secrets environment"
+test ! -e /etc/systemd/system/ti-reporter@boost.service.d/heartbeat.conf || fail "Boost must not need a heartbeat drop-in"
+grep -qx 'UnsetEnvironment=TI_HEARTBEAT_URL' /etc/systemd/system/ti-reporter@trad-ira.service.d/heartbeat.conf || fail "the trad-ira drop-in does not clear the heartbeat URL"
+heartbeat_url=$(sed -n 's/^TI_HEARTBEAT_URL=//p' "$source")
+test -n "$heartbeat_url" || fail "the shared reporter environment has no heartbeat URL"
+
 line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-reporter@.service)
 line=${line//%i/boost}
 line=${line//%d/$rep/creds}
@@ -401,7 +408,7 @@ echo "2026-01-01T00:00:00+0000 host adapter[2]: ibkr link state=connected reason
 SH
 chmod 0755 "$sysd/journalctl"
 # shellcheck disable=SC2086
-sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $line >/dev/null || fail "the reporter, run as its unit runs it (as ti-trader), failed"
+sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" TI_HEARTBEAT_URL="$heartbeat_url" $line >/dev/null || fail "the reporter, run as its unit runs it (as ti-trader), failed"
 { grep -qx 'show -p ActiveState -p InvocationID ti-engine@boost.service' "$sysd/calls" && grep -qx 'show -p ActiveState -p InvocationID ti-adapter-boost.service' "$sysd/calls"; } ||
   fail "the reporter did not ask systemd for the engine's and the adapter's state: $(cat "$sysd/calls")"
 test -s "$rep/reports/boost.reporter.json" || fail "the reporter wrote no state file"
@@ -425,7 +432,7 @@ commented=$(comments_posted)
 alerts_sent() { { grep -v '^/hb$' "$rep/posts" || true; } | wc -l; }
 sent=$(alerts_sent)
 # shellcheck disable=SC2086
-sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $line >/dev/null || fail "the reporter's second run failed"
+sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" TI_HEARTBEAT_URL="$heartbeat_url" $line >/dev/null || fail "the reporter's second run failed"
 test "$(issues_opened)" = "$opened" || fail "the reporter's second run opened another issue"
 test "$(comments_posted)" = "$commented" || fail "the reporter's second run commented on an issue again"
 test "$(alerts_sent)" = "$sent" || fail "the reporter's second run sent its alerts again"

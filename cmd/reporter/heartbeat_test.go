@@ -288,10 +288,28 @@ func TestProvisioningAssignsOnlyBoostTheHeartbeatEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ti-reporter@boost.service.d/heartbeat.conf", "EnvironmentFile=/run/trend-investing/secrets/secrets.env", "ti-reporter@trad-ira.service.d/heartbeat.conf", "UnsetEnvironment=TI_HEARTBEAT_URL", "a second pinger would mask the loss of the first"} {
+	for _, want := range []string{"ti-reporter@trad-ira.service.d/heartbeat.conf", "UnsetEnvironment=TI_HEARTBEAT_URL", "a second pinger would mask the loss of the first"} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("provisioning lacks %q", want)
 		}
+	}
+}
+
+// Boost uses the template's shared environment; only trad-ira needs an override.
+func TestHeartbeatUsesSharedEnvironmentWithoutBoostDropIn(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/systemd/ti-reporter@.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "\nEnvironmentFile=/run/trend-investing/secrets/secrets.env\n") {
+		t.Error("reporter template must load the shared heartbeat environment")
+	}
+	raw, err = os.ReadFile("../../deploy/provision.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "ti-reporter@boost.service.d") {
+		t.Error("Boost must not need a heartbeat drop-in")
 	}
 }
 
