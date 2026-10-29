@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -143,6 +144,81 @@ func TestAFailedIRAUnitIsSeenByTheReporterSample(t *testing.T) {
 	for _, host := range []string{ntfyHost, pdHost} {
 		if n := pagesFor(r, host, "ti-adapter@trad-ira.service"); n != 1 {
 			t.Errorf("%s took %d pages for the failed IRA adapter, want 1", host, n)
+		}
+	}
+}
+
+// TestMemoryFailurePagesOnceAndResolvesAfterAGoodRun covers the hook and
+// reporter fallback for a timer-run sample (lessons-2026-10.md L1/L8;
+// ADR 0019, "Alerting"). A retry in flight must not resolve the episode.
+func TestMemoryFailurePagesOnceAndResolvesAfterAGoodRun(t *testing.T) {
+	const unit = "ti-memory.service"
+	for _, hook := range []bool{true, false} {
+		t.Run(fmt.Sprint("hook=", hook), func(t *testing.T) {
+			r := &relay{sent: map[string][]string{}}
+			systemd := newStandInSystemd(t)
+			dir := t.TempDir()
+			systemd.invoke(firstRun)
+			systemd.fail(unit)
+			if hook {
+				if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), t0.Add(time.Hour), unit); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, hours := range []int{2, 4} {
+				if err := firing(t, r, dir, systemd, t0.Add(time.Duration(hours)*time.Hour), "ti-adapter-boost.service", "-resolve-units", unit); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, host := range []string{ntfyHost, pdHost} {
+				if n := pagesFor(r, host, unit); n != 1 {
+					t.Errorf("%s pages = %d, want 1", host, n)
+				}
+				text := strings.Join(r.to(host), "\n")
+				if !strings.Contains(text, "The memory sample fails") || strings.Contains(text, "still failing") {
+					t.Errorf("wrong memory page: %s", text)
+				}
+			}
+			systemd.fail()
+			systemd.state(unit, "activating")
+			if err := firing(t, r, dir, systemd, t0.Add(5*time.Hour), "ti-adapter-boost.service", "-resolve-units", unit); err != nil {
+				t.Fatal(err)
+			}
+			if n := count(r.to(pdHost), `"event_action":"resolve"`); n != 0 {
+				t.Fatalf("resolved a retry in flight: %d", n)
+			}
+			systemd.state(unit, "inactive")
+			if err := firing(t, r, dir, systemd, t0.Add(6*time.Hour), "ti-adapter-boost.service", "-resolve-units", unit); err != nil {
+				t.Fatal(err)
+			}
+			if n := count(r.to(pdHost), `"event_action":"resolve"`); n != 1 {
+				t.Errorf("resolves = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestReporterTemplateCoversAllGatewayAdaptersAndMemory checks the shared
+// host checks for all three accounts (lessons-2026-10.md L1/L8; ADR 0026).
+func TestReporterTemplateCoversAllGatewayAdaptersAndMemory(t *testing.T) {
+	starts := directive(t, reporterUnitPath, "[Service]", "ExecStart")
+	if len(starts) != 1 {
+		t.Fatalf("ExecStart = %v", starts)
+	}
+	words := strings.Fields(starts[0])
+	for flag, want := range map[string][]string{
+		"-gateway-adapters": {"ti-adapter-boost.service", "ti-adapter@trad-ira.service", "ti-adapter@roth-ira.service"},
+		"-resolve-units":    {"ti-memory.service"},
+	} {
+		i := indexOf(words, flag)
+		if i < 0 || i+1 >= len(words) {
+			t.Fatalf("missing %s", flag)
+		}
+		got := strings.Split(words[i+1], ",")
+		for _, unit := range want {
+			if !slices.Contains(got, unit) {
+				t.Errorf("%s omits %s", flag, unit)
+			}
 		}
 	}
 }

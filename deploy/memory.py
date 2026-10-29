@@ -44,7 +44,12 @@ def counter(value):
 
 
 def sample(record, week_start, *, now=None, systemctl=run_systemctl, meminfo=Path("/proc/meminfo")):
-    """Append one whole observation, under a lock; outside the week append nothing."""
+    """Append one locked observation; outside the week append nothing.
+
+    lessons-2026-10.md L1 and ADR 0026 require measured server evidence.
+    Injected now must be timezone-aware; active units require both counters.
+    Each appended schema-version-1 row includes the units and timer text.
+    """
     now = now or datetime.now(timezone.utc)
     start, end = week_bounds(week_start)
     if not start <= now < end:
@@ -101,9 +106,14 @@ def stats(values):
 
 
 def report(record, week_start):
-    """Produce the measurement record; a missing day or corrupt row refuses the report."""
+    """Report a UTC week, refusing a missing day, corrupt row or duplicate time.
+
+    lessons-2026-10.md L1 and ADR 0026 require measured server evidence.
+    The caller supplies the sampler's schema-version-1 JSONL for this week
+    and disables the timer before reporting, retaining the original evidence.
+    """
     start, end = week_bounds(week_start)
-    rows, days, schedules = [], Counter(), []
+    rows, days, schedules, seen = [], Counter(), [], set()
     with Path(record).open(encoding="utf-8") as stream:
         fcntl.flock(stream, fcntl.LOCK_SH)
         for number, line in enumerate(stream, 1):
@@ -115,6 +125,9 @@ def report(record, week_start):
                 if at.tzinfo is None or not start <= at < end:
                     raise ValueError("timestamp outside the UTC week")
                 at = at.astimezone(timezone.utc)
+                if at in seen:
+                    raise ValueError("duplicate observation timestamp")
+                seen.add(at)
                 server = row["server"]
                 if (not all(valid_bytes(server[k]) for k in ("total_bytes", "available_bytes", "used_bytes"))
                         or server["total_bytes"] <= 0
@@ -128,8 +141,6 @@ def report(record, week_start):
                             raise ValueError("invalid unit counter")
                 rows.append((at, row))
                 days[at.date().isoformat()] += 1
-                if row["schedule"] not in schedules:
-                    schedules.append(row["schedule"])
             except (ValueError, KeyError, TypeError, AttributeError) as err:
                 raise ValueError(f"invalid record line {number}: {err}") from None
     missing = [(start + timedelta(days=i)).date().isoformat() for i in range(7)
@@ -137,6 +148,10 @@ def report(record, week_start):
     if missing:
         raise ValueError("; ".join(f"missing samples for {day}" for day in missing))
     rows.sort(key=lambda item: item[0])
+    for at, row in rows:
+        if not schedules or row["schedule"] != schedules[-1]["schedule"]:
+            schedules.append(dict(since=at.isoformat(), schedule=row["schedule"], samples=0))
+        schedules[-1]["samples"] += 1
     units = {}
     for name in sorted({name for _, row in rows for name in row["units"]}):
         observations = [row["units"][name] for _, row in rows if name in row["units"]]

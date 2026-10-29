@@ -47,7 +47,37 @@ class MemoryRecordTests(unittest.TestCase):
         unit = report["units"]["ti-engine@roth-ira.service"]
         self.assertEqual((unit["peak_bytes"], unit["median_bytes"], unit["sampled_peak_bytes"]), (600, 300, 500))
         self.assertEqual(report["samples_per_day"], {f"2026-10-{day}": 3 for day in range(19, 26)})
-        self.assertIn("OnCalendar=", report["schedules"][0]["ti-memory.timer"])
+        self.assertIn("OnCalendar=", report["schedules"][0]["schedule"]["ti-memory.timer"])
+
+    def test_schedule_change_and_revert_keep_times_and_samples_after_sorting(self):
+        self.samples()
+        rows = [json.loads(line) for line in self.record.read_text().splitlines()]
+        original = rows[0]["schedule"]
+        changed = {"ti-memory.timer": "OnCalendar=*-*-* *:0/10:00 UTC"}
+        for row in rows[2:5]:
+            row["schedule"] = changed
+        self.record.write_text("".join(json.dumps(row) + "\n" for row in reversed(rows)))
+        result = self.report()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        transitions = json.loads(result.stdout)["schedules"]
+        self.assertEqual(transitions, [
+            dict(since=rows[0]["at"], schedule=original, samples=2),
+            dict(since=rows[2]["at"], schedule=changed, samples=3),
+            dict(since=rows[5]["at"], schedule=original, samples=len(rows)-5),
+        ])
+
+    def test_duplicate_timestamp_refuses_report_including_equivalent_offsets(self):
+        for at in (START.isoformat(), "2026-10-18T20:00:00-04:00"):
+            with self.subTest(at=at):
+                self.samples()
+                row = json.loads(self.record.read_text().splitlines()[0])
+                row["at"] = at
+                with self.record.open("a") as stream:
+                    stream.write(json.dumps(row) + "\n")
+                result = self.report()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("duplicate observation timestamp", result.stderr)
+                self.assertEqual(result.stdout, "")
 
     def test_each_missing_day_fails_loudly(self):
         for day in range(7):
