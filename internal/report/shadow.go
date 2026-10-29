@@ -26,6 +26,7 @@ const levelBand = 0.1
 // which is the price as quoted, and, from a version 2 bar, the split- and
 // dividend-adjusted close and the session it is based at.
 type benchBar struct {
+	at       time.Time
 	split    float64
 	adjusted float64
 	base     string
@@ -50,14 +51,19 @@ func growthLink(prev, next benchBar) (ratio float64, reinvested bool) {
 // net liquidation in the benchmark at that session's close, and each
 // recorded deposit or withdrawal buys or sells the benchmark for the same
 // amount at the close of its New York day, or of the next session with a
-// close when that day has none. A transfer on or before the first paired
+// close when that day has none. Inside a gap in account points the shadow
+// still mirrors each transfer at its own session's index, in session order;
+// only the account return counts it at the next paired close (manual,
+// "Reading the figures").
+// A transfer on or before the first paired
 // day is in the starting balance.
 //
-// Both returns are time-weighted: each interval between paired points grows
-// by (net at its end less the transfers mirrored in it) over the net at its
-// start, chained, so a transfer is never a gain or a loss. The benchmark's
-// is its growth index's, which is the shadow's time-weighted return. The
-// day's figures are the last interval's.
+// The account's return is time-weighted: each interval between paired
+// points grows by (net at its end less the transfers counted in it) over the
+// net at its start, chained, so a transfer is never a gain or a loss. The
+// benchmark's return is its growth index's, with no transfer term, which is
+// also the shadow's time-weighted return. The day's figures are the last
+// interval's.
 func equityOf(points []equityPoint, bars map[string]benchBar, ledger CashLedger, benchmark, date string) Equity {
 	if len(points) < 2 {
 		return Equity{}
@@ -107,6 +113,9 @@ func equityOf(points []equityPoint, bars map[string]benchBar, ledger CashLedger,
 		if at == len(sessions) || sessions[at] <= first.date {
 			continue
 		}
+		// Keep sessions separate so a gap withdrawal can stop the shadow
+		// before a later deposit restarts it (manual, "How the comparison
+		// with SPY works").
 		flows[sessions[at]] += m.Amount
 		e.TransferCount++
 		if m.Amount > 0 {

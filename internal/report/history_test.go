@@ -337,7 +337,7 @@ func TestLoadLogRecoversADurableLogOnce(t *testing.T) {
 
 // TestForHistoryKeepsWhatTheChainAndTheHistoryRead: of an earlier run's
 // recovery, its first two records, its approvals and configurations, its
-// snapshots and the benchmark's bars are kept, nothing else, and the
+// snapshots, target decisions and the benchmark's bars are kept, nothing else, and the
 // history it feeds is the whole recovery's.
 func TestForHistoryKeepsWhatTheChainAndTheHistoryRead(t *testing.T) {
 	s := newStream(t)
@@ -358,7 +358,7 @@ func TestForHistoryKeepsWhatTheChainAndTheHistoryRead(t *testing.T) {
 	for _, e := range kept.Entries {
 		ids = append(ids, e.Envelope.ID)
 	}
-	if strings.Join(ids, ",") != "configuration,bar:0,snapshot:0,bar:1,snapshot:1" || kept.FinalRecordHash != whole.FinalRecordHash {
+	if strings.Join(ids, ",") != "configuration,bar:0,snapshot:0,targets:0,bar:1,snapshot:1" || kept.FinalRecordHash != whole.FinalRecordHash {
 		t.Fatalf("kept %v", ids)
 	}
 	var envelopes []event.Envelope
