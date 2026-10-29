@@ -619,7 +619,16 @@ class Deliverer:
             if not self._finish(batches[-1]):
                 return
             batches = self.record.load()
-        if any("envelope" in e for e in self._outbox.load()):
+        outbox = self._outbox.load()
+        if any("envelope" in e for e in outbox):
+            last = batches[-1] if batches else None
+            if self._tracking is None and last is not None and last["state"] == QUEUED and last["run"] == self.run:
+                # A batch a stop left queued with entries unsent: this start
+                # finishes sending it, so it states its queued and outcome
+                # lines as one it queued itself would (_track).
+                ids = [e["id"] for e in outbox if _entry_run(e) == self.run]
+                if ids:
+                    self._track([f["name"] for f in last["files"]], ids)
             return  # a batch is still being sent: the next waits behind it
         delivered = [f["name"] for b in batches if b["run"] == self.run and b["state"] != DROPPED
                      for f in b["files"]]
@@ -769,12 +778,17 @@ class Deliverer:
             # Written before the stop: the batch's entries are those of its run
             # still in the outbox (any already committed are struck off as the
             # loop finds them, and counted so).
-            ids = [e["id"] for e in self._outbox.load()
-                   if (e.get("envelope") or {}).get("correlation_id", e.get("run")) == batch["run"]]
+            ids = [e["id"] for e in self._outbox.load() if _entry_run(e) == batch["run"]]
         self.record.mark_queued()
         if batch["run"] == self.run:
             self._track([f["name"] for f in batch["files"]], ids)
         return True
+
+
+def _entry_run(entry):
+    """The run an outbox entry of a batch was recorded for: its envelope's, or the adapter entry's own."""
+    envelope = entry.get("envelope")
+    return envelope.get("correlation_id") if isinstance(envelope, dict) else entry.get("run")
 
 
 def _repeats(first, envelope):

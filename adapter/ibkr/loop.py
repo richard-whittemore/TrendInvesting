@@ -1014,14 +1014,23 @@ class AdapterLoop:
 
         class Last(logging.Handler):
             def emit(self, record):
-                said.append(record.getMessage())
+                # Observation only: a log call that cannot be formatted is
+                # reported as logging's own handlers report it, never raised
+                # into the reading (handleError prints and goes on).
+                try:
+                    said.append(record.getMessage())
+                except Exception:  # noqa: BLE001 - logging's own contract for emit
+                    self.handleError(record)
         handler = Last(logging.INFO)
         log.addHandler(handler)
         try:
             reading = self._post_close_reading(close, closes)
         finally:
             log.removeHandler(handler)
-        self._last_wait = "" if reading is not None else (said[-1] if said else "")
+        # A reading that waits again without a new word (the proof wait is
+        # said once per close) keeps the last reason it gave, so the batch's
+        # waiting line names it, never a generic one.
+        self._last_wait = "" if reading is not None else (said[-1] if said else self._last_wait)
         return reading
 
     def _post_close_reading(self, close, closes):
@@ -1682,6 +1691,10 @@ class AdapterLoop:
         kinds = [d.get("type") for d in reply["payload"]["decisions"]]
         log.info("ibkr input=%s type=%s answered with %d decisions %s", envelope["id"], envelope["type"],
                  len(kinds), ",".join(kinds))
+        # Every answered exchange settles its entry for the batch's outcome,
+        # an input a stop left awaiting its reply and asked for again
+        # (_settle_waiting) included.
+        self._settled(envelope["id"], answered=True)
 
     def _drain(self):
         try:
@@ -1750,7 +1763,6 @@ class AdapterLoop:
                 self.pending.record_run(entry["id"], run_identity(self._engine_log_path),
                                         os.path.basename(self._engine_log_path))
                 self._exchange(self._envelope(entry, engine_log))
-                self._settled(entry["id"], answered=True)
         except (NotReconciled, NotConnected) as err:
             # The link went while an order was due: the input stays on disk
             # and is asked for again once the link is back and reconciled.

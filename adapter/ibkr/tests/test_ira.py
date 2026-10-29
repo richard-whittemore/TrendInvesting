@@ -1015,6 +1015,19 @@ class ProbeCatchUpTests(ProbeTests):
 OUTCOME = "ibkr stream batch files="
 
 
+class mock_stderr:
+    """Swallow what logging's handleError prints for a log call it cannot format (the test's own)."""
+
+    def __enter__(self):
+        import io
+        import sys as _sys
+        self._saved, _sys.stderr = _sys.stderr, io.StringIO()
+
+    def __exit__(self, *exc):
+        import sys as _sys
+        _sys.stderr = self._saved
+
+
 class BatchOutcomeTests(IraBatchHarness):
     """The adapter states one outcome per batch from its own accounting (delivery.Deliverer): every entry it queued,
     answered by the engine or struck off as already committed, and nothing else counted."""
@@ -1105,6 +1118,69 @@ class BatchOutcomeTests(IraBatchHarness):
         self.assertEqual(len(out), 1, logged.output)
         self.assertRegex(out[0], r"files=trad-ira-2027-01-14\.jsonl inputs=(\d+) answered=\1 struck=0 outcome=delivered")
         self.assertTrue(any("ibkr stream queued" in line for line in logged.output), "the finished batch is queued too")
+
+    def test_a_second_waiting_step_keeps_the_specific_reason(self):
+        write_stream(self.folder, FRIDAY, ira_session(FRIDAY), prefix="trad-ira")
+        loop = self.loop_with()
+        loop.start()
+        self.steps(loop)
+        later = date(2027, 1, 15)
+        write_stream(self.folder, later, ira_session(later), prefix="trad-ira")
+        loop._now = lambda: datetime(2027, 1, 18, 12, 5, tzinfo=timezone.utc)
+        loop._cash_ledger = str(Path(self.dir.name) / "engine" / "cash-movements.jsonl")
+        with self.assertLogs("ibkr", "INFO") as logged:
+            self.steps(loop, 6)
+        out = [o for o in self.outcomes(logged) if "outcome=waiting" in o]
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("executions proof", out[0])
+
+    def test_a_log_call_that_cannot_be_formatted_never_raises_into_the_delivery(self):
+        import logging
+        loop = self.loop_with()
+
+        def reading(close, closes):
+            logging.getLogger("ibkr").info("ibkr %d broken", "not a number")
+            return None
+        loop._post_close_reading = reading
+        logger = logging.getLogger("ibkr")
+        level = logger.level
+        logger.setLevel(logging.INFO)
+        self.addCleanup(logger.setLevel, level)
+        with mock_stderr():
+            self.assertIsNone(loop._batch_reading(CLOSE, {}))
+
+    def test_an_input_answered_on_a_retry_after_a_stop_settles_its_batch(self):
+        from unittest import mock
+        import loop as loop_module
+        loop = self.loop_with()
+        loop.start()
+        loop.delivery._tracking = {"files": "trad-ira-2027-01-14.jsonl", "ids": {"x"}, "inputs": 1, "answered": 0,
+                                   "struck": 0}
+        with mock.patch.object(loop.pending, "load", return_value={"id": "x", "type": "market.session.closed"}), \
+                mock.patch.object(loop_module, "earlier_run", return_value=None), \
+                mock.patch.object(loop.relay, "exchange", return_value={"payload": {"decisions": []}}), \
+                self.assertLogs("ibkr", "INFO") as logged:
+            loop._settle_waiting()
+        self.assertTrue(any("answered=1 struck=0 outcome=delivered" in o for o in self.outcomes(logged)), logged.output)
+
+    def test_a_batch_a_stop_left_queued_with_its_entries_unsent_states_its_outcome_on_the_next_start(self):
+        from unittest import mock
+        write_stream(self.folder, FRIDAY, ira_session(FRIDAY), prefix="trad-ira")
+        loop = self.loop_with()
+        loop.start()
+        with mock.patch.object(loop, "_exchange", side_effect=OSError("synthetic: the machine stopped")):
+            with self.assertRaises(OSError):
+                self.steps(loop, 5)
+        self.assertTrue(loop.outbox.load(), "the batch is queued and unsent")
+        loop.close()
+        restarted = self.loop_with()
+        with self.assertLogs("ibkr", "INFO") as logged:
+            restarted.start()
+            self.steps(restarted)
+        out = self.outcomes(logged)
+        self.assertEqual(len(out), 1, logged.output)
+        self.assertRegex(out[0], r"files=trad-ira-2027-01-14\.jsonl inputs=(\d+) answered=\1 struck=0 outcome=delivered")
+        self.assertTrue(any("ibkr stream queued" in line for line in logged.output))
 
 
 class ProbeOutcomeTests(ProbeTests):

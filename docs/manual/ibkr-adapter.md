@@ -257,13 +257,18 @@ probe: no decision yet: the first is made at the close of a month's last session
 probe: passed
 ```
 
-The adapter states one outcome line per batch, from its own accounting:
-`ibkr stream batch files=<files> inputs=N answered=A struck=S
+The adapter states each batch's outcome from its own accounting, in lines
+beginning `ibkr stream batch files=<files>`. While a batch waits for its
+reading it says `outcome=waiting reason=<the line the reading logged>`, once
+for each change of reason: these are status lines, and there may be several
+before the end. It ends with one final line: `inputs=N answered=A struck=S
 outcome=delivered` once every input it queued is answered by the engine or
 struck off as already committed (a retraction a later file repeats, say),
-A + S = N; `outcome=waiting reason=<the line the reading logged>` while a
-batch waits for its reading; `outcome=dropped` when a fresh run strikes an
-earlier run's batch off. The probe judges the latest batch by that line
+A + S = N, an input a stop left awaiting its reply and asked for again
+included; or `outcome=dropped` when a fresh run strikes an earlier run's
+batch off. A batch a stop left queued, its inputs still unsent, is taken up
+by the next start, which says its queued line and, once they are settled,
+its final line. The probe judges the latest batch by that line
 alone: delivered with its count adding up passes; waiting, dropped, or no
 outcome line at all fails, and a later batch waiting is never covered by an
 earlier one delivered. A start that queued none passes only on the
