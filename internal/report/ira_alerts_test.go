@@ -10,7 +10,8 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
-// iraInstance is the Traditional IRA deployment instance (docs/manual/server.md).
+// iraInstance is the Traditional IRA deployment instance, the systemd instance
+// its units are named from (ADR 0019, "Alerting"; docs/manual/server.md).
 const iraInstance = "trad-ira"
 
 // monthEnd is the decision session closing month m of 2025 (synthetic dates).
