@@ -55,7 +55,7 @@ func alertKey(t *testing.T, entries []journal.Entry, kind report.Kind) string {
 	for _, e := range entries {
 		envelopes = append(envelopes, e.Envelope)
 	}
-	alerts, err := report.Alerts(envelopes)
+	alerts, err := report.Alerts(envelopes, "boost")
 	if err != nil {
 		t.Fatal(err)
 	}

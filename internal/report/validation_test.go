@@ -78,7 +78,7 @@ func TestADecisionThatDoesNotValidateRefusesBothReports(t *testing.T) {
 	} {
 		s := newStream(t)
 		mutate(s)
-		if _, err := report.Alerts(s.out); err == nil {
+		if _, err := report.Alerts(s.out, "boost"); err == nil {
 			t.Errorf("%s: Alerts accepted it", name)
 		}
 		if _, err := report.Summarize(s.out, "2024-01-02", "SPY"); err == nil {

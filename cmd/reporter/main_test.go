@@ -116,7 +116,9 @@ func writeDurableLog(t *testing.T, dir string) string {
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
 func TestRunDeliversEachAlertOnceAcrossRuns(t *testing.T) {
-	fakeEnv, fakeClient := acceptingNtfy(t)
+	r := &relay{sent: map[string][]string{}}
+	fakeEnv := env(map[string]string{"TI_NTFY_TOPIC": "topic", "TI_NTFY_SERVER": "https://ntfy.test", "TI_HEARTBEAT": "off", "TI_HEARTBEAT_URL": "https://heartbeat.test/ping/secret"})
+	fakeClient := &http.Client{Transport: r}
 	dir := t.TempDir()
 	journalPath := writeJournal(t, dir)
 	state := filepath.Join(dir, "state.json")
@@ -132,12 +134,26 @@ func TestRunDeliversEachAlertOnceAcrossRuns(t *testing.T) {
 			t.Errorf("first run lacks %q:\n%s", want, first.String())
 		}
 	}
+	const notice = "reporter: heartbeat: not this instance\n"
+	if strings.Count(first.String(), notice) != 1 {
+		t.Errorf("first run lacks single informational notice:\n%s", first.String())
+	}
+	delivered := len(r.to("ntfy.test"))
+	if delivered == 0 {
+		t.Fatal("first run delivered no alerts")
+	}
 	var second bytes.Buffer
 	if err := run(args, fakeEnv, now, &second, fakeClient); err != nil {
 		t.Fatal(err)
 	}
-	if second.Len() != 0 {
-		t.Fatalf("second run repeated alerts:\n%s", second.String())
+	if second.String() != notice {
+		t.Errorf("second run must print only the informational notice:\n%s", second.String())
+	}
+	if got := len(r.to("ntfy.test")); got != delivered {
+		t.Errorf("second run repeated deliveries: got %d, want %d", got, delivered)
+	}
+	if anyContains(r.to("ntfy.test"), "heartbeat: not this instance") {
+		t.Error("informational heartbeat notice was delivered as an alert")
 	}
 }
 

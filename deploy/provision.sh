@@ -741,7 +741,7 @@ CONF
     "$unit_dir/timers.target.wants/ti-reporter.timer"
   # On the Mac mini the Gateway's unit file is not installed: masking puts a
   # link to /dev/null in its place, which a real file there would block.
-  local unit
+  local unit instance
   for unit in "$here"/systemd/*.service "$here"/systemd/*.timer; do
     if mac_mini && test "$(basename "$unit")" = ti-gateway.service; then continue; fi
     install -m 0644 "$unit" "$unit_dir/"
@@ -751,6 +751,16 @@ CONF
   # for its instance of the timer, replaced on every run as the units are.
   install -d -m 0755 "$unit_dir/ti-flex@trad-ira.timer.d"
   install -m 0644 "$here/systemd/ti-flex@trad-ira.timer.d/stagger.conf" "$unit_dir/ti-flex@trad-ira.timer.d/"
+  # Boost pings using its credential URL (ADR 0019, "Alerting").
+  # Disable every IRA reporter: a second pinger would mask the loss of Boost.
+  for instance in trad-ira roth-ira; do
+    install -d -m 0755 "$unit_dir/ti-reporter@$instance.service.d"
+    cat >"$unit_dir/ti-reporter@$instance.service.d/heartbeat.conf" <<'EOF'
+[Service]
+# A second pinger would mask the loss of Boost (ADR 0019, "Alerting").
+Environment=TI_HEARTBEAT=off
+EOF
+  done
   if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
     rm -f "$unit_dir/ti-gateway.service"
   fi
@@ -762,8 +772,11 @@ CONF
   fi
   if test "$rehearsal" != 1; then
     systemctl daemon-reload
-    # The Boost account's reporter only: the IRA engines have no
-    # configuration yet, and an enabled IRA reporter would fail every firing.
+    # The Boost and Traditional IRA reporters (the second IRA's joins with its
+    # engine): until an engine's run.env exists its reporter's firing is a
+    # quiet wait (ti-reporter@.service, -run-env), so an enabled one fails
+    # nothing, and a reporter that is only started is gone after a reboot
+    # (docs/live-trading/lessons-2026-10.md L8).
     # `enable` only links them for the next boot, so the timers and the
     # dashboard are started now too: on a server that is not rebooted the
     # reporter, the owner's one eye on the engine, would otherwise never fire
@@ -781,7 +794,7 @@ CONF
     # The Traditional IRA's data job too: until its engine's run.env exists
     # each firing is a quiet wait (ti-data@.service; docs/live-trading/
     # lessons-2026-10.md L8: a timer that should run unattended is enabled).
-    systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer
+    systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer ti-reporter@trad-ira.timer
     if mac_mini; then
       systemctl enable --now ti-clock-check.timer
     fi
@@ -805,9 +818,9 @@ CONF
     # their files are installed and the Boost engine's run.env exists; the
     # reporter also until secrets.env holds its channel secrets.
     if mac_mini; then
-      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-reporter@boost.timer and ti-dashboard; ti-gateway is masked (the Gateway is the Mac app)"
+      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-reporter@boost.timer, ti-reporter@trad-ira.timer and ti-dashboard; ti-gateway is masked (the Gateway is the Mac app)"
     else
-      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-reporter@boost.timer and ti-dashboard; start the gateway with: systemctl start ti-gateway (after the owner enters the IBKR login)"
+      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-reporter@boost.timer, ti-reporter@trad-ira.timer and ti-dashboard; start the gateway with: systemctl start ti-gateway (after the owner enters the IBKR login)"
     fi
   fi
 }

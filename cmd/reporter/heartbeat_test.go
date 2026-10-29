@@ -89,12 +89,18 @@ func TestAHealthyFiringPingsTheOutsideEndpointOnceAfterTheAlertsAreSent(t *testi
 }
 
 func TestAFiringWithNoURLConfiguredPingsNothingAndFailsNothing(t *testing.T) {
-	e, server := newStandInEndpoint(t)
-	if err := heartbeatRun(t, server, t.TempDir(), map[string]string{"TI_HEARTBEAT_URL": ""}, &bytes.Buffer{}); err != nil {
+	r := &relay{sent: map[string][]string{}}
+	dir := t.TempDir()
+	var out bytes.Buffer
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy"}
+	if err := run(args, env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.test"}), func() time.Time { return t0.Add(time.Hour) }, &out, &http.Client{Transport: r}); err != nil {
 		t.Fatal(err)
 	}
-	if e.count("ping") != 0 {
-		t.Errorf("pinged with no URL: %v", e.events)
+	if len(r.sent) != 1 || len(r.to("ntfy.test")) == 0 {
+		t.Errorf("unexpected destinations: %v", r.sent)
+	}
+	if strings.Contains(out.String(), "heartbeat: not this instance") {
+		t.Errorf("missing URL must not imply instance opt-out: %s", out.String())
 	}
 }
 
@@ -211,19 +217,31 @@ func TestThePingCarriesNothingButTheEndpoint(t *testing.T) {
 	}
 }
 
-// TestTheURLComesFromTheSecretsFile: under systemd the secrets arrive as a
-// credential file, never in the environment.
-func TestTheURLComesFromTheSecretsFile(t *testing.T) {
-	e, server := newStandInEndpoint(t)
-	dir := t.TempDir()
-	secrets := filepath.Join(dir, "secrets")
-	writeFileT(t, secrets, "TI_NTFY_TOPIC=t\nTI_NTFY_SERVER="+server.URL+"\nTI_HEARTBEAT_URL="+server.URL+heartbeatPath+"\n")
-	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets}
-	if err := run(args, env(nil), func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, server.Client()); err != nil {
-		t.Fatal(err)
-	}
-	if e.count("ping") != 1 {
-		t.Errorf("pings = %d", e.count("ping"))
+// An explicit instance switch suppresses even a shared credential URL (ADR 0019).
+func TestHeartbeatOffOverridesSharedSecrets(t *testing.T) {
+	for _, waiting := range []bool{false, true} {
+		r := &relay{sent: map[string][]string{}}
+		dir := t.TempDir()
+		secrets := filepath.Join(dir, "secrets")
+		writeFileT(t, secrets, "TI_NTFY_TOPIC=t\nTI_NTFY_SERVER=https://ntfy.test\nTI_HEARTBEAT_URL=https://heartbeat.test/ping/secret\n")
+		path := filepath.Join(dir, "waiting.log")
+		if !waiting {
+			path = writeJournal(t, dir)
+		}
+		args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets}
+		if waiting {
+			args = append(args, "-account", "trad-ira", "-run-env", filepath.Join(dir, "run.env"))
+		}
+		var out bytes.Buffer
+		if err := run(args, env(map[string]string{"TI_HEARTBEAT": "off", "TI_HEARTBEAT_URL": "https://heartbeat.test/ping/environment-secret"}), func() time.Time { return t0.Add(time.Hour) }, &out, &http.Client{Transport: r}); err != nil {
+			t.Fatal(err)
+		}
+		if len(r.to("heartbeat.test")) != 0 {
+			t.Errorf("waiting %v: shared secret enabled peer heartbeat", waiting)
+		}
+		if strings.Count(out.String(), "heartbeat: not this instance") != 1 {
+			t.Errorf("waiting %v: notice absent: %s", waiting, out.String())
+		}
 	}
 }
 
@@ -262,5 +280,57 @@ func TestAFiringThatFindsATradingUnitFailedSendsNoPing(t *testing.T) {
 	}
 	if e.count("ping") != 1 {
 		t.Errorf("the firing after the engine was well again did not ping: %v", e.events)
+	}
+}
+
+// Every IRA reporter instance provisioning knows gets the opt-out; Boost alone pings.
+func TestProvisioningAssignsOnlyBoostTheHeartbeatEnvironment(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/provision.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"trad-ira roth-ira", "ti-reporter@$instance.service.d/heartbeat.conf", "Environment=TI_HEARTBEAT=off", "A second pinger would mask the loss of Boost"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("provisioning lacks %q", want)
+		}
+	}
+}
+
+// Boost reads its URL from the credential without a drop-in; every non-Boost
+// reporter instance gets the opt-out (docs/manual/alerts-and-dashboard.md, "Where alerts go").
+func TestHeartbeatUsesCredentialWithoutBoostDropIn(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/systemd/ti-reporter@.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "EnvironmentFile=/run/trend-investing/secrets/secrets.env") {
+		t.Error("reporter template must not load secrets into the environment")
+	}
+	raw, err = os.ReadFile("../../deploy/provision.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "ti-reporter@boost.service.d") {
+		t.Error("Boost must not need a heartbeat drop-in")
+	}
+}
+
+func TestHeartbeatEnvironmentSelectsOnePinger(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	for _, account := range []string{"boost", "trad-ira"} {
+		dir := t.TempDir()
+		secrets := filepath.Join(dir, "secrets")
+		writeFileT(t, secrets, "TI_NTFY_TOPIC=t\nTI_NTFY_SERVER=https://ntfy.test\nTI_HEARTBEAT_URL=https://heartbeat.test/ping/secret\n")
+		environment := map[string]string{}
+		if account == "trad-ira" {
+			environment["TI_HEARTBEAT"] = "off"
+		}
+		args := []string{"-journal", filepath.Join(dir, "waiting.log"), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", secrets, "-account", account, "-run-env", filepath.Join(dir, "run.env")}
+		if err := run(args, env(environment), func() time.Time { return t0 }, &bytes.Buffer{}, &http.Client{Transport: r}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(r.to("heartbeat.test")); got != 1 {
+		t.Errorf("two reporters sent %d pings, want only Boost's one", got)
 	}
 }

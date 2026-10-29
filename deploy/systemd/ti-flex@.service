@@ -6,6 +6,11 @@ Description=Flex reader for account %i: IBKR's Cash Transactions, each new depos
 # loop never read its ledger).
 After=network-online.target
 Wants=network-online.target
+# When this unit fails, ti-unit-failed@%n sends one urgent page naming it, the
+# failed run's last journal line and the manual row to read (ADR 0019,
+# "Alerting"; docs/live-trading/lessons-2026-10.md L8). Its timer runs it
+# again, so the page is sent once per failure episode and never reminded.
+OnFailure=ti-unit-failed@%n.service
 # Skipped, not failed, until the adapter's code is installed (provision.sh
 # adapter), as ti-adapter-boost.service is. Once installed, a missing token,
 # a rejected one, an account file with its line not filled in, a statement

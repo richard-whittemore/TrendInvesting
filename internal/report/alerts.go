@@ -2,6 +2,7 @@ package report
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -26,12 +27,17 @@ type Kind string
 // The incident types of ADR 0019's alerting: every refusal, Degraded and
 // Halted, withheld decisions, missing data and heartbeat loss.
 const (
-	KindRefusal     Kind = "refusal"
-	KindDegraded    Kind = "degraded"
-	KindHalted      Kind = "halted"
-	KindWithheld    Kind = "withheld"
-	KindMissingData Kind = "missing-data"
-	KindHeartbeat   Kind = "heartbeat-lost"
+	KindRefusal  Kind = "refusal"
+	KindDegraded Kind = "degraded"
+	KindHalted   Kind = "halted"
+	KindWithheld Kind = "withheld"
+	// KindRebalanceWithheld is a momentum account's month-end decision
+	// withheld for any reason: it skips a whole month, not a day, so it is
+	// always urgent and repeats until acknowledged
+	// (docs/live-trading/lessons-2026-10.md, L11; ADR 0019, "Alerting").
+	KindRebalanceWithheld Kind = "rebalance-withheld"
+	KindMissingData       Kind = "missing-data"
+	KindHeartbeat         Kind = "heartbeat-lost"
 	// KindJournalRefused is the reporter's own failure to read the journal:
 	// every alert the journal holds is withheld until it reads.
 	KindJournalRefused Kind = "journal-refused"
@@ -95,14 +101,17 @@ const (
 // set, is the text for a public relay: it names what is in doubt and carries
 // no balance.
 type Alert struct {
-	Key          string
-	Kind         Kind
-	Severity     Severity
-	AccountID    string
-	At           time.Time
-	Title        string
-	Body         string
-	PublicBody   string
+	Key        string
+	Kind       Kind
+	Severity   Severity
+	AccountID  string
+	At         time.Time
+	Title      string
+	Body       string
+	PublicBody string
+	// Standing alerts survive a new channel baseline but retain once-per-key
+	// delivery (ADR 0019, "Alerting"; docs/live-trading/lessons-2026-10.md, L11).
+	Standing     bool
 	Repeat       bool
 	Acknowledged bool
 }
@@ -179,10 +188,38 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 // acknowledgement for another account with no effect. The engine journals only
 // acknowledgements it could read, so one this build cannot read is a build
 // mismatch and a read error.
-func Alerts(envelopes []event.Envelope) ([]Alert, error) {
-	account, _, err := AccountOf(envelopes)
+//
+// instance is the caller's deployment name, never the journal's broker
+// account ID (ADR 0019, "Alerting"; docs/live-trading/lessons-2026-10.md L8).
+// Momentum callers must supply it; Boost retains its fixed unit names.
+// Invalid nonempty momentum names are unknown and omit unit commands.
+func Alerts(envelopes []event.Envelope, instance string) ([]Alert, error) {
+	return alerts(envelopes, instance, true)
+}
+
+// AlertsForDashboard preserves incidents when the deployment instance is
+// unknown, omitting unit commands (ADR 0019, "Alerting"). A nonempty instance
+// must come from a provisioned engine folder (docs/manual/server.md); invalid
+// names are treated as unknown.
+func AlertsForDashboard(envelopes []event.Envelope, instance string) ([]Alert, error) {
+	return alerts(envelopes, instance, false)
+}
+
+func alerts(envelopes []event.Envelope, instance string, requireInstance bool) ([]Alert, error) {
+	account, strategy, err := AccountOf(envelopes)
 	if err != nil {
 		return nil, err
+	}
+	if requireInstance && isMomentum(strategy) && instance == "" {
+		return nil, fmt.Errorf("report: momentum alerts require an engine instance")
+	}
+	if requireInstance && !isMomentum(strategy) {
+		instance = "boost"
+	}
+	if instance != "" && !deploymentInstancePattern.MatchString(instance) {
+		instance = ""
+	} else if requireInstance || instance != "" {
+		instance = instanceOf(strategy, instance)
 	}
 	var out []Alert
 	var lastState, runReason string
@@ -281,7 +318,7 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				return nil, err
 			}
 			out = append(out, refusalAlerts(account, e, p, flagged[p.Reason])...)
-			if a, ok := pending.refused(account, e, p); ok {
+			if a, ok := pending.refused(account, instance, e, p); ok {
 				out = append(out, a)
 			}
 			if p.Alert {
@@ -296,7 +333,7 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				flagged[event.RefusedStaleBrokerSnapshot] = true
 				out = append(out, staleSaleAlert(account, e, p))
 			}
-			if a, ok := byHandAlert(account, e, p); ok && !paged[a.Key] {
+			if a, ok := byHandAlert(account, instance, e, p); ok && !paged[a.Key] {
 				paged[a.Key] = true
 				out = append(out, a)
 			}
@@ -365,20 +402,26 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				return nil, err
 			}
 			if w := p.Boost.ReplanWithheld; w.Cause != "" {
-				out = append(out, rejectionAlert(account, e, w, p.Boost.RejectedInARow))
+				out = append(out, rejectionAlert(account, instance, e, w, p.Boost.RejectedInARow))
 			}
 			for i, r := range p.Boost.RejectedWhileStopped {
 				nth := p.Boost.RejectionsWhileStopped - len(p.Boost.RejectedWhileStopped) + i + 1
-				out = append(out, stoppedRejectionAlert(account, e, r, nth, p.Boost.RejectedInARow))
+				out = append(out, stoppedRejectionAlert(account, instance, e, r, nth, p.Boost.RejectedInARow))
 			}
 			if p.Outcome != event.TargetsOutcomeWithheld {
 				runReason = ""
 				continue
 			}
-			if p.WithheldReason == runReason {
+			// A momentum decision is monthly: each withheld month is its own
+			// skipped month, keyed by its decision session even when found later.
+			thisRun := p.WithheldReason
+			if p.StrategyID == event.TargetWeightStrategyMomentum {
+				thisRun += "@" + momentumDecisionSession(p)
+			}
+			if thisRun == runReason {
 				continue
 			}
-			runReason, runStart = p.WithheldReason, e.EventTime
+			runReason, runStart = thisRun, e.EventTime
 			a := withheldAlert(account, e, p, runStart)
 			if p.WithheldReason == event.WithheldStaleAccountSnapshot && notAtClose[0] != "" {
 				a.Body += fmt.Sprintf(" The adapter's reading after the close could not stand for the close (broker snapshot %s): %s. It was stamped at its read time, so the session was withheld and nothing was ordered: docs/runbooks/first-paper-order.md, \"A session withheld after the close\".", notAtClose[0], notAtClose[1])
@@ -604,6 +647,35 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
 }
 
+// deploymentInstancePattern restricts caller-supplied deployment names before
+// naming units (ADR 0019, "Alerting"). Invalid names remain unknown and never
+// enter commands, whether supplied by the reporter flag or dashboard folder.
+var deploymentInstancePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// instanceOf selects the deployment instance for alert commands (ADR 0019,
+// "Alerting"; docs/live-trading/lessons-2026-10.md L8). Momentum callers supply
+// the reporter flag or a provisioned dashboard directory, never a journal
+// account ID; Boost retains its fixed deployment name.
+func instanceOf(strategyID, instance string) string {
+	if strategyID == event.TargetWeightStrategyMomentum {
+		return instance
+	}
+	return "boost"
+}
+
+// unknownInstance directs readers to the account's reporter for deployment
+// identity before acting (ADR 0019, "Alerting"; docs/manual/server.md).
+const unknownInstance = "instance unknown: run the reporter for the account to get the exact units"
+
+// adapterUnitOf is the adapter unit of an engine instance: Boost keeps its own
+// unit, an IRA runs an instance of the adapter template.
+func adapterUnitOf(instance string) string {
+	if instance == "boost" {
+		return "ti-adapter-boost"
+	}
+	return "ti-adapter@" + instance
+}
+
 // handSaleSteps is the hand-sale procedure for the account while a program sale may be
 // working (docs/manual/states-and-kill-switch.md, "Selling by hand safely"):
 // the program plans Boost's exit again at each decided session while it is
@@ -627,8 +699,12 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 // log, whatever account its configuration decides (the shipped one decides
 // "joint"; deploy/systemd, docs/manual/server.md). The approval names the
 // account.
-func handSaleSteps(account string) string {
-	return fmt.Sprintf("Before you sell anything by hand, stop the adapter, then the engine: sudo systemctl stop ti-adapter-boost, then sudo systemctl stop ti-engine@boost (two commands, so a failed adapter stop ends the procedure before the engine is stopped); if the first fails, stop there and read journalctl -u ti-adapter-boost before going on. The kill switch is not enough, because it does not stop the sale back to 98%%. Then cancel every open order on the instrument, the program's and any of your own, in IBKR's app, and confirm there that none is open, cancel-pending included; only then sell. Start the fresh run you approve only once your sale has filled or been cancelled, approved with the post-sale book and, when this sale was the incident's own, -sale-attempted; its approval states the book as it is after your sale (operator approve -log <previous run's log> -account %[1]s -by <you> -positions SYM=shares,... -cash <IBKR's TotalCashValue> -currency USD -out <approval>), typed right after reading the book in IBKR, or the fresh run's first reading is not the book it is compared with and the account halts as unverifiable. Then start the adapter only after the fresh run's engine is running; never resume the stopped run: a resumed engine hands the adapter an order it had released but never sent, and the adapter sends it beside your sale.", account)
+func handSaleSteps(account, instance string) string {
+	if instance == "" {
+		return unknownInstance + ". Before selling by hand, follow the reporter's instructions to stop the account's adapter, then its engine, and confirm the stops succeeded (docs/manual/states-and-kill-switch.md, 'Selling by hand safely')."
+	}
+	adapter, engine := adapterUnitOf(instance), "ti-engine@"+instance
+	return fmt.Sprintf("Before you sell anything by hand, stop the adapter, then the engine: sudo systemctl stop %[2]s, then sudo systemctl stop %[3]s (two commands, so a failed adapter stop ends the procedure before the engine is stopped); if the first fails, stop there and read journalctl -u %[2]s before going on. The kill switch is not enough, because it does not stop the sale back to 98%%. Then cancel every open order on the instrument, the program's and any of your own, in IBKR's app, and confirm there that none is open, cancel-pending included; only then sell. Start the fresh run you approve only once your sale has filled or been cancelled, approved with the post-sale book and, when this sale was the incident's own, -sale-attempted; its approval states the book as it is after your sale (operator approve -log <previous run's log> -account %[1]s -by <you> -positions SYM=shares,... -cash <IBKR's TotalCashValue> -currency USD -out <approval>), typed right after reading the book in IBKR, or the fresh run's first reading is not the book it is compared with and the account halts as unverifiable. Then start the adapter only after the fresh run's engine is running; never resume the stopped run: a resumed engine hands the adapter an order it had released but never sent, and the adapter sends it beside your sale.", account, adapter, engine)
 }
 
 // rejectionAlert states the rejection that brought the account's Boost
@@ -639,7 +715,7 @@ func handSaleSteps(account string) string {
 // while its sells, Boost's exit and the margin alarm's sale back to 98%,
 // still go (ADR 0026, point 4), so a sale by hand follows the hand-sale
 // procedure.
-func rejectionAlert(account string, e event.Envelope, w event.BoostReplan, inARow []event.BoostRejectedOrder) Alert {
+func rejectionAlert(account, instance string, e event.Envelope, w event.BoostReplan, inARow []event.BoostRejectedOrder) Alert {
 	after := ""
 	for _, o := range inARow {
 		if o.ClientOrderID != w.ClientOrderID {
@@ -650,7 +726,7 @@ func rejectionAlert(account string, e event.Envelope, w event.BoostReplan, inARo
 		Key: "replan-withheld:" + w.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order %s rejected, two orders in a row; Boost buys stopped", account, w.ClientOrderID),
 		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled)%s, and has now rejected two orders in a row for this account. The program sends no more buys for this account, whatever the target does, until you start a fresh run. Its sells still go: Boost's exit, tried again at each session while it is due, and the margin alarm's sale back to 98%%. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
-			w.ClientOrderID, w.Filled, w.Released, after, handSaleSteps(account)),
+			w.ClientOrderID, w.Filled, w.Released, after, handSaleSteps(account, instance)),
 	}
 }
 
@@ -659,7 +735,7 @@ func rejectionAlert(account string, e event.Envelope, w event.BoostReplan, inARo
 // again at each decided session while it is due, or an order released
 // before the stop; it names the two rejections that stopped buys (ADR 0026,
 // points 2, "Boost", amended 2026-10-18, and 4).
-func stoppedRejectionAlert(account string, e event.Envelope, r event.BoostReplan, nth int, inARow []event.BoostRejectedOrder) Alert {
+func stoppedRejectionAlert(account, instance string, e event.Envelope, r event.BoostReplan, nth int, inARow []event.BoostRejectedOrder) Alert {
 	stoppedBy := ""
 	if len(inARow) > 0 {
 		names := make([]string, len(inARow))
@@ -672,7 +748,7 @@ func stoppedRejectionAlert(account string, e event.Envelope, r event.BoostReplan
 		Key: "rejected-while-stopped:" + r.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order %s rejected: another rejection while Boost's buys are stopped (%s since the stop)", account, r.ClientOrderID, ordinal(nth)),
 		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled): another rejection while Boost's buys are stopped, the %s since the stop.%s A rejected sell, such as Boost's exit, is planned again at the next decided session while it is due; the program still sends no buy for this account until you start a fresh run. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
-			r.ClientOrderID, r.Filled, r.Released, ordinal(nth), stoppedBy, handSaleSteps(account)),
+			r.ClientOrderID, r.Filled, r.Released, ordinal(nth), stoppedBy, handSaleSteps(account, instance)),
 	}
 }
 
@@ -703,6 +779,9 @@ func ordinal(n int) string {
 }
 
 func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPayload, start time.Time) Alert {
+	if p.StrategyID == event.TargetWeightStrategyMomentum {
+		return rebalanceWithheldAlert(account, e, p)
+	}
 	kind, severity := KindWithheld, Routine
 	switch p.WithheldReason {
 	case event.WithheldMissingBars, event.WithheldStaleAccountSnapshot, event.WithheldMissingUniverse, event.WithheldHistoriesMissing:
@@ -889,4 +968,26 @@ func RestoredLogNewerAlert(account, restored, current string, at time.Time) Aler
 // current run.
 func RestoredLogNewerKeyPrefix(account string) string {
 	return "restored-log-newer:" + account + ":"
+}
+
+// rebalanceWithheldAlert pages that a momentum account's month-end decision
+// was withheld: nothing is bought or sold until the next month's decision,
+// whatever the reason, so it is urgent and repeats until acknowledged
+// (docs/live-trading/lessons-2026-10.md L11; ADR 0019, "Alerting").
+func rebalanceWithheldAlert(account string, e event.Envelope, p event.TargetsDecidedPayload) Alert {
+	session := momentumDecisionSession(p)
+	key := fmt.Sprintf("%s:%s:%s@%s", KindRebalanceWithheld, p.WithheldReason, session, account)
+	body := fmt.Sprintf("The month-end rebalance for the session ending %s was withheld (%s): %s. Nothing was ordered, held positions and orders are unchanged, and the account decides again only at the next month-end, so this skips the whole month unless you act.",
+		session, p.WithheldReason, p.Detail)
+	return Alert{Key: key, Kind: KindRebalanceWithheld, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
+		Title: fmt.Sprintf("%s: rebalance withheld (%s)", account, p.WithheldReason), Body: body + acknowledgeLine(key)}
+}
+
+// momentumDecisionSession names the decision's own close, including a missed
+// close discovered later (ADR 0026, point 1).
+func momentumDecisionSession(p event.TargetsDecidedPayload) string {
+	if p.Momentum.CloseSession != "" {
+		return p.Momentum.CloseSession
+	}
+	return p.SessionPeriodEnd.UTC().Format(time.DateOnly)
 }

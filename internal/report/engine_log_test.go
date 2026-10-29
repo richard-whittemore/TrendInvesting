@@ -166,7 +166,7 @@ func TestTheReporterReadsTheReleasesTheGateWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := report.Alerts(envelopes); err != nil {
+	if _, err := report.Alerts(envelopes, "boost"); err != nil {
 		t.Errorf("alerts of the engine's own log: %v", err)
 	}
 	date, ok := report.ClosedSessionDate(envelopes)
@@ -207,7 +207,7 @@ func TestTheReporterReadsTheRefusalsTheGateWrites(t *testing.T) {
 	if refusals == 0 {
 		t.Fatal("the gate wrote no version 3 refusal: the fixture no longer shows what the gate writes")
 	}
-	alerts, err := report.Alerts(envelopes)
+	alerts, err := report.Alerts(envelopes, "boost")
 	if err != nil {
 		t.Fatalf("alerts of the gate's own log: %v", err)
 	}

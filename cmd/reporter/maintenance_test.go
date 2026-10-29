@@ -727,8 +727,8 @@ func TestEveryNeverHeldKindPagesThroughARealFiringInsideAWindow(t *testing.T) {
 	openWindow(t, dir, at, at.Add(10*time.Minute))
 	was := journalReader
 	t.Cleanup(func() { journalReader = was })
-	journalReader = func(path string, now time.Time, ack time.Duration, seen map[string]bool) (report.History, []event.Envelope, string, []report.Alert, error) {
-		history, envelopes, account, alerts, err := was(path, now, ack, seen)
+	journalReader = func(path, instance string, now time.Time, ack time.Duration, seen map[string]bool) (report.History, []event.Envelope, string, []report.Alert, error) {
+		history, envelopes, account, alerts, err := was(path, instance, now, ack, seen)
 		for _, k := range report.NeverHeld {
 			alerts = append(alerts, report.Alert{Key: "never-held:" + string(k), Kind: k, Severity: report.Urgent, AccountID: account, At: at, Title: account + ": never-held " + string(k), Body: "a " + string(k) + " alert"})
 		}

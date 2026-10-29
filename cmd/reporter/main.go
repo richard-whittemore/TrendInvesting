@@ -100,7 +100,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	date := flags.String("date", "", "summary date, YYYY-MM-DD, sent once the log records that day's session closed (default: the latest closed session)")
 	summary := flags.Bool("summary", false, "also deliver the daily summary")
 	sessions := flags.Int("heartbeat-sessions", 2, "NYSE sessions that may close with nothing written to the journal before a heartbeat alert fires (at least 2); weekends and holidays close none")
-	accountName := flags.String("account", "", "account name for alerts when the journal cannot name its own (default: the journal file's name)")
+	accountName := flags.String("account", "", "deployment instance (%i, e.g. trad-ira), required for IRA alert unit commands; also the alert label when the journal cannot name its account (default label: the journal file's name)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
 	repeat := flags.Duration("repeat-interval", defaultRepeatInterval, "how often a Degraded, Halted or reconciliation alert is sent again until the journal records its acknowledgement (the owner's setting, ADR 0019)")
 	secretsFile := flags.String("secrets-file", "", "KEY=VALUE file of channel secrets, read for any not set in the environment (under systemd: %d/secrets, the credential file)")
@@ -115,7 +115,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	gatewayOwner := flags.String("gateway-owner", "", "the account whose reporter owns the Gateway check, which reads the ti-gateway and -gateway-adapters journals with -journalctl after the incident alerts: logged out for more than 10 minutes outside the Gateway's restart windows pages once for the host, hourly reminders follow, and a completed login resolves it; every other instance skips it, so three accounts do not page three times")
 	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, and beside which the reader's costs.jsonl gives the summary its costs line, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
 	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed unit is paged once per failure episode if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a unit no longer failed is resolved")
-	resolveUnits := flags.String("resolve-units", "", "comma-separated units (the data jobs, ti-data.service and ti-data@<account>.service) that systemctl show samples only to end their failure episode once a run has ended well: the reporter pages one once only when its OnFailure hook could not, never reminds or names it, and it never holds back the heartbeat; only a data job is accepted, and not a unit also in -units")
+	resolveUnits := flags.String("resolve-units", "", "comma-separated units (the data jobs, ti-data.service and ti-data@<account>.service, and the Flex readers, ti-flex@<account>.service) that systemctl show samples only to end their failure episode once a run has ended well: the reporter pages one once only when its OnFailure hook could not, never reminds or names it, and it never holds back the heartbeat; only a data job or a Flex reader is accepted, and not a unit also in -units")
 	selfUnit := flags.String("self-unit", "", "this reporter's own unit (ti-reporter@<instance>.service): its failure page is resolved by the next firing that finishes without a fault")
 	unitState := flags.String("unit-state", "", "the host's record of failed-unit pages, shared with the OnFailure hook (default: unit-failures.json beside -state)")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
@@ -169,12 +169,19 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// what it touches: every other channel still delivers, and the run fails
 	// naming each fault (ADR 0019, "Alerting").
 	var failures []error
+	// Only the per-instance switch disables the outside heartbeat; the URL
+	// remains a credential secret (ADR 0019, "Alerting").
+	heartbeatOff := getenv("TI_HEARTBEAT") == "off"
+	if heartbeatOff {
+		_, _ = fmt.Fprintln(out, "reporter: heartbeat: not this instance")
+	}
 	if *secretsFile != "" {
 		var secretsErr error
 		if getenv, secretsErr = withSecretsFile(getenv, *secretsFile); secretsErr != nil {
 			failures = append(failures, secretsErr)
 		}
 	}
+	heartbeatEnv := getenv
 	// run.env missing or empty means no settings, and so no log path: the
 	// journal step alone is skipped for it. Whether that is a quiet wait or a
 	// fault is decided once the state is loaded (runEvidence). Every other
@@ -282,7 +289,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		refused = lostRunEnv
 	default:
 		info, statErr = os.Stat(*journalPath)
-		history, envelopes, account, alerts, refused = journalReader(*journalPath, now(), *ackWithin, seen)
+		history, envelopes, account, alerts, refused = journalReader(*journalPath, *accountName, now(), *ackWithin, seen)
 		if account != "" {
 			label = account
 		}
@@ -513,7 +520,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			return nil
 		}
 	}
-	pingHeartbeat(getenv, &bounded, out)
+	if !heartbeatOff {
+		pingHeartbeat(heartbeatEnv, &bounded, out)
+	}
 	return nil
 }
 
@@ -555,7 +564,7 @@ func hasKeys(seen map[string]bool, channel string) bool {
 
 // sendersFor returns the senders alert a may go to now. To a channel whose
 // baseline is after the event the alert reports, the alert is history and is
-// not sent, unless it is still open (repeating and not acknowledged): then it
+// not sent, unless it is still open (standing or repeating, not acknowledged): then it
 // is in force, not history, and is in starting, to be sent marked as the
 // state at reporter start until the channel has taken it, and in current
 // after that, so it repeats as usual (ADR 0019, "Alerting"). An alert with no
@@ -565,7 +574,7 @@ func sendersFor(senders []sender, a report.Alert, baselines map[string]time.Time
 		if _, echo := s.(echoOnly); !echo {
 			if b, ok := baselines[s.name()]; ok && !a.At.IsZero() && a.At.Before(b) {
 				switch {
-				case !a.Repeat || a.Acknowledged:
+				case (!a.Repeat && !a.Standing) || a.Acknowledged:
 				case seen[channelKey(s.name(), a.Key)]:
 					current = append(current, s)
 				default:
@@ -706,8 +715,9 @@ var journalReader = readJournal
 // acknowledged within ackWithin of its commit by now, or the reason it was
 // refused. Only the summary's equity comparison reads the earlier runs, so a
 // broken chain of them refuses nothing: it is one more alert, delivered once
-// (ADR 0019, "Alerting").
-func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[string]bool) (history report.History, envelopes []event.Envelope, account string, alerts []report.Alert, err error) {
+// (ADR 0019, "Alerting"). instance comes from -account, never from the
+// journal's broker account ID.
+func readJournal(path, instance string, now time.Time, ackWithin time.Duration, seen map[string]bool) (history report.History, envelopes []event.Envelope, account string, alerts []report.Alert, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return report.History{}, nil, "", nil, fmt.Errorf("reporter: read journal: %w", err)
@@ -724,7 +734,7 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 	if err != nil {
 		return report.History{}, nil, "", nil, err
 	}
-	alerts, err = report.Alerts(envelopes)
+	alerts, err = report.Alerts(envelopes, instance)
 	if err != nil {
 		return report.History{}, nil, account, nil, err
 	}
@@ -733,6 +743,7 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 		return report.History{}, nil, account, nil, err
 	}
 	alerts = append(alerts, report.UnreadReportAlerts(account, unread)...)
+	alerts = append(alerts, report.IncompleteSellAlerts(instance, entries, strategy)...)
 	alerts = append(alerts, report.UnacknowledgedAlerts(orders, now, ackWithin, func(key string) bool { return deliveredAnywhere(seen, key) })...)
 	history = report.EarlierRunsOf(path, raw, recoverLogFile)
 	if history.Broken != nil {

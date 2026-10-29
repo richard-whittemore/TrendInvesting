@@ -42,7 +42,7 @@ func TestNoReconciliationIsHeldByAMaintenanceWindow(t *testing.T) {
 	mismatch := newStream(t)
 	mismatch.mismatch(1, "reconciliation:1")
 	for name, s := range map[string]*stream{"pending cash": pending, "mismatch": mismatch} {
-		got, err := report.Alerts(s.out)
+		got, err := report.Alerts(s.out, "boost")
 		if err != nil || len(got) == 0 {
 			t.Fatalf("%s: %+v, %v", name, got, err)
 		}

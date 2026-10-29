@@ -364,6 +364,15 @@ rm -rf /dev/shm/ti-edit
 source=$(sed -n 's/^LoadCredential=secrets://p' /etc/systemd/system/ti-reporter@.service)
 test "$source" = "$unlocked/secrets.env" || fail "the reporter's unit loads its secrets from $source, not the unlocked copy"
 install -o ti-trader -g ti-trader -m 0400 "$source" "$rep/creds/secrets"
+# Secrets reach the reporter only through its private credential.
+if grep -qx "EnvironmentFile=$source" /etc/systemd/system/ti-reporter@.service; then
+  fail "the reporter must not load secrets into the environment"
+fi
+test ! -e /etc/systemd/system/ti-reporter@boost.service.d/heartbeat.conf || fail "Boost must not need a heartbeat drop-in"
+for instance in trad-ira roth-ira; do
+  grep -qx 'Environment=TI_HEARTBEAT=off' "/etc/systemd/system/ti-reporter@$instance.service.d/heartbeat.conf" || fail "the $instance drop-in does not disable the heartbeat"
+done
+
 line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-reporter@.service)
 line=${line//%i/boost}
 line=${line//%d/$rep/creds}

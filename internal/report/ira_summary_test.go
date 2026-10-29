@@ -91,7 +91,7 @@ func TestIRASummaryReadsItsRecordVersionsAndShowsItsBook(t *testing.T) {
 	if got.RejectedInputs != 0 {
 		t.Errorf("IRA inputs not read = %d, want 0", got.RejectedInputs)
 	}
-	if _, err := report.Alerts(s.out); err != nil {
+	if _, err := report.Alerts(s.out, "trad-ira"); err != nil {
 		t.Fatalf("IRA record versions must remain readable by the reporter: %v", err)
 	}
 	if !reflect.DeepEqual(got.Holdings, holdings) {
@@ -206,7 +206,7 @@ func TestReporterReadsApprovalsAtVersionsOneThroughSix(t *testing.T) {
 				t.Fatal(err)
 			}
 			s.add(event.OperatorRunApprovedEventType, v, "approval", day(0), p)
-			if _, err := report.Alerts(s.out); err != nil {
+			if _, err := report.Alerts(s.out, "trad-ira"); err != nil {
 				t.Fatal(err)
 			}
 			if _, _, err := report.StateAtStartAlert(s.out, nil); err != nil {

@@ -127,7 +127,7 @@ func TestDashboardFollowsARestartAndShowsTheWholeHistory(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	h1 := writeRun(t, dir, "run1.log", approval("", ""), 0, base)
-	h := newHandlerFor(nil, []string{dir}, nil, "SPY")
+	h := newHandlerFor(nil, []string{dir})
 
 	first := summaryOf(t, h)
 	if first.Summary.Date != at(1).Format(time.DateOnly) || len(first.Summary.Equity.Points) != 2 {
@@ -164,7 +164,7 @@ func TestDashboardShowsTheCurrentRunWhenTheChainIsBroken(t *testing.T) {
 	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	writeRun(t, dir, "run1.log", approval("", ""), 0, base)
 	writeRun(t, dir, "run2.log", approval("run1.log", "sha256:"+strings.Repeat("0", 64)), 2, base.Add(time.Hour), halted(t, 3))
-	h := newHandlerFor(nil, []string{dir}, nil, "SPY")
+	h := newHandlerFor(nil, []string{dir})
 	got := summaryOf(t, h)
 	s := got.Summary
 	if s.EngineState != "halted" || !s.HaveSnapshot || len(s.Holdings) != 1 || len(got.Alerts) == 0 || s.Date != at(3).Format(time.DateOnly) {
@@ -197,7 +197,7 @@ func TestDashboardKeepsBothLogNamesForADamagedEarlierLog(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := summaryOf(t, newHandlerFor([]string{filepath.Join(dir, "run2.log")}, nil, nil, "SPY"))
+	got := summaryOf(t, newHandlerFor([]string{filepath.Join(dir, "run2.log")}, nil))
 	if got.Summary.Equity.HistoryUnavailable != "history unavailable: the chain of runs is broken between run2.log and run1.log" {
 		t.Fatalf("equity = %+v", got.Summary.Equity)
 	}
@@ -245,7 +245,7 @@ func TestDashboardOfAFixedJournalStillFollowsTheChain(t *testing.T) {
 	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	h1 := writeRun(t, dir, "run1.log", approval("", ""), 0, base)
 	writeRun(t, dir, "run2.log", approval("run1.log", h1), 2, base.Add(time.Hour))
-	got := summaryOf(t, newHandlerFor([]string{filepath.Join(dir, "run2.log")}, nil, nil, "SPY"))
+	got := summaryOf(t, newHandlerFor([]string{filepath.Join(dir, "run2.log")}, nil))
 	if len(got.Summary.Equity.Points) != 4 {
 		t.Fatalf("points = %d, want 4", len(got.Summary.Equity.Points))
 	}
@@ -260,7 +260,7 @@ func TestDashboardOfAnEngineDirectoryWithNoRunSaysSo(t *testing.T) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rec := get(newHandlerFor(nil, []string{dir}, nil, "SPY"), http.MethodGet, "/")
+	rec := get(newHandlerFor(nil, []string{dir}), http.MethodGet, "/")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "trad-ira: no run yet: the engine has not started a run") {
 		t.Fatalf("status %d body %q, want the account's no-run message", rec.Code, rec.Body)
 	}
@@ -281,7 +281,7 @@ func TestDashboardDegradesPerAccount(t *testing.T) {
 	}
 	writeRun(t, good, "run1.log", approval("", ""), 0, base, halted(t, 5))
 	missing := filepath.Join(root, "gone")
-	h := newHandlerFor(nil, []string{good, empty, missing}, nil, "SPY")
+	h := newHandlerFor(nil, []string{good, empty, missing})
 	rec := get(h, http.MethodGet, "/")
 	body := rec.Body.String()
 	if rec.Code != http.StatusOK {
@@ -317,7 +317,7 @@ func TestDashboardOfOnlyAbandonedStartsSaysTheEngineStarted(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "run1.log"), file.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	body := get(newHandlerFor(nil, []string{dir}, nil, "SPY"), http.MethodGet, "/").Body.String()
+	body := get(newHandlerFor(nil, []string{dir}), http.MethodGet, "/").Body.String()
 	if !strings.Contains(body, "boost: the engine started a run but recorded nothing past its header") || strings.Contains(body, "has not started a run") {
 		t.Fatalf("body %q", body)
 	}
@@ -354,7 +354,7 @@ func TestADirectoryWhoseHeadLogDoesNotVerifyIsItsOwnCard(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rec := get(newHandlerFor(nil, []string{boost, trad}, nil, "SPY"), http.MethodGet, "/")
+	rec := get(newHandlerFor(nil, []string{boost, trad}), http.MethodGet, "/")
 	body := rec.Body.String()
 	if rec.Code != http.StatusOK || !strings.Contains(body, "boost: journal does not verify") || !strings.Contains(body, "halted") {
 		t.Fatalf("status %d body %q, want boost's card and trad-ira's figures", rec.Code, body)
@@ -386,7 +386,7 @@ func TestAMessageCardCarriesNoFigures(t *testing.T) {
 	if err := os.Mkdir(empty, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rec := get(newHandlerFor(nil, []string{boost, empty}, nil, "SPY"), http.MethodGet, "/api/summary.json")
+	rec := get(newHandlerFor(nil, []string{boost, empty}), http.MethodGet, "/api/summary.json")
 	var raw []map[string]json.RawMessage
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil || len(raw) != 2 {
 		t.Fatalf("body %q, err %v", rec.Body, err)
@@ -423,7 +423,7 @@ func TestMessageCardAnchorsAreUnique(t *testing.T) {
 	}
 	writeRun(t, healthy, "run1.log", approval("", ""), 0, time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC), halted(t, 5))
 	dirs = append(dirs, healthy)
-	body := get(newHandlerFor(nil, dirs, nil, "SPY"), http.MethodGet, "/").Body.String()
+	body := get(newHandlerFor(nil, dirs), http.MethodGet, "/").Body.String()
 	for _, want := range []string{`id="dir-0"`, `id="dir-1"`, `href="#dir-1"`, `id="acct-joint"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %s", want)
@@ -436,5 +436,52 @@ func TestMessageCardAnchorsAreUnique(t *testing.T) {
 	}
 	if strings.Contains(body, `id="acct-boost"`) {
 		t.Error("a message card must not use an account's anchor")
+	}
+}
+
+// TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsUnavailable: the
+// dashboard reads every engine's folder (Boost, the Traditional IRA and, once
+// provisioned, the Roth IRA), each card keeps its own engine's state, and a
+// missing engine folder is "journal unavailable", never an error page for
+// the others (docs/live-trading/lessons-2026-10.md, L8).
+func TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsUnavailable(t *testing.T) {
+	root := t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	boost, ira, roth := filepath.Join(root, "boost"), filepath.Join(root, "trad-ira"), filepath.Join(root, "roth-ira")
+	for _, d := range []string{boost, ira} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRun(t, boost, "run1.log", approval("", ""), 0, base, halted(t, 5))
+	writeRun(t, ira, "run1.log", approval("", ""), 0, base)
+	h := newHandlerFor(nil, []string{boost, ira, roth})
+	rec := get(h, http.MethodGet, "/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "roth-ira: journal unavailable") || strings.Contains(body, root) {
+		t.Errorf("the missing engine is not shown as unavailable, or the page leaks a path:\n%s", body)
+	}
+	var accounts []account
+	if err := json.Unmarshal(get(h, http.MethodGet, "/api/summary.json").Body.Bytes(), &accounts); err != nil || len(accounts) != 3 {
+		t.Fatalf("accounts = %d, %v, want the three engines", len(accounts), err)
+	}
+	if accounts[0].Summary.EngineState != "halted" || accounts[1].Summary.EngineState == "halted" || accounts[1].Message != "" {
+		t.Errorf("states = %q and %q (message %q), want Boost halted and the IRA's own, normal", accounts[0].Summary.EngineState, accounts[1].Summary.EngineState, accounts[1].Message)
+	}
+	if accounts[2].Name != "roth-ira" || !strings.Contains(accounts[2].Message, "journal unavailable") {
+		t.Errorf("the missing engine's card = %+v", accounts[2])
+	}
+}
+
+func TestDashboardRunSettingsWithoutLogAreUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "run.env"), []byte("TI_RUN=lost\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := get(newHandlerFor(nil, []string{dir}), http.MethodGet, "/")
+	if !strings.Contains(rec.Body.String(), "journal unavailable") {
+		t.Fatal("run.env without a journal shown as no run")
 	}
 }

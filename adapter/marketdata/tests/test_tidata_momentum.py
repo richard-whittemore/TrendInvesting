@@ -568,11 +568,11 @@ class TemplateUnitTest(unittest.TestCase):
 
     def test_provisioning_enables_the_iras_timer(self):
         provision = (REPO / "deploy/provision.sh").read_text()
-        self.assertIn("systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer", provision)
+        self.assertIn("systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer ti-reporter@trad-ira.timer", provision)
 
     def test_every_reporter_resolves_the_iras_data_job(self):
         reporter = (REPO / "deploy/systemd/ti-reporter@.service").read_text()
-        self.assertIn("-resolve-units ti-data.service,ti-data@trad-ira.service ", reporter)
+        self.assertIn("-resolve-units ti-data.service,ti-data@trad-ira.service,", reporter)
 
 
 class LogHoldingsRefusalTest(unittest.TestCase):

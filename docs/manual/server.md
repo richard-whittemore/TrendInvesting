@@ -150,8 +150,10 @@ What each program actually reads today:
   or the user key) and says so in its output; the other channels still
   deliver, including the GitHub issues, and its unit exits non-zero, so it
   shows as failed. Fill them in with `sudo ti-secrets edit secrets.env`; the
-  next firing uses them. It also reads `TI_HEARTBEAT_URL`, the address of your check at the
-  outside heartbeat service; that one is optional for the run, but without
+  next firing uses them. Every instance reads `TI_HEARTBEAT_URL` from its
+  private credential, the address of your check at the outside heartbeat service;
+  only Boost pings it. The `trad-ira` and `roth-ira` instance drop-ins separately
+  set `TI_HEARTBEAT=off`. The URL is optional for the run, but without
   it nothing outside the server notices the server dying
   ("The outside heartbeat", below).
 - The reporter's `github-issues` channel reads `TI_GITHUB_ISSUES_TOKEN`, a
@@ -477,7 +479,7 @@ and sends no ping.
 ## The outside heartbeat
 
 A reporter on the server cannot page you that the server died, so the
-reporter also pings an outside service, Healthchecks, at the end of every
+Boost reporter also pings an outside service, Healthchecks, at the end of every
 firing that finishes without a fault (every 5 minutes, around the clock),
 including the firings that wait for the account's first run. The
 service pages you through Pushover when the pings stop. You decided this is
@@ -485,7 +487,7 @@ required before paper trading.
 
 What is sent: an empty request to your check's address, with nothing in it:
 no balance, account number, alert text or secret. The address is the check's
-key, so it lives only in `secrets.env` as `TI_HEARTBEAT_URL` and is never
+key, so it lives in `secrets.env` as `TI_HEARTBEAT_URL` and is never
 printed or logged. A ping that fails never fails the reporter's run: the
 reporter logs one line ("the heartbeat ping was not sent: ...", without the
 address) and pings again at the next firing. No ping is sent for a firing that
@@ -493,6 +495,17 @@ failed, so a reporter that cannot deliver, or cannot read the log, also goes
 quiet and is noticed from outside; nor for a firing that found the engine or
 the adapter failed, even when its page was delivered, so a trading unit left
 failed for 20 minutes also takes the check down.
+
+Only `ti-reporter@boost` pings this check. The reporter reads
+`TI_HEARTBEAT_URL` from the private credential file (`%d/secrets`), never
+prints it, and needs no Boost drop-in. Provisioning writes both
+`ti-reporter@trad-ira.service.d/heartbeat.conf` and
+`ti-reporter@roth-ira.service.d/heartbeat.conf`, each with
+`Environment=TI_HEARTBEAT=off`: a second pinger would mask the loss of the
+first. This switch suppresses the ping even with a URL in the credential.
+The instance logs `reporter: heartbeat: not this instance` once per firing,
+as information, never an alert. The stop-Boost-timer drill below therefore
+still pages even while the IRA reporter is healthy.
 
 **Set it up (once) [OWNER]:**
 

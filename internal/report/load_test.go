@@ -2,6 +2,7 @@ package report_test
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -150,5 +151,33 @@ func TestLoadRefusesADurableLogWhoseRecordsNameAnotherRun(t *testing.T) {
 				t.Fatalf("a log that mixes runs must be refused as a journal is, got %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadEntriesWithRecoveryReadsAnEndOfRunJournal(t *testing.T) {
+	envelopes := buildDay(t)
+	header, entries, recovery, err := report.LoadEntriesWithRecovery(journalBytes(t, envelopes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery != nil {
+		t.Fatal("an end-of-run journal must not have durable-log recovery")
+	}
+	if header.JournalVersion == 0 || header.ConfigurationHash != "h" || header.StrategyVersion != "v" {
+		t.Fatalf("wrong journal header: %+v", header)
+	}
+	if len(entries) != len(envelopes) {
+		t.Fatalf("got %d entries, want %d", len(entries), len(envelopes))
+	}
+	for i, e := range envelopes {
+		kind := journal.KindInput
+		switch e.Type {
+		case event.TargetsDecidedEventType, event.OrderPlannedEventType, event.OrderReleasedEventType,
+			event.OrderRefusedEventType, event.EngineStateEventType:
+			kind = journal.KindDecision
+		}
+		if entries[i].Kind != kind || !reflect.DeepEqual(entries[i].Envelope, e) {
+			t.Errorf("entry %d did not preserve its kind and envelope: %+v", i, entries[i])
+		}
 	}
 }

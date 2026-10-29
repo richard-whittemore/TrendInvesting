@@ -103,7 +103,7 @@ func (c *logCache) raises(path string, info fs.FileInfo, loaded journalquery.Jou
 		envelopes = append(envelopes, rec.Envelope)
 	}
 	keys := map[string]bool{}
-	alerts, err := c.alerts(envelopes)
+	alerts, err := c.alerts(envelopes, filepath.Base(filepath.Dir(path)))
 	if err != nil {
 		return false // not kept: a fault fixed at the file is seen on the next request
 	}
