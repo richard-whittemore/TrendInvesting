@@ -136,6 +136,10 @@ type hostGateway struct {
 	Quiet        int  `json:"quiet,omitempty"`         // consecutive good quiet firings
 	StartFailing bool `json:"start_failing,omitempty"` // a failing start is open, until it closes
 	RestartOnly  bool `json:"restart_only,omitempty"`  // the outage was opened by the restart rule alone
+	// Held is the end of the maintenance window that held this outage's page:
+	// a record only, that the outage was seen and not paged inside it
+	// (maintenance.go).
+	Held *time.Time `json:"held_in_maintenance_until,omitempty"`
 }
 
 func loadHostGateway(path string) (hostGateway, error) {
@@ -160,7 +164,7 @@ func loadHostGateway(path string) (hostGateway, error) {
 // seen in; it pages once the time passes gatewayPagesAfter outside a window,
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
-func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, senders []sender, setAside []channelFault, clock func() time.Time) (retErr error) {
+func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, window func() time.Time, unitState string, note func(string), senders []sender, setAside []channelFault, clock func() time.Time) (retErr error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -224,7 +228,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
 		if err != nil {
 			return err
 		}
@@ -255,10 +259,18 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		}
 	}
 	if !out {
+		// A Gateway that logged in again while a window held its outage is
+		// handled at the window's close, not before. The bookkeeping of that
+		// never stands between an outage and its page: a fault in it is
+		// reported with the firing's errors and nothing else waits on it.
+		if holdFor(report.KindGatewayLoggedOut, window).IsZero() {
+			retErr = errors.Join(retErr, closeGatewayHold(unitState, host, true, now, note))
+			h.Held = nil
+		}
 		h.Since, h.RestartOnly = nil, false
 		if !deliveredAnywhere(seen, key) {
 			h.Resolving = false
-			return record()
+			return errors.Join(retErr, record())
 		}
 		failed, resolveErr := resolveAll(senders, key, seen, now)
 		keep := map[string]bool{}
@@ -270,7 +282,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		}
 		forgetAlert(key, keep, seen, sent, repeats)
 		h.Resolving = deliveredAnywhere(seen, key)
-		return errors.Join(resolveErr, record())
+		return errors.Join(retErr, resolveErr, record())
 	}
 	if h.Since == nil {
 		t := now
@@ -278,11 +290,30 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		h.RestartOnly = !ev.out && restartOut
 	}
 	if err := record(); err != nil {
-		return err
+		return errors.Join(retErr, err)
 	}
+	// A maintenance window records the outage and pages nothing, reminders
+	// included. It does not move the outage's start, so the ten minutes still
+	// count from it: an outage already that old pages at the first firing after
+	// the window closes, and a shorter one waits out the rest (restart windows
+	// still count).
+	if hold := holdFor(report.KindGatewayLoggedOut, window); !hold.IsZero() {
+		// The shared hold is written first, then this file's: a stop between
+		// leaves the shared hold, which the close always looks for.
+		retErr = errors.Join(retErr, holdGateway(unitState, host, hold, now))
+		h.Held = &hold
+		return errors.Join(retErr, record())
+	}
+	// Past a window an outage not yet ten minutes old keeps its hold: if it
+	// logs in before it pages, the window's hold is handled and said then.
 	if sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter {
-		return nil
+		return errors.Join(retErr, record())
 	}
+	// It pages. The hold is forgotten only now, immediately before the page,
+	// and only if one exists; the bookkeeping is bounded in time and its faults
+	// are reported with the firing's errors, but never delay or stop the page.
+	retErr = errors.Join(retErr, closeGatewayHold(unitState, host, false, now, note))
+	h.Held = nil
 	if h.Resolving {
 		// The new outage is due its page while an earlier recovery's resolution
 		// is still pending: the channel that never took that resolution holds a
@@ -291,7 +322,61 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		forgetAlert(key, map[string]bool{}, seen, sent, repeats)
 		h.Resolving = false
 	}
-	return deliver(senders, report.GatewayLoggedOutAlert(host, *h.Since, now, said), seen, sent, repeats, now, gatewayRemindEvery, record)
+	err = deliver(senders, report.GatewayLoggedOutAlert(host, *h.Since, now, said), seen, sent, repeats, now, gatewayRemindEvery, record)
+	return errors.Join(retErr, err, record())
+}
+
+// gatewayBookkeepingWait bounds the Gateway's wait for the shared record's
+// lock, so a stalled holder never delays its page.
+const gatewayBookkeepingWait = 10 * time.Second
+
+// holdGateway records, in the unit-failure record the units' held failures are
+// in, that the window ending at until held the Gateway's outage, so the close
+// handles it as it handles a unit: paged if it is still out, otherwise marked
+// held and recovered with one output line.
+func holdGateway(path, host string, until, at time.Time) error {
+	if path == "" {
+		return nil
+	}
+	return withUnitStateWait(path, at, gatewayBookkeepingWait, func(u *unitState) error {
+		holdAlert(u.sent, until, at, gatewayHeldKey(host))
+		return u.record()
+	})
+}
+
+// gatewayHeld reports whether the shared record holds the Gateway's outage. It
+// reads the record without its lock (writes replace the file whole), so a
+// Gateway that was never held waits on nothing.
+func gatewayHeld(path, host string) (bool, error) {
+	if path == "" {
+		return false, nil
+	}
+	_, sent, _, _, err := loadState(path)
+	if err != nil {
+		return false, err
+	}
+	return len(heldOf(sent, gatewayHeldKey(host))) > 0, nil
+}
+
+// closeGatewayHold forgets the Gateway's held record, if the shared record has
+// one; when the Gateway recovered, the line saying it was held and recovered
+// is given to note. With no hold nothing is locked or written.
+func closeGatewayHold(path, host string, recovered bool, at time.Time, note func(string)) error {
+	if held, err := gatewayHeld(path, host); err != nil || !held {
+		return err
+	}
+	return withUnitStateWait(path, at, gatewayBookkeepingWait, func(u *unitState) error {
+		taken := takeHeld(u.sent, gatewayHeldKey(host), time.Time{})
+		if len(taken) == 0 {
+			return nil
+		}
+		if recovered && note != nil {
+			for _, h := range taken {
+				note(recoveredLine(gatewayName, h.until))
+			}
+		}
+		return u.record()
+	})
 }
 
 // advanceRestartRule applies the restart rule to a good sample of the Gateway

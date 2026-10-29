@@ -912,8 +912,14 @@ cmp "$rel/v9.9.9/ti-engine" /opt/trend-investing/bin/ti-engine >/dev/null 2>&1 &
 test ! -e /opt/trend-investing/releases/current || fail "ti-release without gh recorded a build"
 if env -u TI_REHEARSAL /root/deploy/release.sh --unverified v9.9.9 >/root/release.out 2>&1; then fail "ti-release --unverified ran without the rehearsal marker"; fi
 test "${TI_REHEARSAL:-}" = 1 || fail "the rehearsal container does not set TI_REHEARSAL"
+# Two minutes past a 5-minute mark: no wait for a quiet moment (the wait is
+# covered by deploy/rehearsal/test-release.sh with a fixed clock).
+export TI_RELEASE_NOW=120
+marker_file=/run/ti-maintenance/maintenance.json
 /root/deploy/release.sh --unverified v9.9.9 >/root/release.out 2>&1 || { cat /root/release.out; fail "ti-release --unverified v9.9.9 failed"; }
 grep -q WARNING /root/release.out || fail "ti-release --unverified did not warn"
+grep -q 'maintenance window open until' /root/release.out || fail "ti-release did not open a maintenance window: $(cat /root/release.out)"
+test ! -e "$marker_file" || fail "ti-release left its maintenance window open: $(cat "$marker_file")"
 for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   cmp "$rel/v9.9.9/$b" "/opt/trend-investing/bin/$b" || fail "ti-release did not install $b"
 done
@@ -924,7 +930,10 @@ grep -Eq 'ti-engine@' /root/release-ctl.log && grep -E '^(restart|stop|start|kil
 for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   cmp "/root/dist/$b" "/opt/trend-investing/bin/$b" || fail "rollback did not restore $b byte for byte"
 done
-pass "ti-release refuses without gh, installs a fake release with --unverified, restarts only the dashboard, and --rollback restores the previous build"
+grep -q 'maintenance window open until' /root/release.out || fail "ti-release --rollback did not open a maintenance window"
+test ! -e "$marker_file" || fail "ti-release --rollback left its maintenance window open"
+unset TI_RELEASE_NOW
+pass "ti-release refuses without gh, installs a fake release with --unverified inside a maintenance window it opens and closes, restarts only the dashboard, and --rollback restores the previous build the same way"
 for f in $(find / -xdev -type f -print0 2>/dev/null | xargs -0 grep -lF -- "$marker" 2>/dev/null || true); do
   fail "the migrated secret is on disk at the end: $f"
 done

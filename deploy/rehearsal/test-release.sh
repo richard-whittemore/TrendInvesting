@@ -86,6 +86,7 @@ case $1 in
     n=$(($(cat "$FAKE_CTL_LOG.lists" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE_CTL_LOG.lists"
     from=${FAKE_ENGINE_BUSY_FROM:-}
     if test -n "${FAKE_ENGINE_BUSY:-}"; then from=1; fi
+    if test -e "$FAKE_CTL_LOG.busy"; then from=1; fi
     if test -n "$from" && test "$n" -ge "$from"; then echo "ti-engine@boost.service loaded deactivating stop"; fi ;;
   is-active)
     if grep -q BAD "$TI_PREFIX/bin/ti-dashboard"; then exit 3; fi
@@ -181,7 +182,7 @@ fresh_server() {
   local p
   for p in $programs; do fake_program "$TI_PREFIX/bin/$p" "echo $p hand"; chmod 0755 "$TI_PREFIX/bin/$p"; done
   : >"$work/ctl.log"
-  rm -f "$work/ctl.log.lists" "$work/ctl.log.active"
+  rm -f "$work/ctl.log.lists" "$work/ctl.log.active" "$work/ctl.log.maint" "$work/ctl.log.opencalls" "$work/ctl.log.other" "$work/ctl.log.start3" "$work/ctl.log.busy"
   : >"$work/gh.log"
   : >"$work/gh.log.verified"
   : >"$work/curl.log"
@@ -189,6 +190,51 @@ fresh_server() {
 export TI_RELEASE_URL=file://$work/rel TI_RELEASE_API=file://$work/api TI_RELEASE_NO_ROOT=1 TI_RELEASE_ANY_ARCH=1
 export TI_SYSTEMCTL=$work/stub/systemctl TI_GH=$work/stub/gh TI_RELEASE_SETTLE=0
 export FAKE_CTL_LOG=$work/ctl.log FAKE_GH_LOG=$work/gh.log FAKE_CURL_LOG=$work/curl.log
+# The maintenance window and the wait for a 5-minute mark: a stand-in
+# ti-maintenance and sleep that log into the systemctl log, so the order of
+# window, wait, install and close can be read from one file; the time is fixed
+# (TI_RELEASE_NOW, seconds since the epoch; 0 is on a 5-minute mark).
+cat >"$work/stub/ti-maintenance" <<'STUB'
+#!/bin/bash
+echo "MAINT $*" >>"$FAKE_CTL_LOG"
+state=$FAKE_CTL_LOG.maint
+case $1 in
+  start)
+    test -z "${FAKE_MAINT_FAIL:-}" || test "$1" != "${FAKE_MAINT_FAIL}" || { echo "ti-maintenance: refused" >&2; exit 1; }
+    # FAKE_MAINT_START3=N: someone else's window, with N seconds left, appears
+    # just before the first start, which is refused (status 3).
+    if test -n "${FAKE_MAINT_START3:-}" && { test -n "${FAKE_MAINT_START3_ALWAYS:-}" || test ! -e "$FAKE_CTL_LOG.start3"; }; then
+      echo "$FAKE_MAINT_START3" >"$FAKE_CTL_LOG.other"; : >"$FAKE_CTL_LOG.start3"
+      echo "ti-maintenance: a window is already open" >&2; exit 3
+    fi
+    rm -f "$FAKE_CTL_LOG.other"
+    echo open >"$state"
+    echo "id 0123456789abcdef"
+    echo "ti-maintenance: maintenance window open until later" ;;
+  end) rm -f "$state" ;;
+  status) echo "maintenance window open until later" ;;
+  left)
+    if test -e "$state"; then echo 300; elif test -e "$FAKE_CTL_LOG.other"; then cat "$FAKE_CTL_LOG.other"; else
+      case ${FAKE_MAINT_OPEN:-} in 1) echo "${FAKE_MAINT_LEFT:-600}" ;; *) echo 0 ;; esac
+    fi ;;
+  is-open)
+    test ! -e "$state" || exit 0
+    test ! -e "$FAKE_CTL_LOG.other" || exit 0
+    case ${FAKE_MAINT_OPEN:-} in
+      1) exit 0 ;;
+      first) n=$(($(cat "$FAKE_CTL_LOG.opencalls" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE_CTL_LOG.opencalls"; test "$n" -le 1; exit ;;
+    esac
+    exit 1 ;;
+esac
+STUB
+cat >"$work/stub/sleep" <<'STUB'
+#!/bin/bash
+echo "SLEEP $*" >>"$FAKE_CTL_LOG"
+# FAKE_BUSY_AFTER_SLEEP: an engine unit starts restarting while we wait.
+test -z "${FAKE_BUSY_AFTER_SLEEP:-}" || : >"$FAKE_CTL_LOG.busy"
+STUB
+chmod +x "$work/stub/ti-maintenance" "$work/stub/sleep"
+export TI_MAINTENANCE=$work/stub/ti-maintenance TI_RELEASE_SLEEP=$work/stub/sleep TI_RELEASE_NOW=120
 
 # run ARGS...: the script's status; its output is in $work/out.
 run() { local s=0; rm -f "$work/ctl.log.lists"; "$script" "$@" >"$work/out" 2>&1 || s=$?; echo "$s"; }
@@ -863,6 +909,126 @@ if grep -Eq 'cache: true|actions/cache@' "$wf"; then fail "the release workflow 
 if command -v actionlint >/dev/null 2>&1; then
   (cd "$repo" && actionlint .github/workflows/release.yml) || fail "actionlint rejects the release workflow"
 fi
+
+# The maintenance window (docs/manual/server.md, "Installing a release"): a
+# release opens a window sized to its own worst case, waits for the 1-to-3
+# minutes after a 5-minute mark so no reporter firing lands on a program being
+# replaced, installs, verifies and closes the window; a release that fails
+# closes it too, so what is still broken pages at the reporter's next firing.
+lines_of() { grep -E "$1" "$work/ctl.log" | tr '\n' ';'; }
+line_no() { grep -n -m1 -E "$1" "$work/ctl.log" | cut -d: -f1; }
+fresh_server
+expect "a release installs inside a window" 0 "$(TI_RELEASE_NOW=120 run v1.0.0)"
+expect "the window is the wait (none at 2 minutes past) plus five minutes, opened once" "MAINT start 300s;" "$(lines_of '^MAINT start')"
+expect "the window is closed once" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
+if test "$(line_no '^MAINT start')" -ge "$(line_no '^restart ti-dashboard')"; then fail "the window opened after the install began"; fi
+if test "$(line_no '^MAINT end')" -le "$(line_no '^restart ti-dashboard')"; then fail "the window closed before the install was verified"; fi
+expect "no wait when it is already 2 minutes past a mark" "" "$(lines_of '^SLEEP')"
+# Seconds past the 5-minute mark -> seconds to wait for the :01 point, and the
+# window that wait makes: 0 -> 60; 30 -> 30; 60..239 -> none; 240 -> 120; 299 -> 61.
+n=0
+for pair in "0 60" "30 30" "59 1" "60 0" "239 0" "240 120" "299 61"; do
+  read -r past want <<<"$pair"
+  fresh_server
+  n=$((n + 1))
+  expect "release at $past s past a mark installs" 0 "$(TI_RELEASE_NOW=$((1000 * 300 + past)) run v1.0.0)"
+  if test "$want" -eq 0; then
+    expect "no wait at $past s past a mark" "" "$(lines_of '^SLEEP')"
+  else
+    expect "wait at $past s past a mark" "SLEEP $want;" "$(lines_of '^SLEEP')"
+  fi
+  expect "window at $past s past a mark" "MAINT start $((want + 300))s;" "$(lines_of '^MAINT start')"
+  asked=$(grep -E '^MAINT start' "$work/ctl.log" | sed 's/^MAINT start \([0-9]*\)s$/\1/')
+  if ! test "$asked" -le 1800 2>/dev/null || ! test "$asked" -ge 1; then fail "the window ti-release asked for at $past s past a mark is '$asked' seconds, outside 1 to 1800"; fi
+  if test "$(line_no '^SLEEP')" != "" && test "$(line_no '^SLEEP')" -ge "$(line_no '^restart ti-dashboard')"; then fail "the install began before the wait at $past s"; fi
+done
+# A release that fails verification (the dashboard does not stay up) closes
+# the window as well.
+fresh_server
+expect "a failed release is nonzero" nonzero "$(nonzero "$(run v1.2.0)")"
+expect "a failed release closes the window" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
+# A refusal after the window opened closes it too (an engine goes mid-restart
+# just before the swap).
+fresh_server
+expect "a late refusal is nonzero" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY_FROM=2 run v1.0.0)")"
+expect "a late refusal closes the window it opened" "MAINT start 300s;MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT (start|end)')"
+# A window that cannot be opened stops the install before it begins.
+fresh_server
+expect "no window, no install" nonzero "$(nonzero "$(FAKE_MAINT_FAIL=start run v1.0.0)")"
+expect "nothing installed without a window" "echo ti-dashboard hand" "$(installed ti-dashboard)"
+if grep -q '^restart' "$work/ctl.log"; then fail "something was restarted without a window"; fi
+# Without the script beside it, ti-release says how to install it.
+fresh_server
+expect "no ti-maintenance, no install" nonzero "$(nonzero "$(TI_MAINTENANCE=$work/stub/no-such-maintenance run v1.0.0)")"
+grep -q "ti-maintenance" "$work/out" || fail "the refusal does not name ti-maintenance: $(cat "$work/out")"
+expect "nothing installed without ti-maintenance" "echo ti-dashboard hand" "$(installed ti-dashboard)"
+# A window the owner opened by hand is used, not replaced, extended or ended.
+fresh_server
+expect "a release inside a hand-opened window installs" 0 "$(FAKE_MAINT_OPEN=1 run v1.0.0)"
+expect "it opens no window of its own" "" "$(lines_of '^MAINT (start|end)')"
+expect "and no maintenance end of any form ran" 0 "$(grep -c '^MAINT end' "$work/ctl.log" || true)"
+grep -q "already open" "$work/out" || fail "ti-release does not say it is using the open window: $(cat "$work/out")"
+fresh_server
+expect "a failed release inside a hand-opened window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run v1.2.0)")"
+expect "a failed release leaves the hand-opened window alone" "" "$(lines_of '^MAINT (start|end)')"
+# A hand-opened window that ends before the swap is not relied on: ti-release
+# opens a window of its own right before it installs, and ends only that one.
+fresh_server
+expect "a release whose borrowed window expired still installs" 0 "$(FAKE_MAINT_OPEN=first run v1.0.0)"
+expect "it opens a window of its own once the borrowed one is gone" "MAINT start 300s;" "$(lines_of '^MAINT start')"
+expect "it ends only its own window, by id" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
+if test "$(line_no '^MAINT start')" -ge "$(line_no '^restart ti-dashboard')"; then fail "the window of its own was opened after the install began"; fi
+# A borrowed window with little left is waited out, not relied on: ti-release
+# needs 120 seconds of window before it swaps, waits for a shorter one to end,
+# then opens a window of its own; never two at once.
+fresh_server
+expect "a release in a window with 30 seconds left installs" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 run v1.0.0)"
+expect "it waited for the short window to end" "SLEEP 31;" "$(lines_of '^SLEEP')"
+expect "then opened one of its own" "MAINT start 300s;" "$(lines_of '^MAINT start')"
+if test "$(line_no '^SLEEP')" -ge "$(line_no '^MAINT start')"; then fail "its own window was opened before the short one ended"; fi
+fresh_server
+expect "a release in a window with 120 seconds left installs" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=120 run v1.0.0)"
+expect "120 seconds is enough" "" "$(lines_of '^MAINT (start|end)')"
+# A window that appears between the check and the start (start is refused,
+# status 3) is checked again: with enough left it is used, with too little it
+# is waited out and replaced by one of our own.
+fresh_server
+expect "a release when a window appears with 600 seconds left" 0 "$(FAKE_MAINT_START3=600 run v1.0.0)"
+expect "the window that appeared is checked, used and no maintenance end of any form ran" 0 "$(grep -c '^MAINT end' "$work/ctl.log" || true)"
+expect "it asked how long was left" 1 "$(grep -c '^MAINT left' "$work/ctl.log")"
+fresh_server
+expect "a release when a window appears with 30 seconds left" 0 "$(FAKE_MAINT_START3=30 run v1.0.0)"
+expect "it waited the short one out" "SLEEP 31;" "$(lines_of '^SLEEP')"
+expect "it then started its own, ending only that one" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
+# The same when it is the start after the wait that is refused: the short
+# window that appeared is not enough either, so it is waited out in turn.
+fresh_server
+expect "a release when a short window appears during the wait" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_MAINT_START3=40 run v1.0.0)"
+expect "both short windows were waited out" "SLEEP 31;SLEEP 41;" "$(lines_of '^SLEEP')"
+fresh_server
+expect "windows that keep appearing short stop the release" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_MAINT_START3=40 FAKE_MAINT_START3_ALWAYS=1 run v1.0.0)")"
+expect "nothing installed" "echo ti-dashboard hand" "$(installed ti-dashboard)"
+# An engine that starts restarting during the wait is caught: the guard is
+# asked again after the wait, right before the swap.
+fresh_server
+expect "an engine that goes mid-restart during the wait is refused" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_BUSY_AFTER_SLEEP=1 run v1.0.0)")"
+expect "nothing installed after the wait" "echo ti-dashboard hand" "$(installed ti-dashboard)"
+# A window this run did not open is never ended, however the run goes.
+fresh_server
+expect "a failed release in a borrowed window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run v1.2.0)")"
+expect "a borrowed window is not ended: no maintenance end of any form ran" 0 "$(grep -c '^MAINT end' "$work/ctl.log" || true)"
+# A rollback is an install too.
+fresh_server
+expect "a first release" 0 "$(run v1.0.0)"
+expect "a second release" 0 "$(run v1.1.0)"
+: >"$work/ctl.log"
+expect "a rollback" 0 "$(run --rollback)"
+expect "a rollback opens a window" "MAINT start 300s;" "$(lines_of '^MAINT start')"
+expect "a rollback closes it" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
+# --install puts ti-maintenance beside ti-release.
+grep -Fq 'ti-maintenance' "$script" || fail "release.sh does not mention ti-maintenance"
+# shellcheck disable=SC2016  # the script holds a literal $here
+grep -Fq 'install -m 0755 "$here/maintenance.sh" /usr/local/sbin/ti-maintenance' "$script" || fail "--install does not install ti-maintenance"
 
 if test "$failures" -ne 0; then echo "$failures failure(s)" >&2; exit 1; fi
 echo "test-release: ok"

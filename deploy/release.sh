@@ -60,7 +60,19 @@
 # the build that was current is put back (every program it has; none removed)
 # and the script exits non-zero, recording nothing.
 #
-# Settings for tests and rehearsals (the server needs none): TI_RELEASE_URL,
+# Maintenance window: once the release is fetched and checked, ti-release
+# opens a maintenance window (ti-maintenance start; deploy/maintenance.sh)
+# sized to its own worst case, waits until it is 1 to 3 minutes past a
+# 5-minute mark, so a reporter firing rarely overlaps the swap (the window
+# covers one that does),
+# installs, verifies, and closes the window as it exits, whether the install
+# worked or not: a failed one closes it too, so what is still broken pages at
+# the reporter's next firing (docs/manual/server.md, "Installing a release";
+# ADR 0019, "Alerting"). Without ti-maintenance beside it, nothing is installed.
+#
+# Settings for tests and rehearsals (the server needs none): TI_MAINTENANCE
+# (the ti-maintenance to run), TI_RELEASE_NOW (seconds since the epoch) and
+# TI_RELEASE_SLEEP (the sleep to run), TI_RELEASE_URL,
 # TI_RELEASE_API, TI_PREFIX, TI_LINK_DIR, TI_SYSTEMCTL, TI_GH,
 # TI_PROC (the process table --status reads; default /proc), TI_RELEASE_NO_ROOT, TI_RELEASE_ANY_ARCH, TI_RELEASE_WAIT (seconds to wait
 # for the dashboard), TI_RELEASE_SETTLE (seconds between the settle checks),
@@ -231,6 +243,8 @@ if test "$mode" = install; then
   install -d -m 0755 /usr/local/sbin
   install -m 0755 "$here/release.sh" /usr/local/sbin/ti-release
   log "installed /usr/local/sbin/ti-release"
+  install -m 0755 "$here/maintenance.sh" /usr/local/sbin/ti-maintenance
+  log "installed /usr/local/sbin/ti-maintenance"
   exit 0
 fi
 
@@ -251,6 +265,108 @@ refuse_if_engine_busy() {
     exit 1
   fi
 }
+# The maintenance window. ti-maintenance is beside ti-release once installed
+# (sudo deploy/release.sh --install), or beside this script in a checkout.
+maint=${TI_MAINTENANCE:-}
+if test -z "$maint"; then
+  for c in "$here/ti-maintenance" "$here/maintenance.sh"; do
+    if test -x "$c"; then maint=$c; break; fi
+  done
+fi
+window_id=
+sleep_cmd=${TI_RELEASE_SLEEP:-sleep}
+
+# seconds_to_quiet_mark: how long to wait before replacing a program. The
+# reporter's timer fires at every 5-minute mark of the New York clock (an
+# offset of whole hours, so the marks are the multiples of 300 seconds since
+# the epoch), up to a minute late (systemd's accuracy); a firing can run for
+# minutes, so no time is certain to be clear of one. The install starts when
+# it is 60 to 239 seconds past a mark, so a collision is unlikely, and the
+# window makes one harmless: now, if it is, else at 60 seconds past the next
+# mark. The wait is at most 120.
+seconds_to_quiet_mark() {
+  local past=$(( ${TI_RELEASE_NOW:-$(date +%s)} % 300 ))
+  if test "$past" -lt 60; then echo $((60 - past))
+  elif test "$past" -lt 240; then echo 0
+  else echo $((360 - past))
+  fi
+}
+
+# start_window: open a window of our own for the given seconds and keep its id,
+# the only window this run ever ends. Returns 3, having opened nothing, when a
+# window opened meanwhile by anyone else made start refuse: the caller looks at
+# how much of it is left.
+start_window() {
+  local out rc=0
+  out=$("$maint" start "$1s") || rc=$?
+  if test "$rc" -eq 3; then return 3; fi
+  test "$rc" -eq 0 || die "could not open a maintenance window; nothing installed"
+  printf '%s\n' "$out" | grep -v '^id '
+  window_id=$(printf '%s\n' "$out" | sed -n 's/^id \([0-9a-f]\{16\}\)$/\1/p' | head -n 1)
+  test -n "$window_id" || die "ti-maintenance did not say which window it opened; nothing installed"
+}
+
+# open_window: refuse, installing nothing, without a window; otherwise use the
+# one already open (a window the owner opened is theirs: never replaced,
+# extended or ended) or open one for the wait plus five minutes (the install,
+# the dashboard's three checks, and putting the old build back if it fails), at
+# most seven, and wait.
+open_window() {
+  local wait_for
+  test -n "$maint" && test -x "$maint" || die "ti-maintenance is not installed beside ti-release, so no maintenance window can be opened; nothing installed. Run sudo deploy/release.sh --install from the checkout, then try again"
+  wait_for=$(seconds_to_quiet_mark)
+  if "$maint" is-open; then
+    log "a maintenance window is already open; using it (it is not extended and is left open): $("$maint" status)"
+  else
+    # Refused because one opened meanwhile (3): ensure_window checks its length.
+    start_window "$((wait_for + 300))" || log "a maintenance window was opened meanwhile; using it (it is left open)"
+  fi
+  if test "$wait_for" -gt 0; then
+    log "waiting $wait_for seconds for a quiet moment after a 5-minute mark, so a reporter firing rarely overlaps the swap"
+    "$sleep_cmd" "$wait_for"
+  fi
+}
+
+# ensure_window: the last step before the swap. Each time round it first looks
+# at the engine (an engine unit mid-restart refuses the install: it may have
+# begun during a wait, and the look itself can take time), then at the window:
+# at least 120 seconds must be left (the install and its checks take less). A
+# window with less, the owner's or this run's own, is waited out, never relied
+# on or added to, and then this run opens one of its own for 300 seconds (never
+# past the 30 minutes ti-maintenance allows per window): never two windows at
+# once, and never an install with none. A window that appears while it waits is
+# looked at again, and the install is refused if none holds after four tries.
+# It returns the moment a look at the window finds enough left, and the caller
+# installs at once.
+ensure_window() {
+  local left tries=0
+  while test "$tries" -lt 4; do
+    tries=$((tries + 1))
+    refuse_if_engine_busy
+    left=$("$maint" left) || left=0
+    test "$left" -ge 120 && return 0
+    if test "$left" -gt 0; then
+      log "the maintenance window has only $left seconds left; waiting for it to end before opening one for the install"
+      "$sleep_cmd" "$((left + 1))"
+    else
+      log "the maintenance window ended during the wait; opening a new one before installing"
+    fi
+    start_window 300 || true
+  done
+  die "could not get a maintenance window with 120 seconds left; nothing installed"
+}
+
+# close_window: runs as ti-release exits, on every path, and ends only the
+# window this run opened, by its id; a window that cannot be closed ends by
+# itself at its expiry, and says so.
+close_window() {
+  if test -n "$window_id"; then
+    local id=$window_id
+    window_id=
+    "$maint" end --id "$id" >/dev/null || log "ALERT: the maintenance window could not be closed; it ends by itself within 7 minutes, and whatever is still broken pages then"
+  fi
+}
+
 refuse_if_engine_busy
 
 # The lock comes first, so a second run during another run's legitimate swap
@@ -268,7 +384,7 @@ if test -e "$releases/.replaced"; then
   die "ALERT: a kept build (tag $(kept_tag)) was left at $releases/.replaced by an earlier failed save; move it to $releases/<that tag> (or to a dot-prefixed name such as $releases/.aside-<that tag>) by hand first; nothing installed"
 fi
 keep_replaced=0
-trap 'rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true; rm -rf "$releases/.staging"; test "$keep_replaced" = 1 || rm -rf "$releases/.replaced"' EXIT
+trap 'close_window; rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true; rm -rf "$releases/.staging"; test "$keep_replaced" = 1 || rm -rf "$releases/.replaced"' EXIT
 
 read_state() { cat "$releases/$1" 2>/dev/null || true; }
 write_state() { printf '%s\n' "$2" >"$releases/$1.new" && mv "$releases/$1.new" "$releases/$1"; }
@@ -528,6 +644,7 @@ if test "$mode" = release; then
   test -d "$releases/$cur" || die "the current build's folder $releases/$cur is missing; nothing installed"
   check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) failed its checksums, so it could not be put back; nothing installed"
 
+  open_window
   refuse_if_engine_busy
   # A saved five-program build has no starter of its own: keep the one now
   # installed in that build's folder, so a failed upgrade can put it back. A
@@ -542,6 +659,7 @@ if test "$mode" = release; then
       die "could not keep the installed ti-gateway-start with $cur; nothing installed"
     fi
   fi
+  ensure_window
   if ! install_from "$stage" || ! restart_dashboard_verified; then
     log "$tag did not install, or the dashboard did not stay up on it; putting $cur back"
     put_back "$cur" || true
@@ -599,7 +717,9 @@ if ! listed "$releases/$prev" | grep -qx ti-gateway-start; then
 fi
 test -n "$cur" && test -d "$releases/$cur" || die "the current build's folder is missing, so it could not be put back; nothing changed"
 check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) failed its checksums, so it could not be put back; nothing changed"
+open_window
 refuse_if_engine_busy
+ensure_window
 if ! install_from "$releases/$prev" || ! restart_dashboard_verified; then
   log "rolling back to $prev failed, or the dashboard did not stay up on it; putting $cur back"
   put_back "$cur" || true

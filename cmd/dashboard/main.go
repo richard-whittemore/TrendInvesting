@@ -28,6 +28,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
+	"github.com/richard-whittemore/TrendInvesting/internal/maintenance"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
@@ -200,7 +201,7 @@ type alertView struct {
 // re-verifies the current log, so the page is never staler than the file.
 // ledgers names each account's Flex ledger (source).
 func newHandlerFor(journals, engineDirs []string, ledgers map[string]string, benchmark string) http.Handler {
-	return newHandlerWith(source{journals: journals, dirs: engineDirs, ledgers: ledgers}, benchmark, os.ReadFile)
+	return newHandlerWith(source{journals: journals, dirs: engineDirs, ledgers: ledgers, maintenance: maintenanceFileFor(engineDirs)}, benchmark, os.ReadFile)
 }
 
 // newHandlerWith is newHandlerFor reading each file whole with readFile.
@@ -230,7 +231,7 @@ func newHandlerCached(sources source, benchmark string, logs *logCache) http.Han
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = page.Execute(w, pageData{Accounts: accounts, Theme: themeOf(r)})
+		_ = page.Execute(w, pageData{Accounts: accounts, Theme: themeOf(r), Maintenance: maintenanceNote(sources.maintenance, time.Now())})
 	})
 	return readOnly(mux)
 }
@@ -240,6 +241,34 @@ func newHandlerCached(sources source, benchmark string, logs *logCache) http.Han
 type pageData struct {
 	Accounts []account
 	Theme    string
+	// Maintenance is when the host's maintenance window ends, or empty when
+	// none is open.
+	Maintenance string
+}
+
+// maintenanceFileFor is the host's maintenance marker, where ti-maintenance
+// writes it (internal/maintenance): a folder only root can write, which the
+// dashboard only reads. Empty without an engine directory.
+func maintenanceFileFor(engineDirs []string) string {
+	if len(engineDirs) == 0 {
+		return ""
+	}
+	return "/run/ti-maintenance/maintenance.json"
+}
+
+// maintenanceNote is the end of the window open at now, in UTC, or "".
+func maintenanceNote(path string, now time.Time) string {
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	if m, open := maintenance.Read(raw, now); open {
+		return m.Until.UTC().Format("2006-01-02 15:04Z")
+	}
+	return ""
 }
 
 // themeOf reads the ?theme= choice. Only "dark" and "light" are honoured; any
@@ -306,6 +335,8 @@ func fail(w http.ResponseWriter, err error) {
 type source struct {
 	journals, dirs []string
 	ledgers        map[string]string
+	// maintenance is the host's maintenance marker (maintenanceFileFor).
+	maintenance string
 }
 
 // ledgersOf places each -cash-ledger value with its account: a bare path

@@ -227,6 +227,76 @@ that one channel (delivery is at-least-once: ntfy and Pushover post it twice); e
 period divides the repeat interval and is at most half the acknowledgement
 bound, and that a run is stopped before the next firing.
 
+## Maintenance windows
+
+Installing a new program on the server replaces files the reporter runs from
+at 5-minute marks, and a unit can fail for a moment because of it. A
+**maintenance window** is a bounded quiet period for exactly that: nothing
+pages for the install's own noise, and anything still broken when the window
+ends pages at once. You normally never open one: `sudo ti-release <tag>`
+opens one for its own run and closes it ([server](server.md), "Installing a
+release"). To open one by hand, `sudo ti-maintenance start 10m` (15 minutes
+if you give no length; 30 at most), `sudo ti-maintenance end` to close it,
+`ti-maintenance status` to see it. `start` refuses while a window is open (it
+says which); `start --replace` replaces it. A window ends by itself at its expiry even
+if nobody closes it; no window can last more than 30 minutes.
+
+**What you see while a window is open.** The dashboard's header says
+"Maintenance until ..." with the end time in UTC. The reporter still runs
+every 5 minutes and still pings the outside heartbeat, so the outside check
+does not page you for the install, and the daily summary is sent as always.
+Two things are *recorded and not paged*: a failed unit (the failure the unit
+hook reports at the moment it fails, and the failure the reporter finds at its
+firing, the data job's included, and the hourly reminder of a failure already
+paged) and the Gateway logged out. Each is written in the reporter's state
+files with the window's end noted (`held:<end of window>` in
+`unit-failures.json`, `held_in_maintenance_until` in `host-gateway.json`), so
+you can see what a window held. The window is judged at each decision, not
+once per firing: one that closes while a firing is under way holds nothing
+from then on. A marker file that is there but is not a window in the one layout `ti-maintenance` writes is reported once in the reporter's output (once for each different content) and counts as no window; it is never a page and is never removed.
+
+**What never waits for a window.** Every capital-safety alert pages as it
+always does, inside a window too: an order refused (the kill switch is a
+refusal), a Halted or Degraded account, a reconciliation that did not match
+(no install causes one, and a cash decrease is a money signal), a decision withheld, an order the venue has not
+acknowledged, a sale that failed or must be made by hand, a margin alarm. The
+list is in one place, `NeverHeld` in `internal/report/maintenance.go`
+(`TestNoCapitalSafetyAlertIsHeldByAMaintenanceWindow`); every alert not named
+above (a lost heartbeat, an unreadable journal, a refused channel) is
+delivered as always, since a window changes no other alert.
+
+**What happens when it closes.** Nothing held is forgotten. At the first
+reporter firing after the window ends, whether you ended it, `ti-release`
+did, or it expired, every held alert is judged afresh by the normal paths. A
+unit still failed pages once, as a new failure would (and is reminded hourly
+after that). A Gateway still logged out pages as soon as its outage is 10
+minutes old: the window never moved the outage's start, so an old outage pages
+at once and a short one is given the rest of its 10 minutes. A unit that
+recovered inside the window, or a Gateway that logged in again, resolves with
+no page at all, and a recovered unit's failed run is marked handled, so a late
+repeat of the same failure does not page it. That firing is at most 5 minutes
+after the window closes. A window that expires because `ti-release` died, or
+because you forgot it, therefore cannot hide a broken install for more than its
+length plus 5 minutes.
+
+A window's close sends no message of its own. At the first firing after it,
+each condition it held is either paged (still failed: the ordinary page,
+which nothing else gates) or, if it recovered, marked handled and said in one
+line in the reporter's output, "held during maintenance and recovered:
+ti-adapter-boost.service (<window end>)" (the same for "IB Gateway"). A Gateway
+that logged in again inside the window is handled at the close, like a unit,
+never before; an outage a window held that is still under 10 minutes old at the
+close keeps its hold until it pages or logs in. You read these lines in the
+reporter's journal on the server: `journalctl -u ti-reporter@boost.service
+--since yesterday | grep 'held during maintenance'`. The line is
+informational and best effort: if the hold could not be recorded, or the output
+cannot be written, the line is lost, and the page for anything still failed is
+never affected. A fault in the hold
+bookkeeping is reported with the firing's errors and never delays or stops a
+page (the Gateway's bookkeeping waits at most 10 seconds for the shared record).
+A held failure of a unit that this reporter instance does not itself watch is
+left as it is for the instance that does.
+
 ## Where alerts go
 
 Alerts go to real channels. You choose them with `-channel`, comma-separated.

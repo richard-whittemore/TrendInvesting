@@ -400,6 +400,10 @@ rm -f "$reports/unit-failures.json"
 systemctl daemon-reload
 pass "a failing IRA data job starts $ira_data_hook with %i = ti-data@trad-ira.service and the failed run's invocation, and it pages with the run's own line and the data job's manual row"
 
+# The maintenance window, as the owner meets it (deploy/rehearsal/maintenance-window.sh).
+. /deploy/rehearsal/maintenance-window.sh
+rehearse_maintenance_window
+
 # A start refused while the unit is already failed: systemd 255 does not
 # start OnFailure= for it, so only the reporter's firing, which keys by the
 # new invocation, can page it.

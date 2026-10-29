@@ -129,6 +129,7 @@ deploy-test:
 	./deploy/rehearsal/test-platform.sh
 	./deploy/rehearsal/test-build.sh
 	./deploy/rehearsal/test-release.sh
+	./deploy/rehearsal/test-maintenance.sh
 	./deploy/rehearsal/test-provision-arch.sh
 	./deploy/rehearsal/test-engine-configs.sh
 	./deploy/mac-mini/test-programs-lib.sh

@@ -91,13 +91,34 @@ func (u *unitState) record() error {
 
 // withUnitState runs fn on the unit-failure record under an exclusive lock.
 func withUnitState(path string, at time.Time, fn func(*unitState) error) error {
+	return withUnitStateWait(path, at, 0, fn)
+}
+
+// withUnitStateWait is withUnitState that gives up, with an error, when the
+// lock is not got within wait (0 waits as long as it takes). The Gateway's
+// bookkeeping uses it so that a stalled lock holder never delays its page.
+func withUnitStateWait(path string, at time.Time, wait time.Duration, fn func(*unitState) error) error {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the unit-failure record's lock: %w", err)
 	}
 	defer func() { _ = lock.Close() }()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("reporter: the unit-failure record's lock: %w", err)
+	if wait <= 0 {
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			return fmt.Errorf("reporter: the unit-failure record's lock: %w", err)
+		}
+	} else {
+		deadline := time.Now().Add(wait)
+		for {
+			err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+				return fmt.Errorf("reporter: the unit-failure record's lock was not got within %s: %w", wait, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 	seen, sent, repeats, baselines, err := loadState(path)
 	if err != nil {
@@ -131,6 +152,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that names the failed run when systemd did not (MONITOR_INVOCATION_ID)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
 	repeat := flags.Duration("repeat-interval", defaultRepeatInterval, "unused by a page that does not repeat; kept so the hook and the reporter share one delivery code")
+	maintenanceFile := flags.String("maintenance", "", "the host's maintenance window marker (default: /run/ti-maintenance/maintenance.json): while a window is open the failure is recorded and not paged, and the first reporter firing after it closes pages the unit if it is still failed")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -141,6 +163,17 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 		return errors.New("reporter: -send-timeout must be positive")
 	}
 	unit := flags.Arg(0)
+	// Inside a maintenance window the failure is recorded and not paged: the
+	// reporter's first firing after the window closes pages it if the unit is
+	// still failed, and forgets it if the unit recovered (maintenance.go).
+	if until := holdFor(report.KindUnitFailed, func() time.Time { return windowEnd(maintenancePath(*maintenanceFile), now()) }); !until.IsZero() {
+		at := now()
+		run := failedInvocation(getenv, *systemctl, unit, at)
+		return withUnitState(*statePath, at, func(u *unitState) error {
+			holdAlert(u.sent, until, at, report.UnitFailedKey(unit, run))
+			return u.record()
+		})
+	}
 	var failures []error
 	secrets := secretValues(getenv, *secretsFile)
 	if *secretsFile != "" {
@@ -164,6 +197,12 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	at := now()
 	run := failedInvocation(getenv, *systemctl, unit, at)
 	err = withUnitState(*statePath, at, func(u *unitState) error {
+		// A run the reporter already saw well (a held failure that recovered, or
+		// an episode resolved) is not paged by a delayed hook (ADR 0019,
+		// "Alerting": each incident once).
+		if handledRun(u, unit, run) {
+			return nil
+		}
 		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, at, time.Time{}, *repeat)
 	})
 	return errors.Join(append(failures, err)...)
@@ -560,9 +599,19 @@ func splitUnits(list string) []string {
 // the next firing), and every other error, including any failure to persist
 // the record, is hard and fails the firing (ADR 0019: delivery state is
 // durable).
-func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, current func(string) (unitSample, error)) (soft, hard error) {
+func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, window func() time.Time, current func(string) (unitSample, error), note func(string)) (soft, hard error) {
 	var softErrs, hardErrs []error
 	err := withUnitState(path, at, func(u *unitState) error {
+		// Held records are a window's. Whether one holds a failed unit is asked
+		// of window at that unit's decision, under this lock, never once for
+		// the step. A failed unit inside a window is recorded and not paged; with
+		// none open it pages (failedRun). A unit that recovered has its older held
+		// runs marked handled, so a stale redelivery of one never pages it, and,
+		// once the window has closed, the hold is forgotten and note is given one
+		// line saying it was held and recovered. A record newer than the sample,
+		// or of a unit this instance does not sample, is left exactly as it is
+		// (maintenance.go).
+		changed := false
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
 			resolves := slices.Contains(resolveOnly, unit)
@@ -598,15 +647,44 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				if sample.invocation == "" {
 					sample.invocation = unnamedRun
 				}
-				if resolves {
-					if handledRun(u, unit, sample.invocation) {
-						continue
-					}
-					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, time.Time{}, every))
+				if hold := holdFor(report.KindUnitFailed, window); !hold.IsZero() {
+					holdAlert(u.sent, hold, at, report.UnitFailedKey(unit, sample.invocation))
+					changed = true
 					continue
 				}
-				fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
+				// Still failed once the window is closed: the hold is forgotten and
+				// the ordinary page follows, gated by nothing else.
+				if len(takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), time.Time{})) > 0 {
+					changed = true
+				}
+				switch {
+				case resolves && handledRun(u, unit, sample.invocation):
+				case resolves:
+					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, time.Time{}, every))
+				default:
+					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
+				}
 				continue
+			}
+			// Only a sample newer than a held failure says anything about it.
+			cutoff := sampledAt
+			if resolves {
+				cutoff = time.Time{}
+			}
+			for _, h := range heldOf(u.sent, report.UnitFailedKeyPrefix(unit)) {
+				if !cutoff.IsZero() && !h.at.Before(cutoff) {
+					continue
+				}
+				handleRuns(u, unit, h.alertKey, strings.TrimPrefix(h.alertKey, report.UnitFailedKeyPrefix(unit)), at)
+				changed = true
+			}
+			if holdFor(report.KindUnitFailed, window).IsZero() {
+				for _, h := range takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), cutoff) {
+					if note != nil {
+						note(recoveredLine(unit, h.until))
+					}
+					changed = true
+				}
 			}
 			for invocation, recorded := range unitRecords(u, unit) {
 				key := report.UnitFailedKey(unit, invocation)
@@ -616,6 +694,9 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				handleRuns(u, unit, key, invocation, at)
 				fail(resolveKey(u, key, senders, setAside, at))
 			}
+		}
+		if changed {
+			hardErrs = append(hardErrs, u.record())
 		}
 		return nil
 	})
@@ -739,6 +820,14 @@ func allTook(senders []sender, key string, seen map[string]bool) bool {
 func clearUnit(path, unit, current string, senders []sender, setAside []channelFault, at time.Time) error {
 	return withUnitState(path, at, func(u *unitState) error {
 		var failures []error
+		// The unit's own held failures are seen well: handled, not forgotten, so
+		// a delayed hook for one of those runs is silent.
+		if taken := takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), time.Time{}); len(taken) > 0 {
+			for _, h := range taken {
+				handleRuns(u, unit, h.alertKey, strings.TrimPrefix(h.alertKey, report.UnitFailedKeyPrefix(unit)), at)
+			}
+			failures = append(failures, u.record())
+		}
 		for invocation := range unitRecords(u, unit) {
 			if invocation == current {
 				continue
