@@ -237,7 +237,8 @@ ends pages at once. You normally never open one: `sudo ti-release <tag>`
 opens one for its own run and closes it ([server](server.md), "Installing a
 release"). To open one by hand, `sudo ti-maintenance start 10m` (15 minutes
 if you give no length; 30 at most), `sudo ti-maintenance end` to close it,
-`ti-maintenance status` to see it. A window ends by itself at its expiry even
+`ti-maintenance status` to see it. `start` refuses while a window is open (it
+says which); `start --replace` replaces it. A window ends by itself at its expiry even
 if nobody closes it; no window can last more than 30 minutes.
 
 **What you see while a window is open.** The dashboard's header says
@@ -254,8 +255,6 @@ you can see what a window held. The window is judged at each decision, not
 once per firing: one that closes while a firing is under way holds nothing
 from then on. A marker file that is there but is not a window in the one layout `ti-maintenance` writes is reported once in the reporter's output (once for each different content) and counts as no window; it is never a page and is never removed.
 
-**When a window closes.** The first reporter firing that finds the window closed sends one routine message (not an urgent page) naming what it held: "maintenance window closed; held: ti-adapter-boost.service recovered, ti-engine@boost.service still failed (paged)". A unit that recovered inside the window pages no one and its failed run is marked handled, so a late repeat of the same failure does not page it. A unit still failed pages once, as a new failure would. A held failure of a unit that a reporter instance does not itself watch is left as it is for the instance that does.
-
 **What never waits for a window.** Every capital-safety alert pages as it
 always does, inside a window too: an order refused (the kill switch is a
 refusal), a Halted or Degraded account, a reconciliation that did not match
@@ -268,15 +267,28 @@ delivered as always, since a window changes no other alert.
 
 **What happens when it closes.** Nothing held is forgotten. At the first
 reporter firing after the window ends, whether you ended it, `ti-release`
-did, or it expired, every held alert is judged afresh by the normal paths: a
+did, or it expired, every held alert is judged afresh by the normal paths. A
 unit still failed pages once, as a new failure would (and is reminded hourly
-after that), a Gateway still logged out pages as soon as its outage is 10 minutes
-old (the window never moved its start, so an old outage pages at once and a
-short one is given the rest of its 10 minutes), and a unit that recovered inside the window, or a Gateway
-that logged in again, resolves with no page at all. That firing is at most 5
-minutes after the window closes. A window that expires because `ti-release`
-died, or because you forgot it, therefore cannot hide a broken install for
-more than its length plus 5 minutes.
+after that). A Gateway still logged out pages as soon as its outage is 10
+minutes old: the window never moved the outage's start, so an old outage pages
+at once and a short one is given the rest of its 10 minutes. A unit that
+recovered inside the window, or a Gateway that logged in again, resolves with
+no page at all, and a recovered unit's failed run is marked handled, so a late
+repeat of the same failure does not page it. That firing is at most 5 minutes
+after the window closes. A window that expires because `ti-release` died, or
+because you forgot it, therefore cannot hide a broken install for more than its
+length plus 5 minutes.
+
+Every held condition is also told once, in one routine message (not an urgent
+page) that goes only where the daily summary goes, your own ntfy server, never
+to Pushover or the alerts repository's issues: "maintenance window closed;
+held: ti-adapter-boost.service recovered, ti-engine@boost.service still failed
+(paged)", and a line for the Gateway ("IB Gateway recovered", or "IB Gateway
+still logged out" with whether it has paged). "Paged" is said only for a page
+that was delivered; otherwise it says "page failed, retrying". The message is
+saved before the held records are forgotten and is sent again at a later firing
+if it could not be delivered. A held failure of a unit that this reporter
+instance does not itself watch is left as it is for the instance that does.
 
 ## Where alerts go
 

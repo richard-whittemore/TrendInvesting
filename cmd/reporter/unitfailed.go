@@ -176,6 +176,12 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	at := now()
 	run := failedInvocation(getenv, *systemctl, unit, at)
 	err = withUnitState(*statePath, at, func(u *unitState) error {
+		// A run the reporter already saw well (a held failure that recovered, or
+		// an episode resolved) is not paged by a delayed hook (ADR 0019,
+		// "Alerting": each incident once).
+		if handledRun(u, unit, run) {
+			return nil
+		}
 		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, at, time.Time{}, *repeat)
 	})
 	return errors.Join(append(failures, err)...)
@@ -584,16 +590,12 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 		// close summary. A record newer than the sample, or of a unit this
 		// instance does not sample, is left exactly as it is (maintenance.go).
 		changed := false
-		var recovered, stillFailed []string
-		var closedWindow time.Time
-		note := func(list *[]string, unit string, taken []held) {
-			if len(taken) > 0 && !slices.Contains(*list, unit) {
-				*list = append(*list, unit)
-			}
+		// closing records what each held unit came to, written in the same
+		// save as the removal of its held record, so a summary that could not
+		// be delivered is still owed (flushClosing).
+		closing := func(unit, status string, taken []held) {
 			for _, h := range taken {
-				if closedWindow.IsZero() || h.until.After(closedWindow) {
-					closedWindow = h.until
-				}
+				setClosing(u, unit, status, h.until, at)
 			}
 		}
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
@@ -636,18 +638,28 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 					changed = true
 					continue
 				}
-				if taken := takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), time.Time{}); len(taken) > 0 {
-					note(&stillFailed, unit, taken)
+				taken := takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), time.Time{})
+				if len(taken) > 0 {
+					closing(unit, closingPending, taken)
 					changed = true
 				}
-				if resolves {
-					if handledRun(u, unit, sample.invocation) {
-						continue
-					}
-					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, time.Time{}, every))
-					continue
+				var paged error
+				switch {
+				case resolves && handledRun(u, unit, sample.invocation):
+				case resolves:
+					paged = failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, time.Time{}, every)
+				default:
+					paged = failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every)
 				}
-				fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
+				fail(paged)
+				if len(taken) > 0 {
+					status := closingPaged
+					if paged != nil {
+						status = closingRetrying
+					}
+					closing(unit, status, taken)
+					changed = true
+				}
 				continue
 			}
 			// Only a sample newer than a held failure says anything about it.
@@ -664,7 +676,7 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 			}
 			if holdFor(report.KindUnitFailed, window).IsZero() {
 				if taken := takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), cutoff); len(taken) > 0 {
-					note(&recovered, unit, taken)
+					closing(unit, closingRecovered, taken)
 					changed = true
 				}
 			}
@@ -677,12 +689,10 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				fail(resolveKey(u, key, senders, setAside, at))
 			}
 		}
-		if len(recovered)+len(stillFailed) > 0 {
-			hardErrs = append(hardErrs, closeSummary(u, senders, recovered, stillFailed, closedWindow, at, every))
-		}
 		if changed {
 			hardErrs = append(hardErrs, u.record())
 		}
+		hardErrs = append(hardErrs, flushClosing(u, senders, at, every))
 		return nil
 	})
 	return errors.Join(softErrs...), errors.Join(append(hardErrs, err)...)
@@ -805,7 +815,14 @@ func allTook(senders []sender, key string, seen map[string]bool) bool {
 func clearUnit(path, unit, current string, senders []sender, setAside []channelFault, at time.Time) error {
 	return withUnitState(path, at, func(u *unitState) error {
 		var failures []error
-		dropHeld(u.sent, report.UnitFailedKeyPrefix(unit))
+		// The unit's own held failures are seen well: handled, not forgotten, so
+		// a delayed hook for one of those runs is silent.
+		if taken := takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), time.Time{}); len(taken) > 0 {
+			for _, h := range taken {
+				handleRuns(u, unit, h.alertKey, strings.TrimPrefix(h.alertKey, report.UnitFailedKeyPrefix(unit)), at)
+			}
+			failures = append(failures, u.record())
+		}
 		for invocation := range unitRecords(u, unit) {
 			if invocation == current {
 				continue
@@ -840,30 +857,4 @@ func resolveKey(u *unitState, key string, senders []sender, setAside []channelFa
 		u.repeats[recoveredKey(key)] = 1
 	}
 	return errors.Join(resolveErr, u.record())
-}
-
-// kindMaintenanceClosed is the routine message that says what a maintenance
-// window held, once, when it closes.
-const kindMaintenanceClosed report.Kind = "maintenance-closed"
-
-// closeSummary sends the one routine message that tells what the window that
-// has closed held: "held: <unit> recovered, <unit> still failed (paged)". A
-// unit still failed has been paged by the normal path; one that recovered
-// pages no one. It goes by the ordinary channels, not as an urgent page.
-func closeSummary(u *unitState, senders []sender, recovered, stillFailed []string, window, at time.Time, every time.Duration) error {
-	sort.Strings(recovered)
-	sort.Strings(stillFailed)
-	var parts []string
-	for _, unit := range recovered {
-		parts = append(parts, unit+" recovered")
-	}
-	for _, unit := range stillFailed {
-		parts = append(parts, unit+" still failed (paged)")
-	}
-	body := "maintenance window closed; held: " + strings.Join(parts, ", ")
-	a := report.Alert{
-		Key: "maintenance-closed:" + window.UTC().Format(time.RFC3339) + ":" + strings.Join(append(append([]string{}, recovered...), stillFailed...), ","), Kind: kindMaintenanceClosed, Severity: report.Routine, AccountID: hostName(), At: at,
-		Title: hostName() + ": maintenance window closed", Body: body, PublicBody: body,
-	}
-	return deliver(senders, a, u.seen, u.sent, u.repeats, at, every, u.record)
 }

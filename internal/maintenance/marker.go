@@ -39,11 +39,12 @@ type Marker struct {
 
 // The one layout ti-maintenance start writes, byte for byte: lower-case keys
 // in this order, no spaces, UTC times to the second ending in Z, the same
-// times again as seconds since the epoch, one object and one newline. Both
+// times again as seconds since the epoch (no leading zeros), one object and
+// one newline. Both
 // readers (this one and deploy/maintenance.sh) accept only this layout and
 // read anything else as no window, so a hand-edited or damaged file can never
 // be open to one and closed to the other.
-var layout = regexp.MustCompile(`^\{"id":"([0-9a-f]{16})","opened":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})Z","until":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})Z","opened_unix":([0-9]{1,12}),"until_unix":([0-9]{1,12})\}$`)
+var layout = regexp.MustCompile(`^\{"id":"([0-9a-f]{16})","opened":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})Z","until":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})Z","opened_unix":(0|[1-9][0-9]{0,11}),"until_unix":(0|[1-9][0-9]{0,11})\}$`)
 
 // Verdict is what a marker file says at a moment.
 type Verdict int
@@ -64,12 +65,12 @@ const (
 // reader: an expired marker reads Closed whoever sees it, and the next start
 // replaces it, so no reader ever deletes a file that a start may be replacing.
 func Judge(raw []byte, now time.Time) (Marker, Verdict) {
-	body := strings.TrimRight(string(raw), "\n")
 	if len(raw) == 0 {
 		return Marker{}, Closed
 	}
-	f := layout.FindStringSubmatch(body)
-	if f == nil || strings.Count(string(raw), "\n") > 1 {
+	// One object and one newline: a second line, even blank, is not the layout.
+	f := layout.FindStringSubmatch(strings.TrimSuffix(string(raw), "\n"))
+	if f == nil {
 		return Marker{}, Invalid
 	}
 	opened, err1 := time.ParseInLocation("2006-01-02T15:04:05", f[2], time.UTC)

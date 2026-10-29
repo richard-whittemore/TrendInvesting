@@ -140,6 +140,9 @@ type hostGateway struct {
 	// a record only, that the outage was seen and not paged inside it
 	// (maintenance.go).
 	Held *time.Time `json:"held_in_maintenance_until,omitempty"`
+	// Closing is the close summary's line about this outage, owed after the
+	// window that held it closed, and removed once it has been delivered.
+	Closing string `json:"closing_summary,omitempty"`
 }
 
 func loadHostGateway(path string) (hostGateway, error) {
@@ -228,7 +231,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held, Closing: h.Closing})
 		if err != nil {
 			return err
 		}
@@ -239,6 +242,11 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 			return err
 		}
 	}
+	// What a closed window held is told once, by the routine channel, and is
+	// owed until it has been delivered (the same rule as the unit failures').
+	defer func() {
+		retErr = errors.Join(retErr, flushGatewayClosing(&h, senders, seen, sent, repeats, host, now, record))
+	}()
 	key := report.GatewayKey(host)
 	// An open outage is closed only by a completed login or a restored link
 	// NEWER than its start. Silence in the journals, or events older than the
@@ -259,6 +267,9 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		}
 	}
 	if !out {
+		if h.Held != nil {
+			h.Closing = "IB Gateway recovered"
+		}
 		h.Since, h.RestartOnly, h.Held = nil, false, nil
 		if !deliveredAnywhere(seen, key) {
 			h.Resolving = false
@@ -293,10 +304,14 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		h.Held = &hold
 		return record()
 	}
-	if sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter {
-		return nil
-	}
+	wasHeld := h.Held != nil
 	h.Held = nil
+	if sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter {
+		if wasHeld {
+			h.Closing = "IB Gateway still logged out (not paged yet: its 10 minutes have not passed)"
+		}
+		return record()
+	}
 	if h.Resolving {
 		// The new outage is due its page while an earlier recovery's resolution
 		// is still pending: the channel that never took that resolution holds a
@@ -305,7 +320,33 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		forgetAlert(key, map[string]bool{}, seen, sent, repeats)
 		h.Resolving = false
 	}
-	return deliver(senders, report.GatewayLoggedOutAlert(host, *h.Since, now, said), seen, sent, repeats, now, gatewayRemindEvery, record)
+	err = deliver(senders, report.GatewayLoggedOutAlert(host, *h.Since, now, said), seen, sent, repeats, now, gatewayRemindEvery, record)
+	if wasHeld {
+		h.Closing = "IB Gateway still logged out (paged)"
+		if err != nil {
+			h.Closing = "IB Gateway still logged out (page failed, retrying)"
+		}
+	}
+	return errors.Join(err, record())
+}
+
+// flushGatewayClosing sends the Gateway's line of the close summary, only
+// where the daily summary goes, and clears it once delivered (or when there is
+// nowhere to send it).
+func flushGatewayClosing(h *hostGateway, senders []sender, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, host string, now time.Time, record func() error) error {
+	if h.Closing == "" {
+		return nil
+	}
+	if summaryTakerAmong(senders) {
+		body := "maintenance window closed; held: " + h.Closing
+		a := report.Alert{Key: "maintenance-closed-gateway:" + shortHash(body), Kind: kindSummary, Severity: report.Routine, AccountID: host, At: now, Title: host + ": maintenance window closed", Body: body, PublicBody: body}
+		if err := deliver(senders, a, seen, sent, repeats, now, gatewayRemindEvery, record); err != nil {
+			return err
+		}
+		forgetAlert(a.Key, nil, seen, sent, repeats)
+	}
+	h.Closing = ""
+	return record()
 }
 
 // advanceRestartRule applies the restart rule to a good sample of the Gateway

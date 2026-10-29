@@ -2,14 +2,18 @@
 # ti-maintenance: open, close or show the host's maintenance window, the
 # bounded quiet period in which an install's own noise pages no one.
 #
-#   sudo ti-maintenance start [DURATION]   open a window: 15 minutes by default,
+#   sudo ti-maintenance start [--replace] [DURATION]
+#                                          open a window: 15 minutes by default,
 #                                          30 at most (10m, 90s, or a bare
 #                                          number of minutes); prints the
-#                                          window's id on a line "id <hex>"
+#                                          window's id on a line "id <hex>".
+#                                          Refuses (status 3) while a window is
+#                                          open; --replace replaces it
 #   sudo ti-maintenance end [--id ID]      close it; with --id, only the window
 #                                          that has that id (ti-release closes
 #                                          only the window it opened)
 #   ti-maintenance status                  say whether one is open, and until when
+#   ti-maintenance left                    print the seconds a window has left, 0 if none
 #   ti-maintenance is-open                 exit 0 when one is open, 1 when not
 #                                          (what ti-release asks, so it never
 #                                          overwrites or ends a window you opened)
@@ -34,11 +38,16 @@
 # replaced, and a seventh program would join the release's checksum, build and
 # attestation lists for a dozen lines of work.
 #
+# Every command takes the lock /run/ti-maintenance/.lock (flock; where flock is
+# missing, a lock folder beside it), so a start can never land between an
+# end --id's check of the window's id and its removal of the file, and two
+# starts cannot both pass the check that no window is open.
+#
 # The marker has ONE layout, written only here and accepted only in this form
 # by this script and by internal/maintenance (fixtures:
 # internal/maintenance/testdata/markers, run through both): lower-case keys in
 # a fixed order and no spaces, UTC times to the second ending in Z, the same
-# times as seconds since the epoch, one object and one newline. Anything else,
+# times as seconds since the epoch (no leading zeros), one object and one newline. Anything else,
 # or a window of more than 30 minutes, or one not yet begun, reads as no
 # window. The file is read once and every field is taken from that one read. No
 # reader removes a marker, expired or not: it reads closed whoever sees it,
@@ -72,21 +81,24 @@ seconds() {
   esac
 }
 
-layout='^\{"id":"([0-9a-f]{16})","opened":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)","until":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)","opened_unix":([0-9]{1,12}),"until_unix":([0-9]{1,12})\}$'
+layout='^\{"id":"([0-9a-f]{16})","opened":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)","until":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)","opened_unix":(0|[1-9][0-9]{0,11}),"until_unix":(0|[1-9][0-9]{0,11})\}$'
 
 # read_marker: reads the marker once and sets marker_id and marker_until to the
 # window open now (empty when there is none or the marker cannot be trusted).
 marker_id=
 marker_until=
 read_marker() {
-  local raw o u t
+  local raw body o u t
   marker_id=
   marker_until=
   test -r "$file" || return 0
-  raw=$(cat "$file" 2>/dev/null) || return 0
-  # One object on one line: a second line, even blank, is not the layout.
-  [[ $(wc -l <"$file" | tr -d ' ') -le 1 ]] || return 0
-  [[ $raw =~ $layout ]] || return 0
+  # One read of the file: every field below comes from this one snapshot.
+  raw=$(cat "$file" 2>/dev/null; printf x) || return 0
+  raw=${raw%x}
+  # One object and one newline: a second line, even blank, is not the layout.
+  body=${raw%$'\n'}
+  [[ $body != *$'\n'* ]] || return 0
+  [[ $body =~ $layout ]] || return 0
   o=${BASH_REMATCH[4]}
   u=${BASH_REMATCH[5]}
   t=$(now)
@@ -97,13 +109,43 @@ read_marker() {
   marker_until=$u
 }
 
+# take_lock: the commands that change or judge the marker run one at a time. A
+# reader that cannot write the folder takes the lock for reading, or none when
+# there is no lock yet (there is then no writer either).
+lockfile=$(dirname "$file")/.lock
+take_lock() {
+  if command -v flock >/dev/null 2>&1; then
+    if ( : >>"$lockfile" ) 2>/dev/null; then
+      exec 9>>"$lockfile"
+    elif test -r "$lockfile"; then
+      exec 9<"$lockfile"
+    else
+      return 0
+    fi
+    flock 9 || die "could not take the lock"
+    return 0
+  fi
+  # No flock (the Mac the tests run on): a lock folder, for writers only.
+  local i=0
+  test -d "$(dirname "$file")" || return 0
+  while ! mkdir "$lockfile.d" 2>/dev/null; do
+    i=$((i + 1))
+    test "$i" -lt 100 || die "could not take the lock"
+    sleep 0.1
+  done
+  trap 'rmdir "$lockfile.d" 2>/dev/null || true' EXIT
+}
+
 cmd=${1:-}
 case $cmd in
   start)
     need_root
-    test $# -le 2 || die "usage: ti-maintenance start [DURATION]"
-    d=${2-}
-    if test $# -lt 2; then
+    shift
+    replace=0
+    if test "${1-}" = --replace; then replace=1; shift; fi
+    test $# -le 1 || die "usage: ti-maintenance start [--replace] [DURATION]"
+    d=${1-}
+    if test $# -lt 1; then
       secs=$default_s
     else
       secs=$(seconds "$d") || die "'$d' is not a duration (10m, 90s, or a number of minutes up to 30)"
@@ -114,6 +156,12 @@ case $cmd in
     end=$((t + secs))
     dir=$(dirname "$file")
     ( umask 022; mkdir -p "$dir" ) || die "could not make $dir"
+    take_lock
+    read_marker
+    if test -n "$marker_until" && test "$replace" = 0; then
+      echo "ti-maintenance: a window is already open until $(iso "$marker_until") (id $marker_id); nothing changed. End it first, or start --replace" >&2
+      exit 3
+    fi
     id=$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')
     pub=$(mktemp -u "$dir/.maintenance.XXXXXXXXXX")
     # Created exclusively with the umask's mode (0644), then renamed over the
@@ -129,11 +177,15 @@ case $cmd in
     ;;
   end)
     need_root
+    take_lock
     if test "${2-}" = --id; then
       test $# -eq 3 && [[ $3 =~ ^[0-9a-f]{16}$ ]] || die "usage: ti-maintenance end [--id ID]"
-      # Only the window with that id: one opened since, by anyone else, stays.
+      # Only the window with that id, checked and removed under the lock: one
+      # started since, by anyone else, stays.
+      read_marker
       raw=$(cat "$file" 2>/dev/null || true)
       if [[ $raw =~ $layout ]] && test "${BASH_REMATCH[1]}" = "$3"; then
+        if test "${TI_MAINTENANCE_NO_ROOT:-0}" = 1 && test -n "${TI_MAINTENANCE_AFTER_CHECK:-}"; then eval "$TI_MAINTENANCE_AFTER_CHECK"; fi
         rm -f "$file"
       else
         echo "ti-maintenance: the open window (if any) is not window $3; left as it is"
@@ -149,6 +201,7 @@ case $cmd in
     echo "ti-maintenance: maintenance window closed; whatever is still broken pages at the reporter's next firing, within 5 minutes"
     ;;
   status)
+    take_lock
     read_marker
     if test -z "$marker_until"; then
       echo "maintenance window closed"
@@ -156,12 +209,18 @@ case $cmd in
       printf 'maintenance window open until %s (%s seconds left, id %s)\n' "$(iso "$marker_until")" "$((marker_until - $(now)))" "$marker_id"
     fi
     ;;
+  left)
+    take_lock
+    read_marker
+    if test -z "$marker_until"; then echo 0; else echo $((marker_until - $(now))); fi
+    ;;
   is-open)
+    take_lock
     read_marker
     test -n "$marker_until"
     ;;
   *)
-    echo "usage: ti-maintenance start [DURATION] | end [--id ID] | status | is-open" >&2
+    echo "usage: ti-maintenance start [--replace] [DURATION] | end [--id ID] | status | left | is-open" >&2
     exit 1
     ;;
 esac

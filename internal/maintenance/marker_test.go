@@ -103,7 +103,7 @@ func TestWhatTheScriptWritesReadsOpenAndEndClosesIt(t *testing.T) {
 			t.Fatalf("ti-maintenance %v: %v\n%s", args, err, out)
 		}
 	}
-	run("start", "10m")
+	run("start", "--replace", "10m")
 	m, open := Read(read(), t0.Add(time.Minute))
 	if !open || !m.Until.Equal(t0.Add(10*time.Minute)) {
 		t.Fatalf("Read = %v, %v; want open until %v", m, open, t0.Add(10*time.Minute))
@@ -111,7 +111,7 @@ func TestWhatTheScriptWritesReadsOpenAndEndClosesIt(t *testing.T) {
 	if _, open := Read(read(), t0.Add(11*time.Minute)); open {
 		t.Error("the script's marker is open past its expiry")
 	}
-	run("start")
+	run("start", "--replace")
 	if m, _ := Read(read(), t0); !m.Until.Equal(t0.Add(Default)) {
 		t.Errorf("the default window ends %v, want %v", m.Until, t0.Add(Default))
 	}

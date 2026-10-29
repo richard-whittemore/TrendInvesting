@@ -292,11 +292,17 @@ seconds_to_quiet_mark() {
   fi
 }
 
-# start_window: open a window of its own for the given seconds and keep its id,
-# the only window this run ever ends.
+# start_window: open a window of our own for the given seconds and keep its id,
+# the only window this run ever ends. A window opened meanwhile by anyone else
+# (start refuses, status 3) is used as it is.
 start_window() {
-  local out
-  out=$("$maint" start "$1s") || die "could not open a maintenance window; nothing installed"
+  local out rc=0
+  out=$("$maint" start "$1s") || rc=$?
+  if test "$rc" -eq 3; then
+    log "a maintenance window was opened meanwhile; using it (it is left open)"
+    return 0
+  fi
+  test "$rc" -eq 0 || die "could not open a maintenance window; nothing installed"
   printf '%s\n' "$out" | grep -v '^id '
   window_id=$(printf '%s\n' "$out" | sed -n 's/^id \([0-9a-f]\{16\}\)$/\1/p' | head -n 1)
   test -n "$window_id" || die "ti-maintenance did not say which window it opened; nothing installed"
@@ -322,15 +328,23 @@ open_window() {
   fi
 }
 
-# ensure_window: right before the swap, a window must be open. One borrowed from
-# the owner, or this run's own, may have ended during the wait; then this run
-# opens one of its own (never past the 30 minutes ti-maintenance allows per
-# window) rather than install with none.
+# ensure_window: right before the swap, at least 120 seconds of window must be
+# left (the install and its checks take less). A window with less, the owner's
+# or this run's own, is waited out, never relied on or added to, and then this
+# run opens one of its own for 300 seconds (never past the 30 minutes
+# ti-maintenance allows per window): never two windows at once, and never an
+# install with none.
 ensure_window() {
-  if ! "$maint" is-open; then
+  local left
+  left=$("$maint" left) || left=0
+  test "$left" -ge 120 && return 0
+  if test "$left" -gt 0; then
+    log "the maintenance window has only $left seconds left; waiting for it to end before opening one for the install"
+    "$sleep_cmd" "$((left + 1))"
+  else
     log "the maintenance window ended during the wait; opening a new one before installing"
-    start_window 300
   fi
+  start_window 300
 }
 
 # close_window: runs as ti-release exits, on every path, and ends only the

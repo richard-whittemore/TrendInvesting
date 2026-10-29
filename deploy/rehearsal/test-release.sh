@@ -205,6 +205,10 @@ case $1 in
     echo "ti-maintenance: maintenance window open until later" ;;
   end) rm -f "$state" ;;
   status) echo "maintenance window open until later" ;;
+  left)
+    if test -e "$state"; then echo 300; else
+      case ${FAKE_MAINT_OPEN:-} in 1) echo "${FAKE_MAINT_LEFT:-600}" ;; *) echo 0 ;; esac
+    fi ;;
   is-open)
     test ! -e "$state" || exit 0
     case ${FAKE_MAINT_OPEN:-} in
@@ -962,6 +966,17 @@ expect "a release whose borrowed window expired still installs" 0 "$(FAKE_MAINT_
 expect "it opens a window of its own once the borrowed one is gone" "MAINT start 300s;" "$(lines_of '^MAINT start')"
 expect "it ends only its own window, by id" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
 if test "$(line_no '^MAINT start')" -ge "$(line_no '^restart ti-dashboard')"; then fail "the window of its own was opened after the install began"; fi
+# A borrowed window with little left is waited out, not relied on: ti-release
+# needs 120 seconds of window before it swaps, waits for a shorter one to end,
+# then opens a window of its own; never two at once.
+fresh_server
+expect "a release in a window with 30 seconds left installs" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 run v1.0.0)"
+expect "it waited for the short window to end" "SLEEP 31;" "$(lines_of '^SLEEP')"
+expect "then opened one of its own" "MAINT start 300s;" "$(lines_of '^MAINT start')"
+if test "$(line_no '^SLEEP')" -ge "$(line_no '^MAINT start')"; then fail "its own window was opened before the short one ended"; fi
+fresh_server
+expect "a release in a window with 120 seconds left installs" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=120 run v1.0.0)"
+expect "120 seconds is enough" "" "$(lines_of '^MAINT (start|end)')"
 # A window this run did not open is never ended, however the run goes.
 fresh_server
 expect "a failed release in a borrowed window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run v1.2.0)")"

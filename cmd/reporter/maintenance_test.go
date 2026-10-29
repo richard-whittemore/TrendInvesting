@@ -597,17 +597,22 @@ func TestTheCloseOfAWindowTellsWhatItHeldOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The routine summary goes to the channel the daily summary uses (the
+	// owner's own ntfy), never to an urgent channel.
+	if n := count(r.to(pdHost), "maintenance window closed"); n != 0 {
+		t.Errorf("PagerDuty took %d close summaries, want 0", n)
+	}
+	got := r.to(ntfyHost)
+	if n := count(got, "maintenance window closed"); n != 1 {
+		t.Fatalf("ntfy took %d close summaries, want 1:\n%v", n, got)
+	}
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"held: " + recovered + " recovered", failed + " still failed (paged)"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the close summary lacks %q:\n%s", want, joined)
+		}
+	}
 	for _, host := range []string{ntfyHost, pdHost} {
-		got := r.to(host)
-		if n := count(got, "maintenance window closed"); n != 1 {
-			t.Fatalf("%s took %d close summaries, want 1:\n%v", host, n, got)
-		}
-		joined := strings.Join(got, "\n")
-		for _, want := range []string{"held: " + recovered + " recovered", failed + " still failed (paged)"} {
-			if !strings.Contains(joined, want) {
-				t.Errorf("%s: the close summary lacks %q:\n%s", host, want, joined)
-			}
-		}
 		if n := pagesFor(r, host, failed); n != 1 {
 			t.Errorf("%s: %s paged %d times, want 1", host, failed, n)
 		}
@@ -701,5 +706,213 @@ func TestAMarkerThatIsNotAWindowIsSaidOnceAndNeverPaged(t *testing.T) {
 	}
 	if _, err := os.Stat(windowFile(dir)); err != nil {
 		t.Errorf("the marker was removed: %v", err)
+	}
+}
+
+// mixedTransport sends the GitHub stand-in's requests to it and everything
+// else to the recording relay.
+type mixedTransport struct {
+	ghHost string
+	relay  *relay
+}
+
+func (m mixedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host == m.ghHost {
+		return http.DefaultTransport.RoundTrip(req)
+	}
+	return m.relay.RoundTrip(req)
+}
+
+// The close summary is a routine message: it opens no issue in the alerts
+// repository (nothing would ever close it) and keeps no record behind it.
+func TestTheCloseSummaryOpensNoIssueAndLeavesNoRecord(t *testing.T) {
+	const recovered = "ti-adapter-boost.service"
+	r := &relay{sent: map[string][]string{}}
+	gh := &fakeGitHub{}
+	ghURL := fakeGitHubServer(t, gh)
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	openWindow(t, dir, start, start.Add(10*time.Minute))
+	if err := notifyAt(t, r, dir, systemd, monitored(recovered, firstRun), start, recovered); err != nil {
+		t.Fatal(err)
+	}
+	environment := twoChannels()
+	getenv := func(k string) string {
+		if v := issuesEnv(ghURL)[k]; v != "" {
+			return v
+		}
+		return environment(k)
+	}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty,github-issues", "-units", recovered, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+	client := &http.Client{Transport: mixedTransport{ghHost: strings.TrimPrefix(ghURL, "http://"), relay: r}}
+	for i := 0; i < 2; i++ {
+		if err := run(args, getenv, func() time.Time { return start.Add(time.Duration(15+5*i) * time.Minute) }, &bytes.Buffer{}, client); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := count(r.to(ntfyHost), "maintenance window closed"); n != 1 {
+		t.Fatalf("ntfy took %d close summaries, want 1", n)
+	}
+	for _, issue := range gh.snapshot() {
+		if strings.Contains(issue.title, "maintenance window closed") {
+			t.Errorf("the close summary opened an issue: %q", issue.title)
+		}
+	}
+	if strings.Contains(recordText(t, dir, "unit-failures.json"), "maintenance-closed") || strings.Contains(recordText(t, dir, "unit-failures.json"), "closing:") {
+		t.Errorf("the delivered close summary left records behind:\n%s", recordText(t, dir, "unit-failures.json"))
+	}
+}
+
+// The summary says "paged" only for a page that was delivered.
+func TestTheCloseSummaryDoesNotSayPagedForAPageThatFailed(t *testing.T) {
+	const failed = "ti-engine@boost.service"
+	base := &relay{sent: map[string][]string{}}
+	flaky := &flakyRelay{relay: base, failHost: pdHost}
+	systemd := newStandInSystemd(t)
+	systemd.fail(failed)
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	openWindow(t, dir, start, start.Add(10*time.Minute))
+	if err := notifyAt(t, flaky, dir, systemd, monitored(failed, firstRun), start, failed); err != nil {
+		t.Fatal(err)
+	}
+	// PagerDuty refuses everything at the firing after the close: the page fails.
+	_ = firing(t, flaky, dir, systemd, start.Add(15*time.Minute), failed)
+	joined := strings.Join(base.to(ntfyHost), "\n")
+	if !strings.Contains(joined, "maintenance window closed") || strings.Contains(joined, "(paged)") || !strings.Contains(joined, "page failed, retrying") {
+		t.Errorf("the summary of a page that failed must say so, not that it was paged:\n%s", joined)
+	}
+}
+
+// A summary that could not be delivered is not lost: its records stay until a
+// firing delivers it.
+func TestACloseSummaryThatCouldNotBeSentIsSentAtALaterFiring(t *testing.T) {
+	const recovered = "ti-adapter-boost.service"
+	base := &relay{sent: map[string][]string{}}
+	flaky := &flakyRelay{relay: base, failHost: ntfyHost, failBody: "maintenance window closed"}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	openWindow(t, dir, start, start.Add(10*time.Minute))
+	if err := notifyAt(t, flaky, dir, systemd, monitored(recovered, firstRun), start, recovered); err != nil {
+		t.Fatal(err)
+	}
+	if err := firing(t, flaky, dir, systemd, start.Add(15*time.Minute), recovered); err == nil {
+		t.Fatal("a firing whose close summary was refused must fail")
+	}
+	flaky.setFailing(false)
+	if err := firing(t, flaky, dir, systemd, start.Add(20*time.Minute), recovered); err != nil {
+		t.Fatal(err)
+	}
+	if err := firing(t, flaky, dir, systemd, start.Add(25*time.Minute), recovered); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(base.to(ntfyHost), "\n")
+	if n := strings.Count(joined, "held: "+recovered+" recovered"); n != 1 {
+		t.Errorf("the close summary reached ntfy %d times after the retry, want once:\n%s", n, joined)
+	}
+}
+
+// A held failure that recovered is handled for the hook too, trading units
+// included: a late redelivery of the same failed run does not page.
+func TestAStaleHookRedeliveryOfARecoveredHeldTradingUnitDoesNotPage(t *testing.T) {
+	const unit = "ti-adapter-boost.service"
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	openWindow(t, dir, start, start.Add(12*time.Minute))
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), start, unit); err != nil {
+		t.Fatal(err)
+	}
+	if err := firing(t, r, dir, systemd, start.Add(5*time.Minute), unit); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), start.Add(30*time.Minute), unit); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, unit); n != 0 {
+			t.Errorf("%s was paged %d times by a stale redelivery of a recovered run", host, n)
+		}
+	}
+}
+
+// The reporter's own unit: a clean firing marks its held failures handled
+// instead of forgetting them, so a delayed hook for the same run is silent.
+func TestCleaningTheReportersOwnUnitMarksItsHeldRunsHandled(t *testing.T) {
+	const unit = "ti-reporter@boost.service"
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unit-failures.json")
+	start := t0.Add(time.Hour)
+	openWindow(t, dir, start, start.Add(10*time.Minute))
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), start, unit); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearUnit(path, unit, "", nil, nil, start.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	rec := recordText(t, dir, "unit-failures.json")
+	if strings.Contains(rec, "held:") || !strings.Contains(rec, "handled|"+unit+"/"+firstRun) {
+		t.Errorf("clearUnit must mark the held run handled and forget the hold:\n%s", rec)
+	}
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), start.Add(30*time.Minute), unit); err != nil {
+		t.Fatal(err)
+	}
+	if n := pagesFor(r, ntfyHost, unit); n != 0 {
+		t.Errorf("a delayed hook paged %d times for a run the reporter had seen well", n)
+	}
+}
+
+// Every capital-safety kind, handed to the reporter as an alert of the run
+// inside an open window, pages on each channel: the table is the NeverHeld
+// list itself, so a kind added to it is tested at once.
+func TestEveryNeverHeldKindPagesThroughARealFiringInsideAWindow(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	dir := t.TempDir()
+	at := t0.Add(time.Hour)
+	openWindow(t, dir, at, at.Add(10*time.Minute))
+	was := journalReader
+	t.Cleanup(func() { journalReader = was })
+	journalReader = func(path string, now time.Time, ack time.Duration, seen map[string]bool) (report.History, []event.Envelope, string, []report.Alert, error) {
+		history, envelopes, account, alerts, err := was(path, now, ack, seen)
+		for _, k := range report.NeverHeld {
+			alerts = append(alerts, report.Alert{Key: "never-held:" + string(k), Kind: k, Severity: report.Urgent, AccountID: account, At: at, Title: account + ": never-held " + string(k), Body: "a " + string(k) + " alert"})
+		}
+		return history, envelopes, account, alerts, err
+	}
+	journalFiring(t, r, dir, haltedEntries(t), at)
+	for _, k := range report.NeverHeld {
+		for _, host := range []string{ntfyHost, pdHost} {
+			if n := count(r.to(host), "never-held "+string(k)); n != 1 {
+				t.Errorf("%s took %d pages for a %s alert inside a window, want 1", host, n, k)
+			}
+		}
+	}
+}
+
+// A window holds the Gateway's outage; the close tells it too.
+func TestTheCloseSummaryNamesAHeldGatewayOutage(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.logout()
+	dir := t.TempDir()
+	openWindow(t, dir, tuesday(14, 20), tuesday(14, 25))
+	for _, at := range []time.Time{tuesday(14, 20), tuesday(14, 22)} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, at := range []time.Time{tuesday(14, 26), tuesday(14, 31)} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	joined := strings.Join(r.to("ntfy.private.test"), "\n")
+	if n := strings.Count(joined, "maintenance window closed; held: IB Gateway still logged out"); n != 1 {
+		t.Errorf("the close summary named the held Gateway outage %d times, want once:\n%s", n, joined)
 	}
 }

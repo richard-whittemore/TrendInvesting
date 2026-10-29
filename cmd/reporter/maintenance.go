@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,19 +35,6 @@ func heldKey(until time.Time, alertKey string) string {
 // alertKey at at.
 func holdAlert(sent map[string]time.Time, until, at time.Time, alertKey string) {
 	sent[heldKey(until, alertKey)] = at
-}
-
-// dropHeld forgets every held record whose alert key begins with prefix (all
-// of them for ""), and returns the alert keys it forgot.
-func dropHeld(sent map[string]time.Time, prefix string) (dropped []string) {
-	for k := range sent {
-		ch, alert, ok := strings.Cut(k, "|")
-		if ok && strings.HasPrefix(ch, heldPrefix) && strings.HasPrefix(alert, prefix) {
-			delete(sent, k)
-			dropped = append(dropped, alert)
-		}
-	}
-	return dropped
 }
 
 // maintenanceFileDefault is where ti-maintenance writes the marker
@@ -151,4 +139,133 @@ func heldOf(sent map[string]time.Time, prefix string) (found []held) {
 		}
 	}
 	return found
+}
+
+// What a held unit came to, as the close summary will say it.
+const (
+	closingRecovered = "recovered"
+	closingPending   = "pending"
+	closingPaged     = "paged"
+	closingRetrying  = "retrying"
+)
+
+// closingPrefix begins the channel part of a closing record's key in the unit
+// state's sent times: closing:<status>:<window's end>|<unit>. A closing record
+// is a close summary that is owed: it is written in the same save as the
+// removal of the held record it replaces and is removed only once the summary
+// has been delivered, so a summary that could not be sent is sent at a later
+// firing (ADR 0019, "Alerting": delivery state is durable).
+const closingPrefix = "closing:"
+
+func closingKey(status string, until time.Time, unit string) string {
+	return channelKey(closingPrefix+status+":"+until.UTC().Format(time.RFC3339), unit)
+}
+
+// setClosing records that the window ending at until held unit and that it
+// came to status, replacing any earlier status for the same window.
+func setClosing(u *unitState, unit, status string, until, at time.Time) {
+	for _, c := range closingOf(u.sent) {
+		if c.unit == unit && c.until.Equal(until) {
+			delete(u.sent, closingKey(c.status, c.until, c.unit))
+		}
+	}
+	u.sent[closingKey(status, until, unit)] = at
+}
+
+type closing struct {
+	unit, status string
+	until        time.Time
+}
+
+// closingOf lists the closing records.
+func closingOf(sent map[string]time.Time) (found []closing) {
+	for k := range sent {
+		ch, unit, ok := strings.Cut(k, "|")
+		rest, isClosing := strings.CutPrefix(ch, closingPrefix)
+		if !ok || !isClosing {
+			continue
+		}
+		status, untilText, _ := strings.Cut(rest, ":")
+		until, err := time.Parse(time.RFC3339, untilText)
+		if err != nil {
+			continue
+		}
+		found = append(found, closing{unit: unit, status: status, until: until})
+	}
+	return found
+}
+
+// closingText is how the summary says what a held unit came to.
+func closingText(c closing) string {
+	switch c.status {
+	case closingRecovered:
+		return c.unit + " recovered"
+	case closingPaged:
+		return c.unit + " still failed (paged)"
+	case closingRetrying:
+		return c.unit + " still failed (page failed, retrying)"
+	}
+	return c.unit + " still failed (page pending)"
+}
+
+// summaryTakerAmong reports whether any sender takes the routine summary.
+func summaryTakerAmong(senders []sender) bool {
+	for _, s := range senders {
+		if t, ok := s.(summaryTaker); ok && t.takesSummary() {
+			return true
+		}
+	}
+	return false
+}
+
+// flushClosing sends, for each window that has closed, the one routine message
+// that says what it held: "maintenance window closed; held: <unit> recovered,
+// <unit> still failed (paged)". It goes only where the daily summary goes (the
+// owner's own ntfy server: deliver restricts kindSummary to such a channel),
+// never to an urgent channel or the issue tracker. A message that could not be
+// delivered leaves its closing records, and is sent at the next firing; one
+// that has been delivered, or has nowhere to go, leaves nothing behind. A page
+// is called "paged" only when it was delivered.
+func flushClosing(u *unitState, senders []sender, at time.Time, every time.Duration) error {
+	byWindow := map[string][]closing{}
+	for _, c := range closingOf(u.sent) {
+		w := c.until.UTC().Format(time.RFC3339)
+		byWindow[w] = append(byWindow[w], c)
+	}
+	windows := make([]string, 0, len(byWindow))
+	for w := range byWindow {
+		windows = append(windows, w)
+	}
+	sort.Strings(windows)
+	var errs []error
+	for _, w := range windows {
+		recs := byWindow[w]
+		sort.Slice(recs, func(i, j int) bool { return recs[i].unit < recs[j].unit })
+		var parts []string
+		for _, c := range recs {
+			parts = append(parts, closingText(c))
+		}
+		body := "maintenance window closed; held: " + strings.Join(parts, ", ")
+		key := "maintenance-closed:" + w + ":" + shortHash(body)
+		if summaryTakerAmong(senders) {
+			a := report.Alert{Key: key, Kind: kindSummary, Severity: report.Routine, AccountID: hostName(), At: at, Title: hostName() + ": maintenance window closed", Body: body, PublicBody: body}
+			if err := deliver(senders, a, u.seen, u.sent, u.repeats, at, every, u.record); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		}
+		for _, c := range recs {
+			delete(u.sent, closingKey(c.status, c.until, c.unit))
+		}
+		forgetAlert(key, nil, u.seen, u.sent, u.repeats)
+		errs = append(errs, u.record())
+	}
+	return errors.Join(errs...)
+}
+
+// shortHash names a summary's content in its key, so a changed outcome is a
+// new message.
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:6])
 }

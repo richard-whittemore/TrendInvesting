@@ -282,7 +282,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		refused = lostRunEnv
 	default:
 		info, statErr = os.Stat(*journalPath)
-		history, envelopes, account, alerts, refused = readJournal(*journalPath, now(), *ackWithin, seen)
+		history, envelopes, account, alerts, refused = journalReader(*journalPath, now(), *ackWithin, seen)
 		if account != "" {
 			label = account
 		}
@@ -704,6 +704,9 @@ func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[stri
 // refused. Only the summary's equity comparison reads the earlier runs, so a
 // broken chain of them refuses nothing: it is one more alert, delivered once
 // (ADR 0019, "Alerting").
+// journalReader reads the journal for a firing; a test wraps it.
+var journalReader = readJournal
+
 func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[string]bool) (history report.History, envelopes []event.Envelope, account string, alerts []report.Alert, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
