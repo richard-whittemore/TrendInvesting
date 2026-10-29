@@ -894,10 +894,11 @@ def _digest_of(envelopes):
     return digest.hexdigest()
 
 
-def _verify_momentum(files, data, cfg, base, identity, engine_log, ranker, manifest=None):
+def _verify_momentum(files, data, cfg, base, identity, engine_log, ranker, manifest=None, without_universe=()):
     """Refuses unless each of ``files`` ([(first session, last session, path)]) re-encodes alone, byte for
     byte, from the recordings under the current identity, with the holdings its own bars name and the
-    manifest's missing universes (ADR 0027: inputs the engine never saw stay absent)."""
+    manifest's missing universes, or the stream's own omissions during recovery
+    (ADR 0027: inputs the engine never saw stay absent)."""
     without = {e["name"]: [dt.date.fromisoformat(d) for d in e["without_universe"]]
                for e in manifest["files"]} if manifest else {}
     for first, last, path in files:
@@ -905,7 +906,7 @@ def _verify_momentum(files, data, cfg, base, identity, engine_log, ranker, manif
             envelopes = encode.iter_encode(data, first, last, identity, required=list(cfg.required),
                                            optional=_named_in(path, cfg.required), base=base, first_sequence=1,
                                            engine=MOMENTUM, ranker=ranker, retracted_through=last,
-                                           without_universe=without.get(os.path.basename(path), ()))
+                                           without_universe=without.get(os.path.basename(path), without_universe))
             again = _digest_of(envelopes)
         except Exception as e:   # a recording missing, a gap or a conflict: the file cannot be re-derived
             raise Refused("the run's file {} cannot be encoded again from its recordings ({}: {}); this stops the "
@@ -1290,8 +1291,11 @@ def _published(directory, instance, existing, base, data, cfg, identity, engine_
         if _last_session_of(path) != last:
             raise Refused("{} ends at {}, not at the session its name gives; this stops the job for a person".format(
                 path, _last_session_of(path)))
-        _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker)
-        manifest["files"].append(_manifest_entry(path, first, last, _without_universe(data, first, last, retracted)))
+        # ADR 0027: recovery preserves the published inputs even if another instance recorded more later.
+        without = [dt.date.fromisoformat(d) for d in _stream_without_universe(path)]
+        _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker,
+                         without_universe=without)
+        manifest["files"].append(_manifest_entry(path, first, last, without))
         spans.append((first, last, path))
         newest = last
     if rebuild:

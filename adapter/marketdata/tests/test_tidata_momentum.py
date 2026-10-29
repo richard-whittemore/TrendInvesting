@@ -1196,6 +1196,58 @@ class ManifestRecoveryTest(unittest.TestCase):
     firing takes in by the same rule; a manifest lost or damaged is rebuilt only by hand
     (--rebuild-manifest), every file taken in by that rule in chain order."""
 
+    def test_an_unlisted_file_keeps_its_omissions_after_another_instance_records_a_universe(self):
+        self.recover_without_universe(rebuild=False)
+
+    def test_a_rebuilt_manifest_keeps_omissions_after_another_instance_records_a_universe(self):
+        self.recover_without_universe(rebuild=True)
+
+    def recover_without_universe(self, rebuild):
+        def down(url):
+            raise tidata.massive.MarketDataError("HTTP 503 from a sector source")
+
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data), sector_session=None)
+            os.remove(data / "universe_2026-11-30.json")
+            job = MomentumJob(root, data=data, ranker=FakeRanker(), sectors_get=down,
+                              client=FakeMassive({D(2026, 11, 30): bars_for(D(2026, 11, 30))}))
+            firing = dt.datetime(2026, 12, 1, 8, 15, tzinfo=nyse_calendar.NEW_YORK)
+            status, _, err = job.main(firing, "--backfill-from", "2026-11-23")
+            self.assertEqual(status, 0, err)
+            path = job.path(D(2026, 11, 30))
+            before = path.read_bytes()
+            manifest_path = job.stream_dir() / "manifest.json"
+            published = json.loads(manifest_path.read_text())
+            self.assertIn("2026-11-30", published["files"][-1]["without_universe"])
+            if rebuild:
+                manifest_path.unlink()
+            else:
+                unlisted = json.loads(json.dumps(published))
+                unlisted["files"].pop()
+                manifest_path.write_text(json.dumps(unlisted))
+            second_root = Path(root) / "second"
+            second_root.mkdir()
+            second = MomentumJob(second_root, data=data, ranker=FakeRanker(), instance="roth-ira")
+            status, _, err = second.main(firing + dt.timedelta(seconds=5), "--backfill-from", "2026-11-23")
+            self.assertEqual(status, 0, err)
+            self.assertTrue((data / "universe_2026-11-30.json").exists())
+
+            status, _, err = job.main(firing + dt.timedelta(minutes=15),
+                                      *(("--rebuild-manifest",) if rebuild else ()))
+            self.assertEqual(status, 0, err)
+            recovered = json.loads(manifest_path.read_text())
+            self.assertEqual(recovered["files"], published["files"])
+            self.assertEqual(path.read_bytes(), before)
+            # ADR 0027: a present manifest remains authoritative and must agree with the stream.
+            recovered["files"][-1]["without_universe"] = []
+            manifest_path.write_text(json.dumps(recovered))
+            status, _, err = job.main(firing + dt.timedelta(minutes=20))
+            self.assertEqual(status, 1, err)
+            self.assertIn("manifest without_universe does not match its sha256-checked stream", err)
+            self.assertEqual(path.read_bytes(), before)
+
     def test_a_stop_after_the_first_file_is_linked_is_taken_in_by_the_next_firing(self):
         with tempfile.TemporaryDirectory() as root:
             data = Path(root) / "data"
