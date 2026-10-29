@@ -247,6 +247,10 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 	// (ADR 0026, amendment of 2026-10-29). Earlier journals without the pick
 	// evidence retain their refusal alerts.
 	withheldPicks := map[[2]string]bool{}
+	// A buy phase can append missing-mark evidence after the original
+	// decision. Join it through the recorded decision session while orders
+	// retain their original tags (ADR 0026, amendment of 2026-10-29).
+	decisionSessions := map[string]string{}
 	// notAtClose is the latest broker snapshot stamped at its read time, if
 	// the latest one is: its ID and why it was not as of the close.
 	var notAtClose [2]string
@@ -326,7 +330,11 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 			if err := read(e, refusedVersions, &p); err != nil {
 				return nil, err
 			}
-			if p.Reason != event.RefusedMissingMark || !withheldPicks[[2]string{p.Tag, p.InstrumentID}] {
+			decision := p.Tag
+			if session, ok := decisionSessions[p.Tag]; ok {
+				decision = session
+			}
+			if p.Reason != event.RefusedMissingMark || !withheldPicks[[2]string{decision, p.InstrumentID}] {
 				out = append(out, refusalAlerts(account, e, p, flagged[p.Reason])...)
 			}
 			if a, ok := pending.refused(account, instance, e, p); ok {
@@ -412,8 +420,13 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 			if err := read(e, decidedVersions, &p); err != nil {
 				return nil, err
 			}
+			decision := e.ID
+			if isMomentum(p.StrategyID) {
+				decision = p.SessionPeriodEnd.Format(time.RFC3339Nano)
+				decisionSessions[e.ID] = decision
+			}
 			for _, pick := range p.WithheldPicks {
-				withheldPicks[[2]string{e.ID, pick.InstrumentID}] = true
+				withheldPicks[[2]string{decision, pick.InstrumentID}] = true
 				a := pickWithheldAlert(account, e, p, pick)
 				if !paged[a.Key] {
 					paged[a.Key] = true

@@ -154,11 +154,12 @@ type momentumRun struct {
 // rebalance is the decision time in progress: what its buy phase needs.
 type rebalance struct {
 	decisionID   string
+	decision     event.TargetsDecidedPayload // immutable original targets and decision session
 	session      time.Time
 	snapshot     event.AccountCashSnapshotPayload
 	prices       map[string]float64
 	buys         []event.OrderPlannedPayload
-	withheld     map[string]bool // fixed at the decision, through the buy phase
+	withheld     map[string]bool // once withheld, stays cash through the buy phase
 	sells        []string        // client order IDs of released sells
 	sold         map[string]int64
 	sellsPlanned int
@@ -628,7 +629,7 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 	r.skipped(b, plan.Skipped)
 	h.gate.RecordDecision(id)
 	reb := &rebalance{
-		decisionID: id, session: end, snapshot: *r.snapshot, prices: maps.Clone(r.raw),
+		decisionID: id, decision: p, session: end, snapshot: *r.snapshot, prices: maps.Clone(r.raw),
 		buys: plan.Buys, sold: map[string]int64{}, sellsPlanned: len(plan.Sells),
 		budget:   orderplan.NewBudget(r.cash(*r.snapshot)),
 		withheld: map[string]bool{},
@@ -990,6 +991,25 @@ func (r *momentumRun) unexplainedCashDrop(reb *rebalance) float64 {
 // (ADR 0026, amendment of 2026-10-29).
 func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPlannedPayload, prior int) []event.OrderPlannedPayload {
 	h := r.h
+	// Preserve the original decision and order tags. Later missing marks
+	// append evidence for that same session before any refusal (ADR 0026,
+	// amendment of 2026-10-29); its unbought weights still stay in cash.
+	p := reb.decision
+	p.WithheldPicks = slices.Clone(p.WithheldPicks)
+	for _, o := range orders {
+		if o.Side == event.OrderSideBuy && !reb.withheld[o.InstrumentID] {
+			if pick := r.missingMark(o.InstrumentID, reb.session); pick != nil {
+				p.WithheldPicks = append(p.WithheldPicks, *pick)
+				reb.withheld[o.InstrumentID] = true
+			}
+		}
+	}
+	if len(p.WithheldPicks) > len(reb.decision.WithheldPicks) {
+		slices.SortFunc(p.WithheldPicks, func(a, b event.WithheldPick) int {
+			return strings.Compare(a.InstrumentID, b.InstrumentID)
+		})
+		b.add(reb.decisionID+":withheld-picks", event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
+	}
 	holdings := holdings(reb.snapshot.Positions)
 	for id, sold := range reb.sold {
 		holdings[id] -= sold

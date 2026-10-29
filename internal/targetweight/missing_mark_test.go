@@ -1,10 +1,13 @@
 package targetweight_test
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
@@ -108,6 +111,18 @@ func TestMomentumWithheldPickStaysCashAfterSellsAndALaterMark(t *testing.T) {
 // ADR 0026, amendment of 2026-10-29: a buy needs an available mark
 // when the sell phase ends, even if its mark was valid at the decision.
 func TestMomentumLaterUnavailableMarkWithholdsDelayedBuy(t *testing.T) {
+	for _, tc := range []struct{ failure, detail string }{
+		{event.MarkFailureTransient, "mark lookup timed out"},
+		{event.MarkFailureFinal, "IBKR answered its contract request with error 200: No security definition"},
+	} {
+		t.Run(tc.failure, func(t *testing.T) {
+			testMomentumLaterUnavailableMark(t, tc.failure, tc.detail)
+		})
+	}
+}
+
+func testMomentumLaterUnavailableMark(t *testing.T, failure, detail string) {
+	t.Helper()
 	r := simulateMomentum(t, momentumOptions{stopAfter: "2025-03-03"})
 	h, s := momentumHandler(t)
 	var decisions, buyPhase []event.Envelope
@@ -120,8 +135,10 @@ func TestMomentumLaterUnavailableMarkWithholdsDelayedBuy(t *testing.T) {
 		decisions = append(decisions, out...)
 		if in.ID == "session:2025-02-28" {
 			at := closeOf("2025-03-03").Add(-390 * time.Minute)
-			mustApply(t, h, s.envelope(t, event.MarkUnavailableEventType, event.MarkUnavailableSchemaVersion, "later-unavailable-BBB", at,
-				event.MarkUnavailablePayload{InstrumentID: "BBB", AsOf: at, Source: event.AdapterIBKR, Failure: event.MarkFailureTransient, Detail: "mark lookup timed out"}))
+			for _, instrument := range []string{"IEF", "BBB"} {
+				mustApply(t, h, s.envelope(t, event.MarkUnavailableEventType, event.MarkUnavailableSchemaVersion, "later-unavailable-"+instrument, at,
+					event.MarkUnavailablePayload{InstrumentID: instrument, AsOf: at, Source: event.AdapterIBKR, Failure: failure, Detail: detail}))
+			}
 			inserted = true
 			continue
 		}
@@ -138,17 +155,68 @@ func TestMomentumLaterUnavailableMarkWithholdsDelayedBuy(t *testing.T) {
 		t.Fatalf("mark was already missing at the decision: %+v", feb.WithheldPicks)
 	}
 	refusals := ofType(buyPhase, event.OrderRefusedEventType)
-	if len(refusals) != 1 {
-		t.Fatalf("delayed buy refusals: %d, want one for BBB's superseded mark; released: %+v", len(refusals), released(t, buyPhase))
+	if len(refusals) != 2 {
+		t.Fatalf("delayed buy refusals: %d, want two for superseded marks; released: %+v", len(refusals), released(t, buyPhase))
 	}
-	var p event.OrderRefusedPayload
-	decode(t, refusals[0], &p)
-	if p.InstrumentID != "BBB" || p.Reason != event.RefusedMissingMark || p.Figures.MarkSet {
-		t.Fatalf("superseded mark did not withhold BBB: %+v", p)
+	refused := make(map[string]int)
+	for _, refusal := range refusals {
+		var p event.OrderRefusedPayload
+		decode(t, refusal, &p)
+		refused[p.InstrumentID]++
+		if p.Reason != event.RefusedMissingMark || p.Figures.MarkSet {
+			t.Errorf("superseded mark did not withhold buy: %+v", p)
+		}
+	}
+	if !reflect.DeepEqual(refused, map[string]int{"BBB": 1, "IEF": 1}) {
+		t.Errorf("refused instruments: %v", refused)
+	}
+	// The original decision remains immutable; later withholding records the
+	// same targets and session with the adapter's evidence before its refusal.
+	late := targets(t, buyPhase)
+	wantWithheld := []event.WithheldPick{
+		{InstrumentID: "BBB", Reason: event.RefusedMissingMark, Failure: failure, Detail: detail},
+		{InstrumentID: "IEF", Reason: event.RefusedMissingMark, Failure: failure, Detail: detail},
+	}
+	if len(late) != 1 || !reflect.DeepEqual(late[0].Targets, feb.Targets) || !late[0].SessionPeriodEnd.Equal(feb.SessionPeriodEnd) ||
+		!reflect.DeepEqual(late[0].WithheldPicks, wantWithheld) {
+		t.Errorf("later withholding evidence: %+v, want original targets/session and sorted missing-mark evidence: %+v", late, wantWithheld)
+	}
+	journal := append([]event.Envelope{r.inputs[0]}, decisions...)
+	alerts, err := report.Alerts(journal, "momentum-ira")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages := make(map[string]int)
+	var generic int
+	for _, a := range alerts {
+		switch a.Kind {
+		case report.KindPickWithheld:
+			pages[a.Key]++
+			if !a.Repeat || a.Severity != report.Urgent ||
+				!strings.Contains(a.Title, failure) || !strings.Contains(a.Title, detail) {
+				t.Errorf("later withholding page: %+v", a)
+			}
+		case report.KindRefusal, report.KindMissingData:
+			generic++
+		}
+	}
+	for _, instrument := range []string{"BBB", "IEF"} {
+		count := 0
+		for key, n := range pages {
+			if strings.Contains(key, "2025-02:"+instrument) {
+				count += n
+			}
+		}
+		if count != 1 {
+			t.Errorf("later unavailable mark: %s pages=%d, want 1; alerts: %+v", instrument, count, alerts)
+		}
+	}
+	if len(pages) != 2 || generic != 0 {
+		t.Errorf("later unavailable mark: per-pick pages=%v generic pages=%d, want two picks and no generic pages; alerts: %+v", pages, generic, alerts)
 	}
 	buys := released(t, buyPhase)
-	if len(buys) != 1 || buys[0].Side != event.OrderSideBuy || buys[0].InstrumentID != "IEF" {
-		t.Fatalf("other buy after the sell phase: %+v", buys)
+	if len(buys) != 0 {
+		t.Fatalf("withheld buys released after the sell phase: %+v", buys)
 	}
 	if len(ofType(decisions, event.EngineStateEventType)) != 0 {
 		t.Fatal("withholding degraded")
