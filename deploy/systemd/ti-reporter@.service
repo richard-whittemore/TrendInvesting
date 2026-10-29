@@ -29,6 +29,10 @@ Group=ti-trader
 Environment=TZ=America/New_York
 Environment=TI_STATE_DIR=/var/lib/trend-investing/engines/%i
 Environment=TI_REPORTS_DIR=/var/lib/trend-investing/reports
+# The Gateway's configured restart times (TI_GATEWAY_RESTART_TIME,
+# TI_GATEWAY_COLD_RESTART), the same file the IBC render reads, give the
+# Gateway check its restart windows.
+EnvironmentFile=-/etc/trend-investing/gateway.env
 # TI_RUN: the engine's current run, whose durable log is read. systemd reads
 # the file again at every start, so after a fresh run the next firing follows
 # the new log. Optional here ("-") because before the account's first run there is
@@ -47,6 +51,12 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # "Alerting"; docs/manual/server.md, "The clock"). Installed by provision.sh
 # clock. The clock is the host's, so every instance shares one clock state,
 # host-clock.json in the reports directory, under a lock.
+# The Gateway check reads the ti-gateway and adapter journals itself and runs
+# only in the instance named by -gateway-owner, so three accounts do not page three times: logged out of
+# IBKR for more than 10 minutes outside the Gateway's restart windows pages
+# once, reminds hourly and resolves on login (ADR 0019, "Alerting";
+# docs/manual/server.md, "The Gateway is logged out"). Its state is the
+# host's, host-gateway.json in the reports directory.
 # The state file of delivered alerts is per account, so it outlives a run:
 # an alert already delivered is not sent again from a later run's log.
 # The Flex reader's ledger of the account's deposits and withdrawals
@@ -69,7 +79,7 @@ LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # sign of a run it is an alert and a fault (docs/manual/server.md, "The reporter before the
 # first run").
 SupplementaryGroups=systemd-journal
-ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover,github-issues -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -resolve-units ti-data.service -self-unit ti-reporter@%i.service
+ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover,github-issues -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -gateway-owner boost -gateway-adapters ti-adapter-boost.service -gateway-state ${TI_REPORTS_DIR}/host-gateway.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service,ti-gateway.service -resolve-units ti-data.service -self-unit ti-reporter@%i.service
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

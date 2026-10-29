@@ -151,7 +151,8 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		case "ReadWritePaths":
 			readWrite = d.value
 		case "EnvironmentFile":
-			if strings.TrimPrefix(d.value, "-") != "/var/lib/trend-investing/engines/%i/run.env" {
+			// The Gateway's own settings give the Gateway check its restart windows.
+			if f := strings.TrimPrefix(d.value, "-"); f != "/etc/trend-investing/gateway.env" && f != "/var/lib/trend-investing/engines/%i/run.env" {
 				t.Errorf("EnvironmentFile=%s, want the engine's run.env, which names the current run", d.value)
 			}
 		case "LoadCredential":
@@ -203,13 +204,19 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		// The server's script is not on this machine: a stand-in that passes.
 		args[i+1] = newStandInCheck(t).path()
 	}
+	if i := indexOf(args, "-gateway-adapters"); i < 0 || i+1 >= len(args) || args[i+1] != "ti-adapter-boost.service" {
+		t.Errorf("ExecStart %v does not give the Gateway check the Boost adapter's journal", args)
+	}
+	if i := indexOf(args, "-gateway-owner"); i < 0 || i+1 >= len(args) || args[i+1] != "boost" {
+		t.Errorf("ExecStart %v does not name boost as the gateway check's owner", args)
+	}
 	if indexOf(args, "-summary") < 0 {
 		t.Errorf("ExecStart %v does not send the daily summary", args)
 	}
 	// The instance's engine and adapter are checked, and the reporter's own
 	// failure page is resolved by a clean firing.
 	for flag, value := range map[string]string{
-		"-units":         "ti-engine@boost.service,ti-adapter-boost.service",
+		"-units":         "ti-engine@boost.service,ti-adapter-boost.service,ti-gateway.service",
 		"-resolve-units": "ti-data.service",
 		"-self-unit":     "ti-reporter@boost.service",
 	} {
@@ -220,7 +227,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	// The server's systemctl is not on this machine: a stand-in with no unit failed.
 	systemd := newStandInSystemd(t)
 	systemd.fail()
-	args = append(args, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl())
+	args = append(args, "-systemctl", systemd.systemctl(), "-journalctl", newStandInGateway(t).journalctl())
 
 	if err := os.Rename(writeDurableLog(t, t.TempDir()), filepath.Join(state, env["TI_RUN"]+".log")); err != nil {
 		t.Fatal(err)

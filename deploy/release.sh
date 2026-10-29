@@ -1,5 +1,5 @@
 #!/bin/bash
-# ti-release: put a tagged release of the server's five programs on the
+# ti-release: put a tagged release of the server's six programs on the
 # server, or put the previous build back. Pull-based: the owner runs it over
 # Tailscale; nothing is pushed to the server and nothing deploys on a merge.
 #
@@ -81,7 +81,7 @@ max_bytes=${TI_RELEASE_MAX_BYTES:-209715200}
 max_time=300
 bin=$prefix/bin
 releases=$prefix/releases
-programs="ti-engine ti-reporter ti-dashboard operator journal-query"
+programs="ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start"
 
 die() { printf 'ti-release: %s\n' "$*" >&2; exit 1; }
 log() { printf 'ti-release: %s\n' "$*"; }
@@ -281,16 +281,25 @@ listed() {
   done
 }
 
-# check_dir DIR: every program DIR/checksums.txt lists is present and
-# matches, and all five are listed; only the hand-installed build (initial)
-# may lack one, so a lost line cannot mix two builds.
+# check_dir DIR [strict]: every program DIR/checksums.txt lists is present and
+# matches, and all six are listed; only the hand-installed build (initial)
+# may lack one, so a lost line cannot mix two builds. A build saved before
+# ti-gateway-start joined the release (five programs, no .programs marker) is
+# still valid when it is not "strict": a freshly fetched release must list all
+# six, and is saved with the marker, so a six-program build that loses the
+# starter's line is damaged, not old. A five-program build is put back only
+# after a failed upgrade (the starter installed before it is restored); a
+# deliberate rollback to one is refused.
 check_dir() {
-  local dir=$1 p want got n=0
+  local dir=$1 strict=${2:-} p want got n=0
   test -f "$dir/checksums.txt" || { echo "no checksums.txt in $dir" >&2; return 1; }
   for p in $programs; do
     want=$(awk -v f="$p" '$2 == f { print $1 }' "$dir/checksums.txt")
     if test -z "$want"; then
       test "$(basename "$dir")" != initial || continue
+      # Only a build saved before the starter joined the release (no .programs
+      # marker, which every build saved since carries) may lack its line.
+      if test "$p" = ti-gateway-start && test "$strict" != strict && test ! -f "$dir/.programs"; then continue; fi
       echo "$p is not listed in checksums.txt" >&2
       return 1
     fi
@@ -402,6 +411,13 @@ restart_dashboard_verified() {
   done
 }
 
+# flush PATH: forces a file or directory to disk. Where `sync` takes a path
+# (GNU coreutils) its error is the answer; where it does not (the Mac), every
+# file system is flushed.
+flush() {
+  if LC_ALL=C sync --help 2>&1 | grep -q 'FILE'; then sync "$1"; else sync; fi
+}
+
 # put_back NAME: re-check the kept build NAME against its checksums and put it
 # back; says so loudly if it cannot.
 put_back() {
@@ -412,6 +428,12 @@ put_back() {
   if ! install_from "$releases/$1"; then
     log "ALERT: putting $1 back failed partway; the programs in $bin may be a mix of builds: run sudo ti-release <a good tag>"
     return 1
+  fi
+  if test -f "$releases/$1/.starter-installed" && ! listed "$releases/$1" | grep -qx ti-gateway-start; then
+    if ! install -m 0755 "$releases/$1/.starter-installed" "$bin/.ti-gateway-start.new" || ! mv -f "$bin/.ti-gateway-start.new" "$bin/ti-gateway-start"; then
+      log "ALERT: the previous ti-gateway-start could not be put back; the programs in $bin may be a mix of builds: run sudo ti-release <a good tag>"
+      return 1
+    fi
   fi
   restart_dashboard_verified || log "the dashboard is still not active on $1: check journalctl -u ti-dashboard"
 }
@@ -473,7 +495,8 @@ if test "$mode" = release; then
   for f in $programs checksums.txt attestation.sigstore.json; do
     fetch "$base_url/$tag/$f" "$stage/$f" || die "could not fetch $base_url/$tag/$f (or it is over $max_bytes bytes); nothing installed"
   done
-  check_dir "$stage" || die "$tag failed its checksums; nothing installed"
+  check_dir "$stage" strict || die "$tag failed its checksums; nothing installed"
+  printf 'six\n' >"$stage/.programs" || die "could not mark the build $tag as a six-program build; nothing installed"
   require_native_programs "$stage"
   if test "$unverified" = 0; then
     commit=$(tag_commit) || die "could not read the commit $tag names from $api_url (a rate limit, the network, or a bad answer); nothing installed; try again later"
@@ -506,6 +529,19 @@ if test "$mode" = release; then
   check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) failed its checksums, so it could not be put back; nothing installed"
 
   refuse_if_engine_busy
+  # A saved five-program build has no starter of its own: keep the one now
+  # installed in that build's folder, so a failed upgrade can put it back. A
+  # copy kept by an upgrade that was interrupted is the original and is never
+  # overwritten by a retry.
+  if ! listed "$releases/$cur" | grep -qx ti-gateway-start && test -f "$bin/ti-gateway-start" && test ! -f "$releases/$cur/.starter-installed"; then
+    # Copied to a name of its own and renamed into place, so a copy that was
+    # cut short is never mistaken for the original.
+    rm -f "$releases/$cur/.starter-installed.tmp"
+    if ! cp -p "$bin/ti-gateway-start" "$releases/$cur/.starter-installed.tmp" || ! flush "$releases/$cur/.starter-installed.tmp" \
+      || ! mv -f "$releases/$cur/.starter-installed.tmp" "$releases/$cur/.starter-installed" || ! flush "$releases/$cur"; then
+      die "could not keep the installed ti-gateway-start with $cur; nothing installed"
+    fi
+  fi
   if ! install_from "$stage" || ! restart_dashboard_verified; then
     log "$tag did not install, or the dashboard did not stay up on it; putting $cur back"
     put_back "$cur" || true
@@ -547,6 +583,7 @@ if test "$mode" = release; then
   fi
   write_state previous "$cur"
   write_state current "$tag"
+  rm -f "$releases/$cur/.starter-installed"
   prune "$tag" "$cur"
   report "$cur" "$tag" "$before"
   exit 0
@@ -557,6 +594,9 @@ cur=$(read_state current)
 prev=$(read_state previous)
 test -n "$prev" && test -d "$releases/$prev" || die "no previous build to roll back to"
 check_dir "$releases/$prev" || die "the previous build ($prev) is damaged; nothing changed"
+if ! listed "$releases/$prev" | grep -qx ti-gateway-start; then
+  die "rolling back to $prev is refused: it holds no ti-gateway-start (it was saved, or installed by hand, before the starter joined the release), so its ti-reporter predates the flags the installed reporter unit passes and would fail every firing. Roll forward instead: sudo ti-release $(read_state current) or a newer tag; nothing changed"
+fi
 test -n "$cur" && test -d "$releases/$cur" || die "the current build's folder is missing, so it could not be put back; nothing changed"
 check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) failed its checksums, so it could not be put back; nothing changed"
 refuse_if_engine_busy

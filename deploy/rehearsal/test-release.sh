@@ -27,7 +27,7 @@ expect() { # description expected actual
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 str_sha() { printf '%s' "$1" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | cut -c1-40; }
 
-programs="ti-engine ti-reporter ti-dashboard operator journal-query"
+programs="ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start"
 slug=richard-whittemore/TrendInvesting
 
 # This machine's ELF e_machine as an octal byte, as release.sh expects it.
@@ -610,7 +610,7 @@ grep -q '^restart ti-dashboard' "$work/ctl.log" || fail "the dashboard was not r
 if grep -E '^(restart|stop|start|kill).*ti-engine' "$work/ctl.log"; then fail "the engine was touched"; fi
 if grep -E '^(restart|stop|start).*ti-reporter' "$work/ctl.log"; then fail "the reporter was restarted"; fi
 expect "gh verified each program once" "$(for p in $programs; do echo "verify $p"; done | sort)" "$(sort "$work/gh.log.verified")"
-expect "gh was called once per program" 5 "$(grep -c '^attestation verify' "$work/gh.log")"
+expect "gh was called once per program" 6 "$(grep -c '^attestation verify' "$work/gh.log")"
 grep -q "next fresh run" "$work/out" || fail "the output does not say the engine takes the build at the next fresh run"
 grep -q "v1.0.0" "$work/out" || fail "the output does not name the new tag"
 grep -qi "changed" "$work/out" || fail "the output does not say what changed"
@@ -700,6 +700,85 @@ expect "rollback over a damaged current build is refused" nonzero "$(nonzero "$(
 all_are "bin untouched over a damaged current build" v1.1.0
 if grep -q '^restart' "$work/ctl.log"; then fail "rollback restarted the dashboard over a damaged current build"; fi
 grep -q "v1.1.0" "$work/out" || fail "the refusal does not name the current build: $(cat "$work/out")"
+
+# A build saved before ti-gateway-start joined the release (five programs, no
+# marker) is still valid for an upgrade, but it is not rolled back to: its
+# ti-reporter does not know the flags the installed reporter unit passes. A
+# build saved with the sixth program carries a marker, so one that loses the
+# starter's checksum line is damaged, not old.
+make_five() { # TAG: the saved build as an older ti-release kept it
+  rm -f "$TI_PREFIX/releases/$1/ti-gateway-start" "$TI_PREFIX/releases/$1/.programs"
+  grep -v ti-gateway-start "$TI_PREFIX/releases/$1/checksums.txt" >"$work/five" && mv "$work/five" "$TI_PREFIX/releases/$1/checksums.txt"
+}
+fresh_server
+run v1.0.0 >/dev/null
+make_five v1.0.0
+expect "an upgrade from a saved five-program release succeeds" 0 "$(run v1.1.0)"
+expect "rollback to a saved five-program release is refused" nonzero "$(nonzero "$(run --rollback)")"
+grep -qi "roll forward" "$work/out" || fail "the refusal does not tell the owner to roll forward: $(cat "$work/out")"
+grep -q "v1.1.0" "$work/out" || fail "the refusal does not name the tag to roll forward to: $(cat "$work/out")"
+all_are "bin untouched by the refused rollback" v1.1.0
+
+# A failed upgrade from a five-program release puts the previous starter back.
+fresh_server
+run v1.0.0 >/dev/null
+make_five v1.0.0
+fake_program "$TI_PREFIX/bin/ti-gateway-start" "echo ti-gateway-start previous"
+expect "an upgrade whose dashboard fails is refused" nonzero "$(nonzero "$(run v1.2.0)")"
+expect "the previous starter is put back after the failed upgrade" "echo ti-gateway-start previous" "$(installed ti-gateway-start)"
+
+# An upgrade that was interrupted left the original starter with the build; a
+# retry that then fails puts that one back, not the candidate it had installed.
+fresh_server
+run v1.0.0 >/dev/null
+make_five v1.0.0
+fake_program "$TI_PREFIX/releases/v1.0.0/.starter-installed" "echo ti-gateway-start original"
+fake_program "$TI_PREFIX/bin/ti-gateway-start" "echo ti-gateway-start candidate-from-the-interrupted-upgrade"
+expect "a retried upgrade whose dashboard fails is refused" nonzero "$(nonzero "$(run v1.2.0)")"
+expect "the original starter is put back, not the interrupted candidate" "echo ti-gateway-start original" "$(installed ti-gateway-start)"
+
+# A copy of the starter that is cut short is not the original: a cp that fails
+# after writing part of the file leaves nothing a retry would trust.
+fresh_server
+run v1.0.0 >/dev/null
+make_five v1.0.0
+fake_program "$TI_PREFIX/bin/ti-gateway-start" "echo ti-gateway-start installed"
+mkdir -p "$work/shim"
+cat >"$work/shim/cp" <<SHIM
+#!/bin/sh
+for a; do last=\$a; done
+case \$last in *.starter-installed*) if [ ! -e "$work/shim/once" ]; then touch "$work/shim/once"; printf partial >"\$last"; exit 1; fi ;; esac
+exec /bin/cp "\$@"
+SHIM
+chmod +x "$work/shim/cp"
+rm -f "$work/shim/once"
+s=0; PATH="$work/shim:$PATH" "$script" v1.2.0 >"$work/out" 2>&1 || s=$?
+expect "an upgrade whose starter copy is cut short is refused" nonzero "$(nonzero "$s")"
+expect "nothing was installed over the starter" "echo ti-gateway-start installed" "$(installed ti-gateway-start)"
+expect "the retry whose dashboard fails is refused" nonzero "$(nonzero "$(PATH="$work/shim:$PATH" run v1.2.0)")"
+expect "the installed starter, not a partial copy, is put back" "echo ti-gateway-start installed" "$(installed ti-gateway-start)"
+
+# A hand-installed build (initial) without the starter is refused as a rollback target too.
+fresh_server
+rm "$TI_PREFIX/bin/ti-gateway-start"
+run v1.0.0 >/dev/null
+expect "rollback to a hand build without the starter is refused" nonzero "$(nonzero "$(run --rollback)")"
+
+# A saved build that carries the marker but lost the starter's line is damaged.
+fresh_server
+run v1.0.0 >/dev/null
+run v1.1.0 >/dev/null
+grep -v ti-gateway-start "$TI_PREFIX/releases/v1.0.0/checksums.txt" >"$work/five" && mv "$work/five" "$TI_PREFIX/releases/v1.0.0/checksums.txt"
+expect "rollback to a six-program build missing its starter line is refused" nonzero "$(nonzero "$(run --rollback)")"
+grep -q "is not listed in checksums.txt" "$work/out" || fail "the refusal does not say the build is damaged: $(cat "$work/out")"
+if grep -qi "roll forward" "$work/out"; then fail "a damaged six-program build was treated as an old five-program one: $(cat "$work/out")"; fi
+all_are "bin untouched by a refusal for a damaged six-program build" v1.1.0
+
+fresh_server
+rm "$work/rel/v1.3.0/ti-gateway-start"
+grep -v ti-gateway-start "$work/rel/v1.3.0/checksums.txt" >"$work/five" && mv "$work/five" "$work/rel/v1.3.0/checksums.txt"
+expect "a freshly fetched release without the sixth program is refused" nonzero "$(nonzero "$(run v1.3.0)")"
+make_release v1.3.0
 
 # Rollback with no previous build.
 fresh_server
