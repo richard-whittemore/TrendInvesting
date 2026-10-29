@@ -288,7 +288,10 @@ that logged in again inside the window is handled at the close, like a unit,
 never before; an outage a window held that is still under 10 minutes old at the
 close keeps its hold until it pages or logs in. You read these lines in the
 reporter's journal on the server: `journalctl -u ti-reporter@boost.service
---since yesterday | grep 'held during maintenance'`. A fault in the hold
+--since yesterday | grep 'held during maintenance'`. The line is
+informational and best effort: if the hold could not be recorded, or the output
+cannot be written, the line is lost, and the page for anything still failed is
+never affected. A fault in the hold
 bookkeeping is reported with the firing's errors and never delays or stops a
 page (the Gateway's bookkeeping waits at most 10 seconds for the shared record).
 A held failure of a unit that this reporter instance does not itself watch is

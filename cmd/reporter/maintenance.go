@@ -152,10 +152,13 @@ func gatewayHeldKey(host string) string { return gatewayHeldPrefix + host }
 
 // A held condition ends in one of two ways at the first firing after the
 // window closes. If it is still wrong it is paged by the ordinary path (the
-// page is never gated by any of this bookkeeping). If it recovered it is
-// marked handled (the handled record, with its time, is the record) and the
-// firing says so in one output line, which the owner reads in the reporter's
-// journal (docs/manual/alerts-and-dashboard.md, "Maintenance windows").
+// page is never gated by any of this bookkeeping). If it recovered, its hold is
+// forgotten and the firing says so in one output line, which the owner reads in
+// the reporter's journal (docs/manual/alerts-and-dashboard.md, "Maintenance
+// windows"). A unit's failed run is also marked handled (handleRuns) so a late
+// repeat of it pages no one; the Gateway keeps nothing but the line. The line
+// is informational and best effort: if recording the hold failed, or the output
+// cannot be written, the line is lost, and that never affects a page.
 
 // recoveredLine is that output line for name, held by the window ending at
 // until.
