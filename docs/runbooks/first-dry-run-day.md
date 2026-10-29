@@ -1159,3 +1159,69 @@ with a stated reason (`stale-account-snapshot` without the proof by 09:00,
 `docs/manual/momentum.md`). The IRA's reporter and dashboard view are not
 part of this slice, so no page comes for a withheld IRA month yet: run the
 probe on the morning of 1 December and record its output.
+
+## The Roth IRA and the measurement week
+
+Use the same Gateway and login as Boost and Traditional IRA (ADR 0026;
+owner decision 2026-10-28). The Roth adapter is client **13**, Traditional
+IRA is **12**, Boost is **11**. All remain dry-run. From the staged repository
+root on the server, install the new account's examples only when absent;
+never replace another account's configuration. Record the existing files'
+checksums before and after, without printing their contents:
+
+```bash
+before=$(sudo sha256sum /etc/trend-investing/engines/*.config /etc/trend-investing/engines/*.env)
+sudo test -e /etc/trend-investing/engines/roth-ira.config || sudo install -m 0644 deploy/etc/engines/roth-ira.config.example /etc/trend-investing/engines/roth-ira.config
+sudo test -e /etc/trend-investing/engines/roth-ira.env || sudo install -m 0644 deploy/etc/engines/roth-ira.env /etc/trend-investing/engines/roth-ira.env
+sudo test -e /etc/trend-investing/adapters/roth-ira.json || sudo install -m 0644 deploy/etc/adapters/roth-ira.json.example /etc/trend-investing/adapters/roth-ira.json
+for account in boost trad-ira roth-ira; do
+  sudo install -d -m 0755 "/etc/systemd/system/ti-flex@$account.timer.d"
+  sudo install -m 0644 "deploy/systemd/ti-flex@$account.timer.d/stagger.conf" "/etc/systemd/system/ti-flex@$account.timer.d/"
+done
+sudo install -d -m 0755 /etc/systemd/system/ti-data@roth-ira.timer.d
+sudo install -m 0644 deploy/systemd/ti-data@roth-ira.timer.d/stagger.conf /etc/systemd/system/ti-data@roth-ira.timer.d/
+sudo install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/engines/roth-ira /var/lib/trend-investing/adapters/roth-ira /var/lib/trend-investing/flex/roth-ira
+sudo install -d -o ti-operator -g ti-trader -m 0750 /var/lib/trend-investing/engines/roth-ira/operator
+printf '%s\n' "$before" | sudo sha256sum --check --status
+sudo systemctl daemon-reload
+sudo systemctl enable --now ti-data@roth-ira.timer ti-reporter@roth-ira.timer
+```
+
+Before starting any Roth engine or adapter, use `sudo ti-secrets edit
+accounts/roth-ira.env` to set `IBKR_ACCOUNT_ROTH_IRA` on the server. Follow
+I-1 through I-8 with `roth-ira` in every path and instance, `ROTH_IRA` in
+the account key and `13` in the probe. Substitute the owner's birth month
+and review the glide anchors and retirement horizon in **Roth's own**
+configuration. Its account must match its own secret and differ from the
+other two accounts; never copy their account values. Use a new Roth run
+name and its own starting-book approval. Warm it up before starting its
+adapter. Do not enable engines or adapters; each start remains the owner's
+step under ADR 0027. Enable and start `ti-flex@roth-ira.timer` once the
+account and shared Flex query credentials are ready (I-6). Restart any
+already running Flex timers after installing their calendar drop-ins so
+the new schedule is in force.
+
+Roth's Flex starts at 06:00/07:00/08:00 New York; its data job starts at
+06:30/07:30/08:30, after Flex's scheduled starts and before the 09:00 proof
+cutoff. Slow Flex reads can run past their windows; the adapter still
+requires the proof. Check `systemctl list-timers 'ti-flex@*' 'ti-data*'`.
+The shared engine/adapter/Flex/data templates already page on failure and
+the reporter's `-units` and `-resolve-units` lists cover Roth. Verify its
+reporter runs and the heartbeat remains Boost's alone.
+
+**Same day, before leaving the installation:** run I-8's probe for Roth,
+expect `client_id=13`, snapshot version 4 and sending off; retain the
+account-masked output. Start Roth's Flex reader by hand and confirm its
+executions proof; start its data job and reporter and read their unit
+results. Record a withheld decision's stated reason if one occurs. Do not
+wait for the next morning to find that a unit cannot start (Boost lesson
+L10).
+
+Then follow [Measuring the server](../manual/server.md#measuring-the-server)
+to install the memory recorder by hand, select seven UTC dates and enable
+its timer. Check the first JSONL record that same day with all three
+engines/adapters and the Gateway running. After the week, retain the JSONL,
+the report's peak/median figures, counts/gaps and schedule, and the owner's
+capacity decision. A missing day fails the report and requires a new
+recorded week; keep the failed one. No server upgrade, paper orders or
+restart drill is performed by these steps.

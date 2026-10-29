@@ -596,8 +596,10 @@ install_engine_settings() {
       mv -f "$dest/.$name.new" "$dest/$name"
     fi
   done
-  for f in "$src"/*.config; do
+  for f in "$src"/*.config "$src"/*.config.example; do
+    test -f "$f" || continue
     name=$(basename "$f")
+    name=${name%.example}
     if test -e "$dest/$name"; then
       install -m 0644 "$f" "$dest/$name.example"
       log "kept $dest/$name, which names the server's account; the shipped one is $dest/$name.example"
@@ -610,12 +612,33 @@ install_engine_settings() {
   done
 }
 
+# One adapter per account (ADR 0026 point 8). Examples contain no account;
+# an existing server configuration is the owner's and is never replaced
+# (docs/live-trading/lessons-2026-10.md L7).
+install_adapter_settings() {
+  local src=$1 adapter_root=$2 f name
+  for f in "$src"/*.json.example; do
+    name=$(basename "${f%.example}")
+    test ! -e "$adapter_root/$name" || continue
+    if mac_mini; then
+      sed 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' "$f" >"$adapter_root/.$name.new"
+    else
+      cat "$f" >"$adapter_root/.$name.new"
+    fi
+    chmod 0644 "$adapter_root/.$name.new"
+    mv "$adapter_root/.$name.new" "$adapter_root/$name"
+    log "created $adapter_root/$name; review mode and sending settings before starting"
+  done
+}
+
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
   log "directories and config"
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/
+  install -m 0755 "$here/memory.py" /usr/local/libexec/trend-investing/
+  install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/memory
   install_engine_settings "$here/etc/engines" "$etc/engines"
   # Non-secret gateway settings. Restart times are New York time (the unit sets TZ).
   install -m 0644 /dev/stdin "$etc/gateway.env" <<CONF
@@ -694,30 +717,7 @@ CONF
   # On the Mac mini the Gateway listens on the Mac, which the container
   # reaches as host.docker.internal; the adapter accepts any host name.
   install -d -m 0755 "$etc/adapters"
-  if ! test -e "$etc/adapters/boost.json"; then
-    if mac_mini; then
-      sed 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' "$here/etc/adapters/boost.json.example" >"$etc/adapters/boost.json.new"
-    else
-      cat "$here/etc/adapters/boost.json.example" >"$etc/adapters/boost.json.new"
-    fi
-    chmod 0644 "$etc/adapters/boost.json.new"
-    mv "$etc/adapters/boost.json.new" "$etc/adapters/boost.json"
-    log "created $etc/adapters/boost.json (owner step: set paper mode before the paper test)"
-  fi
-  # The Traditional IRA's adapter (ti-adapter@trad-ira): its own client ID
-  # (12), the account snapshot the momentum engine reads (version 4) and a
-  # contract and mark for every name it can decide (ADR 0026 points 2 and 3).
-  # Created once, never overwritten, as Boost's is.
-  if ! test -e "$etc/adapters/trad-ira.json"; then
-    if mac_mini; then
-      sed 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' "$here/etc/adapters/trad-ira.json.example" >"$etc/adapters/trad-ira.json.new"
-    else
-      cat "$here/etc/adapters/trad-ira.json.example" >"$etc/adapters/trad-ira.json.new"
-    fi
-    chmod 0644 "$etc/adapters/trad-ira.json.new"
-    mv "$etc/adapters/trad-ira.json.new" "$etc/adapters/trad-ira.json"
-    log "created $etc/adapters/trad-ira.json (dry-run, sending off)"
-  fi
+  install_adapter_settings "$here/etc/adapters" "$etc/adapters"
 
   log "systemd units"
   # The reporter is one instance per engine (ti-reporter@<instance>); an
@@ -746,11 +746,24 @@ CONF
     if mac_mini && test "$(basename "$unit")" = ti-gateway.service; then continue; fi
     install -m 0644 "$unit" "$unit_dir/"
   done
-  # The Traditional IRA's Flex reader fires at its own staggered times, 15
-  # minutes after Boost's (docs/live-trading/lessons-2026-10.md L3): a drop-in
-  # for its instance of the timer, replaced on every run as the units are.
-  install -d -m 0755 "$unit_dir/ti-flex@trad-ira.timer.d"
-  install -m 0644 "$here/systemd/ti-flex@trad-ira.timer.d/stagger.conf" "$unit_dir/ti-flex@trad-ira.timer.d/"
+  # All three Flex readers share one paced token (docs/live-trading/lessons-2026-10.md L3).
+  for instance in boost trad-ira roth-ira; do
+    install -d -m 0755 "$unit_dir/ti-flex@$instance.timer.d"
+    install -m 0644 "$here/systemd/ti-flex@$instance.timer.d/stagger.conf" "$unit_dir/ti-flex@$instance.timer.d/"
+  done
+  install -d -m 0755 "$unit_dir/ti-data@roth-ira.timer.d"
+  install -m 0644 "$here/systemd/ti-data@roth-ira.timer.d/stagger.conf" "$unit_dir/ti-data@roth-ira.timer.d/"
+  # Memory accounting covers the Gateway and every trading service, including
+  # short-lived jobs. Counters are read by memory.py (docs/live-trading/lessons-2026-10.md L1).
+  # Enabling accounting starts no unit and leaves every owner's config intact.
+  for unit in "$here"/systemd/*.service; do
+    unit=$(basename "$unit")
+    if mac_mini && test "$unit" = ti-gateway.service; then continue; fi
+    install -d -m 0755 "$unit_dir/$unit.d"
+    printf '[Service]\nMemoryAccounting=yes\n' >"$unit_dir/$unit.d/memory.conf"
+  done
+  # The measurement timer is installed only. The owner selects its UTC week
+  # and enables it by hand (docs/manual/server.md, "Measuring the server").
   # Boost pings using its credential URL (ADR 0019, "Alerting").
   # Disable every IRA reporter: a second pinger would mask the loss of Boost.
   for instance in trad-ira roth-ira; do
@@ -772,9 +785,8 @@ EOF
   fi
   if test "$rehearsal" != 1; then
     systemctl daemon-reload
-    # The Boost and Traditional IRA reporters (the second IRA's joins with its
-    # engine): until an engine's run.env exists its reporter's firing is a
-    # quiet wait (ti-reporter@.service, -run-env), so an enabled one fails
+    # All three accounts' reporters: until an engine's run.env exists its
+    # reporter's firing is a quiet wait (ti-reporter@.service, -run-env), so an enabled one fails
     # nothing, and a reporter that is only started is gone after a reboot
     # (docs/live-trading/lessons-2026-10.md L8).
     # `enable` only links them for the next boot, so the timers and the
@@ -791,10 +803,11 @@ EOF
     else
       systemctl enable ti-gateway.service
     fi
-    # The Traditional IRA's data job too: until its engine's run.env exists
+    # Both IRAs' data jobs too: until each engine's run.env exists
     # each firing is a quiet wait (ti-data@.service; docs/live-trading/
     # lessons-2026-10.md L8: a timer that should run unattended is enabled).
     systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer ti-reporter@trad-ira.timer
+    systemctl enable --now ti-data@roth-ira.timer ti-reporter@roth-ira.timer
     if mac_mini; then
       systemctl enable --now ti-clock-check.timer
     fi
@@ -811,16 +824,16 @@ EOF
     # The adapters are started by the owner too, each after its engine and,
     # for an IRA, after its warm-up; never enabled: the engine is never
     # started at boot, so an adapter started then would only fail.
-    systemctl disable ti-adapter-boost.service ti-adapter@trad-ira.service
+    systemctl disable ti-adapter-boost.service ti-adapter@trad-ira.service ti-adapter@roth-ira.service
     # The gateway starts only once the owner has filled
     # the login file; the unit's own check refuses an empty one. The data
     # step, the reporter and the dashboard fail, each with a message, until
     # their files are installed and the Boost engine's run.env exists; the
     # reporter also until secrets.env holds its channel secrets.
     if mac_mini; then
-      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-reporter@boost.timer, ti-reporter@trad-ira.timer and ti-dashboard; ti-gateway is masked (the Gateway is the Mac app)"
+      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-data@roth-ira.timer, ti-reporter@boost.timer, ti-reporter@trad-ira.timer, ti-reporter@roth-ira.timer and ti-dashboard; ti-gateway is masked (the Gateway is the Mac app)"
     else
-      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-reporter@boost.timer, ti-reporter@trad-ira.timer and ti-dashboard; start the gateway with: systemctl start ti-gateway (after the owner enters the IBKR login)"
+      log "enabled; started ti-data.timer, ti-data@trad-ira.timer, ti-data@roth-ira.timer, ti-reporter@boost.timer, ti-reporter@trad-ira.timer, ti-reporter@roth-ira.timer and ti-dashboard; start the gateway with: systemctl start ti-gateway (after the owner enters the IBKR login)"
     fi
   fi
 }

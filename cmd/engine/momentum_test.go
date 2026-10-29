@@ -451,3 +451,84 @@ func TestTheShippedIRAConfigurationRecordsTheMonthWithheld(t *testing.T) {
 	}
 	t.Logf("withheld: %s (%s)", decided[0].WithheldReason, decided[0].Detail)
 }
+
+// TestEachIRAReadsItsOwnBirthAndHorizon exercises two independently loaded
+// configurations through the engine's recorded decision (ADR 0026 point 6,
+// "Glide path"). Births and the alternate horizon are synthetic; the
+// momentum lookbacks use the existing synthetic month, never real prices.
+func TestEachIRAReadsItsOwnBirthAndHorizon(t *testing.T) {
+	for _, tc := range []struct {
+		account, file, birth string
+		shift, ageMonths     int
+		bondShare            float64
+	}{
+		{"trad-ira", "trad-ira.config", "1972-02", 0, 53 * 12, 0.308},
+		{"roth-ira", "roth-ira.config.example", "1982-02", -5, 43 * 12, 0.308 * 10 / 15},
+	} {
+		t.Run(tc.account, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := boostConfiguration(t, "../../deploy/etc/engines/"+tc.file)
+			if cfg.AccountID != tc.account || cfg.Glide.Birth != "YYYY-MM" {
+				t.Fatal("shipped account or birth placeholder differs")
+			}
+			cfg.Momentum = boostConfiguration(t, momentumConfigPath).Momentum
+			cfg.Glide.Birth = tc.birth
+			cfg.Glide.RetirementAgeYears += tc.shift
+			for i := range cfg.Glide.Anchors {
+				cfg.Glide.Anchors[i].AgeYears += tc.shift
+			}
+			raw, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, tc.account+".config")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			asOf, err := time.Parse(time.RFC3339, momentumAsOf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			comp, err := compose(path, "test-build", asOf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := comp.handler.Apply(context.Background(), comp.configEnvelope); err != nil {
+				t.Fatal(err)
+			}
+			var decisions []event.Envelope
+			sequence := configurationSequence + 1
+			for _, in := range readMonth(t, momentumMonthPath) {
+				raw := bytes.ReplaceAll(in.Payload, []byte(`"account_id":"`+fixtureAccount+`"`), []byte(`"account_id":"`+cfg.AccountID+`"`))
+				env := event.Envelope{
+					ID: in.ID, Type: in.Type, EnvelopeVersion: event.CurrentEnvelopeVersion, SchemaVersion: in.SchemaVersion,
+					EventTime: in.EventTime, RecordedAt: in.EventTime, Sequence: sequence, Source: "test-adapter",
+					StrategyVersion: comp.strategyVersion, ConfigurationHash: comp.configurationHash, PayloadHash: event.HashPayload(raw), Payload: raw,
+				}
+				out, err := comp.handler.Apply(context.Background(), env)
+				if err != nil {
+					t.Fatalf("apply %s: %v", in.ID, err)
+				}
+				decisions = append(decisions, out...)
+				sequence += 1 + uint64(len(out))
+			}
+			count := 0
+			for _, d := range decisions {
+				if d.Type != event.TargetsDecidedEventType {
+					continue
+				}
+				var p event.TargetsDecidedPayload
+				if err := json.Unmarshal(d.Payload, &p); err != nil {
+					t.Fatal(err)
+				}
+				count++
+				if p.AccountID != tc.account || p.Glide.AgeMonths != tc.ageMonths || math.Abs(p.Glide.BondShare-tc.bondShare) > 1e-12 {
+					t.Errorf("decision account %s glide %+v, want age %d bond share %v", p.AccountID, p.Glide, tc.ageMonths, tc.bondShare)
+				}
+			}
+			if count != 1 {
+				t.Fatalf("got %d decisions, want one", count)
+			}
+		})
+	}
+}

@@ -88,7 +88,7 @@ Boost instance's account id is `joint`.
 | File | What it holds | Who writes it |
 | --- | --- | --- |
 | `/etc/trend-investing/engines/<instance>.env` | the account's label (`TI_ACCOUNT`), its adapter client ID (Boost 11, Traditional IRA 12, Roth IRA 13) and the engine's start mode (`TI_MODE`, `dry-run`) | installed from `deploy/etc/engines/` by `provision.sh services` when there is none, then kept; the shipped one beside it as `<instance>.env.example` |
-| `/etc/trend-investing/engines/<instance>.config` | the account's configuration: strategy, account, mode, rule figures, hard limits. Hashed into every run (ADR 0016). `boost.config` and `trad-ira.config` exist; the Roth IRA has none yet. Each ships with placeholders (`joint`, `trad-ira`; the IRA's birth month `YYYY-MM`), never your account or birth month, which you name on the server | installed from `deploy/etc/engines/` by `provision.sh services` only when there is none; then yours, kept by every later run (the shipped one goes beside it as `<instance>.config.example`) |
+| `/etc/trend-investing/engines/<instance>.config` | the account's configuration: strategy, account, mode, rule figures, hard limits. Hashed into every run (ADR 0016). All three accounts have templates. Each ships with placeholders (`joint`, `trad-ira`, `roth-ira`; each IRA's birth month `YYYY-MM`), never your account or birth month, which you name on the server. Each IRA reads its own glide anchors and retirement horizon from this file | installed from `deploy/etc/engines/` by `provision.sh services` only when there is none; then yours, kept by every later run (the shipped one goes beside it as `<instance>.config.example`) |
 | `/var/lib/trend-investing/engines/<instance>/run.env` | one engine start: `TI_RUN` (the run's name, never reused), `TI_AS_OF` (its first decided session) and `TI_RESTART_ARGS` (empty, `-approval <file>` or `-resume <log>`) | you, before every start (`docs/runbooks/durable-log.md`, "Restarting an engine"; example in `deploy/etc/engines/run.env.example`) |
 | `/etc/trend-investing/gateway.env` | the Gateway's restart times | `provision.sh services` |
 | `/etc/trend-investing/adapters/boost.json` | the Boost adapter's settings: the Gateway's address and port (4002), client ID 11, mode and the paper sending switch (`paper_sending_enabled`), timeouts; no account number | created once from `deploy/etc/adapters/boost.json.example` by `provision.sh services`, never overwritten; you edit it for paper |
@@ -128,7 +128,7 @@ the same disk as the files, and a snapshot would carry both.
 | `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY`, `TI_PAGERDUTY_ROUTING_KEY` (unused: the server pages through Pushover), `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL`, and the Flex reader's `TI_IBKR_FLEX_TOKEN`, `TI_IBKR_FLEX_QUERY_ID` and `TI_IBKR_FLEX_TRADES_QUERY_ID` | handed as a private credential file (`LoadCredential`) to the data job, the engines, the reporter and the Flex readers; the dashboard is given none |
 | `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
 | `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's adapter (`ti-adapter@trad-ira.service`) and its Flex reader (`ti-flex@trad-ira.service`) |
-| `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@roth-ira.service`) |
+| `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to its adapter (`ti-adapter@roth-ira.service`, client ID 13) and Flex reader (`ti-flex@roth-ira.service`) |
 
 An existing server's `secrets.env` keeps the layout it was provisioned with, because provisioning never overwrites it, so the owner may tidy it by hand to match `deploy/etc/secrets.env.example`.
 
@@ -584,6 +584,100 @@ needs"). If a job is ever killed for memory anyway (`journalctl -k | grep -i
 `sudo systemctl stop ti-gateway ti-dashboard`, run the warm-up, then `sudo
 systemctl start ti-gateway ti-dashboard` (the Gateway logs in again and may
 ask for the phone approval).
+
+## Measuring the server
+
+Boost lesson L1 requires a week of evidence with the Gateway, all three
+engines and adapters, data jobs, reporters and dashboard sharing the 2 GB
+server before the IRAs go live. This measures the existing server; the owner
+decides whether its figures require a larger instance (ADR 0026). Run the
+accounts in dry-run; the paper and restart gates remain separate.
+
+`deploy/memory.py` uses only Python's standard library and `systemctl`.
+`ti-memory.timer` samples every five minutes, including weekends, into
+`/var/lib/trend-investing/memory/<week-start>.jsonl`. Provisioning installs
+the script, units, directory and `MemoryAccounting=yes` service drop-ins;
+it **does not enable the measurement timer** or choose a week. Existing
+evidence is append-only. Keep each week's JSONL and report, failed weeks
+included; never truncate or replace one to obtain a passing report.
+
+For an existing server, install by hand from the staged repository root:
+
+```bash
+sudo install -m 0755 deploy/memory.py /usr/local/libexec/trend-investing/memory.py
+sudo install -m 0644 deploy/systemd/ti-memory.service deploy/systemd/ti-memory.timer /etc/systemd/system/
+sudo install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/memory
+for file in deploy/systemd/*.service; do
+  unit=$(basename "$file")
+  sudo install -d -m 0755 "/etc/systemd/system/$unit.d"
+  printf '[Service]\nMemoryAccounting=yes\n' | sudo tee "/etc/systemd/system/$unit.d/memory.conf" >/dev/null
+done
+sudo systemctl daemon-reload
+```
+
+Choose the first of seven **UTC dates** in `memory.env`. An arbitrary start
+date is allowed. Start at its midnight for the fullest coverage; starting
+later on that date records a partial first day explicitly. For example,
+replace `YYYY-MM-DD` below with the chosen date. This file holds no secret:
+
+```bash
+printf 'TI_MEMORY_WEEK_START=YYYY-MM-DD\n' | sudo tee /etc/trend-investing/memory.env >/dev/null
+sudo chmod 0644 /etc/trend-investing/memory.env
+sudo systemctl enable --now ti-memory.timer
+sudo systemctl start ti-memory.service
+sudo systemctl status ti-memory.service --no-pager
+sudo systemctl list-timers ti-memory.timer --no-pager
+```
+
+On that same day, after the selected UTC week has begun, check that the
+JSONL has a new record and check the `active_state` of all three engines,
+all three adapters and the Gateway. Missing/inactive services are recorded,
+not assumed to be running. An active unit with unavailable counters fails
+the sample and pages through `OnFailure`; check `MemoryAccounting` and, for
+an already running unit, use `sudo systemctl set-property --runtime <unit>
+MemoryAccounting=yes`, then retry. The sampler records all loaded `ti-*`
+services plus an explicit list of the accounts' services and the Gateway,
+so even an inactive or unloaded required unit appears.
+
+The record includes each unit's `MemoryCurrent`, `MemoryPeak`, active/load
+state, the server's `MemTotal` and `MemAvailable` from `/proc/meminfo`, and
+the installed timer text including instance drop-ins. Schedule changes
+during the week remain visible in the report's `schedules`. The Flex
+starts are Boost 05:30/06:30/07:30, Traditional IRA 05:45/06:45/07:45 and
+Roth IRA 06:00/07:00/08:00 New York. Roth data runs at
+06:30/07:30/08:30, thirty minutes after its Flex starts, before the 09:00
+proof cutoff. The stagger separates starts; a slow Flex request can outlive
+its fifteen-minute window, and each adapter still requires the executions
+proof (Boost lesson L3).
+
+After the seven dates, substitute the same start date and save the report:
+
+```bash
+sudo systemctl disable --now ti-memory.timer
+sudo -u ti-trader python3 /usr/local/libexec/trend-investing/memory.py report \
+  --week-start YYYY-MM-DD --record /var/lib/trend-investing/memory/YYYY-MM-DD.jsonl
+```
+
+Copy stdout to a new report file and keep it beside the JSONL. The sampler
+appends nothing outside the selected week even if the owner leaves its
+timer enabled. The report exits non-zero with `memory: FAIL: missing samples
+for <date>` if any UTC day has no sample; malformed/truncated records also
+fail. It states counts per day (288 expected), first/last observations and
+the largest gap: a day with one observation meets the missing-day check,
+but is visibly incomplete and is not enough evidence for a capacity decision.
+
+All figures are bytes. Typical use is the median of available
+`MemoryCurrent` observations per unit. `peak_bytes` includes the largest
+cgroup `MemoryPeak` seen: this is a lifetime high-water mark and can predate
+the week, and a short-lived job can finish between samples without leaving
+a readable counter. `sampled_peak_bytes` is the highest observed
+`MemoryCurrent`; neither claims to capture every short spike. Unavailable
+counters are null with observation counts and unit states, never invented
+zeros. Server peak and median use `MemTotal - MemAvailable` at each sample;
+they include the whole host, and are never a sum of non-simultaneous unit
+peaks. Compare these figures and coverage with `capacity_bytes`, and retain
+the schedule under which they were taken before making the owner's sizing
+decision.
 
 ## The clock
 
