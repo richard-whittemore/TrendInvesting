@@ -32,7 +32,7 @@ func directive(t *testing.T, path, section, key string) []string {
 // the reporter are never restarted by systemd (the reporter is fired by its
 // timer), so a failed one is paged by the hook with its own name.
 func TestEveryTradingUnitHandsItsFailureToTheHook(t *testing.T) {
-	for _, path := range []string{engineUnitPath, adapterUnitPath, reporterUnitPath, "../../deploy/systemd/ti-data.service", "../../deploy/systemd/ti-data@.service"} {
+	for _, path := range []string{engineUnitPath, adapterUnitPath, reporterUnitPath, "../../deploy/systemd/ti-data.service", "../../deploy/systemd/ti-data@.service", "../../deploy/systemd/ti-flex@.service"} {
 		if got := directive(t, path, "[Unit]", "OnFailure"); len(got) != 1 || got[0] != "ti-unit-failed@%n.service" {
 			t.Errorf("%s: OnFailure = %v, want ti-unit-failed@%%n.service", path, got)
 		}

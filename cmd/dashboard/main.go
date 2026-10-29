@@ -452,6 +452,12 @@ func loadOne(path, warning, ledger, instance, benchmark string, logs *logCache) 
 // restored without its time, which the engine would take for the latest run
 // at its next start; it is "" when there is none.
 func currentLogIn(dir string, logs *logCache) (path, warning string, err error) {
+	// An engine whose folder is not there yet (the second IRA's before its
+	// provisioning) has not started: its card says so, and no other card is
+	// affected (docs/live-trading/lessons-2026-10.md L8).
+	if _, statErr := logs.stat(dir); errors.Is(statErr, fs.ErrNotExist) {
+		return "", "", errNoRun
+	}
 	files, err := journalquery.ListLogs(dir, ".log")
 	if err != nil {
 		return "", "", errors.New("read the engine directory")

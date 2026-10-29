@@ -16,10 +16,13 @@ Environment=TZ=America/New_York
 # Loopback only, on the port `tailscale serve --bg 8088` publishes; the
 # firewall also closes every non-Tailscale port. The dashboard needs no
 # secret, so it is handed none.
-# The Flex reader's ledger of Boost's deposits and withdrawals (ti-flex@boost)
+# Every engine's folder is read (Boost, the Traditional IRA and the Roth IRA),
+# each card with its own engine's state; a folder not there yet, or with no
+# run, is the card "no run yet: the engine has not started a run".
+# The Flex reader's ledger of each account's deposits and withdrawals (ti-flex@<instance>)
 # is read on every request for the equity card's SPY shadow account; until
 # the reader has written it the card says the comparison assumes none.
-ExecStart=/opt/trend-investing/bin/ti-dashboard -engine-dir /var/lib/trend-investing/engines/boost -cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl -addr 127.0.0.1:8088
+ExecStart=/opt/trend-investing/bin/ti-dashboard -engine-dir /var/lib/trend-investing/engines/boost -engine-dir /var/lib/trend-investing/engines/trad-ira -engine-dir /var/lib/trend-investing/engines/roth-ira -cash-ledger /var/lib/trend-investing/engines/boost=/var/lib/trend-investing/flex/boost/cash-movements.jsonl -cash-ledger /var/lib/trend-investing/engines/trad-ira=/var/lib/trend-investing/flex/trad-ira/cash-movements.jsonl -cash-ledger /var/lib/trend-investing/engines/roth-ira=/var/lib/trend-investing/flex/roth-ira/cash-movements.jsonl -addr 127.0.0.1:8088
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true

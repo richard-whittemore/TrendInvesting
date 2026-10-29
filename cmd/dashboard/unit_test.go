@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -89,7 +90,7 @@ func TestTheServiceFileServesTheBoostLogOnTheOnePort(t *testing.T) {
 	if got, want := flag("-engine-dir"), "/var/lib/trend-investing/engines/boost"; got != want {
 		t.Errorf("-engine-dir %q, want the Boost engine's log directory %q, so the page finds the latest run on each request", got, want)
 	}
-	if got, want := flag("-cash-ledger"), "/var/lib/trend-investing/flex/boost/cash-movements.jsonl"; got != want {
+	if got, want := flag("-cash-ledger"), "/var/lib/trend-investing/engines/boost=/var/lib/trend-investing/flex/boost/cash-movements.jsonl"; got != want {
 		t.Errorf("-cash-ledger %q, want the Boost Flex reader's ledger %q, so the shadow account mirrors the owner's transfers", got, want)
 	}
 	if flag("-journal") != "" {
@@ -115,5 +116,34 @@ func TestTheServiceFileServesTheBoostLogOnTheOnePort(t *testing.T) {
 		if m[1] != port {
 			t.Errorf("the runbook publishes port %s, the unit listens on %s", m[1], port)
 		}
+	}
+}
+
+// TestTheServiceFileReadsEveryEnginesFolderAndLedger: the unit names the
+// engine folder and the Flex ledger of each account, so the page shows Boost
+// and the IRAs; a folder not there yet is a "not started" card.
+func TestTheServiceFileReadsEveryEnginesFolderAndLedger(t *testing.T) {
+	_, execStart := serviceSettings(t, dashboardUnitPath)
+	words := strings.Fields(execStart)
+	var dirs, ledgers []string
+	for i, w := range words {
+		switch {
+		case w == "-engine-dir" && i+1 < len(words):
+			dirs = append(dirs, words[i+1])
+		case w == "-cash-ledger" && i+1 < len(words):
+			ledgers = append(ledgers, words[i+1])
+		}
+	}
+	for _, a := range []string{"boost", "trad-ira", "roth-ira"} {
+		dir := "/var/lib/trend-investing/engines/" + a
+		if !slices.Contains(dirs, dir) {
+			t.Errorf("-engine-dir does not name %s", dir)
+		}
+		if want := dir + "=/var/lib/trend-investing/flex/" + a + "/cash-movements.jsonl"; !slices.Contains(ledgers, want) {
+			t.Errorf("-cash-ledger does not name %s", want)
+		}
+	}
+	if _, err := ledgersOf(ledgers, nil, dirs); err != nil {
+		t.Errorf("the dashboard refuses the unit's ledgers: %v", err)
 	}
 }

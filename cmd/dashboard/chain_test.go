@@ -287,7 +287,7 @@ func TestDashboardDegradesPerAccount(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, body)
 	}
-	for _, want := range []string{"trad-ira: no run yet", "gone: journal unavailable", "acct-joint", "halted"} {
+	for _, want := range []string{"trad-ira: no run yet", "gone: no run yet", "acct-joint", "halted"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q", want)
 		}
@@ -436,5 +436,41 @@ func TestMessageCardAnchorsAreUnique(t *testing.T) {
 	}
 	if strings.Contains(body, `id="acct-boost"`) {
 		t.Error("a message card must not use an account's anchor")
+	}
+}
+
+// TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsNotStarted: the
+// dashboard reads every engine's folder (Boost, the Traditional IRA and, once
+// it exists, the Roth IRA), each card keeps its own engine's state, and an
+// engine whose folder is not there yet is the card "not started", never an
+// error page for the others (lessons L8).
+func TestDashboardShowsEachEnginesOwnStateAndAMissingEngineAsNotStarted(t *testing.T) {
+	root := t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	boost, ira, roth := filepath.Join(root, "boost"), filepath.Join(root, "trad-ira"), filepath.Join(root, "roth-ira")
+	for _, d := range []string{boost, ira} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRun(t, boost, "run1.log", approval("", ""), 0, base, halted(t, 5))
+	writeRun(t, ira, "run1.log", approval("", ""), 0, base)
+	h := newHandlerFor(nil, []string{boost, ira, roth}, nil, "SPY")
+	rec := get(h, http.MethodGet, "/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "roth-ira: no run yet: the engine has not started a run") || strings.Contains(body, root) {
+		t.Errorf("the missing engine is not shown as not started, or the page leaks a path:\n%s", body)
+	}
+	var accounts []account
+	if err := json.Unmarshal(get(h, http.MethodGet, "/api/summary.json").Body.Bytes(), &accounts); err != nil || len(accounts) != 3 {
+		t.Fatalf("accounts = %d, %v, want the three engines", len(accounts), err)
+	}
+	if accounts[0].Summary.EngineState != "halted" || accounts[1].Summary.EngineState == "halted" || accounts[1].Message != "" {
+		t.Errorf("states = %q and %q (message %q), want Boost halted and the IRA's own, normal", accounts[0].Summary.EngineState, accounts[1].Summary.EngineState, accounts[1].Message)
+	}
+	if accounts[2].Name != "roth-ira" || !strings.Contains(accounts[2].Message, "not started") {
+		t.Errorf("the missing engine's card = %+v", accounts[2])
 	}
 }

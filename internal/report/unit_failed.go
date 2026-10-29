@@ -32,6 +32,7 @@ var UnitManualRows = []struct{ prefix, row string }{
 	{"ti-gateway.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "ti-gateway failed and stays down" (login file, or login retries stopped)`},
 	{"ti-data.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
 	{"ti-data@", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
+	{"ti-flex@", `docs/manual/reconciliation.md, "What can go wrong, and what the program does then", the rows that begin "ti-flex@<instance> failed"`},
 }
 
 // UnitManualRow is the manual row for a failed unit; every other unit is
@@ -56,6 +57,14 @@ func isDataJob(unit string) bool {
 	return strings.HasPrefix(unit, "ti-data.") || strings.HasPrefix(unit, "ti-data@")
 }
 
+// isFlexReader is an account's Flex reader, ti-flex@<instance>.service: run
+// again by its timer at the next firing like a data job, so it is paged once
+// and only resolved (ADR 0019, "Alerting"; lessons L8).
+func isFlexReader(unit string) bool { return strings.HasPrefix(unit, "ti-flex@") }
+
+// isTimerJob is a unit its timer runs again: a data job or a Flex reader.
+func isTimerJob(unit string) bool { return isDataJob(unit) || isFlexReader(unit) }
+
 // restartSentence says who starts the failed unit again, per unit. The rule
 // is the restart model (ADR 0027): systemd never restarts the engine or the
 // adapter, so a stop waits for the owner; the data job is the exception,
@@ -63,6 +72,9 @@ func isDataJob(unit string) bool {
 func restartSentence(unit string) string {
 	if isDataJob(unit) {
 		return "The data job is run again by its timer at the next firing; you need not start it unless you fixed its cause and want the session recorded sooner."
+	}
+	if isFlexReader(unit) {
+		return "The Flex reader is run again by its timer at the next firing; you need not start it unless you fixed its cause and want the ledger read sooner."
 	}
 	if strings.HasPrefix(unit, "ti-gateway.") {
 		return "systemd starts the Gateway again after most stops; a stop it does not restart on (the login file, or the bound on login attempts) waits for you."
@@ -75,7 +87,7 @@ func restartSentence(unit string) string {
 // job is the exception, never reminded, because its timer runs it again and
 // its incident ends when a run ends well.
 func episodeSentence(unit string) string {
-	if isDataJob(unit) {
+	if isTimerJob(unit) {
 		return "You are told once for this failure; a run that fails again is the same failure and is not paged again, and the incident is resolved when a run ends well."
 	}
 	return "You are told once for this failure; a run that fails again before the unit is seen well is not paged again, only reminded at most once an hour, and the incident is resolved when the unit is seen well."
@@ -161,7 +173,7 @@ func WithFailedUnits(a Alert, inForce bool, failed []string) (Alert, bool) {
 	var rows, data []string
 	for _, unit := range failed {
 		row := fmt.Sprintf("%s (read %s)", unit, UnitManualRow(unit))
-		if isDataJob(unit) {
+		if isTimerJob(unit) {
 			data = append(data, row)
 			continue
 		}
@@ -172,7 +184,7 @@ func WithFailedUnits(a Alert, inForce bool, failed []string) (Alert, bool) {
 		parts = append(parts, "Failed trading unit(s), which systemd does not restart: "+strings.Join(rows, "; ")+".")
 	}
 	if len(data) > 0 {
-		parts = append(parts, "Failed data job, which its timer runs again: "+strings.Join(data, "; ")+".")
+		parts = append(parts, "Failed data job or Flex reader, which its timer runs again: "+strings.Join(data, "; ")+".")
 	}
 	line := strings.Join(parts, " ")
 	if !inForce {
