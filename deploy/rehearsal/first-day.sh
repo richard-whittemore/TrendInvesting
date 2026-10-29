@@ -454,3 +454,54 @@ step recover-adapter
 withvars=0
 pass "recovery: the first run (as of 20:00) halted on a wrong book; the section's names, the approval clearing its incident, run.env with an as-of one minute earlier, and the engine, warm-up and adapter blocks start a new run that stays out of Halted; the second warm-up fetched $refetched sessions (the days missing from the recordings)"
 remap_expr='s/^$//'
+
+# --- The Traditional IRA (the runbook's section "The Traditional IRA"): its
+# engine started by its own unit, a stand-in for its warm-up (the container
+# has no Massive, sector sources or recordings for the real job, whose
+# warm-up command inside.sh rehearses on synthetic recordings), then its
+# adapter, ti-adapter@trad-ira, started by the template's own unit with the
+# scripted Gateway (client ID 12; account values as ibapi gives them, the
+# IRA's settled cash among them; every contract lookup answered), and the
+# same-day probe on what that start logged and the engine journalled. The
+# account is invented, as Boost's.
+install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/engines/trad-ira /var/lib/trend-investing/adapters/trad-ira /var/lib/trend-investing/flex/trad-ira
+install -d -o ti-operator -g ti-trader -m 0750 /var/lib/trend-investing/engines/trad-ira/operator
+install -m 0644 /deploy/etc/engines/trad-ira.env /deploy/etc/engines/trad-ira.config /etc/trend-investing/engines/
+install -D -m 0644 /deploy/etc/adapters/trad-ira.json.example /etc/trend-investing/adapters/trad-ira.json
+cp /deploy/systemd/ti-adapter@.service /etc/systemd/system/
+systemctl daemon-reload
+install -d -m 0700 /dev/shm/ti-edit
+printf 'IBKR_ACCOUNT_TRAD_IRA=DUX1234568\n' >/dev/shm/ti-edit/content
+EDITOR=/root/ti-editor.sh with_pass ti-secrets edit accounts/trad-ira.env >/dev/null || fail "ti-secrets edit accounts/trad-ira.env failed"
+rm -rf /dev/shm/ti-edit
+step ira-preflight
+step ira-account
+grep -q '"birth": "1975-06"' /etc/trend-investing/engines/trad-ira.config || fail "the IRA's birth was not named"
+step ira-approve
+step ira-run-env
+step ira-engine
+ira_engines=/var/lib/trend-investing/engines/trad-ira
+written=$(runuser -u ti-trader -- python3 /deploy/rehearsal/ira-stream.py "$ira_engines/run-ira-2026-10-29.log" \
+  /var/lib/trend-investing/data/streams/trad-ira 2025-01-02 2026-10-23) || fail "the stand-in IRA warm-up wrote no stream"
+test -s "$written" || fail "the stand-in IRA warm-up wrote no stream"
+step ira-adapter
+grep '"type":"account.snapshot"' "$ira_engines/run-ira-2026-10-29.log" | grep -q '"schema_version":4' || fail "the IRA engine journalled no version-4 account snapshot"
+grep '"type":"market.mark.recorded"' "$ira_engines/run-ira-2026-10-29.log" | grep -q '"con_id":' || fail "the IRA engine journalled no mark with its contract"
+if grep -q '"send":true' "$ira_engines/run-ira-2026-10-29.log"; then fail "the IRA's dry-run engine released an order to be sent"; fi
+step ira-probe
+# A start whose configuration names another client ID never connects: the
+# template hands the adapter the instance's TI_ADAPTER_CLIENT_ID.
+systemctl stop ti-adapter@trad-ira.service
+sed -i 's/"client_id": 12/"client_id": 11/' /etc/trend-investing/adapters/trad-ira.json
+systemctl start ti-adapter@trad-ira.service || true
+for _ in $(seq 30); do systemctl is-failed --quiet ti-adapter@trad-ira.service && break; sleep 1; done
+systemctl is-failed --quiet ti-adapter@trad-ira.service || fail "the IRA adapter started on a configuration naming Boost's client ID"
+journalctl -u ti-adapter@trad-ira.service --no-pager -o cat | grep -q 'names client_id 11, but the instance.s settings give 12' || fail "the IRA adapter's refusal does not name the two client IDs"
+sed -i 's/"client_id": 11/"client_id": 12/' /etc/trend-investing/adapters/trad-ira.json
+systemctl reset-failed ti-adapter@trad-ira.service
+# The template refuses the boost instance: Boost keeps its own adapter unit.
+if systemctl start ti-adapter@boost.service 2>/dev/null; then sleep 2; fi
+journalctl -u ti-adapter@boost.service --no-pager -o cat | grep -q 'has its own adapter unit, ti-adapter-boost.service' || fail "ti-adapter@boost was not refused"
+systemctl reset-failed ti-adapter@boost.service || true
+systemctl stop ti-engine@trad-ira.service
+pass "the Traditional IRA: the runbook's blocks name its account and birth, approve its first run, start its engine, start ti-adapter@trad-ira (client ID 12) on its stream, which delivers a version-4 snapshot and marks with their contracts and sends nothing, and the same-day probe passes; a configuration naming another client ID and the boost instance of the template are refused"

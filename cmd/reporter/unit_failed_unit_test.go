@@ -175,10 +175,10 @@ func TestEveryUnitThatLoadsASecretRefusesToStartWhileTheSecretsAreLocked(t *test
 			}
 		}
 	}
-	// The gateway, the engines, the Boost adapter, the data job and its IRA
-	// instances, the reporter, the failed-unit page and the Flex reader
-	// (secrets and account).
-	if loaders != 9 {
-		t.Errorf("%d LoadCredential= lines across the units, want 9", loaders)
+	// The gateway, the engines, the Boost adapter, the IRAs' adapter
+	// template, the data job and its IRA instances, the reporter, the
+	// failed-unit page and the Flex reader (secrets and account).
+	if loaders != 10 {
+		t.Errorf("%d LoadCredential= lines across the units, want 10", loaders)
 	}
 }

@@ -994,6 +994,18 @@ refused with a message naming this command (and pages). Before the IRA
 engine's first run (no `run.env`) each firing waits quietly: `ti-data:
 waiting for the account's first run: ... (start the trad-ira engine once)`.
 
+**Who delivers it.** The IRA's own adapter, `ti-adapter@trad-ira`, started
+after the warm-up (it refuses to start until the run's folder exists), picks
+up each file of the run's folder and delivers it to the engine behind one
+reading of the account, as Boost's adapter does. On a month's last session,
+where the file carries the ranked stocks' histories and no bar for a stock
+newly picked, the adapter marks every ranked stock at its close in that
+session's universe snapshot, with the IBKR contract it resolved for it, so
+the engine has a mark for every name it can decide before the session closes
+([IBKR adapter](ibkr-adapter.md), "Contracts and marks for an IRA"). The
+whole order, engine, warm-up, adapter, then the daily firings, is
+`docs/runbooks/first-dry-run-day.md`, "The Traditional IRA".
+
 **What can go wrong.** As for Boost's job (above), and also:
 
 - "it is not a momentum configuration", or "its universe_input is

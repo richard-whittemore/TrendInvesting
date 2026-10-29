@@ -42,6 +42,19 @@ def contract(con_id=756733, symbol="SPY", sec_type="STK", currency="USD", exchan
                            currency=currency, exchange=exchange, primaryExchange="ARCA")
 
 
+def contract_details(symbol, con_id, primary_exchange="NASDAQ", currency="USD", sec_type="STK", exchange="SMART"):
+    """One contractDetails answer as ibapi 10.51.01's decoder hands it to EWrapper (testdata/ibapi_shapes.json): a
+    ContractDetails whose contract carries conId (int), symbol, secType, exchange (SMART, as asked), primaryExchange,
+    currency, localSymbol and tradingClass (str), beside marketName, longName, stockType, validExchanges (str) and
+    minTick (float). Synthetic values."""
+    return SimpleNamespace(
+        contract=SimpleNamespace(conId=con_id, symbol=symbol, secType=sec_type, exchange=exchange,
+                                 primaryExchange=primary_exchange, currency=currency, localSymbol=symbol,
+                                 tradingClass="NMS"),
+        marketName="NMS", minTick=0.01, longName="SYNTHETIC " + symbol, stockType="COMMON",
+        validExchanges="SMART,{},ARCA".format(primary_exchange))
+
+
 def order(order_ref="tag-1", account=ACCOUNT, action="BUY", total_quantity="10",
           order_type="MKT", lmt_price=None, aux_price=None, tif="DAY", perm_id=9001,
           client_id=11):
@@ -199,6 +212,24 @@ class FakeTWS(TWSApi):
         self.drop_on_mark = False
         self.mark_end_delay = None
         self._late_ends = []
+        # IBKR's contract details for each symbol asked for by name
+        # (reqContractDetails): each answer in contract_details[symbol] is
+        # sent as contract_details under the request's ID, then
+        # contract_details_end (unless end_contract_details is false); a
+        # symbol in contract_detail_errors gets IBKR's (code, message) error
+        # under the request's ID instead, as IBKR answers 200 for a name it
+        # does not know; drop_on_contract_details drops the link as the
+        # request is asked.
+        self.contract_details = {}
+        self.contract_detail_errors = {}
+        self.end_contract_details = True
+        self.drop_on_contract_details = False
+        # Symbols whose first lookup IBKR answers but never ends (a slow
+        # Gateway); a second lookup is answered and ended as usual.
+        self.unended_contract_details_once = set()
+        # The server version the session negotiates (EClient.serverVersion);
+        # 205 and later read contract details from IBKR's protobuf messages.
+        self.negotiated_server_version = 205
 
     # -- connection ------------------------------------------------------
     def connect(self, host, port, client_id, callbacks, timeout):
@@ -428,6 +459,26 @@ class FakeTWS(TWSApi):
             self._late_ends.append(req_id)
         elif self.end_marks:
             self.callbacks.tick_snapshot_end(req_id)
+
+    def server_version(self):
+        """The negotiated server version, as EClient.serverVersion() gives it (an int; synthetic here)."""
+        return self.negotiated_server_version if self.connected else None
+
+    def req_contract_details(self, req_id, contract_):
+        self.calls.append(("req_contract_details", req_id, contract_))
+        if self.drop_on_contract_details:
+            self.drop()
+            return
+        if contract_.symbol in self.contract_detail_errors:
+            self.callbacks.error(req_id, *self.contract_detail_errors[contract_.symbol])
+            return
+        for details in self.contract_details.get(contract_.symbol, []):
+            self.callbacks.contract_details(req_id, details)
+        if contract_.symbol in self.unended_contract_details_once:
+            self.unended_contract_details_once.discard(contract_.symbol)
+            return
+        if self.end_contract_details:
+            self.callbacks.contract_details_end(req_id)
 
     def late_end(self, clock):
         """A Connection subscriber: once a delayed snapshot's price is taken, clock passes mark_end_delay and IBKR ends it."""

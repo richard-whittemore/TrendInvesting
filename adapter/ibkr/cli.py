@@ -94,6 +94,10 @@ def _parser():
                      help="the adapter's configuration, a JSON object (config.py): host, port, client_id, mode, "
                           "the timing values, con_ids, and paper_sending_enabled (true to send in paper; "
                           "left out means false)")
+    run.add_argument("--client-id", type=int, metavar="N",
+                     help="the client ID the instance's settings give (TI_ADAPTER_CLIENT_ID in "
+                          "/etc/trend-investing/engines/<instance>.env); the adapter refuses to start unless its "
+                          "configuration's client_id is the same. Left out, not checked")
     run.add_argument("--pending", required=True, metavar="FILE",
                      help="the adapter's pending-input file; its other files sit beside it with suffixes "
                           "(.handover, .refused, .outbox, .held, ...). On the server: "
@@ -147,6 +151,23 @@ def _parser():
                              "first-run approval given after that session's close: in-first-book (the starting book "
                              "holds it) or after-approval; a recorded decision is never changed, and nothing is read "
                              "(docs/manual/reconciliation.md)")
+    probe = commands.add_parser(
+        "probe", help="the same-day probe: check one adapter start's journal and the engine's log, read only",
+        description="Read the adapter's journal lines for one start (journalctl _SYSTEMD_INVOCATION_ID=<its "
+                    "invocation> -o cat) and the engine's durable log, and print one line per check, then \"probe: "
+                    "passed\" (exit 0) or \"probe: FAILED, n check(s)\" (exit 1). Connects to nothing "
+                    "(probe.py; docs/manual/ibkr-adapter.md, \"The same-day probe\").")
+    probe.add_argument("--journal", required=True, metavar="FILE", help="the adapter's journal lines for one start")
+    probe.add_argument("--engine-log", required=True, metavar="FILE", help="the engine's durable log")
+    probe.add_argument("--client-id", required=True, type=int, metavar="N",
+                       help="the instance's client ID (TI_ADAPTER_CLIENT_ID): 12 for trad-ira")
+    probe.add_argument("--snapshot-version", type=int, choices=(3, 4), default=4,
+                       help="the account snapshot version the engine reads: 4 for an IRA (the default), 3 for Boost")
+    probe.add_argument("--mode", choices=("dry-run", "paper", "live"), default="dry-run",
+                       help="the mode the adapter must have started in (default dry-run)")
+    probe.add_argument("--expect-batch", action="store_true",
+                       help="fail unless this start queued a batch of the run's stream; left out, a start that "
+                            "finds every file delivered passes as \"no new batch since start\"")
     return parser
 
 
@@ -220,13 +241,21 @@ def load_config(args):
     elif "account_id" not in values:
         raise Refused("no account: name account_id in the configuration or give --secrets and --account-key")
     try:
-        return AdapterConfig.from_mapping(values)
+        cfg = AdapterConfig.from_mapping(values)
     except ConfigError as err:
         message = str(err)
         # A refusal may quote the account; it is masked (mask_accounts).
         account = values.get("account_id")
         message = mask_accounts(message, account if isinstance(account, str) else "")
         raise Refused("the configuration {} is refused: {}".format(args.config, message)) from None
+    # One adapter per account, each with its own client ID (ADR 0026 point 8):
+    # the settings the unit hands over and the configuration must agree, so
+    # a configuration copied from another account's never connects as it.
+    if getattr(args, "client_id", None) is not None and args.client_id != cfg.client_id:
+        raise Refused("the configuration {} names client_id {}, but the instance's settings give {} "
+                      "(TI_ADAPTER_CLIENT_ID): each account's adapter has its own client ID".format(
+                          args.config, cfg.client_id, args.client_id))
+    return cfg
 
 
 def _real_api(cfg):
@@ -241,7 +270,7 @@ def _engine_connect(path, timeout):
 
 def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err=None, poll=POLL,
          ibapi_version=None, protobuf_version=None, today=None, now=None, zone_lookup=None, flex_get=None,
-         flex_sleep=None):
+         flex_sleep=None, out=None):
     """Run the command; returns the process exit status.
 
     api_factory, engine_connect, should_stop, ibapi_version and protobuf_version replace the
@@ -256,6 +285,12 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
     """
     err = err or sys.stderr
     args = _parser().parse_args(argv)
+    if args.command == "probe":
+        import probe
+        lines, status = probe.run(args.journal, args.engine_log, args.client_id, args.snapshot_version, args.mode,
+                                  expect_batch=args.expect_batch)
+        print("\n".join(lines), file=out or sys.stdout)
+        return status
     if args.command == "flex":
         import flex
         return flex.command(args, err, **({"get": flex_get} if flex_get else {}),

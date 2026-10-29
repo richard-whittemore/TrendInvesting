@@ -59,7 +59,7 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 | `ti-ntfy.service` | Your own ntfy server: the only place the daily summary goes ("Your own ntfy server", below). Listens on the server's Tailscale address, port 2586, and nowhere else | Starts at boot once `provision.sh ntfy` has enabled it; tried again every 10 seconds if the Tailscale address is not up yet | Installed by `provision.sh ntfy`, which you run after joining Tailscale. Not part of `provision.sh all` |
 | `tailscaled` | Tailscale | At boot | Installed by `provision.sh base` |
 
-`ti-adapter-boost.service` carries the IBKR adapter ([IBKR adapter](ibkr-adapter.md)): never started at boot or restarted by systemd (`Restart=no`), every start is yours, after the engine ([paper trading](paper-trading.md), "Starting the adapter"). It reads the same `run.env` as the engine, reads the engine's log, talks to the engine over its socket, and delivers the data job's stream for the run, so it refuses to start without the engine's log or that run's stream folder, which the data job's warm-up writes ([market data](market-data.md), "The one-time warm-up"). It is skipped, not failed, until `provision.sh twsapi` and `provision.sh adapter` have installed `ibapi` and the adapter's code, and `provision.sh services` has created its configuration (`/etc/trend-investing/adapters/boost.json`, created once and never overwritten, in dry-run with paper sending off). Its reason for stopping is in `journalctl -u ti-adapter-boost`.
+`ti-adapter-boost.service` carries the IBKR adapter ([IBKR adapter](ibkr-adapter.md)): never started at boot or restarted by systemd (`Restart=no`), every start is yours, after the engine ([paper trading](paper-trading.md), "Starting the adapter"). It reads the same `run.env` as the engine, reads the engine's log, talks to the engine over its socket, and delivers the data job's stream for the run, so it refuses to start without the engine's log or that run's stream folder, which the data job's warm-up writes ([market data](market-data.md), "The one-time warm-up"). It is skipped, not failed, until `provision.sh twsapi` and `provision.sh adapter` have installed `ibapi` and the adapter's code, and `provision.sh services` has created its configuration (`/etc/trend-investing/adapters/boost.json`, created once and never overwritten, in dry-run with paper sending off). Its reason for stopping is in `journalctl -u ti-adapter-boost`. Each IRA's adapter is an instance of the template `ti-adapter@.service` (`ti-adapter@trad-ira`, client ID 12, configuration `/etc/trend-investing/adapters/trad-ira.json`, created once in dry-run with paper sending off), with the same rules: never started at boot, never restarted, started by you after its engine and its warm-up; skipped until the same installs and its configuration exist; the template refuses to run as `ti-adapter@boost` ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter").
 
 Updates: `unattended-upgrades` applies security updates only and never
 reboots by itself, because a reboot logs the Gateway out.
@@ -87,20 +87,21 @@ Boost instance's account id is `joint`.
 
 | File | What it holds | Who writes it |
 | --- | --- | --- |
-| `/etc/trend-investing/engines/<instance>.env` | the account's label (`TI_ACCOUNT`), its adapter client ID (Boost 11, Traditional IRA 12, Roth IRA 13) and the engine's start mode (`TI_MODE`, `dry-run`) | copied from `deploy/etc/engines/` by `provision.sh services`, every time |
+| `/etc/trend-investing/engines/<instance>.env` | the account's label (`TI_ACCOUNT`), its adapter client ID (Boost 11, Traditional IRA 12, Roth IRA 13) and the engine's start mode (`TI_MODE`, `dry-run`) | installed from `deploy/etc/engines/` by `provision.sh services` when there is none, then kept; the shipped one beside it as `<instance>.env.example` |
 | `/etc/trend-investing/engines/<instance>.config` | the account's configuration: strategy, account, mode, rule figures, hard limits. Hashed into every run (ADR 0016). `boost.config` and `trad-ira.config` exist; the Roth IRA has none yet. Each ships with placeholders (`joint`, `trad-ira`; the IRA's birth month `YYYY-MM`), never your account or birth month, which you name on the server | installed from `deploy/etc/engines/` by `provision.sh services` only when there is none; then yours, kept by every later run (the shipped one goes beside it as `<instance>.config.example`) |
 | `/var/lib/trend-investing/engines/<instance>/run.env` | one engine start: `TI_RUN` (the run's name, never reused), `TI_AS_OF` (its first decided session) and `TI_RESTART_ARGS` (empty, `-approval <file>` or `-resume <log>`) | you, before every start (`docs/runbooks/durable-log.md`, "Restarting an engine"; example in `deploy/etc/engines/run.env.example`) |
 | `/etc/trend-investing/gateway.env` | the Gateway's restart times | `provision.sh services` |
 | `/etc/trend-investing/adapters/boost.json` | the Boost adapter's settings: the Gateway's address and port (4002), client ID 11, mode and the paper sending switch (`paper_sending_enabled`), timeouts; no account number | created once from `deploy/etc/adapters/boost.json.example` by `provision.sh services`, never overwritten; you edit it for paper |
 
-**Caution:** `provision.sh services` copies the repository's `*.env` files
-over `/etc/trend-investing/engines/` every time it runs, so a `TI_MODE` you
-set to `paper` there comes back as `dry-run`; the engine then refuses to start
-in paper, which is safe, and you set it again. It installs an account's
-`*.config` only when there is none: one already there, with the account you
-named in it, is kept byte for byte, and the shipped file is put beside it as
-`<instance>.config.example` to compare (rehearsed by `deploy/rehearse.sh`
-and `deploy/rehearsal/test-engine-configs.sh`).
+**Caution:** `provision.sh services` installs an account's settings file
+(`*.env`) and its configuration (`*.config`) only when there is none: one
+already there, with a `TI_MODE` you set to `paper` or the account you named,
+is kept byte for byte, and the shipped file is put beside it as
+`<instance>.env.example` or `<instance>.config.example` to compare. A line the
+shipped settings file adds (such as the IRA adapter's `TI_ADAPTER_ACCOUNT_KEY`)
+is yours to copy by hand; `docs/runbooks/first-dry-run-day.md`, "The
+Traditional IRA", gives the lines (rehearsed by `deploy/rehearse.sh` and
+`deploy/rehearsal/test-engine-configs.sh`).
 
 ## Where the secrets live
 
@@ -126,7 +127,7 @@ the same disk as the files, and a snapshot would carry both.
 | `ibkr-login.env` | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
 | `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY`, `TI_PAGERDUTY_ROUTING_KEY` (unused: the server pages through Pushover), `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL`, and the Flex reader's `TI_IBKR_FLEX_TOKEN`, `TI_IBKR_FLEX_QUERY_ID` and `TI_IBKR_FLEX_TRADES_QUERY_ID` | handed as a private credential file (`LoadCredential`) to the data job, the engines, the reporter and the Flex readers; the dashboard is given none |
 | `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
-| `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@trad-ira.service`) |
+| `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's adapter (`ti-adapter@trad-ira.service`) and its Flex reader (`ti-flex@trad-ira.service`) |
 | `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@roth-ira.service`) |
 
 An existing server's `secrets.env` keeps the layout it was provisioned with, because provisioning never overwrites it, so the owner may tidy it by hand to match `deploy/etc/secrets.env.example`.
@@ -861,7 +862,9 @@ Paste `policy.hujson` again once you have found the cause.
   fresh run an approval, then `sudo systemctl start ti-engine@<instance>`
   ([restart](restart.md)).
 - **The adapter**, after its engine: `sudo systemctl start ti-adapter-boost`
-  ([paper trading](paper-trading.md), "Starting the adapter").
+  ([paper trading](paper-trading.md), "Starting the adapter"); an IRA's, after
+  its engine and warm-up: `sudo systemctl start ti-adapter@trad-ira`, then the
+  same-day probe ([IBKR adapter](ibkr-adapter.md), "The same-day probe").
 - **Once per Boost run:** the data job's warm-up, after the engine has
   started once ([market data](market-data.md), "The one-time warm-up").
 - **The first dry-run day, in order:** [the first dry-run day runbook](../runbooks/first-dry-run-day.md).
@@ -1015,7 +1018,7 @@ stop, not after two sessions of silence.
 | The IBKR password is wrong | The refused login is retried at most twice (3 attempts in all; any start counts, so after a good login fewer), then the unit stops, so IBKR cannot lock the login; you are paged | Correct the file (`sudo ti-secrets edit ibkr-login.env`), delete `/var/lib/ti-gateway/login-failures`, start it again (`docs/runbooks/gateway-login.md`) |
 | The journal of `ti-data` or `ti-reporter@boost` says "waiting for the account's first run" (the unit is not failed) | No engine run has been started, so there is nothing to record or report. The data job writes nothing; the reporter sends no alert and, if nothing else is wrong, pings the heartbeat. Nothing is paged ("The reporter before the first run", below) | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine") |
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |
-| `ti-engine@<instance>` or `ti-adapter-boost` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the Roth IRA's engine has no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
+| `ti-engine@<instance>`, `ti-adapter-boost` or `ti-adapter@<instance>` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the Roth IRA's engine has no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
 | The data job fails (you are paged: "ti-data.service failed") | The unit shows failed; `journalctl -u ti-data` says why (a 403 that is still there at 08:05 reads "Massive still refuses session ..."); no file is written for the session | Fix the cause and `sudo systemctl start ti-data` ([market data](market-data.md)); you are paged once, not reminded, and the incident ends when a run ends well, so wait for that run to finish ("A failed unit") |
 | The end-to-end test (step 5 of "Your own ntfy server") shows nothing on the phone | The phone is not on the tailnet (Tailscale off, or not set to stay on), the app is subscribed on another server, or the server cannot reach ntfy.sh to wake an iPhone (`journalctl -u ti-ntfy` names the upstream) | Turn Tailscale on and set it to stay on (step 3); check the subscription's server URL is exactly `TI_NTFY_SERVER`; check the server reaches the internet (`curl -sI https://ntfy.sh`) |
 | `ti-ntfy` fails, or the summary stops reaching your phone while Pushover pages still do; `journalctl -u ti-ntfy` names it | Your own ntfy server is down or has no Tailscale address yet. The unit tries again every 10 seconds; the reporter retries the summary at every firing and the run ends with an error naming `ntfy:`. Incident pages go to Pushover as well and are not held back | `sudo systemctl status ti-ntfy`; if Tailscale was signed out, `sudo tailscale up --ssh` and `sudo systemctl restart ti-ntfy`; if the configuration is missing, `sudo deploy/provision.sh ntfy` |

@@ -123,8 +123,9 @@ SESSION_OPEN = clock_time(9, 30)
 # How a person settles a refused file (docs/manual/market-data.md, "What
 # happens to the file").
 SETTLE = ("with the adapter stopped, move the file out of the run's stream folder (keep it: it is evidence, never "
-          "edit it), run the data job again (sudo systemctl start ti-data.service), and start the adapter again "
-          "(sudo systemctl start ti-adapter-boost) (docs/manual/market-data.md, \"What happens to the file\")")
+          "edit it), run the data job again (sudo systemctl start ti-data.service, or ti-data@<instance>.service "
+          "for an IRA), and start the adapter again (sudo systemctl start ti-adapter-boost, or "
+          "ti-adapter@<instance> for an IRA) (docs/manual/market-data.md, \"What happens to the file\")")
 
 
 # The data job's calendar and table of the inputs it writes, loaded by path
@@ -579,7 +580,7 @@ class Deliverer:
     an event type.
     """
 
-    def __init__(self, streams, record_path, outbox, engine_log_path, snapshot, new_id):
+    def __init__(self, streams, record_path, outbox, engine_log_path, snapshot, new_id, wait_reason=lambda: ""):
         self._streams = streams
         # The log's own run name until check finds the run's folder.
         self.run = run_name(engine_log_path)
@@ -589,6 +590,14 @@ class Deliverer:
         self._engine_log_path = engine_log_path
         self._snapshot = snapshot
         self._new_id = new_id
+        # The last file the "caught up" line named (deliver).
+        self._caught_up_said = None
+        # wait_reason() says why the last reading for a batch could not be
+        # taken (the line the reading logged); the batch being sent and the
+        # last waiting outcome stated (_track, settled, _waiting).
+        self._wait_reason = wait_reason
+        self._tracking = None
+        self._waiting_said = None
 
     def check(self):
         """At start, once the engine listens (its log is whole): the run's stream folder exists and the delivery
@@ -611,6 +620,7 @@ class Deliverer:
                 return
             batches = self.record.load()
         if any("envelope" in e for e in self._outbox.load()):
+            self.resume()
             return  # a batch is still being sent: the next waits behind it
         delivered = [f["name"] for b in batches if b["run"] == self.run and b["state"] != DROPPED
                      for f in b["files"]]
@@ -618,6 +628,14 @@ class Deliverer:
         new = sorted((_session_of(n), n) for n in os.listdir(self.folder)
                      if STREAM_FILE.fullmatch(n) and n not in delivered)
         if not new:
+            # Said once per file, so the same-day probe can tell a start that
+            # is caught up from one still waiting (probe.py): only when every
+            # file of the run's folder is delivered and none is in the outbox;
+            # a run with nothing delivered yet is never caught up.
+            last = max(delivered, key=_session_of) if delivered else None
+            if last is not None and self._caught_up_said != last:
+                self._caught_up_said = last
+                log.info("ibkr stream no new file since %s; caught up", last)
             return
         for session, name in new:
             if latest is not None and session <= latest:
@@ -627,6 +645,7 @@ class Deliverer:
         streams = self._read_batch([name for _, name in new], latest)
         snapshot = self._snapshot(*last_session(streams, self.folder))
         if snapshot is None:
+            self._waiting([s.name for s in streams])
             return
         batch = {"run": self.run, "snapshot": self._new_id(BROKER_SNAPSHOT_TYPE),
                  "files": [{"name": s.name, "sha256": s.sha256, "lines": len(s.envelopes)} for s in streams],
@@ -635,11 +654,70 @@ class Deliverer:
         entries = _entries(self.run, batch["snapshot"], snapshot, streams, self._holds_book())
         self._outbox.extend(entries)
         self.record.mark_queued()
-        log.info("ibkr stream queued run=%s files=%s inputs=%d", self.run, ",".join(s.name for s in streams),
-                 len(entries))
+        self._track([s.name for s in streams], [e["id"] for e in entries])
+
+    def resume(self):
+        """Take up a batch a stop left queued with entries unsent, before anything of it is sent again.
+
+        Called at start (loop.AdapterLoop.start), before the input a stop
+        left awaiting its reply is asked for again, so that input is counted
+        too, even when it is the batch's last; and from deliver(). The batch's
+        lines then say resumed=1 and count only the remaining inputs, its
+        entries still in the outbox: the total it was queued with is not
+        recorded there, and the start that queued it judged the inputs before
+        the stop.
+        """
+        if self._tracking is not None:
+            return
+        batches = self.record.load()
+        last = batches[-1] if batches else None
+        if last is None or last["state"] != QUEUED or last["run"] != self.run:
+            return
+        ids = [e["id"] for e in self._outbox.load() if _entry_run(e) == self.run]
+        if ids:
+            self._track([f["name"] for f in last["files"]], ids, resumed=True)
+
+    def _track(self, files, ids, resumed=False):
+        """Say the batch of files is queued as the entries ids, and account for each as the loop settles it."""
+        self._tracking = {"files": ",".join(files), "ids": set(ids), "inputs": len(ids), "answered": 0, "struck": 0,
+                          "resumed": " resumed=1" if resumed else ""}
+        self._waiting_said = None
+        log.info("ibkr stream queued run=%s files=%s inputs=%d%s", self.run, self._tracking["files"], len(ids),
+                 self._tracking["resumed"])
+
+    def settled(self, entry_id, answered):
+        """The loop sent entry_id and the engine answered it (answered true), or struck it off unsent as already
+        committed (false). Once every entry of the batch being sent is settled, the batch's one outcome line says
+        so, from this accounting alone: the inputs the engine answered and those struck off as committed, which
+        together are every input queued. Another input answered meanwhile (a reconciliation, a broker report)
+        is no entry of the batch and counts for nothing (the same-day probe judges by this line, probe.py)."""
+        t = self._tracking
+        if t is None or entry_id not in t["ids"]:
+            return
+        t["ids"].discard(entry_id)
+        t["answered" if answered else "struck"] += 1
+        if not t["ids"]:
+            self._tracking = None
+            log.info("ibkr stream batch files=%s inputs=%d answered=%d struck=%d%s outcome=delivered reason=every "
+                     "input answered or already committed", t["files"], t["inputs"], t["answered"], t["struck"],
+                     t["resumed"])
+
+    def _waiting(self, files):
+        """Say once, for these files and this reason, that their batch waits for a reading (its outcome so far)."""
+        said = (tuple(files), self._wait_reason() or "the account reading could not be taken now")
+        if said != self._waiting_said:
+            self._waiting_said = said
+            log.info("ibkr stream batch files=%s inputs=0 answered=0 struck=0 outcome=waiting reason=%s",
+                     ",".join(files), said[1])
 
     def dropped(self, run):
         """A fresh run struck run's entries off the outbox unsent: its last batch is not delivered (see the module)."""
+        t = self._tracking
+        if t is not None:
+            self._tracking = None
+            log.info("ibkr stream batch files=%s inputs=%d answered=%d struck=%d%s outcome=dropped reason=the "
+                     "engine now runs another run, so run %s gets it again if resumed", t["files"], t["inputs"],
+                     t["answered"], t["struck"], t["resumed"], run)
         if self.record.drop_queued(run):
             log.info("ibkr stream batch of run %s struck off unsent; dropped, so a resumed run %s gets its files "
                      "again", run, run)
@@ -707,10 +785,26 @@ class Deliverer:
                                    "it changed since the adapter recorded it for delivery")
             snapshot = self._snapshot(*last_session(streams, self.folder))
             if snapshot is None:
+                self._waiting([s.name for s in streams])
                 return False
-            self._outbox.extend(_entries(self.run, batch["snapshot"], snapshot, streams, self._holds_book()))
+            entries = _entries(self.run, batch["snapshot"], snapshot, streams, self._holds_book())
+            self._outbox.extend(entries)
+            ids = [e["id"] for e in entries]
+        else:
+            # Written before the stop: the batch's entries are those of its run
+            # still in the outbox (any already committed are struck off as the
+            # loop finds them, and counted so).
+            ids = [e["id"] for e in self._outbox.load() if _entry_run(e) == batch["run"]]
         self.record.mark_queued()
+        if batch["run"] == self.run:
+            self._track([f["name"] for f in batch["files"]], ids)
         return True
+
+
+def _entry_run(entry):
+    """The run an outbox entry of a batch was recorded for: its envelope's, or the adapter entry's own."""
+    envelope = entry.get("envelope")
+    return envelope.get("correlation_id") if isinstance(envelope, dict) else entry.get("run")
 
 
 def _repeats(first, envelope):
@@ -732,28 +826,66 @@ def _session_of(name):
 
 
 def last_session(streams, folder=""):
-    """(close, closes) of a batch's last session: its close (an aware datetime) and each bar's official close.
+    """(close, closes) of a batch's last session: its close (an aware datetime) and each marked instrument's close.
 
     closes maps each instrument the last file delivers a bar for, in that
     session, to the bar's raw close: the price the backtest marks at, which
     the adapter states as the mark (the owner's decision of 2026-10-18; ADR
     0026 point 1, amended). A bar with no raw close that is a positive number
     is refused, as a file not as the data job writes it (StreamRefused).
+
+    A compact IRA stream (docs/manual/market-data.md, "A job for the IRAs")
+    carries bars only for SPY, IEF, SHY and the holdings; on a decision
+    session it carries each ranked member's close history instead, and the
+    momentum engine values a pick at that member's universe row close, the
+    same unadjusted close its bar would carry (internal/targetweight,
+    rankedMembers). Every order it plans needs a mark as of the close, or the
+    risk gate refuses it (missing-mark; ADR 0026 point 3), and a stock newly
+    picked has no bar. So each member with a close history ending at the last
+    session is marked too, at its row in that session's universe snapshot; a
+    member with its own bar keeps the bar's close (the engine checks the two
+    agree). A history whose member has no row in the session's universe is
+    refused (StreamRefused): the data job writes histories only for members
+    ranked from that universe. Boost's stream carries no history, so its
+    closes are its bars' alone, as before.
     """
     last = streams[-1]
-    closes = {}
+    path = os.path.join(folder, last.name)
+    closes, histories, universe = {}, [], None
     for envelope in last.envelopes:
         payload = envelope["payload"]
-        if (envelope["type"], envelope["schema_version"]) != kinds.BAR or _closed_session(payload) != last.session:
+        kind = (envelope["type"], envelope["schema_version"])
+        if kind == kinds.HISTORY and payload.get("session") == last.session.isoformat():
+            if not _is_text(payload.get("instrument_id")):
+                raise _refused(path, "its close history {} names no instrument".format(envelope["id"]))
+            histories.append(payload["instrument_id"])
+            continue
+        if kind == kinds.UNIVERSE and payload.get("session") == last.session.isoformat():
+            rows = payload.get("rows")
+            universe = {r.get("instrument_id"): r.get("close") for r in rows if isinstance(r, dict)} \
+                if isinstance(rows, list) else {}
+            continue
+        if kind != kinds.BAR or _closed_session(payload) != last.session:
             continue
         raw = payload.get("raw")
         price = raw.get("close") if isinstance(raw, dict) else None
-        if (not isinstance(price, (int, float)) or isinstance(price, bool) or not price > 0
-                or not _is_text(payload.get("instrument_id"))):
-            raise _refused(os.path.join(folder, last.name), "its bar {} carries no instrument and raw close the mark can be taken from".format(
+        if not _is_price(price) or not _is_text(payload.get("instrument_id")):
+            raise _refused(path, "its bar {} carries no instrument and raw close the mark can be taken from".format(
                 envelope["id"]))
         closes[payload["instrument_id"]] = price
+    for instrument in histories:
+        if instrument in closes:
+            continue
+        price = (universe or {}).get(instrument)
+        if not _is_price(price):
+            raise _refused(path, "its close history for {} ends at {}, but that session's universe snapshot gives it "
+                                 "no positive close the mark can be taken from".format(instrument, last.session))
+        closes[instrument] = price
     return nyse_calendar.session_close(last.session), closes
+
+
+def _is_price(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 
 
 def _derived(snapshot_id, event_type, instrument=""):

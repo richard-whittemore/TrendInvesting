@@ -3,6 +3,7 @@ package event_test
 import (
 	"encoding/json"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -132,8 +133,11 @@ func TestMarkVersion2CarriesIBKRsLastPriceAsEvidence(t *testing.T) {
 	if err := validMarkRecorded().ValidateSchema(event.MarkRecordedSchemaVersion); err != nil {
 		t.Errorf("version 1: %v", err)
 	}
-	if err := evidencedMark().ValidateSchema(3); err == nil {
-		t.Error("version 3: want refused")
+	if err := evidencedMark().ValidateSchema(event.MarkRecordedContractVersion); err == nil || !strings.Contains(err.Error(), "contract") {
+		t.Errorf("version 3 with no contract: err = %v, want refused", err)
+	}
+	if err := evidencedMark().ValidateSchema(4); err == nil {
+		t.Error("version 4: want refused")
 	}
 	type P = event.MarkRecordedPayload
 	for name, c := range map[string]struct {
@@ -160,8 +164,8 @@ func TestMarkVersion2CarriesIBKRsLastPriceAsEvidence(t *testing.T) {
 	if strings.Contains(string(raw), "broker_last") {
 		t.Errorf("a version-1 mark encodes the evidence: %s", raw)
 	}
-	if got := event.MarkRecordedVersions(); len(got) != 2 || got[0] != 1 || got[1] != 2 {
-		t.Errorf("MarkRecordedVersions = %v, want [1 2]", got)
+	if got := event.MarkRecordedVersions(); !slices.Equal(got, []uint32{1, 2, 3}) {
+		t.Errorf("MarkRecordedVersions = %v, want [1 2 3]", got)
 	}
 }
 
@@ -342,5 +346,53 @@ func TestACloseStampedSnapshotStatesTheUnexplainedCash(t *testing.T) {
 	v1.UnexplainedCash = 1
 	if err := v1.ValidateSchema(event.BrokerSnapshotSchemaVersion); err == nil {
 		t.Error("version 1 stating unexplained cash: want refused")
+	}
+}
+
+// contractMark is a version-3 mark: version 2 with the IBKR contract the
+// IRA's adapter resolved for the instrument (ADR 0026 point 3).
+func contractMark() event.MarkRecordedPayload {
+	p := evidencedMark()
+	p.Contract = &event.MarkContract{ConID: 900001, Exchange: "SMART", PrimaryExchange: "NASDAQ", Currency: "USD"}
+	return p
+}
+
+func TestMarkVersion3StatesTheContractItIsFor(t *testing.T) {
+	if err := contractMark().ValidateSchema(event.MarkRecordedContractVersion); err != nil {
+		t.Fatalf("version 3: %v", err)
+	}
+	for _, version := range []uint32{event.MarkRecordedSchemaVersion, event.MarkRecordedEvidenceVersion} {
+		if err := contractMark().ValidateSchema(version); err == nil || !strings.Contains(err.Error(), "version 3") {
+			t.Errorf("a contract at version %d: err = %v, want refused naming version 3", version, err)
+		}
+	}
+	type C = event.MarkContract
+	for name, c := range map[string]struct {
+		mutate func(*C)
+		want   string
+	}{
+		"no contract id":       {func(c *C) { c.ConID = 0 }, "con_id"},
+		"negative contract id": {func(c *C) { c.ConID = -5 }, "con_id"},
+		"not on SMART":         {func(c *C) { c.Exchange = "NASDAQ" }, "SMART"},
+		"no primary exchange":  {func(c *C) { c.PrimaryExchange = "" }, "primary exchange"},
+		"not US dollars":       {func(c *C) { c.Currency = "CAD" }, "USD"},
+	} {
+		p := contractMark()
+		contract := *p.Contract
+		c.mutate(&contract)
+		p.Contract = &contract
+		if err := p.ValidateSchema(event.MarkRecordedContractVersion); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, c.want)
+		}
+	}
+	raw, err := json.Marshal(evidencedMark())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "contract") {
+		t.Errorf("a version-2 mark marshals a contract: %s", raw)
+	}
+	if !slices.Contains(event.MarkRecordedVersions(), event.MarkRecordedContractVersion) {
+		t.Errorf("MarkRecordedVersions() = %v, want version 3 read", event.MarkRecordedVersions())
 	}
 }

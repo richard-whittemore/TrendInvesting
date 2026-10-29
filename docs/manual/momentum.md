@@ -23,17 +23,20 @@ Traditional IRA's engine starts on the server in dry-run** (since
 dry-run configuration (placeholders for the account and your birth month,
 which you name on the server), and a fresh IRA run is approved with the
 rebalance its previous run left in progress, or none, and holds until you
-clear it ([restart](restart.md); `docs/runbooks/missed-rebalance.md`). It is
-shown on a synthetic month only (below, "Starting the Traditional IRA's
-engine in dry-run"). **The IRAs cannot trade yet**: the daily data job
+clear it ([restart](restart.md); `docs/runbooks/missed-rebalance.md`). The daily data job
 writes the Traditional IRA's compact stream each weekday morning
 (`ti-data@trad-ira`, [market data](market-data.md), "A job for the IRAs"),
-but there is no adapter service for an IRA to deliver it (only
-`ti-adapter-boost`), and the Roth IRA has no configuration. The configuration's hard limits (`max_orders_per_decision`
+and **its own adapter, `ti-adapter@trad-ira`, delivers it** with IBKR's
+account snapshot and a mark and contract for every name the engine can
+decide ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter"), so the engine
+decides a real month-end in dry-run (`docs/runbooks/first-dry-run-day.md`,
+"The Traditional IRA"). **The IRAs cannot trade yet**: no IRA order is sent
+before the paper gate, the IRA's reporter and dashboard view are still to
+come, and the Roth IRA has no configuration. The configuration's hard limits (`max_orders_per_decision`
 40, `max_order_fraction` 0.6) and its cash rule and share quantity
 (`settled-cash`, `minimum-lot`: decisions D5 and D7) are dry-run values for
 you to confirm before paper. So the "one IRA month" walk-through below stops
-after the engine.
+at sending.
 
 ## What it is and why
 
@@ -211,9 +214,9 @@ order's shape, account and mode, not these limits (`adapter/ibkr/sender.py`).
 | --- | --- | --- | --- |
 | 1 | each session, the next morning | The data job records the whole market, the latest session's universe and sector labels, and writes SPY's, IEF's, SHY's and every holding's bars, the holdings read from the engine's own log ([market data](market-data.md), "A job for the IRAs"). | Built for the Traditional IRA: `ti-data@trad-ira`, weekday mornings at 06:15, 07:15 and 08:15 New York |
 | 2 | the morning after the last session of the month | The same job writes the compact stream, exactly as `encode --ranker`: bars for the named instruments, the universe snapshot, and the 500 ranked stocks' price histories ([momentum universe](momentum-universe.md)). | Built |
-| 3 | — | An IRA engine is started from its own configuration and settings (`trad-ira.config`, `trad-ira.env`), in dry-run, and fed that stream together with IBKR's account snapshot and marks. | The engine starts on the server from its configuration and decides a synthetic month fed by `deploy/feed-month.py`; the data job writes its stream each morning. **Stops here today**: nothing delivers the stream to the engine with IBKR's figures (no IRA adapter) |
-| 4 | at the close | The engine decides the month and plans the sells, checked against the limits. | Built and tested on recorded inputs |
-| 5 | next session | The adapter sends the sells; when every sell has finished, the engine plans and releases the buys from the cash realised. | Engine side built. The adapter's sending, its real IBKR client and its paper switch are built and run for Boost only; no IRA adapter service exists |
+| 3 | the same morning | The IRA's own adapter, `ti-adapter@trad-ira` (client ID 12), reads the account once and delivers that stream behind it: the account snapshot the engine reads (version 4: positions, net liquidation, IBKR's settled and total cash, from the same reading), and, before the session's close, a mark for every name the engine can decide, each ranked stock at its universe close and SPY, IEF, SHY and the holdings at their bars, each with the IBKR contract the adapter resolved for it by name; a name IBKR cannot resolve to one US-dollar stock gets no mark ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter" and "Contracts and marks for an IRA"). The morning reading stands for the close only with the IRA's own Flex executions proof (`ti-flex@trad-ira`, 05:45, 06:45, 07:45). | Built; the order to start the engine, its warm-up, the adapter and the same-day probe is `docs/runbooks/first-dry-run-day.md`, "The Traditional IRA" |
+| 4 | at the close | The engine decides the month and plans the sells, checked against the limits; any order for a name without a mark as of the close is refused (`missing-mark`) before it is released. | Built and tested on recorded inputs, and against the real IRA adapter with the scripted Gateway |
+| 5 | next session | In dry-run (now): nothing is sent; the engine records a synthetic cancel for each order it releases, so the buys are planned at the same close from the snapshot's settled cash. In paper (later): the adapter sends the sells; when every sell has finished, the engine plans and releases the buys from the cash realised. | Dry-run built and rehearsed: the IRA adapter runs and the engine decides a dry-run month. **Stops here today**: no IRA order is sent before the paper gate (AGENTS.md rule 5); sending one will need the adapter's sender to take the contract the journal records for a pick, which today names a contract only from `con_ids` |
 | 6 | after | Fills come back; the reporter and the dashboard show the month. | As for Boost ([boost](boost.md#one-boost-day-from-the-data-to-ibkr-and-back)) |
 
 ## What can go wrong, and what the program does then
@@ -223,8 +226,9 @@ the reporter ([alerts and dashboard](alerts-and-dashboard.md)); `<account>`
 is the account the IRA's configuration names. An **urgent** alert pages
 you; a **routine** one only informs. A withheld month sends one alert when
 a run of withheld months with the same reason starts, and its text says
-held positions and orders are unchanged. Until an IRA engine can run (see
-"Where this stands"), only the first row can happen on the server.
+held positions and orders are unchanged. The IRA's reporter is not running yet, so none of these alerts reaches you
+for the IRA until it is; until then the same-day probe (`docs/runbooks/first-dry-run-day.md`, I-8) names the
+latest decision and any `missing-mark` refusal.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |

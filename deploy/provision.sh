@@ -571,25 +571,40 @@ require_native_programs() {
 }
 
 # install_engine_settings SRC DEST: installs the engines' settings from SRC
-# into DEST. The settings files (*.env) carry client IDs and modes only, no
-# secret and no account, and are repo-managed, so they are overwritten. A
-# configuration (*.config) names its account, which the owner substitutes on
-# the server and never in the repository, and is hashed into its engine's run
-# (ADR 0016), so it is installed only when DEST has none: an existing one is
-# kept byte for byte, and the shipped one is installed beside it as
-# <name>.config.example, to compare (docs/live-trading/lessons-2026-10.md L7: an earlier provisioner
-# copied the shipped configuration over the server's, resetting Boost's
-# account to the placeholder).
+# into DEST. A settings file (*.env: client ID, mode, the adapter's account
+# line name; no secret, no account) and a configuration (*.config, which
+# names its account, which the owner substitutes on the server and never in
+# the repository, and is hashed into its engine's run, ADR 0016) are each
+# installed only when DEST has none: an existing one is kept byte for byte,
+# an owner's edit included, and the shipped one is installed beside it as
+# <name>.env.example or <name>.config.example, to compare; a line the
+# shipped file adds is the owner's to copy (docs/runbooks/first-dry-run-day.md,
+# "The Traditional IRA"; docs/live-trading/lessons-2026-10.md L7: an earlier
+# provisioner copied the shipped configuration over the server's, resetting
+# Boost's account to the placeholder).
 install_engine_settings() {
   local src=$1 dest=$2 f name
-  install -m 0644 "$src"/*.env "$dest/"
+  for f in "$src"/*.env; do
+    name=$(basename "$f")
+    if test -e "$dest/$name"; then
+      install -m 0644 "$f" "$dest/$name.example"
+      log "kept $dest/$name; the shipped one is $dest/$name.example (copy any line it adds by hand)"
+    else
+      # Written whole beside it, then renamed into place: a copy cut short
+      # never stands under the file's own name, which a later run would keep.
+      install -m 0644 "$f" "$dest/.$name.new"
+      mv -f "$dest/.$name.new" "$dest/$name"
+    fi
+  done
   for f in "$src"/*.config; do
     name=$(basename "$f")
     if test -e "$dest/$name"; then
       install -m 0644 "$f" "$dest/$name.example"
       log "kept $dest/$name, which names the server's account; the shipped one is $dest/$name.example"
     else
-      install -m 0644 "$f" "$dest/$name"
+      # Whole beside it, then renamed into place, as each settings file is.
+      install -m 0644 "$f" "$dest/.$name.new"
+      mv -f "$dest/.$name.new" "$dest/$name"
       log "installed $dest/$name; name its account on the server (docs/runbooks/first-dry-run-day.md)"
     fi
   done
@@ -689,6 +704,20 @@ CONF
     mv "$etc/adapters/boost.json.new" "$etc/adapters/boost.json"
     log "created $etc/adapters/boost.json (owner step: set paper mode before the paper test)"
   fi
+  # The Traditional IRA's adapter (ti-adapter@trad-ira): its own client ID
+  # (12), the account snapshot the momentum engine reads (version 4) and a
+  # contract and mark for every name it can decide (ADR 0026 points 2 and 3).
+  # Created once, never overwritten, as Boost's is.
+  if ! test -e "$etc/adapters/trad-ira.json"; then
+    if mac_mini; then
+      sed 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' "$here/etc/adapters/trad-ira.json.example" >"$etc/adapters/trad-ira.json.new"
+    else
+      cat "$here/etc/adapters/trad-ira.json.example" >"$etc/adapters/trad-ira.json.new"
+    fi
+    chmod 0644 "$etc/adapters/trad-ira.json.new"
+    mv "$etc/adapters/trad-ira.json.new" "$etc/adapters/trad-ira.json"
+    log "created $etc/adapters/trad-ira.json (dry-run, sending off)"
+  fi
 
   log "systemd units"
   # The reporter is one instance per engine (ti-reporter@<instance>); an
@@ -717,6 +746,11 @@ CONF
     if mac_mini && test "$(basename "$unit")" = ti-gateway.service; then continue; fi
     install -m 0644 "$unit" "$unit_dir/"
   done
+  # The Traditional IRA's Flex reader fires at its own staggered times, 15
+  # minutes after Boost's (docs/live-trading/lessons-2026-10.md L3): a drop-in
+  # for its instance of the timer, replaced on every run as the units are.
+  install -d -m 0755 "$unit_dir/ti-flex@trad-ira.timer.d"
+  install -m 0644 "$here/systemd/ti-flex@trad-ira.timer.d/stagger.conf" "$unit_dir/ti-flex@trad-ira.timer.d/"
   if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
     rm -f "$unit_dir/ti-gateway.service"
   fi
@@ -761,8 +795,10 @@ CONF
     # links outlive it, so each instance is disabled too (ADR 0027, the
     # restart model). Disabling stops nothing that is running.
     systemctl disable ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service
-    # The adapter is started by the owner too, after its engine; never enabled.
-    systemctl disable ti-adapter-boost.service
+    # The adapters are started by the owner too, each after its engine and,
+    # for an IRA, after its warm-up; never enabled: the engine is never
+    # started at boot, so an adapter started then would only fail.
+    systemctl disable ti-adapter-boost.service ti-adapter@trad-ira.service
     # The gateway starts only once the owner has filled
     # the login file; the unit's own check refuses an empty one. The data
     # step, the reporter and the dashboard fail, each with a message, until

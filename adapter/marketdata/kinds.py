@@ -28,15 +28,18 @@ ACCOUNT_SNAPSHOT = ("account.snapshot", 3)            # AccountSnapshotPositions
 BROKER_SNAPSHOT = ("account.broker.snapshot", 2)      # BrokerSnapshotReadAtVersion
 BROKER_SNAPSHOT_V1 = ("account.broker.snapshot", 1)   # BrokerSnapshotSchemaVersion
 MARK = ("market.mark.recorded", 2)                    # MarkRecordedEvidenceVersion
-ADAPTER_KINDS = (ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT, BROKER_SNAPSHOT_V1, MARK)
+# An IRA's adapter (config account_snapshot_version 4, resolve_contracts):
+# the account snapshot with its cash, and each mark with its IBKR contract.
+ACCOUNT_SNAPSHOT_CASH = ("account.snapshot", 4)       # AccountSnapshotCashVersion
+MARK_CONTRACT = ("market.mark.recorded", 3)           # MarkRecordedContractVersion
+ADAPTER_KINDS = (ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT, BROKER_SNAPSHOT_V1, MARK, ACCOUNT_SNAPSHOT_CASH, MARK_CONTRACT)
 
 # The account snapshots that state an account's positions, which the data
 # job reads an IRA's holdings from (tidata.holdings): version 3, the one the
-# adapter writes today (Boost's book), and version 4, version 3 with the cash
-# an IRA's buys are budgeted from, the one the momentum engine reads
+# adapter writes for Boost, and version 4, version 3 with the cash an IRA's
+# buys are budgeted from, the one it writes for the momentum engine
 # (AccountSnapshotCashVersion; ADR 0026 point 2). A snapshot of any other
 # version is refused there, never read as holding nothing (ADR 0015).
-ACCOUNT_SNAPSHOT_CASH = ("account.snapshot", 4)       # AccountSnapshotCashVersion
 POSITIONS_SNAPSHOTS = (ACCOUNT_SNAPSHOT, ACCOUNT_SNAPSHOT_CASH)
 # A target-weight account's fill (FillTargetWeightVersion), whose instrument
 # a holdings reading adds; version 4 is the Turtle reducer's.

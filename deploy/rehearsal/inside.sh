@@ -70,6 +70,10 @@ ira_config=/etc/trend-investing/engines/trad-ira.config
 grep -q '"account_id": "trad-ira"' "$ira_config" || fail "the first pass did not install the shipped trad-ira.config"
 sed -i 's/"account_id": "trad-ira"/"account_id": "DUREHEARS1"/' "$ira_config"
 edited=$(sha256sum "$ira_config")
+# A settings file the owner edited by hand (a line the shipped one lacks)
+# survives too, the shipped one beside it.
+echo "TI_OWNER_MARKER=kept" >>/etc/trend-investing/engines/trad-ira.env
+edited_env=$(sha256sum /etc/trend-investing/engines/trad-ira.env)
 before=$(secret_sums)
 "$p" base
 "$p" clock
@@ -78,7 +82,9 @@ before=$(secret_sums)
 test "$(secret_sums)" = "$before" || fail "re-run changed the owner's encrypted secret files"
 test "$(sha256sum "$ira_config")" = "$edited" || fail "re-run changed the account ID the owner named in trad-ira.config"
 cmp -s /root/deploy/etc/engines/trad-ira.config "$ira_config.example" || fail "re-run did not put the shipped trad-ira.config beside the owner's as trad-ira.config.example"
-pass "second pass idempotent, owner's encrypted files and edited account configuration preserved, no passphrase asked"
+test "$(sha256sum /etc/trend-investing/engines/trad-ira.env)" = "$edited_env" || fail "re-run changed the trad-ira.env the owner edited (its marker line)"
+cmp -s /root/deploy/etc/engines/trad-ira.env /etc/trend-investing/engines/trad-ira.env.example || fail "re-run did not put the shipped trad-ira.env beside the owner's as trad-ira.env.example"
+pass "second pass idempotent, owner's encrypted files, edited account configuration and edited settings file preserved, no passphrase asked"
 
 # The encrypted files, ti-unlock and ti-secrets (deploy/rehearsal/inside-secrets.sh).
 TI_TEST_PASS=$passphrase TI_TEST_MARKER=$marker bash /root/deploy/rehearsal/inside-secrets.sh
@@ -548,7 +554,8 @@ systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer ti-data@
   ti-reporter@boost.service ti-reporter@boost.timer \
   ti-unit-failed@ti-engine@boost.service.service ti-unit-failed@ti-adapter-boost.service.service ti-unit-failed@ti-reporter@boost.service.service \
   ti-unit-failed@ti-data@trad-ira.service.service \
-  ti-dashboard.service ti-adapter-boost.service ti-ntfy.service \
+  ti-dashboard.service ti-adapter-boost.service ti-adapter@trad-ira.service ti-ntfy.service \
+  ti-unit-failed@ti-adapter@trad-ira.service.service \
   ti-flex@boost.service ti-flex@boost.timer ti-flex@trad-ira.service ti-flex@trad-ira.timer \
   ti-flex@roth-ira.service ti-flex@roth-ira.timer >"$verify_log" 2>&1 || verify_status=$?
 cat "$verify_log"
@@ -598,7 +605,7 @@ for a in boost trad-ira roth-ira; do
 done
 # shellcheck disable=SC2016
 grep -q -- '-operator ${TI_STATE_DIR}/operator' /etc/systemd/system/ti-engine@.service || fail "the engine unit does not pass -operator"
-for unit in ti-adapter-boost.service ti-data.service ti-data@.service ti-reporter@.service ti-unit-failed@.service ti-dashboard.service ti-flex@.service; do
+for unit in ti-adapter-boost.service ti-adapter@.service ti-data.service ti-data@.service ti-reporter@.service ti-unit-failed@.service ti-dashboard.service ti-flex@.service; do
   grep -q '^InaccessiblePaths=.*-/var/lib/trend-investing/engines/boost/operator' "/etc/systemd/system/$unit" || fail "$unit can reach the operator inbox"
 done
 pass "ti-operator writes the instructions: each account's inbox is ti-operator:ti-trader 0750, the engine unit passes it, and no network-facing unit can reach it"
@@ -883,7 +890,11 @@ done
 test -f /etc/systemd/system/ti-flex@.service && test -f /etc/systemd/system/ti-flex@.timer || fail "ti-flex@ unit or timer not installed"
 test ! -e /etc/systemd/system/ti-flex-boost.service && test ! -e /etc/systemd/system/ti-flex-boost.timer || fail "the Boost-only Flex reader unit is still installed"
 grep -q '"paper_sending_enabled": false' /etc/trend-investing/adapters/boost.json || fail "adapter configuration not created from the example"
-pass "adapter state directory and configuration in place, sending off"
+cmp -s /root/deploy/etc/adapters/trad-ira.json.example /etc/trend-investing/adapters/trad-ira.json || fail "the IRA adapter's configuration not created from its example"
+test "$(stat -c %U:%a /var/lib/trend-investing/adapters/trad-ira)" = ti-trader:750 || fail "the IRA adapter's state directory not ti-trader 0750"
+# The Traditional IRA's Flex reader fires 15 minutes after Boost's (lessons L3).
+test "$(grep -c '^OnCalendar=Mon\.\.Fri 0[567]:45 America/New_York$' /etc/systemd/system/ti-flex@trad-ira.timer.d/stagger.conf)" = 3 || fail "the IRA Flex reader's staggered times are not installed"
+pass "adapter state directories and configurations in place (Boost's and the Traditional IRA's), sending off, and the IRA Flex reader's staggered times installed"
 # ti-release, run against a local fake release (file://) on the programs
 # installed above, with a stand-in systemctl (no systemd runs here) and no gh.
 # Without gh it refuses, installing nothing; with --unverified (this container

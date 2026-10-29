@@ -66,6 +66,17 @@ LIST_MESSAGES = ("open_order", "open_order_end")
 # both, so request IDs start far above any order ID an account reaches
 # (IBKR's are 32-bit) and an error on a request never names an order.
 REQUEST_ID_BASE = 1 << 30
+# The adapter's bulk requests (contract lookups, market-data snapshots and
+# their cancels; snapshot.py) share one pacer: at most PACE_LIMIT of them in
+# any PACE_WINDOW seconds. IBKR accepts at most 50 API messages a second from
+# a client and warns, then disconnects, past it (TWS API documentation,
+# request limitations); the margin leaves room for the few other requests a
+# reading makes beside them.
+PACE_LIMIT = 40
+PACE_WINDOW = 1.0
+# ibapi 10.51.01's MIN_SERVER_VER_PROTOBUF_CONTRACT_DATA: from this server
+# version on, a contract's details arrive as protobuf messages.
+PROTOBUF_CONTRACT_DATA = 205
 # How long one sleep of Connection.pause lasts at most, so the callbacks
 # that arrive meanwhile are applied (and fanned out) at least this often;
 # a link change ends the wait early (ADR 0025 point 5).
@@ -142,6 +153,8 @@ class Connection:
         self.config = config
         self._status_sink = status_sink
         self._sleep = sleep
+        # The times of the paced messages sent in the last PACE_WINDOW (paced).
+        self._paced = deque()
         self._monotonic = monotonic
         self._wall_clock = wall_clock
         self._subscribers = []
@@ -532,6 +545,41 @@ class Connection:
             if drained:
                 self._sleep(min(remaining, PAUSE_SLICE))
 
+    def _log_server_version(self):
+        """Log the server version this session negotiated, and so which of ibapi's two decoders reads IBKR's answers.
+
+        ibapi 10.51.01 decodes a contract's details from IBKR's protobuf
+        messages from server version PROTOBUF_CONTRACT_DATA on, and from the
+        older text messages below it; the adapter's doubles are captured from
+        both (tests/testdata/ibapi_shapes.json). The same-day probe reports
+        this line, so the path the live Gateway uses is on record (docs/live-
+        trading/lessons-2026-10.md L5).
+        """
+        version = self.api.server_version()
+        path = ("unknown" if not isinstance(version, int) else
+                "protobuf" if version >= PROTOBUF_CONTRACT_DATA else "text")
+        log.info("ibkr gateway server_version=%s contract_data=%s", version, path)
+
+    def paced(self, send, *args):
+        """send(*args), once fewer than PACE_LIMIT paced messages went in the last PACE_WINDOW seconds.
+
+        The wait is the injected sleep alone, never a pump: the answers to
+        requests already sent stay queued in the Inbox for the read that
+        asked them (snapshot.read_marks, resolve_contracts), so pacing can
+        neither drop nor reorder one. Rule: IBKR's 50-messages-a-second limit
+        (PACE_LIMIT); a burst past it would cost the link, not just the
+        request.
+        """
+        while True:
+            now = self._monotonic()
+            while self._paced and now - self._paced[0] >= PACE_WINDOW:
+                self._paced.popleft()
+            if len(self._paced) < PACE_LIMIT:
+                break
+            self._sleep(max(0.0, self._paced[0] + PACE_WINDOW - now))
+        self._paced.append(self._monotonic())
+        return send(*args)
+
     def new_req_id(self):
         req_id = self._next_req_id
         self._next_req_id += 1
@@ -587,6 +635,7 @@ class Connection:
                 self.needs_reconciliation = True
                 self.last_drop_reason = None
                 self._report("connected")
+                self._log_server_version()
                 return
             if event.name == "managed_accounts":
                 # The session's own state, read here: nothing else needs it.

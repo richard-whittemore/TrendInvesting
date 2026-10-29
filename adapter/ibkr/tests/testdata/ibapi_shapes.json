@@ -1,0 +1,217 @@
+{
+  "ibapi": "1051.1",
+  "protobuf": {
+    "account_value": {
+      "accountName": {
+        "type": "str",
+        "value": "DU0000001"
+      },
+      "currency": {
+        "type": "str",
+        "value": "USD"
+      },
+      "key": {
+        "type": "str",
+        "value": "SettledCash"
+      },
+      "val": {
+        "type": "str",
+        "value": "10000.00"
+      }
+    },
+    "contract_details": {
+      "contract": {
+        "conId": {
+          "type": "int",
+          "value": 900001
+        },
+        "currency": {
+          "type": "str",
+          "value": "USD"
+        },
+        "exchange": {
+          "type": "str",
+          "value": "SMART"
+        },
+        "localSymbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "primaryExchange": {
+          "type": "str",
+          "value": "NASDAQ"
+        },
+        "secType": {
+          "type": "str",
+          "value": "STK"
+        },
+        "symbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "tradingClass": {
+          "type": "str",
+          "value": "NMS"
+        }
+      },
+      "details": {
+        "longName": {
+          "type": "str",
+          "value": "SYNTHETIC CO"
+        },
+        "marketName": {
+          "type": "str",
+          "value": "NMS"
+        },
+        "minTick": {
+          "type": "float",
+          "value": 0.01
+        },
+        "stockType": {
+          "type": "str",
+          "value": "COMMON"
+        },
+        "validExchanges": {
+          "type": "str",
+          "value": "SMART,NASDAQ,ARCA"
+        }
+      },
+      "req_id": {
+        "type": "int",
+        "value": 7
+      }
+    },
+    "contract_details_end": {
+      "req_id": {
+        "type": "int",
+        "value": 7
+      }
+    },
+    "error": {
+      "errorCode": {
+        "type": "int",
+        "value": 200
+      },
+      "errorString": {
+        "type": "str",
+        "value": "No security definition has been found for the request"
+      },
+      "errorTime": {
+        "type": "int",
+        "value": 1800000000000
+      },
+      "reqId": {
+        "type": "int",
+        "value": 8
+      }
+    }
+  },
+  "server_version": 205,
+  "text": {
+    "account_value": {
+      "accountName": {
+        "type": "str",
+        "value": "DU0000001"
+      },
+      "currency": {
+        "type": "str",
+        "value": "USD"
+      },
+      "key": {
+        "type": "str",
+        "value": "SettledCash"
+      },
+      "val": {
+        "type": "str",
+        "value": "10000.00"
+      }
+    },
+    "contract_details": {
+      "contract": {
+        "conId": {
+          "type": "int",
+          "value": 900001
+        },
+        "currency": {
+          "type": "str",
+          "value": "USD"
+        },
+        "exchange": {
+          "type": "str",
+          "value": "SMART"
+        },
+        "localSymbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "primaryExchange": {
+          "type": "str",
+          "value": "NASDAQ"
+        },
+        "secType": {
+          "type": "str",
+          "value": "STK"
+        },
+        "symbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "tradingClass": {
+          "type": "str",
+          "value": "NMS"
+        }
+      },
+      "details": {
+        "longName": {
+          "type": "str",
+          "value": "SYNTHETIC CO"
+        },
+        "marketName": {
+          "type": "str",
+          "value": "NMS"
+        },
+        "minTick": {
+          "type": "float",
+          "value": 0.01
+        },
+        "stockType": {
+          "type": "str",
+          "value": "COMMON"
+        },
+        "validExchanges": {
+          "type": "str",
+          "value": "SMART,NASDAQ,ARCA"
+        }
+      },
+      "req_id": {
+        "type": "int",
+        "value": 7
+      }
+    },
+    "contract_details_end": {
+      "req_id": {
+        "type": "int",
+        "value": 7
+      }
+    },
+    "error": {
+      "errorCode": {
+        "type": "int",
+        "value": 200
+      },
+      "errorString": {
+        "type": "str",
+        "value": "No security definition has been found for the request"
+      },
+      "errorTime": {
+        "type": "int",
+        "value": 1800000000000
+      },
+      "reqId": {
+        "type": "int",
+        "value": 8
+      }
+    }
+  },
+  "text_server_version": 200
+}

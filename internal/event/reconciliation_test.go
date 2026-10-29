@@ -273,6 +273,19 @@ func TestTheIBKRAdapterPayloadsDecodeAndValidate(t *testing.T) {
 	if mark.Price != 401.5 || !mark.BrokerLastSet || mark.BrokerLast != 401.17 {
 		t.Errorf("mark %+v", mark)
 	}
+	// The IRA's adapter writes the account snapshot the momentum engine reads
+	// at version 4 and each mark with its IBKR contract at version 3 (ADR
+	// 0026 points 2 and 3).
+	var cash event.AccountCashSnapshotPayload
+	read("account_cash_snapshot.json", event.AccountSnapshotCashVersion, &cash)
+	if cash.SettledCash != 9000 || cash.TotalCash != 10000 || cash.NetLiquidation != 10000 || cash.Quantity("IEF") != 10 {
+		t.Errorf("account cash snapshot %+v", cash)
+	}
+	var contractMark event.MarkRecordedPayload
+	read("mark_contract.json", event.MarkRecordedContractVersion, &contractMark)
+	if contractMark.Contract == nil || contractMark.Contract.ConID != 900001 || contractMark.Contract.PrimaryExchange != "NASDAQ" || contractMark.BrokerLast != 52.41 {
+		t.Errorf("contract mark %+v", contractMark)
+	}
 	var reconciliation event.ReconciliationPayload
 	read("reconciliation.json", event.ReconciliationSchemaVersion, &reconciliation)
 	if reconciliation.TotalCash != -4700 || reconciliation.Currency != "USD" {

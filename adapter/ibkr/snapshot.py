@@ -55,13 +55,14 @@ from collections import namedtuple
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from account import EXCESS_LIQUIDITY, NET_LIQUIDATION, SUMMARY_TAGS, TOTAL_CASH
+from account import EXCESS_LIQUIDITY, NET_LIQUIDATION, SETTLED_CASH, TOTAL_CASH, account_tags
 from account import SnapshotIncomplete, SnapshotInvalid, _add_position, _server_time, ask_account_values
 from account import end_account_values
 from connection import LIST_ENDED, LIST_READING, NotConnected
 from masking import mask_accounts
 from orders import FINISHED, UnrecognisedOrderReport, open_order_record, order_key, order_label
 from sender import CURRENCY, EXCHANGE, SEC_TYPE
+from spelling import ibkr_symbol
 from values import to_decimal
 
 log = logging.getLogger("ibkr")
@@ -72,9 +73,15 @@ BROKER_SNAPSHOT_VERSION = 2
 # internal/event AccountSnapshotPositionsVersion: what Boost reads.
 ACCOUNT_SNAPSHOT_TYPE = "account.snapshot"
 ACCOUNT_SNAPSHOT_VERSION = 3
+# internal/event AccountSnapshotCashVersion: version 3 with IBKR's settled and
+# total cash, what the momentum engine reads (ADR 0026 point 2).
+ACCOUNT_SNAPSHOT_CASH_VERSION = 4
 # internal/event MarkRecordedEvidenceVersion: IBKR's last price beside the mark.
 MARK_TYPE = "market.mark.recorded"
 MARK_VERSION = 2
+# internal/event MarkRecordedContractVersion: version 2 with the IBKR contract
+# the mark is for, as reqContractDetails resolved it (ADR 0026 point 3).
+MARK_CONTRACT_VERSION = 3
 RECONCILIATION_TYPE = "account.reconciliation"
 RECONCILIATION_VERSION = 1
 MORNING = "morning"
@@ -85,6 +92,19 @@ NET = "net-liquidation"
 OPEN_ORDERS = "open-orders"
 POSITIONS = "positions"
 CASH = "total-cash"
+# Version 4's settled cash: unread in a reading for a configuration that
+# needs it (account.account_tags) when IBKR did not give it in full.
+SETTLED = "settled-cash"
+
+# How many market-data snapshots are asked for at once: IBKR's market-data
+# lines (TWS API "Market Data Lines": at least 100 concurrent requests per
+# account, more only with more commissions or booster packs). An IRA marks
+# its 500 ranked members, so they are asked for in batches well inside it;
+# Boost's few holdings are one batch, as before.
+MARK_BATCH = 50
+# The one kind of contract a mark is resolved to, the one the engine trades
+# (sender.SEC_TYPE, CURRENCY, EXCHANGE): a US-dollar stock routed by SMART.
+CONTRACT_SEC_TYPE, CONTRACT_CURRENCY, CONTRACT_EXCHANGE = SEC_TYPE, CURRENCY, EXCHANGE
 
 # IBKR's tick type for the last traded price (TWS API "Tick Types": 4, LAST),
 # the only tick read_marks takes as a mark.
@@ -93,7 +113,7 @@ LAST_PRICE_TICK = 4
 # The currency the engine's balances are in; a balance in another is unreadable.
 BASE_CURRENCY = "USD"
 # Each balance's unread marker.
-MARKERS = {NET_LIQUIDATION: NET, EXCESS_LIQUIDITY: EXCESS, TOTAL_CASH: CASH}
+MARKERS = {NET_LIQUIDATION: NET, EXCESS_LIQUIDITY: EXCESS, TOTAL_CASH: CASH, SETTLED_CASH: SETTLED}
 
 # The unended marker of an account-values download IBKR had not ended: its
 # accountDownloadEnd carries no request ID, so a late one would end a later
@@ -161,6 +181,10 @@ def read_account(conn):
     0019: an unavailable balance is not zero).
     """
     account = conn.config.account_id
+    # The balances this reading needs, each with its unread marker: Boost's
+    # three, and an IRA's settled cash (account.account_tags).
+    needed = tuple((tag, MARKERS[tag]) for tag in account_tags(conn.config))
+    balance_markers = {component for _, component in needed}
     unread = set()
     positions, balances, orders = {}, {}, {}
     received = conn.now_utc()
@@ -212,21 +236,20 @@ def read_account(conn):
     link_changed = conn.link_changes != changes
     if not conn.connected or as_of is None or link_changed:
         # A read with no server time after it is not bounded by IBKR's clock.
-        unread.update({POSITIONS, NET, EXCESS, CASH, OPEN_ORDERS})
+        unread.update({POSITIONS, OPEN_ORDERS} | balance_markers)
         as_of = received
     if not done["positions"]:
         unread.add(POSITIONS)
     if not done["orders"]:
         unread.add(OPEN_ORDERS)
     if summary is None or not summary.ended or summary.error is not None:
-        unread.update({NET, EXCESS, CASH})
+        unread.update(balance_markers)
     else:
         unread.update(MARKERS[tag] for tag in invalid)
-    for tag, component in ((NET_LIQUIDATION, NET), (EXCESS_LIQUIDITY, EXCESS), (TOTAL_CASH, CASH)):
+    for tag, component in needed:
         if tag not in balances:
             unread.add(component)
-    for component, tag in ((NET, NET_LIQUIDATION), (EXCESS, EXCESS_LIQUIDITY), (CASH, TOTAL_CASH)):
-        if tag in balances and balances[tag].currency != BASE_CURRENCY:
+        elif balances[tag].currency != BASE_CURRENCY:
             unread.add(component)
     unended = set()
     if asked:
@@ -265,7 +288,7 @@ def _summary_outcome(conn, summary, balances, invalid):
                 else "the link to IB Gateway went before it ended")
     else:
         problems = []
-        for tag in SUMMARY_TAGS:
+        for tag in summary.tags:
             if tag in invalid and tag == TOTAL_CASH and summary.foreign_cash:
                 problems.append("{} unreadable: cash in {}".format(MARKERS[tag], ", ".join(summary.foreign_cash)))
             elif tag in invalid:
@@ -356,7 +379,8 @@ def _take_order(orders, account, unread, order_id, contract, order, order_state)
 def read_marks(conn, con_ids):
     """IBKR's mark for each symbol of con_ids (symbol to IBKR's contract ID): {symbol: Decimal}.
 
-    One market-data snapshot per contract, asked together and waited for up
+    One market-data snapshot per contract, asked MARK_BATCH at a time (in
+    symbol order), each batch together and waited for up
     to the configuration's mark_timeout, which outlasts the 11-second window
     at whose end IBKR ends a snapshot (config.MARK_TIMEOUT). A symbol has a mark only when
     its request completed (IBKR ended its snapshot) and every LAST price it
@@ -365,16 +389,29 @@ def read_marks(conn, con_ids):
     permission), one that ended with no LAST price or carried any price
     that is not finite and positive, and one not ended in time (cancelled)
     give no mark: an uncertain price is never stated as the mark (ADR 0019).
-    Nothing here raises: with the link down there are no marks.
+    Nothing here raises: with the link down there are no marks, not even a
+    batch's read before it went.
     """
+    symbols = sorted(con_ids)
+    prices = {}
+    for start in range(0, len(symbols), MARK_BATCH):
+        batch = {s: con_ids[s] for s in symbols[start:start + MARK_BATCH]}
+        prices.update(_read_mark_batch(conn, batch))
+        if not conn.connected:
+            return {}
+    return prices
+
+
+def _read_mark_batch(conn, con_ids):
+    """read_marks for one batch of at most MARK_BATCH contracts."""
     if not conn.connected or not con_ids:
         return {}
     asked = {}
     for symbol in sorted(con_ids):
         req_id = conn.new_req_id()
         asked[req_id] = symbol
-        conn.api.req_mkt_data(req_id, SimpleNamespace(conId=con_ids[symbol], symbol=symbol, secType=SEC_TYPE,
-                                                      currency=CURRENCY, exchange=EXCHANGE))
+        conn.paced(conn.api.req_mkt_data, req_id, SimpleNamespace(
+            conId=con_ids[symbol], symbol=ibkr_symbol(symbol), secType=SEC_TYPE, currency=CURRENCY, exchange=EXCHANGE))
     prices, failed, ended = {}, set(), set()
     try:
         for event in conn.events(conn.config.mark_timeout):
@@ -400,10 +437,162 @@ def read_marks(conn, con_ids):
     finally:
         if conn.connected:
             for req_id in sorted(set(asked) - ended):
-                conn.api.cancel_mkt_data(req_id)
+                conn.paced(conn.api.cancel_mkt_data, req_id)
     if not conn.connected:
         return {}
     return {asked[r]: prices[r] for r in sorted(ended - failed) if r in prices}
+
+
+Contract = namedtuple("Contract", "symbol con_id exchange primary_exchange currency")
+"""One IBKR contract a name resolved to (resolve_contracts): IBKR's conId, the SMART routing it was asked on, its
+primary exchange and currency."""
+
+# How many contract-details requests are outstanding at once. Their rate is
+# the connection's shared pacer's (Connection.paced: under IBKR's 50
+# messages a second, cancels included), so a batch answered at once and the
+# next one never make a burst together.
+CONTRACT_BATCH = 40
+# How many times a name whose answer did not end is asked: once, then once
+# more after the rest of the batch. An answer IBKR has not finished is not a
+# refusal (IBKR's error, such as 200, which is final and never asked again),
+# so a slow Gateway does not leave a pick without a mark; one that does not
+# end the second time gets none (ADR 0025, amended 2026-10-29).
+CONTRACT_ASKS = 2
+
+
+def resolve_contracts(conn, symbols, configured):
+    """(contracts, refused) for symbols, each resolved by name with IBKR's reqContractDetails; None if the link went.
+
+    ADR 0026 point 3 and ADR 0025 (amended 2026-10-29): an IRA's mark states
+    the IBKR contract it is for, and a stock newly picked is in no
+    configuration, so its contract is looked up by name, in IBKR's spelling
+    (spelling.ibkr_symbol), as a US-dollar stock on SMART. contracts maps a symbol to
+    its Contract when IBKR answered with exactly one contract, and that
+    contract is the name's own: IBKR's symbol and local symbol are the
+    spelling asked, a stock (STK), in US dollars, on SMART, with a positive
+    conId and a primary exchange, and the conId configured for it
+    (configured, config.con_ids) when there is one. refused maps every other
+    symbol to why: IBKR's error under the request (200, no security
+    definition; final, never asked again), an answer that did not end within
+    the request_timeout when asked CONTRACT_ASKS times, more than one
+    contract (ambiguous: never a guess), one that is not the name's own, or
+    one that contradicts the configured conId. A refused name is given no
+    mark, so the engine refuses any order for it (missing-mark), never sizes
+    it on another contract. Every request goes through the connection's
+    pacer. A link that changed during the requests gives None: nothing read
+    on it stands (ADR 0019, one cutoff), and the caller waits for it to be
+    reconciled.
+    """
+    contracts, refused = {}, {}
+    changes = conn.link_changes
+    pending = sorted(set(symbols))
+    for ask in range(1, CONTRACT_ASKS + 1):
+        unended = []
+        for start in range(0, len(pending), CONTRACT_BATCH):
+            answered = _ask_contracts(conn, pending[start:start + CONTRACT_BATCH], changes)
+            if answered is None:
+                return None
+            for symbol, (state, value) in answered.items():
+                if state == "unended":
+                    unended.append(symbol)
+                elif state == "error":
+                    code, message = value
+                    refused[symbol] = "IBKR answered its contract request with error {}: {}".format(
+                        code, mask_accounts(str(message), conn.config.account_id))
+                else:
+                    contract, why = _one_contract(symbol, value, configured.get(symbol))
+                    if contract is None:
+                        refused[symbol] = why
+                    else:
+                        contracts[symbol] = contract
+        pending = unended
+        if not pending:
+            break
+    for symbol in pending:
+        refused[symbol] = "IBKR's answer to its contract request did not end within {}s, asked {}".format(
+            conn.config.request_timeout, {2: "twice"}.get(CONTRACT_ASKS, "{} times".format(CONTRACT_ASKS)))
+    return contracts, refused
+
+
+def _ask_contracts(conn, names, changes):
+    """{symbol: (state, value)} for one batch of contract lookups: ("answered", details), ("error", (code, message))
+    or ("unended", None); None if the link went or changed (see resolve_contracts)."""
+    if not conn.connected or conn.link_changes != changes:
+        return None
+    asked, answers, ended, errors = {}, {}, set(), {}
+    try:
+        for symbol in names:
+            req_id = conn.new_req_id()
+            asked[req_id] = symbol
+            answers[req_id] = []
+            conn.paced(conn.api.req_contract_details, req_id, SimpleNamespace(
+                symbol=ibkr_symbol(symbol), secType=CONTRACT_SEC_TYPE, currency=CONTRACT_CURRENCY,
+                exchange=CONTRACT_EXCHANGE))
+            if not conn.connected:
+                return None
+        for event in conn.events(conn.config.request_timeout):
+            if not conn.connected:
+                break
+            req_id = event.args[0] if event.args else None
+            if not isinstance(req_id, int) or isinstance(req_id, bool) or req_id not in asked or req_id in ended:
+                continue
+            if event.name == "contract_details" and len(event.args) >= 2:
+                answers[req_id].append(event.args[1])
+            elif event.name == "contract_details_end":
+                ended.add(req_id)
+            elif event.name == "error":
+                errors[req_id] = (tuple(event.args[1:3]) + ("", ""))[:2]
+                ended.add(req_id)
+            if len(ended) == len(asked):
+                break
+    except NotConnected:
+        return None
+    if not conn.connected or conn.link_changes != changes:
+        return None
+    out = {}
+    for req_id, symbol in sorted(asked.items()):
+        if req_id in errors:
+            out[symbol] = ("error", errors[req_id])
+        elif req_id not in ended:
+            out[symbol] = ("unended", None)
+        else:
+            out[symbol] = ("answered", answers[req_id])
+    return out
+
+
+def _one_contract(symbol, answers, configured):
+    """(Contract, "") for the one answer that is symbol's own US-dollar stock on SMART, else (None, why).
+
+    The answer's symbol and local symbol must both be the name in IBKR's
+    spelling (ibkr_symbol): a class share asked as "BRK B" is taken only from
+    an answer IBKR spells "BRK B" itself, and is recorded under the data
+    job's name, BRK.B.
+    """
+    if len(answers) != 1:
+        return None, "IBKR gave {} contracts for it, not one{}".format(
+            len(answers), " (ambiguous: none is taken)" if answers else "")
+    details = answers[0]
+    c = getattr(details, "contract", None)
+    con_id = getattr(c, "conId", None)
+    fields = {name: getattr(c, name, None) for name in ("symbol", "localSymbol", "secType", "currency", "exchange",
+                                                         "primaryExchange")}
+    spelled = ibkr_symbol(symbol)
+    if fields["symbol"] != spelled:
+        return None, "IBKR's contract is for {!r}, not {!r}".format(fields["symbol"], spelled)
+    if fields["localSymbol"] != spelled:
+        return None, "IBKR's contract's local symbol is {!r}, not {!r}".format(fields["localSymbol"], spelled)
+    if (fields["secType"], fields["currency"], fields["exchange"]) != (
+            CONTRACT_SEC_TYPE, CONTRACT_CURRENCY, CONTRACT_EXCHANGE):
+        return None, "IBKR's contract is a {} {} contract on {}, not a {} {} contract on {}".format(
+            fields["currency"], fields["secType"], fields["exchange"], CONTRACT_CURRENCY, CONTRACT_SEC_TYPE,
+            CONTRACT_EXCHANGE)
+    if not isinstance(con_id, int) or isinstance(con_id, bool) or con_id <= 0:
+        return None, "IBKR's contract has no positive conId ({!r})".format(con_id)
+    if not isinstance(fields["primaryExchange"], str) or not fields["primaryExchange"]:
+        return None, "IBKR's contract names no primary exchange"
+    if configured is not None and configured != con_id:
+        return None, "IBKR resolved it to conId {}, but the configuration names {} (con_ids)".format(con_id, configured)
+    return Contract(symbol, con_id, fields["exchange"], fields["primaryExchange"], fields["currency"]), ""
 
 
 def _stamp(at):
@@ -509,48 +698,71 @@ def broker_snapshot_record(reading, market_open, marks=None, close=None, why="",
     })
 
 
-def account_snapshot_record(reading, as_of, net_liquidation=None):
-    """The engine's account.snapshot (version 3) of reading, as of as_of: its positions and net liquidation.
+def account_snapshot_record(reading, as_of, net_liquidation=None, version=ACCOUNT_SNAPSHOT_VERSION):
+    """The engine's account.snapshot of reading, as of as_of: version 3, its positions and net liquidation, or 4.
 
     Both must have been read in full: an unavailable balance is not zero
     (ADR 0019), so a reading without them gives no snapshot (ValueError).
     net_liquidation, for a reading as of the close, is its valuation at the
     close (close_valuation; ADR 0019, amended 2026-10-18); without it the
-    snapshot states IBKR's own at the read.
+    snapshot states IBKR's own at the read. Version 4 (an IRA's momentum
+    engine, ADR 0026 point 2) adds IBKR's settled cash and total cash from
+    the same reading, and needs both: a reading missing either gives no
+    snapshot at all, never one with a zero or with only one of them.
     """
-    if reading.unread & {POSITIONS, NET}:
-        raise ValueError("an account snapshot needs the positions and the net liquidation, and {} could not be "
-                         "read".format(", ".join(sorted(reading.unread & {POSITIONS, NET}))))
+    if version not in (ACCOUNT_SNAPSHOT_VERSION, ACCOUNT_SNAPSHOT_CASH_VERSION):
+        raise ValueError("account.snapshot version {} is not one the adapter writes".format(version))
+    needed = {POSITIONS, NET} | ({CASH, SETTLED} if version == ACCOUNT_SNAPSHOT_CASH_VERSION else set())
+    if reading.unread & needed:
+        raise ValueError("an account snapshot at version {} needs {}, and {} could not be read".format(
+            version, ", ".join(sorted(needed)), ", ".join(sorted(reading.unread & needed))))
+    if version == ACCOUNT_SNAPSHOT_CASH_VERSION and not {TOTAL_CASH, SETTLED_CASH} <= set(reading.balances):
+        raise ValueError("an account snapshot at version 4 needs IBKR's settled and total cash, and the reading "
+                         "holds {}".format(", ".join(sorted(reading.balances)) or "no balance"))
     balance = reading.balances[NET_LIQUIDATION]
-    return Record(ACCOUNT_SNAPSHOT_TYPE, ACCOUNT_SNAPSHOT_VERSION, {
+    payload = {
         "account_id": reading.account_id,
         "as_of": _stamp(as_of),
         "net_liquidation": float(balance.amount if net_liquidation is None else net_liquidation),
         "currency": balance.currency,
         "positions": [{"instrument_id": s, "quantity": reading.positions[s]} for s in sorted(reading.positions)],
-    })
+    }
+    if version == ACCOUNT_SNAPSHOT_CASH_VERSION:
+        payload["settled_cash"] = float(reading.balances[SETTLED_CASH].amount)
+        payload["total_cash"] = float(reading.balances[TOTAL_CASH].amount)
+    return Record(ACCOUNT_SNAPSHOT_TYPE, version, payload)
 
 
-def mark_record(symbol, as_of, price, source, broker_last=None):
-    """The market.mark.recorded (version 2) of symbol at as_of: price, the delivered bar's official close.
+def mark_record(symbol, as_of, price, source, broker_last=None, contract=None):
+    """The market.mark.recorded of symbol at as_of: price, the delivered official close; version 2, or 3 with contract.
 
     source names who reported the price (the data job); broker_last is
     IBKR's last price beside it, None when IBKR gave none. Nothing is sized
     from it, but the engine's price band compares a checked order's
     reference price with it when it is set, and with price otherwise (ADR
-    0026 point 3, amended 2026-10-18).
+    0026 point 3, amended 2026-10-18). contract, a Contract that
+    resolve_contracts gave for symbol, makes it version 3: the IBKR contract
+    the mark is for (its conId, the SMART routing it was resolved on, its
+    primary exchange and currency), recorded in the journal with it.
     """
     price = to_decimal(price, "mark")
     if not price > 0:
         raise ValueError("a mark is a positive price")
-    return Record(MARK_TYPE, MARK_VERSION, {
+    payload = {
         "instrument_id": symbol,
         "as_of": _stamp(as_of),
         "price": float(price),
         "source": source,
         "broker_last": 0 if broker_last is None else float(to_decimal(broker_last, "broker last")),
         "broker_last_set": broker_last is not None,
-    })
+    }
+    if contract is None:
+        return Record(MARK_TYPE, MARK_VERSION, payload)
+    if contract.symbol != symbol:
+        raise ValueError("the contract resolved for {} is not {}'s".format(contract.symbol, symbol))
+    payload["contract"] = {"con_id": contract.con_id, "exchange": contract.exchange,
+                           "primary_exchange": contract.primary_exchange, "currency": contract.currency}
+    return Record(MARK_TYPE, MARK_CONTRACT_VERSION, payload)
 
 
 def reconciliation_record(reading, reconciliation_id, trigger=MORNING):

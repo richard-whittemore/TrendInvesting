@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from config import is_paper_account
 from connection import NotConnected
+from spelling import ibkr_symbol
 from values import to_decimal
 
 ACTIONS = ("BUY", "SELL")
@@ -262,7 +263,7 @@ def request_shape(request):
     client maps onto ibapi's Contract and Order (real_client.ibapi_contract,
     real_client.ibapi_order).
     """
-    contract = SimpleNamespace(conId=request.con_id, symbol=request.symbol, secType=SEC_TYPE,
+    contract = SimpleNamespace(conId=request.con_id, symbol=ibkr_symbol(request.symbol), secType=SEC_TYPE,
                                currency=CURRENCY, exchange=EXCHANGE)
     order = SimpleNamespace(orderRef=request.client_order_id, account=request.account_id,
                             action=request.action, totalQuantity=request.quantity,

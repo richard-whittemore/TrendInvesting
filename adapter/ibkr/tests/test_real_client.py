@@ -134,6 +134,13 @@ class _EClient:
     def cancelMktData(self, reqId):
         self.requests.append(("cancelMktData", reqId))
 
+    def serverVersion(self):
+        return 205
+
+    def reqContractDetails(self, reqId, contract):
+        self.requests.append(("reqContractDetails", reqId, contract.conId, contract.symbol, contract.secType,
+                              contract.currency, contract.exchange))
+
     def placeOrder(self, orderId, contract, order):
         self.requests.append(("placeOrder", orderId, contract, order))
         if _EClient.on_place is not None:
@@ -491,6 +498,23 @@ class ForwardingTests(unittest.TestCase):
             ("reqMktData", 5, 756733, "SPY", "STK", "USD", "SMART", "", True, False, []),
             ("cancelMktData", 5), ("disconnect",)])
         self.assertFalse(client.is_connected())
+
+    def test_a_contract_is_looked_up_by_name_as_a_us_dollar_stock_on_smart_and_its_answers_reach_the_inbox(self):
+        client, inbox = self.build(True)
+        client.req_contract_details(6, types.SimpleNamespace(symbol="AAA", secType="STK", currency="USD",
+                                                             exchange="SMART"))
+        # ibapi's Contract leaves conId 0 when it is not set: the lookup is by name.
+        self.assertEqual(client._client.requests[-1], ("reqContractDetails", 6, 0, "AAA", "STK", "USD", "SMART"))
+        for shape in (types.SimpleNamespace(symbol="AAA", secType="OPT", currency="USD", exchange="SMART"),
+                      types.SimpleNamespace(symbol="", secType="STK", currency="USD", exchange="SMART"),
+                      types.SimpleNamespace(symbol="AAA", secType="STK", currency="USD", exchange="SMART", conId=5)):
+            with self.assertRaises(Exception, msg=vars(shape)):
+                client.req_contract_details(7, shape)
+        details = types.SimpleNamespace(contract="c")
+        client._wrapper.contractDetails(6, details)
+        client._wrapper.contractDetailsEnd(6)
+        self.assertEqual([(e.name, e.args) for e in inbox.events()][-2:],
+                         [("contract_details", (6, details)), ("contract_details_end", (6,))])
 
     def test_without_a_configuration_the_real_client_never_places_an_order(self):
         client, _ = self.build(False)

@@ -99,9 +99,48 @@ const MarkRecordedSchemaVersion uint32 = 1
 // permissions.
 const MarkRecordedEvidenceVersion uint32 = 2
 
+// MarkRecordedContractVersion is version 3 of MarkRecordedPayload, the
+// version the IBKR adapter writes for an IRA: version 2 with Contract, the
+// IBKR contract the mark is for, as the adapter resolved it by name with
+// IBKR's contract details (ADR 0026 point 3). The compact IRA stream carries
+// no bar for a stock newly picked, so the adapter marks every ranked member
+// and states the contract it resolved for each; a name it cannot resolve to
+// one US-dollar stock on SMART gets no mark, and the gate refuses any order
+// for it (missing-mark). The price band reads it as version 2.
+const MarkRecordedContractVersion uint32 = 3
+
 // MarkRecordedVersions returns the versions a mark is read at.
 func MarkRecordedVersions() []uint32 {
-	return []uint32{MarkRecordedSchemaVersion, MarkRecordedEvidenceVersion}
+	return []uint32{MarkRecordedSchemaVersion, MarkRecordedEvidenceVersion, MarkRecordedContractVersion}
+}
+
+// MarkContract is the IBKR contract a version-3 mark is for: IBKR's contract
+// ID, the SMART routing it was resolved on, its primary exchange and its
+// currency (US dollars: the one kind of contract the engine trades).
+type MarkContract struct {
+	ConID           int64  `json:"con_id"`
+	Exchange        string `json:"exchange"`
+	PrimaryExchange string `json:"primary_exchange"`
+	Currency        string `json:"currency"`
+}
+
+// Validate checks the contract is a positive IBKR contract ID for a
+// US-dollar contract routed by SMART with its primary exchange named.
+func (c MarkContract) Validate() error {
+	var errs []error
+	if c.ConID <= 0 {
+		errs = append(errs, errors.New("contract con_id must be IBKR's positive contract ID"))
+	}
+	if c.Exchange != "SMART" {
+		errs = append(errs, fmt.Errorf("contract exchange %q is not SMART", c.Exchange))
+	}
+	if c.PrimaryExchange == "" {
+		errs = append(errs, errors.New("contract primary exchange is required"))
+	}
+	if c.Currency != "USD" {
+		errs = append(errs, fmt.Errorf("contract currency %q is not USD", c.Currency))
+	}
+	return errors.Join(errs...)
 }
 
 // MarkRecordedPayload is one instrument's mark at AsOf, as Source reported it.
@@ -116,6 +155,9 @@ type MarkRecordedPayload struct {
 	// BrokerLast zero, when IBKR gave none. Version 1 carries neither.
 	BrokerLast    float64 `json:"broker_last,omitempty"`
 	BrokerLastSet bool    `json:"broker_last_set,omitempty"`
+	// Contract, at version 3 only, is the IBKR contract the mark is for
+	// (MarkRecordedContractVersion); nil at versions 1 and 2.
+	Contract *MarkContract `json:"contract,omitempty"`
 }
 
 // Validate checks the instrument, time, price and source.
@@ -146,10 +188,14 @@ func (p MarkRecordedPayload) Validate() error {
 }
 
 // ValidateSchema is Validate at the version the mark arrived at: version 1
-// carries no broker evidence (MarkRecordedEvidenceVersion).
+// carries no broker evidence (MarkRecordedEvidenceVersion), and only version
+// 3 carries, and must carry, a contract (MarkRecordedContractVersion).
 func (p MarkRecordedPayload) ValidateSchema(version uint32) error {
 	if err := p.Validate(); err != nil {
 		return err
+	}
+	if version != MarkRecordedContractVersion && p.Contract != nil {
+		return fmt.Errorf("invalid mark recorded payload: version %d carries no contract; that is version 3's", version)
 	}
 	switch version {
 	case MarkRecordedSchemaVersion:
@@ -157,6 +203,13 @@ func (p MarkRecordedPayload) ValidateSchema(version uint32) error {
 			return errors.New("invalid mark recorded payload: version 1 carries no broker last; that is version 2's")
 		}
 	case MarkRecordedEvidenceVersion:
+	case MarkRecordedContractVersion:
+		if p.Contract == nil {
+			return errors.New("invalid mark recorded payload: version 3 states the contract the mark is for")
+		}
+		if err := p.Contract.Validate(); err != nil {
+			return fmt.Errorf("invalid mark recorded payload: %w", err)
+		}
 	default:
 		return fmt.Errorf("invalid mark recorded payload: schema version %d is not one of %v", version, MarkRecordedVersions())
 	}
