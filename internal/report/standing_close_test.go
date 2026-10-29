@@ -64,7 +64,7 @@ func TestEarlierRunsPairOnlyStandingCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(got.Equity.Points) != 2 || !near(got.Equity.AccountReturn, 0) || !near(got.Equity.DayAccountReturn, 0) {
-		t.Fatalf("earlier read-time snapshot entered account returns: %+v", got.Equity)
+		t.Errorf("earlier read-time snapshot entered account returns: %+v", got.Equity)
 	}
 	// A cached history retains the decision that withheld an exact-time
 	// snapshot too (ForHistory; Boost lessons L11).
@@ -123,7 +123,7 @@ func TestReadTimeAndWithheldSnapshotsNeverSupplyAnAccountPoint(t *testing.T) {
 			}
 			s.snapshotAs("not-close", "joint", at, at, 4500)
 			if tc.withheld {
-				s.withheld(1, event.WithheldMissingBars)
+				s.withheld(1, event.WithheldStaleAccountSnapshot)
 			}
 			s.bar(2, "SPY", 102)
 			s.snapshot(2, 4000, 0)
@@ -135,5 +135,87 @@ func TestReadTimeAndWithheldSnapshotsNeverSupplyAnAccountPoint(t *testing.T) {
 				t.Fatalf("not a standing close: %+v", got.Equity)
 			}
 		})
+	}
+}
+
+func TestRebalanceOnlyWithheldKeepsStandingAccountPoint(t *testing.T) {
+	for _, reason := range []string{event.WithheldAllUnaffordable, event.WithheldRebalanceInProgress, event.WithheldNoEligibleNames, event.WithheldMissingBars} {
+		t.Run(reason, func(t *testing.T) {
+			s, _ := iraDay(t)
+			s.bar(0, "SPY", 100)
+			s.bar(1, "SPY", 100)
+			s.add(event.AccountSnapshotEventType, 4, "next", day(1), event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "trad-ira", AsOf: day(1), Currency: "USD", NetLiquidation: 100000}})
+			s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "withheld", day(1), event.TargetsDecidedPayload{AccountID: "trad-ira", StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: day(1), SessionPeriodEnd: day(1), Outcome: event.TargetsOutcomeWithheld, WithheldReason: reason, Detail: "synthetic withheld rebalance", Momentum: event.MomentumFigures{CloseSession: "2024-01-03", TrendInstrument: "SPY"}, Glide: event.GlideFigures{AgeMonths: 600, RebalanceSession: "2024-01-04", BondShare: 0.48}})
+			for _, historical := range []bool{false, true} {
+				var h report.History
+				current := s.out
+				if historical {
+					h.Earlier, current = s.out[1:], s.out[:1]
+				}
+				got, err := report.SummarizeWithHistory(h, current, "2024-01-03", "SPY")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Equity.Points) != 2 {
+					t.Errorf("historical=%v: standing point lost: %+v", historical, got.Equity)
+				}
+			}
+		})
+	}
+}
+
+func TestUnreadablePastRecordMakesAccountPointUnknown(t *testing.T) {
+	for _, typ := range []string{event.TargetsDecidedEventType, event.AccountSnapshotEventType} {
+		for _, malformed := range []bool{false, true} {
+			for _, historical := range []bool{false, true} {
+				s := newStream(t)
+				for n := range 3 {
+					s.bar(n, "SPY", 100)
+					s.snapshot(n, 4000, 0)
+					s.decided(n, 0.98)
+				}
+				for i := range s.out {
+					e := &s.out[i]
+					if e.Type == typ && e.EventTime.Equal(day(1)) {
+						if malformed {
+							e.Payload = []byte(`{"broken":`)
+							e.PayloadHash = event.HashPayload(e.Payload)
+						} else {
+							e.SchemaVersion = 999
+						}
+					}
+				}
+				var h report.History
+				current := s.out
+				if historical {
+					h.Earlier, current = s.out[1:7], append(append([]event.Envelope{}, s.out[:1]...), s.out[7:]...)
+				}
+				got, err := report.SummarizeWithHistory(h, current, "2024-01-04", "SPY")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Equity.Points) != 2 || !strings.Contains(report.RenderText(got), "account point unknown for 2024-01-03") {
+					t.Errorf("type=%s malformed=%v historical=%v: %s", typ, malformed, historical, report.RenderText(got))
+				}
+			}
+		}
+	}
+}
+
+func TestGapTransferAppliedAtEndOnAccountAndShadow(t *testing.T) {
+	for _, amount := range []float64{100, -100} {
+		s, _ := flatClosesWithWithhold(t)
+		s.snapshot(2, 4000+amount, 0)
+		// Replace the last close rather than append an equal-time snapshot.
+		s.out[len(s.out)-3] = s.out[len(s.out)-1]
+		s.out = s.out[:len(s.out)-1]
+		ledger := report.CashLedger{Read: true, Movements: []report.CashMovement{{AsOf: day(1), Amount: amount, TransactionID: "gap"}}}
+		got, err := report.SummarizeWithCash(report.History{}, ledger, s.out, "2024-01-04", "SPY")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !near(got.Equity.AccountReturn, 0) || !near(got.Equity.BenchmarkReturn, 0.02) || !near(got.Equity.ShadowValue, 4080+amount) {
+			t.Fatalf("gap transfer earned a shadow return: %+v", got.Equity)
+		}
 	}
 }

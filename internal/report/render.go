@@ -104,6 +104,9 @@ func RenderText(s Summary) string {
 	if s.Equity.HistorySince != "" {
 		fmt.Fprintf(&b, "Equity vs %s: %s\n", s.Benchmark, s.Equity.HistorySince)
 	}
+	for _, d := range s.Equity.UnknownAccountPoints {
+		fmt.Fprintf(&b, "Equity vs %s: account point unknown for %s\n", s.Benchmark, d)
+	}
 	switch {
 	case s.Equity.Available:
 		e := s.Equity

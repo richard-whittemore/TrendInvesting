@@ -64,3 +64,9 @@ The Boost byte-identity test passed in this same run.
 FAIL
 FAIL	github.com/richard-whittemore/TrendInvesting/internal/report	0.187s
 FAIL
+
+=== Round 1 additions (Keeps, Refuses, PairsCashSnapshotsAcrossRuns, RebalanceOnlyWithheldKeepsStandingAccountPoint, UnreadablePastRecordMakesAccountPointUnknown, GapTransferAppliedAtEndOnAccountAndShadow, BoostSummaryRefusesCashSnapshot) ===
+Against origin/main 9c9051c3 with the final test files the package does not build (the tests name helpers added by this change), so their red against main is the build failure below; each one's behavioural red was observed in the worktree before its production edit and is quoted in the PR body's fix-round section. Line numbers in the section above are those of the original test files.
+
+FAIL	github.com/richard-whittemore/TrendInvesting/internal/report [build failed]
+FAIL

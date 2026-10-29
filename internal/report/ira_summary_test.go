@@ -131,20 +131,48 @@ func TestIRASummaryKeepsItsBookWhenANewerCashSnapshotIsInvalid(t *testing.T) {
 }
 
 func TestIRASummaryRefusesOtherSnapshotShapes(t *testing.T) {
-	for _, v := range []uint32{3, 5} {
+	for _, v := range []uint32{3, 4, 5} {
 		t.Run(fmt.Sprint(v), func(t *testing.T) {
 			s, holdings := iraDay(t)
 			e := s.out[2]
 			e.ID, e.SchemaVersion = "wrong-shape", v
+			var p event.AccountCashSnapshotPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			p.AsOf, p.Positions, p.TotalCash = day(0).Add(time.Hour), nil, 9999
+			raw, err := json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.Payload, e.PayloadHash = raw, event.HashPayload(raw)
 			s.out = append(s.out, e)
 			got, err := report.Summarize(s.out, "2024-01-02", "SPY")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.RejectedInputs != 1 || !reflect.DeepEqual(got.Holdings, holdings) {
+			if v == 4 {
+				if got.RejectedInputs != 0 || len(got.Holdings) != 0 || got.TotalCash != 9999 || !got.HoldingsAsOf.Equal(p.AsOf) {
+					t.Fatalf("supported later snapshot not accepted: %+v", got)
+				}
+			} else if got.RejectedInputs != 1 || !reflect.DeepEqual(got.Holdings, holdings) {
 				t.Fatalf("wrong snapshot shape moved the book: %+v", got)
 			}
 		})
+	}
+}
+
+func TestBoostSummaryRefusesCashSnapshot(t *testing.T) {
+	s := newStream(t)
+	s.snapshot(0, 4000, 10)
+	s.add(event.AccountSnapshotEventType, 4, "cash-shape", day(0).Add(time.Hour), event.AccountCashSnapshotPayload{
+		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: day(0).Add(time.Hour), Currency: "USD", NetLiquidation: 9000}, TotalCash: 9000})
+	got, err := report.Summarize(s.out, "2024-01-02", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RejectedInputs != 1 || got.NetLiquidation != 4000 || len(got.Holdings) != 1 || got.HaveCash {
+		t.Fatalf("Boost accepted cash shape: %+v", got)
 	}
 }
 

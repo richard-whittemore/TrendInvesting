@@ -51,7 +51,9 @@ func growthLink(prev, next benchBar) (ratio float64, reinvested bool) {
 // net liquidation in the benchmark at that session's close, and each
 // recorded deposit or withdrawal buys or sells the benchmark for the same
 // amount at the close of its New York day, or of the next session with a
-// close when that day has none. A transfer on or before the first paired
+// close when that day has none. Inside a gap in account points it is applied
+// at the next paired close on both sides (manual, "Reading the figures").
+// A transfer on or before the first paired
 // day is in the starting balance.
 //
 // Both returns are time-weighted: each interval between paired points grows
@@ -108,7 +110,10 @@ func equityOf(points []equityPoint, bars map[string]benchBar, ledger CashLedger,
 		if at == len(sessions) || sessions[at] <= first.date {
 			continue
 		}
-		flows[sessions[at]] += m.Amount
+		// The account can remove flows only at a valued endpoint; the shadow
+		// uses that same endpoint (manual, "Reading the figures").
+		paired := sort.Search(len(points), func(i int) bool { return points[i].date >= sessions[at] })
+		flows[points[paired].date] += m.Amount
 		e.TransferCount++
 		if m.Amount > 0 {
 			e.Deposits += m.Amount
