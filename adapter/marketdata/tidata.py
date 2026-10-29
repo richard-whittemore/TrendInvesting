@@ -894,14 +894,18 @@ def _digest_of(envelopes):
     return digest.hexdigest()
 
 
-def _verify_momentum(files, data, cfg, base, identity, engine_log, ranker):
+def _verify_momentum(files, data, cfg, base, identity, engine_log, ranker, manifest=None):
     """Refuses unless each of ``files`` ([(first session, last session, path)]) re-encodes alone, byte for
-    byte, from the recordings under the current identity, with the holdings its own bars name."""
+    byte, from the recordings under the current identity, with the holdings its own bars name and the
+    manifest's missing universes (ADR 0027: inputs the engine never saw stay absent)."""
+    without = {e["name"]: [dt.date.fromisoformat(d) for d in e["without_universe"]]
+               for e in manifest["files"]} if manifest else {}
     for first, last, path in files:
         try:
             envelopes = encode.iter_encode(data, first, last, identity, required=list(cfg.required),
                                            optional=_named_in(path, cfg.required), base=base, first_sequence=1,
-                                           engine=MOMENTUM, ranker=ranker, retracted_through=last)
+                                           engine=MOMENTUM, ranker=ranker, retracted_through=last,
+                                           without_universe=without.get(os.path.basename(path), ()))
             again = _digest_of(envelopes)
         except Exception as e:   # a recording missing, a gap or a conflict: the file cannot be re-derived
             raise Refused("the run's file {} cannot be encoded again from its recordings ({}: {}); this stops the "
@@ -1265,6 +1269,9 @@ def _published(directory, instance, existing, base, data, cfg, identity, engine_
         if _last_session_of(path) != last:
             raise Refused("{} ends at {}, not at the {} its manifest lists; this stops the job for a person: {}".format(
                 path, _last_session_of(path), last, MANIFEST_REMEDY))
+        if e["without_universe"] != _stream_without_universe(path):
+            raise Refused("{}: manifest without_universe does not match its sha256-checked stream; this stops "
+                          "the job for a person: {}".format(path, MANIFEST_REMEDY))
         listed.append((first, last, path))
     names = {os.path.basename(p) for _, _, p in listed}
     unlisted = [(last, path) for last, path in existing if os.path.basename(path) not in names]
@@ -1300,6 +1307,19 @@ def _published(directory, instance, existing, base, data, cfg, identity, engine_
 def _without_universe(data, first, last, retracted):
     return [d for d in nyse_calendar.sessions(first, last)
             if d not in retracted and not os.path.exists(os.path.join(data, "universe_{}.json".format(d.isoformat())))]
+
+
+def _stream_without_universe(path):
+    """Missing snapshots in the SHA-256-checked stream (ADR 0027: the published inputs are authoritative).
+    Read one envelope at a time to stay within lessons-2026-10.md L1's memory budget."""
+    snapshots, sessions = set(), []
+    with open(path) as f:
+        for line in f:
+            if '"type":"market.universe.snapshot"' in line:
+                snapshots.add(json.loads(line)["payload"]["session"])
+            elif '"type":"market.session.closed"' in line:
+                sessions.append(json.loads(line)["event_time"][:10])
+    return [d for d in sessions if d not in snapshots]
 
 
 def _runs(days):
@@ -1339,7 +1359,7 @@ def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ra
                       "than one firing checks ({}); nothing is written. Run the job once by hand with --reencode-all "
                       "(docs/manual/market-data.md, \"A job for the IRAs\")".format(
                           ", ".join(sorted(changed)), reach, len(affected), affected[0][0], MAX_REENCODED))
-    _verify_momentum(affected, data, cfg, base, identity, engine_log, ranker)
+    _verify_momentum(affected, data, cfg, base, identity, engine_log, ranker, manifest)
     return now_set
 
 
@@ -1385,7 +1405,7 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
             # universe or a sector recording) may have changed, not only the action recordings tracked. The
             # action recordings are read first, so one recorded meanwhile is never acknowledged unchecked.
             snapshot = _action_set(data)
-            _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker)
+            _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker, manifest)
             others = [s for s in spans if s[2] != path]   # the requested file is encoded once, above
             manifest["actions"] = _reencode_changed(manifest, others, data, cfg, base, identity, engine_log, ranker,
                                                     reencode_all, now_set=snapshot)
@@ -1444,7 +1464,7 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
     envelopes = encode.iter_encode(data, first, session, identity, required=list(cfg.required),
                                    optional=[t for t in log.holdings if t not in cfg.required], base=base,
                                    first_sequence=1, engine=MOMENTUM, excluded=excluded, ranker=ranker,
-                                   retracted_through=session)
+                                   retracted_through=session, without_universe=without)
     os.makedirs(directory, exist_ok=True)
     if manifest is None:
         # Written before the run's first file, so a stop between the two leaves a file the next firing takes
