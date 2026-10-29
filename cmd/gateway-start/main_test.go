@@ -185,7 +185,7 @@ func TestAnIBCThatIgnoresTermIsKilledAfterTheDeadline(t *testing.T) {
 }
 
 func TestAnInvalidStopDeadlineFallsBackToTheDefaultNeverToNoEscalation(t *testing.T) {
-	for _, v := range []string{"15s", "0", "-3", "", "99999"} {
+	for _, v := range []string{"15s", "0", "-3", "", "61", "99999"} {
 		env := map[string]string{"TI_GATEWAY_STOP_DEADLINE": v}
 		c, _ := configFromEnv(func(k string) string { return env[k] })
 		if c.StopDeadline != 15*time.Second {
@@ -747,3 +747,25 @@ l L1; sleep 0.3; l L2; l L3; exit 3`)
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// The longest cycle of a failing start (a journal write at its bound, the stop
+// and the kill at theirs, the drain's total cap, and the unit's 30 s) stays under
+// ten minutes by construction, whatever the settings: the reporter catches loops
+// that restart at least every ten minutes.
+func TestTheSettingsCannotMakeAFailingStartsCycleLongerThanTenMinutes(t *testing.T) {
+	for _, v := range []string{"61", "120", "300"} {
+		c, warn := configFromEnv(func(k string) string {
+			return map[string]string{"TI_GATEWAY_SINK_TIMEOUT": v, "TI_GATEWAY_STOP_DEADLINE": v}[k]
+		})
+		if c.SinkTimeout > 60*time.Second || c.StopDeadline > 60*time.Second || len(warn) != 2 {
+			t.Errorf("%s s accepted: sink %s, stop %s, warnings %v", v, c.SinkTimeout, c.StopDeadline, warn)
+		}
+	}
+	c, _ := configFromEnv(func(k string) string {
+		return map[string]string{"TI_GATEWAY_SINK_TIMEOUT": "60", "TI_GATEWAY_STOP_DEADLINE": "60"}[k]
+	})
+	worst := 3*c.SinkTimeout + 2*c.StopDeadline + c.DrainDeadline + 30*time.Second
+	if worst >= 10*time.Minute {
+		t.Fatalf("worst cycle %s is not under ten minutes", worst)
+	}
+}

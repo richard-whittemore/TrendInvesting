@@ -731,9 +731,12 @@ failing is seen through systemd's restart count: every firing the reporter asks
 systemd for `ti-gateway.service`'s restart count and state (`systemctl show`),
 and keeps a baseline: the restart count when the unit was last seen quiet (active,
 with the count unchanged) at two firings in a row. It counts the Gateway as
-logged out when the count stands 3 or more above that baseline, at any pace: a
-loop that restarts every 30 seconds makes about ten a firing, one that restarts
-every ten minutes never lets the baseline move. A fall in the count (a start
+logged out when the count stands 3 or more above that baseline: a
+loop that restarts every 30 seconds makes about ten a firing, and one that
+restarts at least every ten minutes never lets the baseline move. That holds by
+construction: the longest cycle of a failing start is 155 seconds with the
+default settings, and `TI_GATEWAY_SINK_TIMEOUT` and `TI_GATEWAY_STOP_DEADLINE`
+are capped at 60 seconds, which keeps the worst cycle under six minutes. A fall in the count (a start
 by hand, `reset-failed`) re-bases and counts as neither. The usual 10 minutes
 outside the restart windows then page you. Such an outage closes after two
 good firings in a row with the unit active and no new restarts (a firing

@@ -128,9 +128,9 @@ type hostGateway struct {
 	// taken the resolution: the next firing retries it and does not read the
 	// receipts that remain as an outage still open.
 	Resolving bool `json:"resolving,omitempty"`
-	// The Gateway unit as the previous firing saw it: its restart count, whether
-	// it was waiting to restart, and whether a start that keeps failing is what
-	// opened the outage.
+	// The restart rule's state (advanceRestartRule): the unit's restart count at
+	// the last good sample, the quiet baseline, the run of quiet firings, and
+	// whether a failing start is open and opened the outage alone.
 	Restarts     *int `json:"restarts,omitempty"`      // NRestarts at the last good sample
 	Baseline     *int `json:"baseline,omitempty"`      // NRestarts when the unit was last seen quiet twice in a row
 	Quiet        int  `json:"quiet,omitempty"`         // consecutive good quiet firings
@@ -302,7 +302,9 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 // a quiet baseline, the unit's NRestarts when it was last seen quiet (active,
 // with NRestarts unchanged from the previous good sample) at two firings in a
 // row. A failing start is detected when NRestarts minus that baseline is at
-// least gatewayRestartsPage, at any pace: a 30 s loop makes about ten a firing,
+// least gatewayRestartsPage, for any loop that restarts at least every ten
+// minutes (gateway-start bounds a cycle under six minutes, whatever its
+// settings): a 30 s loop makes about ten a firing,
 // a ten-minute one a restart every other firing, which never lets the baseline
 // move. A fall in NRestarts (a manual start, reset-failed) re-bases and counts
 // as neither a rise nor a quiet firing. An open failing start closes after
@@ -310,8 +312,16 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 func (h *hostGateway) advanceRestartRule(unit gatewayUnitSample) (open, closed bool, detail string) {
 	cur := unit.restarts
 	if h.Restarts == nil || h.Baseline == nil {
+		// The first sample, or a record written before the baseline existed: the
+		// baseline starts here. An open failing start stays open (and closes
+		// after two quiet firings from here).
 		h.Restarts, h.Baseline, h.Quiet = &cur, &cur, 0
-		return false, false, ""
+		return h.StartFailing, false, restartDetail(h.StartFailing, 0)
+	}
+	if *h.Baseline < 0 || *h.Restarts < 0 || *h.Baseline > *h.Restarts {
+		// A saved baseline that cannot be right is no baseline.
+		h.Restarts, h.Baseline, h.Quiet = &cur, &cur, 0
+		return h.StartFailing, false, restartDetail(h.StartFailing, 0) + " (the saved restart baseline was not valid and was reset)"
 	}
 	prev := *h.Restarts
 	if cur < prev {

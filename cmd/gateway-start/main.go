@@ -106,7 +106,12 @@ const (
 	maxLine         = 64 << 10
 	defaultRender   = "/usr/local/libexec/trend-investing/render-ibc-config.sh"
 	defaultState    = "/var/lib/ti-gateway/login-failures"
-	maxStopDeadline = 300
+	// maxBound caps the sink timeout and the stop deadline: the longest cycle of
+	// a failing start is 3 x sink + 2 x stop + the drain's 5 s + the unit's 30 s,
+	// 335 s at 60 each, under the ten minutes within which the reporter's restart
+	// rule (cmd/reporter, advanceRestartRule) catches a loop. The defaults make it
+	// 155 s.
+	maxBound = 60
 )
 
 // configFromEnv reads the settings, falling back to the default (never to
@@ -134,9 +139,9 @@ func configFromEnv(getenv func(string) string) (c config, warn []string) {
 		Render:        []string{pick("TI_GATEWAY_RENDER", defaultRender)},
 		StateFile:     pick("TI_GATEWAY_STATE_FILE", defaultState),
 		Max:           intIn("TI_GATEWAY_LOGIN_MAX_FAILURES", 1, 9, defaultMax),
-		StopDeadline:  time.Duration(intIn("TI_GATEWAY_STOP_DEADLINE", 1, maxStopDeadline, int(defaultStop/time.Second))) * time.Second,
+		StopDeadline:  time.Duration(intIn("TI_GATEWAY_STOP_DEADLINE", 1, maxBound, int(defaultStop/time.Second))) * time.Second,
 		DrainDeadline: defaultDrain,
-		SinkTimeout:   time.Duration(intIn("TI_GATEWAY_SINK_TIMEOUT", 1, 300, int(defaultSink/time.Second))) * time.Second,
+		SinkTimeout:   time.Duration(intIn("TI_GATEWAY_SINK_TIMEOUT", 1, maxBound, int(defaultSink/time.Second))) * time.Second,
 		Now:           time.Now,
 	}
 	// A window shorter than IBKR's 24 hours would forget refusals it still counts.

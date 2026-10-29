@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -999,8 +1000,8 @@ func TestALoopThatEndsPartwayStillClosesAfterTwoQuietFirings(t *testing.T) {
 	}
 }
 
-// A slow loop (one restart per firing, at two firings in a row) is a failing
-// start; a single restart is not.
+// A slow loop (one restart at every firing) is a failing start once the count
+// stands 3 above the quiet baseline; a single restart is not.
 func TestASlowLoopOfOneRestartPerFiringPages(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
@@ -1209,5 +1210,72 @@ func TestARestartOpenedOutageThatGainsJournalEvidenceIsNotClosedByAQuietUnit(t *
 	}
 	if resolvesOf(r) != 0 {
 		t.Fatal("a quiet unit closed an outage the journal had evidenced")
+	}
+}
+
+// A state file written before the baseline existed, with an open failing start,
+// keeps that outage open at the first firing after the upgrade.
+func TestAnOldShapedStateWithAnOpenFailingStartKeepsItOpen(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	g.unit(0, "active", "running")
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 0))
+	for i, min := range []int{5, 10, 16} {
+		g.unit(10*(i+1), "activating", "start")
+		_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min))
+	}
+	// The same file as the previous build wrote it: no baseline, no quiet count.
+	path := filepath.Join(dir, "host-gateway.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	delete(state, "baseline")
+	delete(state, "quiet")
+	raw, _ = json.Marshal(state)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g.unit(30, "active", "running")
+	g.ibc(stamp(tuesday(14, 18), ibcCompleted))                   // a login newer than the outage's start
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 20)) // the first firing after the upgrade
+	if resolvesOf(r) != 0 {
+		t.Fatal("the upgrade's first firing closed an open failing start")
+	}
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 25)) // quiet 1
+	if resolvesOf(r) != 0 {
+		t.Fatal("closed after one quiet firing")
+	}
+	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 30)) // quiet 2
+	if resolvesOf(r) != 1 {
+		t.Fatalf("%d resolves after two quiet firings, want 1", resolvesOf(r))
+	}
+}
+
+// A saved baseline above the saved restart count (or negative) is no baseline:
+// it is reset to the current count, so detection still works.
+func TestASavedBaselineAboveTheRestartCountIsReset(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.ibc(stamp(tuesday(1, 0), ibcCompleted))
+	dir := t.TempDir()
+	path := filepath.Join(dir, "host-gateway.json")
+	if err := os.WriteFile(path, []byte(`{"keys":[],"restarts":10,"baseline":1000000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i, min := range []int{0, 5, 10, 16, 21, 26, 31} {
+		g.unit(14+i, "activating", "start")
+		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, min)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatalf("%d pages with a baseline of 1000000 saved, want the loop caught after a reset", gatewayPages(r))
 	}
 }
