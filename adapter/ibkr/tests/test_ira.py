@@ -1155,7 +1155,7 @@ class BatchOutcomeTests(IraBatchHarness):
         loop = self.loop_with()
         loop.start()
         loop.delivery._tracking = {"files": "trad-ira-2027-01-14.jsonl", "ids": {"x"}, "inputs": 1, "answered": 0,
-                                   "struck": 0}
+                                   "struck": 0, "resumed": ""}
         with mock.patch.object(loop.pending, "load", return_value={"id": "x", "type": "market.session.closed"}), \
                 mock.patch.object(loop_module, "earlier_run", return_value=None), \
                 mock.patch.object(loop.relay, "exchange", return_value={"payload": {"decisions": []}}), \
@@ -1179,8 +1179,52 @@ class BatchOutcomeTests(IraBatchHarness):
             self.steps(restarted)
         out = self.outcomes(logged)
         self.assertEqual(len(out), 1, logged.output)
-        self.assertRegex(out[0], r"files=trad-ira-2027-01-14\.jsonl inputs=(\d+) answered=\1 struck=0 outcome=delivered")
+        self.assertRegex(out[0], r"files=trad-ira-2027-01-14\.jsonl inputs=(\d+) answered=\1 struck=0 resumed=1 outcome=delivered")
         self.assertTrue(any("ibkr stream queued" in line for line in logged.output))
+
+    def stopped_awaiting(self, ident):
+        """A start whose engine never answered input ident (the stop came while it awaited its reply)."""
+        write_stream(self.folder, FRIDAY, ira_session(FRIDAY), prefix="trad-ira")
+        loop = self.loop_with()
+        loop.start()
+        decide = self.engine.decide
+
+        def stops_at(envelope):
+            if envelope["id"] == ident:
+                raise OSError("synthetic: the machine stopped while the engine decided")
+            return decide(envelope)
+        self.engine.decide = stops_at
+        with self.assertRaises(OSError):
+            self.steps(loop)
+        self.engine.decide = decide
+        loop.close()
+        return self.loop_with()
+
+    def test_a_batch_whose_last_input_awaited_its_reply_at_a_stop_is_counted_on_the_restart(self):
+        restarted = self.stopped_awaiting("marketdata:session-closed:2027-01-14")
+        with self.assertLogs("ibkr", "INFO") as logged:
+            restarted.start()
+            self.steps(restarted)
+        out = self.outcomes(logged)
+        self.assertEqual(out, ["stream batch files=trad-ira-2027-01-14.jsonl inputs=1 answered=1 struck=0 resumed=1 "
+                               "outcome=delivered reason=every input answered or already committed"], logged.output)
+        self.assertTrue(any("ibkr stream queued" in l and "inputs=1 resumed=1" in l for l in logged.output))
+
+    def test_a_mark_retried_on_the_restart_is_counted_with_the_two_entries_after_it(self):
+        mark = [e.id for e in self.stream_marks()][-2]
+        restarted = self.stopped_awaiting(mark)
+        with self.assertLogs("ibkr", "INFO") as logged:
+            restarted.start()
+            self.steps(restarted)
+        out = self.outcomes(logged)
+        self.assertEqual(len(out), 1, logged.output)
+        self.assertIn("inputs=3 answered=3 struck=0 resumed=1 outcome=delivered", out[0])
+
+    def stream_marks(self):
+        """The marks a batch of ira_session delivers, in delivery order (SHY, SPY last, then the close)."""
+        from types import SimpleNamespace
+        return [SimpleNamespace(id="ibkr:account.broker.snapshot:1:market.mark.recorded:" + s)
+                for s in ("AAA", "BBB", "IEF", "SHY", "SPY")]
 
 
 class ProbeOutcomeTests(ProbeTests):
@@ -1214,6 +1258,17 @@ class ProbeOutcomeTests(ProbeTests):
         lines = [re.sub(r"answered=\d+", "answered=3", l) if OUTCOME in l else l for l in lines]
         status, out = self.probe(self.made(lines))
         self.assertEqual(status, 1, out)
+
+    def test_a_resumed_batch_is_judged_by_its_remainder(self):
+        lines = [l for l in self.start().read_text().splitlines()]
+        made = [l for l in lines if "ibkr stream queued" not in l and OUTCOME not in l and " input=" not in l]
+        made += ["x ibkr stream queued run={} files=trad-ira-2027-01-14.jsonl inputs=1 resumed=1".format(RUN),
+                 "x ibkr input=marketdata:session-closed:2027-01-14 type=market.session.closed answered with 0 decisions",
+                 "x ibkr stream batch files=trad-ira-2027-01-14.jsonl inputs=1 answered=1 struck=0 resumed=1 "
+                 "outcome=delivered reason=every input answered or already committed"]
+        status, out = self.probe(self.made(made))
+        self.assertEqual(status, 0, out)
+        self.assertTrue(any("resumed" in l and l.startswith("probe: ok queued") for l in out), out)
 
     def test_an_impossible_date_or_the_zero_time_is_no_close(self):
         from probe import mark_fault

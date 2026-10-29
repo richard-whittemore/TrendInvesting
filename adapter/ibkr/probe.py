@@ -68,11 +68,11 @@ STARTED = re.compile(r"ibkr adapter starting mode=(\S+) client_id=(\d+) sending=
 CONNECTED = re.compile(r"ibkr link state=connected reason=(\S*) client_id=(\d+)")
 SERVER_VERSION = re.compile(r"ibkr gateway server_version=(\S+) contract_data=(\S+)")
 RECONCILED = re.compile(r"ibkr reconciled client_id=(\d+) positions=(\d+) open_orders=(\d+) executions=(\d+)")
-QUEUED = re.compile(r"ibkr stream queued run=(\S+) files=(\S+) inputs=(\d+)")
+QUEUED = re.compile(r"ibkr stream queued run=(\S+) files=(\S+) inputs=(\d+)( resumed=1)?")
 ANSWERED = re.compile(r"ibkr input=(\S+) type=(\S+) answered with (\d+) decisions")
 UNRESOLVED = re.compile(r"ibkr contract for (\S+) not resolved")
-OUTCOME = re.compile(r"ibkr stream batch files=(\S+) inputs=(\d+) answered=(\d+) struck=(\d+) outcome=(\S+) "
-                     r"reason=(.*)$")
+OUTCOME = re.compile(r"ibkr stream batch files=(\S+) inputs=(\d+) answered=(\d+) struck=(\d+)(?: resumed=1)? "
+                     r"outcome=(\S+) reason=(.*)$")
 CAUGHT_UP = re.compile(r"ibkr stream no new file since (\S+); caught up")
 WAITS = re.compile(r"(ibkr broker snapshot waits.*)$")
 # The adapter's stamp: whole seconds in UTC (snapshot._stamp), as every mark's as_of.
@@ -272,7 +272,7 @@ def check_journal(lines, client_id, mode, report, expect_batch=False):
         q = QUEUED.search(line)
         if q:
             current = {"run": q.group(1), "files": q.group(2), "inputs": int(q.group(3)), "answered": [],
-                       "outcome": None}
+                       "outcome": None, "resumed": bool(q.group(4))}
             batches.append(current)
             continue
         o = OUTCOME.search(line)
@@ -305,6 +305,13 @@ def check_journal(lines, client_id, mode, report, expect_batch=False):
         elif o["outcome"] != "delivered" or o["answered"] + o["struck"] != o["inputs"] or o["inputs"] != latest["inputs"]:
             report.fail("the batch files={} ended {} with {} of {} inputs answered and {} struck off ({})".format(
                 o["files"], o["outcome"], o["answered"], o["inputs"], o["struck"], o["reason"]))
+        elif latest["resumed"]:
+            # Taken up after a stop: its lines count the inputs that were still
+            # to send (delivery.Deliverer.resume); the start that queued it sent
+            # the rest, its records among them.
+            report.ok("queued run={} files={} resumed after a stop, its remaining {} input(s) delivered ({} answered, "
+                      "{} already committed)".format(latest["run"], latest["files"], latest["inputs"], o["answered"],
+                                                     o["struck"]))
         else:
             report.ok("queued run={} files={} inputs={} (delivered: {} answered, {} already committed)".format(
                 latest["run"], latest["files"], latest["inputs"], o["answered"], o["struck"]))
@@ -321,7 +328,8 @@ def check_journal(lines, client_id, mode, report, expect_batch=False):
             report.fail("no stream batch was queued and the adapter did not say its stream is caught up (\"ibkr "
                         "stream no new file since ...; caught up\"): nothing shows this start delivered or needed to")
     unresolved = sorted({m.group(1) for m in (UNRESOLVED.search(line) for line in text) if m})
-    return bool(batches), (latest["answered"] if latest else []), answered, unresolved
+    # A resumed batch's records went before the stop: its own checks (5) were the queuing start's.
+    return bool(batches) and not latest["resumed"], (latest["answered"] if latest else []), answered, unresolved
 
 
 def check_engine_log(path, snapshot_version, mode, report, queued, answered, latest=()):

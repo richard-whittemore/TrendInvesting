@@ -619,16 +619,8 @@ class Deliverer:
             if not self._finish(batches[-1]):
                 return
             batches = self.record.load()
-        outbox = self._outbox.load()
-        if any("envelope" in e for e in outbox):
-            last = batches[-1] if batches else None
-            if self._tracking is None and last is not None and last["state"] == QUEUED and last["run"] == self.run:
-                # A batch a stop left queued with entries unsent: this start
-                # finishes sending it, so it states its queued and outcome
-                # lines as one it queued itself would (_track).
-                ids = [e["id"] for e in outbox if _entry_run(e) == self.run]
-                if ids:
-                    self._track([f["name"] for f in last["files"]], ids)
+        if any("envelope" in e for e in self._outbox.load()):
+            self.resume()
             return  # a batch is still being sent: the next waits behind it
         delivered = [f["name"] for b in batches if b["run"] == self.run and b["state"] != DROPPED
                      for f in b["files"]]
@@ -664,11 +656,34 @@ class Deliverer:
         self.record.mark_queued()
         self._track([s.name for s in streams], [e["id"] for e in entries])
 
-    def _track(self, files, ids):
+    def resume(self):
+        """Take up a batch a stop left queued with entries unsent, before anything of it is sent again.
+
+        Called at start (loop.AdapterLoop.start), before the input a stop
+        left awaiting its reply is asked for again, so that input is counted
+        too, even when it is the batch's last; and from deliver(). The batch's
+        lines then say resumed=1 and count only the remaining inputs, its
+        entries still in the outbox: the total it was queued with is not
+        recorded there, and the start that queued it judged the inputs before
+        the stop.
+        """
+        if self._tracking is not None:
+            return
+        batches = self.record.load()
+        last = batches[-1] if batches else None
+        if last is None or last["state"] != QUEUED or last["run"] != self.run:
+            return
+        ids = [e["id"] for e in self._outbox.load() if _entry_run(e) == self.run]
+        if ids:
+            self._track([f["name"] for f in last["files"]], ids, resumed=True)
+
+    def _track(self, files, ids, resumed=False):
         """Say the batch of files is queued as the entries ids, and account for each as the loop settles it."""
-        self._tracking = {"files": ",".join(files), "ids": set(ids), "inputs": len(ids), "answered": 0, "struck": 0}
+        self._tracking = {"files": ",".join(files), "ids": set(ids), "inputs": len(ids), "answered": 0, "struck": 0,
+                          "resumed": " resumed=1" if resumed else ""}
         self._waiting_said = None
-        log.info("ibkr stream queued run=%s files=%s inputs=%d", self.run, self._tracking["files"], len(ids))
+        log.info("ibkr stream queued run=%s files=%s inputs=%d%s", self.run, self._tracking["files"], len(ids),
+                 self._tracking["resumed"])
 
     def settled(self, entry_id, answered):
         """The loop sent entry_id and the engine answered it (answered true), or struck it off unsent as already
@@ -683,8 +698,9 @@ class Deliverer:
         t["answered" if answered else "struck"] += 1
         if not t["ids"]:
             self._tracking = None
-            log.info("ibkr stream batch files=%s inputs=%d answered=%d struck=%d outcome=delivered reason=every "
-                     "input answered or already committed", t["files"], t["inputs"], t["answered"], t["struck"])
+            log.info("ibkr stream batch files=%s inputs=%d answered=%d struck=%d%s outcome=delivered reason=every "
+                     "input answered or already committed", t["files"], t["inputs"], t["answered"], t["struck"],
+                     t["resumed"])
 
     def _waiting(self, files):
         """Say once, for these files and this reason, that their batch waits for a reading (its outcome so far)."""
@@ -699,9 +715,9 @@ class Deliverer:
         t = self._tracking
         if t is not None:
             self._tracking = None
-            log.info("ibkr stream batch files=%s inputs=%d answered=%d struck=%d outcome=dropped reason=the engine "
-                     "now runs another run, so run %s gets it again if resumed", t["files"], t["inputs"],
-                     t["answered"], t["struck"], run)
+            log.info("ibkr stream batch files=%s inputs=%d answered=%d struck=%d%s outcome=dropped reason=the "
+                     "engine now runs another run, so run %s gets it again if resumed", t["files"], t["inputs"],
+                     t["answered"], t["struck"], t["resumed"], run)
         if self.record.drop_queued(run):
             log.info("ibkr stream batch of run %s struck off unsent; dropped, so a resumed run %s gets its files "
                      "again", run, run)

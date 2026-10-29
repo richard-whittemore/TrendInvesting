@@ -267,8 +267,12 @@ struck off as already committed (a retraction a later file repeats, say),
 A + S = N, an input a stop left awaiting its reply and asked for again
 included; or `outcome=dropped` when a fresh run strikes an earlier run's
 batch off. A batch a stop left queued, its inputs still unsent, is taken up
-by the next start, which says its queued line and, once they are settled,
-its final line. The probe judges the latest batch by that line
+by the next start before anything is asked again, the input that awaited
+its reply at the stop included. Its queued and final lines then say
+`resumed=1`, and they count only the inputs that were still to send
+(`inputs=<remaining>`), since the total the batch was queued with is not
+kept. The probe passes such a batch when answered + struck = inputs; its
+records were judged by the start that queued it. The probe judges the latest batch by that line
 alone: delivered with its count adding up passes; waiting, dropped, or no
 outcome line at all fails, and a later batch waiting is never covered by an
 earlier one delivered. A start that queued none passes only on the

@@ -602,6 +602,10 @@ class AdapterLoop:
         self.relay.connect_engine()
         if self.delivery is not None:
             self.delivery.check()
+            # A batch a stop left queued is taken up before its input
+            # awaiting a reply is asked for again (_settle_waiting below), so
+            # that answer counts toward it (delivery.Deliverer.resume).
+            self.delivery.resume()
         # The earlier runs' reports too: IBKR replays the day's executions
         # and the session's orders after a fresh run starts, and a report an
         # earlier run's engine recorded is never recorded again.
