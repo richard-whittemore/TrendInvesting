@@ -104,3 +104,53 @@ func TestMomentumWithheldPickStaysCashAfterSellsAndALaterMark(t *testing.T) {
 	}
 	t.Fatal("other buy after the sell phase was not released")
 }
+
+// ADR 0026, amendment of 2026-10-29: a buy needs an available mark
+// when the sell phase ends, even if its mark was valid at the decision.
+func TestMomentumLaterUnavailableMarkWithholdsDelayedBuy(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{stopAfter: "2025-03-03"})
+	h, s := momentumHandler(t)
+	var decisions, buyPhase []event.Envelope
+	inserted := false
+	for _, in := range r.inputs {
+		if in.Type == event.TargetWeightConfigurationEventType {
+			continue
+		}
+		out := mustApply(t, h, s.envelope(t, in.Type, in.SchemaVersion, in.ID, in.EventTime, in.Payload))
+		decisions = append(decisions, out...)
+		if in.ID == "session:2025-02-28" {
+			at := closeOf("2025-03-03").Add(-390 * time.Minute)
+			mustApply(t, h, s.envelope(t, event.MarkUnavailableEventType, event.MarkUnavailableSchemaVersion, "later-unavailable-BBB", at,
+				event.MarkUnavailablePayload{InstrumentID: "BBB", AsOf: at, Source: event.AdapterIBKR, Failure: event.MarkFailureTransient, Detail: "mark lookup timed out"}))
+			inserted = true
+			continue
+		}
+		if inserted && len(ofType(out, event.OrderPlannedEventType)) != 0 {
+			buyPhase = out
+			break
+		}
+	}
+	if !inserted || len(buyPhase) == 0 {
+		t.Fatal("fixture never crossed the sell/buy boundary after the unavailable observation")
+	}
+	feb := targets(t, decisions)[1]
+	if len(feb.WithheldPicks) != 0 {
+		t.Fatalf("mark was already missing at the decision: %+v", feb.WithheldPicks)
+	}
+	refusals := ofType(buyPhase, event.OrderRefusedEventType)
+	if len(refusals) != 1 {
+		t.Fatalf("delayed buy refusals: %d, want one for BBB's superseded mark; released: %+v", len(refusals), released(t, buyPhase))
+	}
+	var p event.OrderRefusedPayload
+	decode(t, refusals[0], &p)
+	if p.InstrumentID != "BBB" || p.Reason != event.RefusedMissingMark || p.Figures.MarkSet {
+		t.Fatalf("superseded mark did not withhold BBB: %+v", p)
+	}
+	buys := released(t, buyPhase)
+	if len(buys) != 1 || buys[0].Side != event.OrderSideBuy || buys[0].InstrumentID != "IEF" {
+		t.Fatalf("other buy after the sell phase: %+v", buys)
+	}
+	if len(ofType(decisions, event.EngineStateEventType)) != 0 {
+		t.Fatal("withholding degraded")
+	}
+}

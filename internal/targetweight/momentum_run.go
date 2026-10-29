@@ -985,7 +985,9 @@ func (r *momentumRun) unexplainedCashDrop(reb *rebalance) float64 {
 // orders released, now tracked. The prior orders are the sell phase's, each
 // sized within its holding (orderplan.PlanIRA), so every one is risk-reducing
 // and none counts toward the order limit (ADR 0026, point 3): the book's
-// PriorCounted stays zero.
+// PriorCounted stays zero. A mark must follow the latest unavailable
+// observation; the original rebalance withholding remains in force
+// (ADR 0026, amendment of 2026-10-29).
 func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPlannedPayload, prior int) []event.OrderPlannedPayload {
 	h := r.h
 	holdings := holdings(reb.snapshot.Positions)
@@ -996,7 +998,9 @@ func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPl
 	plan := make([]risklimit.Order, len(orders))
 	for i, o := range orders {
 		plan[i] = risklimit.Order{PlanID: "order-planned:" + o.ClientOrderID, Planned: o}
-		if mark, ok := r.marks[o.InstrumentID]; ok && !mark.AsOf.Before(reb.session) && !reb.withheld[o.InstrumentID] {
+		failure, failed := r.unavailable[o.InstrumentID]
+		if mark, ok := r.marks[o.InstrumentID]; ok && !mark.AsOf.Before(reb.session) &&
+			(!failed || mark.AsOf.After(failure.AsOf)) && !reb.withheld[o.InstrumentID] {
 			plan[i].MarkSet = true
 			plan[i].Mark, plan[i].MarkSource = bandMark(mark, r.markAt[o.InstrumentID])
 		}

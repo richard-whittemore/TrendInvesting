@@ -705,8 +705,9 @@ type TargetsDecidedPayload struct {
 	Detail           string    `json:"detail,omitempty"`
 	// Targets is sorted strictly ascending by instrument.
 	Targets []TargetWeight `json:"targets"`
-	// WithheldPicks is sorted by instrument; the named targets stay in cash
-	// for the month (ADR 0026, amendment of 2026-10-29).
+	// WithheldPicks is sorted by instrument; only each named target's
+	// unbought increase stays in cash for the month. Existing holdings are
+	// unchanged by withholding (ADR 0026, amendment of 2026-10-29).
 	WithheldPicks []WithheldPick `json:"withheld_picks,omitempty"`
 	// Boost is set for StrategyID boost and Momentum for momentum; the other
 	// is zero and omitted.

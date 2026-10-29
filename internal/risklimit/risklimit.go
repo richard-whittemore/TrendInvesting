@@ -471,9 +471,9 @@ func union(a, b []string) []string {
 //     an exposure-increasing order a holding with no reference price, the
 //     exposure limit, and for an IRA's buy the cash available.
 //
-// A breach refuses the order and degrades the account, except an IRA buy
-// missing its mark (ADR 0026, amendment of 2026-10-29), naming the
-// instrument.
+// A breach refuses the order and degrades the account, naming the
+// instrument, except an IRA buy whose only breach is its missing mark
+// (ADR 0026, amendment of 2026-10-29).
 //
 // A risk-reducing order (ADR 0026, point 4) is "a sell that moves the
 // account's exposure toward 98% or lower, sized within the broker-reported
@@ -609,8 +609,16 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 		out := Outcome{Refused: g.refusal(o, f, reason, detail)}
 		// ADR 0026, amendment of 2026-10-29: an IRA buy with no mark
 		// withholds only that pick; every other breach still degrades.
+		// Check the remaining limits without a mark deviation, preserving
+		// the missing-mark refusal and its original figures as evidence.
 		withheldPick := g.ira && p.Side == event.OrderSideBuy && reason == event.RefusedMissingMark
-		if !withheldPick {
+		if withheldPick {
+			probe, figures := o, f
+			probe.MarkSet, probe.Mark = true, p.ReferencePrice
+			figures.MarkDeviation = 0
+			reason, detail = g.breach(probe, figures, counted, book, unvalued)
+		}
+		if reason != "" {
 			g.degrade(&out, p.InstrumentID, fmt.Sprintf("order %s refused: %s: %s", p.ClientOrderID, reason, detail), p.ClientOrderID)
 		}
 		return out
