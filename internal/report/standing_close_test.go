@@ -202,7 +202,7 @@ func TestUnreadablePastRecordMakesAccountPointUnknown(t *testing.T) {
 	}
 }
 
-func TestGapTransferAppliedAtEndOnAccountAndShadow(t *testing.T) {
+func TestGapTransferAppliedAtEndOnAccountAndOwnSessionOnShadow(t *testing.T) {
 	for _, amount := range []float64{100, -100} {
 		s, _ := flatClosesWithWithhold(t)
 		s.snapshot(2, 4000+amount, 0)
@@ -214,8 +214,83 @@ func TestGapTransferAppliedAtEndOnAccountAndShadow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !near(got.Equity.AccountReturn, 0) || !near(got.Equity.BenchmarkReturn, 0.02) || !near(got.Equity.ShadowValue, 4080+amount) {
-			t.Fatalf("gap transfer earned a shadow return: %+v", got.Equity)
+		// The account removes the transfer at the gap's end; the shadow
+		// buys or sells at 101 on the transfer's own session, then grows to 102.
+		wantShadow := 4080 + float64(amount/101*102)
+		e := got.Equity
+		if !near(e.AccountReturn, 0) || !near(e.DayAccountReturn, 0) || !near(e.BenchmarkReturn, 0.02) || !near(e.ShadowValue, wantShadow) || !near(e.Gap, 4000+amount-wantShadow) || !near(e.Points[len(e.Points)-1].Transfers, amount) {
+			t.Fatalf("gap transfer must use the account endpoint and shadow's own session price: %+v", e)
+		}
+	}
+}
+
+func TestGapWithdrawalStopsShadowBeforeLaterDepositRestartsIt(t *testing.T) {
+	s, _ := flatClosesWithWithhold(t)
+	ledger := report.CashLedger{Read: true, Movements: []report.CashMovement{
+		{AsOf: day(1), Amount: -4500, TransactionID: "gap-withdrawal"},
+		{AsOf: day(2), Amount: 1000, TransactionID: "restart-deposit"},
+	}}
+	got, err := report.SummarizeWithCash(report.History{}, ledger, s.out, "2024-01-04", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := got.Equity
+	if !near(e.ShadowValue, 1000) || e.DollarsWithheld || !strings.Contains(e.DollarNote, "dollar figures restart from 2024-01-04") {
+		t.Errorf("gap withdrawal must stop the shadow before the deposit restarts it: %+v", e)
+	}
+	if !near(e.Points[len(e.Points)-1].Transfers, -3500) || !near(e.AccountReturn, 0.875) {
+		t.Errorf("account must still remove the net transfers at the paired close: %+v", e)
+	}
+}
+
+func TestUnreadableDecisionExcludesEventAndPayloadSessions(t *testing.T) {
+	for _, unsupported := range []bool{false, true} {
+		for _, historical := range []bool{false, true} {
+			s := newStream(t)
+			for n := range 4 {
+				s.bar(n, "SPY", 100)
+				s.snapshot(n, 4000, 0)
+				s.decided(n, 0.98)
+			}
+			for i := range s.out {
+				e := &s.out[i]
+				if e.Type != event.TargetsDecidedEventType || !e.EventTime.Equal(day(1)) {
+					continue
+				}
+				var p event.TargetsDecidedPayload
+				if err := json.Unmarshal(e.Payload, &p); err != nil {
+					t.Fatal(err)
+				}
+				p.SessionPeriodEnd = day(2)
+				if unsupported {
+					e.SchemaVersion = 999
+				} else {
+					p.Outcome = "invalid"
+				}
+				raw, err := json.Marshal(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				e.Payload, e.PayloadHash = raw, event.HashPayload(raw)
+			}
+			var h report.History
+			current := s.out
+			if historical {
+				h.Earlier, current = s.out[1:], s.out[:1]
+			}
+			got, err := report.SummarizeWithHistory(h, current, "2024-01-05", "SPY")
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := report.RenderText(got)
+			if len(got.Equity.Points) != 2 || got.Equity.Points[0].Date != "2024-01-02" || got.Equity.Points[1].Date != "2024-01-05" {
+				t.Errorf("unsupported=%v historical=%v: unreadable decision left an uncertain point: %+v", unsupported, historical, got.Equity)
+			}
+			for _, date := range []string{"2024-01-03", "2024-01-04"} {
+				if !strings.Contains(text, "account point unknown for "+date) {
+					t.Errorf("unsupported=%v historical=%v: missing unknown date %s: %s", unsupported, historical, date, text)
+				}
+			}
 		}
 	}
 }

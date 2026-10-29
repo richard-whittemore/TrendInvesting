@@ -1453,8 +1453,9 @@ closing price. From then on:
   the New York day the transfer is dated (IBKR usually dates a transfer by
   its day alone; that day's close is used). A transfer dated on a weekend or
   holiday is mirrored at the next session's close. If that session has no
-  account point, both sides apply it at the next paired close ("Reading the
-  figures", below). A transfer on or before
+  account point, the shadow still mirrors it at that session's close, in
+  session order; only the account return counts it at the next paired close
+  ("Reading the figures", below). A transfer on or before
   the first paired day is already in the starting balance;
 - SPY's dividends are reinvested in SPY on their ex-date. This comes from
   the split- and dividend-adjusted price the market-data job records
@@ -1690,9 +1691,14 @@ account or does not follow the last accepted snapshot replaces none of them.
   past decision or snapshot omits the session and says "account point unknown
   for <date>". This also applies to earlier runs.
   When paired closes bracket a session with no account point, every deposit
-  or withdrawal inside that gap is applied at the **end of the gap on both
-  the account and SPY shadow sides**. Both returns use this endpoint convention;
-  returns within the gap cannot be resolved without intermediate valuations.
+  or withdrawal inside that gap is counted at the **end of the gap for the
+  account's time-weighted return**, because there is no account point inside
+  the gap. The SPY shadow mirrors each transfer on its **own session date**,
+  in session order, priced at that session's SPY index. The dollar gap
+  therefore includes SPY's growth on a gap deposit from its real date to the
+  paired close. SPY's return is the growth index, with no transfer term, and
+  is unaffected by this account convention. Account returns within the gap
+  cannot be resolved without intermediate valuations.
   The comparison needs two paired points before it shows a comparison. The summary then opens with the same verdict line as the card,
   with the dollar gap and both accounts' values beside it ("Beating SPY by
   1.3 points since 2027-03-01; dollar gap +130.00 (account 13130.00, SPY

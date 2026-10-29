@@ -348,6 +348,7 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 				if today {
 					return Summary{}, err
 				}
+				unknown[dateOf(e.EventTime)] = true
 				unknown[accountPointDate(e)] = true
 				continue
 			}
@@ -474,6 +475,7 @@ func pairEarlier(earlier []event.Envelope, end time.Time, account, strategy, ben
 		case event.TargetsDecidedEventType:
 			var p event.TargetsDecidedPayload
 			if err := read(e, decidedVersions, &p); err != nil {
+				unknown[dateOf(e.EventTime)] = true
 				unknown[accountPointDate(e)] = true
 			} else if p.AccountID == account {
 				withheld[p.SessionPeriodEnd.UTC()] = p.WithheldReason == event.WithheldStaleAccountSnapshot
@@ -486,9 +488,12 @@ func pairEarlier(earlier []event.Envelope, end time.Time, account, strategy, ben
 	}
 }
 
-// accountPointDate names an unreadable record's session for diagnostics only.
-// Its unvalidated fields never supply a figure (ADR 0015). If its date cannot
-// be decoded, the recording's event date conservatively marks the session.
+// accountPointDate selects an unreadable record's account point for exclusion
+// before returns are computed and for unknown-point diagnostics (ADR 0015).
+// A decoded snapshot as_of or decision session_period_end supplies only an
+// exclusion date, never a figure; otherwise the event date is used. Callers
+// must also exclude a rejected decision's event date: its unvalidated session
+// date cannot replace that conservative exclusion.
 func accountPointDate(e event.Envelope) string {
 	var p struct {
 		AsOf             time.Time `json:"as_of"`
