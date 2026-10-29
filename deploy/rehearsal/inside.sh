@@ -215,6 +215,7 @@ grep -qx 'ReadOnlyApi=yes' "$run/config.ini" || fail "read-only API not rendered
 grep -qx 'AutoRestartTime=11:45 PM' "$run/config.ini" || fail "nightly restart not rendered"
 grep -qx 'ColdRestartTime=09:00' "$run/config.ini" || fail "Sunday cold restart not rendered"
 grep -qx 'ReloginAfterSecondFactorAuthenticationTimeout=yes' "$run/config.ini" || fail "2FA relogin not rendered"
+grep -qx 'LoginDialogDisplayTimeout=60' "$run/config.ini" || fail "login dialog timeout not rendered"
 grep -qx 'AcceptIncomingConnectionAction=reject' "$run/config.ini" || fail "incoming API connections are not rejected"
 grep -qx 'TrustedTwsApiClientIPs=' "$run/config.ini" || fail "trusted API client addresses not empty"
 if grep -rqF fakePW /etc/trend-investing /var/log 2>/dev/null; then fail "fake secret found on disk outside the runtime dir"; fi
@@ -235,7 +236,7 @@ status=0
 CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run GATEWAY_MAJOR=1050 \
   /usr/local/libexec/trend-investing/start-gateway.sh >/dev/null 2>&1 || status=$?
 test "$status" = 78 || fail "start-gateway exited $status on an empty login, want 78"
-grep -qx 'RestartPreventExitStatus=64 65 78' /etc/systemd/system/ti-gateway.service || fail "ti-gateway restarts on a configuration exit"
+grep -qx 'RestartPreventExitStatus=64 65 77 78' /etc/systemd/system/ti-gateway.service || fail "ti-gateway restarts on a configuration exit"
 pass "an empty login stops the gateway with 78, which the unit does not restart on"
 
 # The data step is installed and runs under the server's python3. Given a
@@ -261,7 +262,7 @@ pass "the data step is installed, runs, and refuses a missing key with nothing w
 # The reporter, the dashboard and the owner's two tools are installed from
 # the build beside deploy/, and the tools are on sudo's PATH for ti-trader,
 # as the runbooks run them.
-for b in ti-reporter ti-dashboard operator journal-query universe-rank; do
+for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start universe-rank; do
   cmp "/root/dist/$b" "/opt/trend-investing/bin/$b" || fail "$b is not installed from the build"
 done
 # Each tool exits 1 with its usage when given no command.
@@ -380,9 +381,19 @@ cat >"$sysd/systemctl" <<SH
 #!/bin/sh
 echo "\$*" >>$sysd/calls
 echo ActiveState=active
+echo NRestarts=0
+echo SubState=running
 echo InvocationID=0123456789abcdef0123456789abcdef
 SH
 chmod 0755 "$sysd/systemctl"
+# Nor does a journal: the Gateway check reads ti-gateway's and the adapter's,
+# so a stand-in journalctl answers with a completed login and a restored link.
+cat >"$sysd/journalctl" <<'SH'
+#!/bin/sh
+echo "2026-01-01T00:00:00+0000 host ibc[1]: Login has completed"
+echo "2026-01-01T00:00:00+0000 host adapter[2]: ibkr link state=connected reason=restored"
+SH
+chmod 0755 "$sysd/journalctl"
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $line >/dev/null || fail "the reporter, run as its unit runs it (as ti-trader), failed"
 { grep -qx 'show -p ActiveState -p InvocationID ti-engine@boost.service' "$sysd/calls" && grep -qx 'show -p ActiveState -p InvocationID ti-adapter-boost.service' "$sysd/calls"; } ||
@@ -883,10 +894,10 @@ pass "adapter state directory and configuration in place, sending off"
 install -m 0755 /root/dist/ti-engine /opt/trend-investing/bin/ti-engine
 rel=/root/fake-release
 mkdir -p "$rel/v9.9.9"
-for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
+for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   { cat "/root/dist/$b"; printf 'rehearsal-release'; } >"$rel/v9.9.9/$b"
 done
-(cd "$rel/v9.9.9" && sha256sum ti-engine ti-reporter ti-dashboard operator journal-query >checksums.txt && echo '{}' >attestation.sigstore.json)
+(cd "$rel/v9.9.9" && sha256sum ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start >checksums.txt && echo '{}' >attestation.sigstore.json)
 ctl_stub=$(mktemp -d)
 cat >"$ctl_stub/systemctl" <<'STUB'
 #!/bin/bash
@@ -903,14 +914,14 @@ if env -u TI_REHEARSAL /root/deploy/release.sh --unverified v9.9.9 >/root/releas
 test "${TI_REHEARSAL:-}" = 1 || fail "the rehearsal container does not set TI_REHEARSAL"
 /root/deploy/release.sh --unverified v9.9.9 >/root/release.out 2>&1 || { cat /root/release.out; fail "ti-release --unverified v9.9.9 failed"; }
 grep -q WARNING /root/release.out || fail "ti-release --unverified did not warn"
-for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
+for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   cmp "$rel/v9.9.9/$b" "/opt/trend-investing/bin/$b" || fail "ti-release did not install $b"
 done
 test "$(cat /opt/trend-investing/releases/current)" = v9.9.9 || fail "ti-release did not record the current build"
 grep -q '^restart ti-dashboard' /root/release-ctl.log || fail "ti-release did not restart the dashboard"
 grep -Eq 'ti-engine@' /root/release-ctl.log && grep -E '^(restart|stop|start|kill).*ti-engine' /root/release-ctl.log && fail "ti-release touched the engine"
 /root/deploy/release.sh --rollback >/root/release.out 2>&1 || { cat /root/release.out; fail "ti-release --rollback failed"; }
-for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
+for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   cmp "/root/dist/$b" "/opt/trend-investing/bin/$b" || fail "rollback did not restore $b byte for byte"
 done
 pass "ti-release refuses without gh, installs a fake release with --unverified, restarts only the dashboard, and --rollback restores the previous build"

@@ -28,6 +28,7 @@ func UnitFailedKeyPrefix(unit string) string { return "unit-failed:" + unit + "/
 var UnitManualRows = []struct{ prefix, row string }{
 	{"ti-adapter-", `docs/manual/ibkr-adapter.md, "What can go wrong", the row "The adapter's unit failed"`},
 	{"ti-engine@", `docs/manual/engine.md, "While it runs", the row "The engine's unit failed"`},
+	{"ti-gateway.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "ti-gateway failed and stays down" (login file, or login retries stopped)`},
 	{"ti-data.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
 	{"ti-data@", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
 }
@@ -61,6 +62,9 @@ func isDataJob(unit string) bool {
 func restartSentence(unit string) string {
 	if isDataJob(unit) {
 		return "The data job is run again by its timer at the next firing; you need not start it unless you fixed its cause and want the session recorded sooner."
+	}
+	if strings.HasPrefix(unit, "ti-gateway.") {
+		return "systemd starts the Gateway again after most stops; a stop it does not restart on (the login file, or the bound on login attempts) waits for you."
 	}
 	return "systemd does not restart the engine or the adapter: every stop is for you to read and every start is yours."
 }

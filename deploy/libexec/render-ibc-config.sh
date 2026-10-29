@@ -47,6 +47,10 @@ case $readonly_api in yes|no) ;; *) echo "render-ibc-config: TWS_READONLY_API mu
 # other address. The firewall is not the guard, because Tailscale's own input
 # rules accept tailnet traffic before ufw looks. BindAddress is not set: in
 # IBC 3.24.2 it is the command server's address, not the API's.
+# LoginDialogDisplayTimeout is IBC's documented default, pinned so a template
+# change cannot alter it: how long IBC waits for the login dialog to appear
+# before restarting TWS. IBC 3.24.2 has no setting for a refused login; the
+# bounded retry is start-gateway.sh's.
 # Values go to awk through the environment, never the command line (ps).
 IBC_V_IbLoginId=$userid \
 IBC_V_IbPassword=$password \
@@ -56,6 +60,7 @@ IBC_V_AutoRestartTime=${TI_GATEWAY_RESTART_TIME:-11:45 PM} \
 IBC_V_ColdRestartTime=${TI_GATEWAY_COLD_RESTART:-09:00} \
 IBC_V_ReloginAfterSecondFactorAuthenticationTimeout=yes \
 IBC_V_AcceptNonBrokerageAccountWarning=yes \
+IBC_V_LoginDialogDisplayTimeout=60 \
 IBC_V_CommandServerPort=0 \
 IBC_V_AcceptIncomingConnectionAction=reject \
 IBC_V_TrustedTwsApiClientIPs='' \

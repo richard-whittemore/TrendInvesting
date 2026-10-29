@@ -32,9 +32,16 @@ Restart=always
 RestartSec=30
 # Except on the renderer's configuration exits: 78 = the login file is not
 # filled in yet (owner step), 64 = it holds an unknown key or value, 65 = the
-# IBC template lacks a key. None fixes itself, so do not loop on them.
-RestartPreventExitStatus=64 65 78
+# IBC template lacks a key; and 77 = the bound on login attempts is reached
+# (ti-gateway-start, cmd/gateway-start, which start-gateway.sh runs), where
+# another try risks IBKR locking the login. None
+# fixes itself, so do not loop on them. 75 (one refused login) restarts.
+RestartPreventExitStatus=64 65 77 78
 TimeoutStopSec=60
+# ti-gateway-start stops only xvfb-run, its own child, after a refused login;
+# this default, stated so it cannot be dropped, is what ends IBC's java and
+# Xvfb when the program exits, so the next start finds no stale Gateway.
+KillMode=control-group
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

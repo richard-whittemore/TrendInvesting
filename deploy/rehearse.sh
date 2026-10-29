@@ -58,7 +58,7 @@ cp "$repo/cmd/engine/testdata/momentum-month.jsonl" "$dist/momentum-month.jsonl"
 (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
   -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=rehearsal" \
   -o "$dist/ti-engine" ./cmd/engine)
-for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query universe-rank:universe-rank; do
+for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query gateway-start:ti-gateway-start universe-rank:universe-rank; do
   (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build -o "$dist/${tool#*:}" "./cmd/${tool%%:*}")
 done
 id=$(docker "${args[@]}" ubuntu:24.04 bash /deploy/rehearsal/inside.sh)

@@ -563,7 +563,7 @@ require_native_programs() {
     aarch64) want=183 ;;
     *) die "no Go build for $machine; not installing" ;;
   esac
-  for b in ti-engine ti-reporter ti-dashboard operator journal-query universe-rank; do
+  for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start universe-rank; do
     test -f "$dist/$b" || continue
     got=$(elf_machine "$dist/$b")
     test "$got" = "$want" || die "$dist/$b is not a Linux program for this machine ($machine; its ELF machine is ${got:-none, not ELF}): build it with deploy/build-engine.sh for this machine and copy dist/ again; nothing installed"
@@ -626,7 +626,7 @@ CONF
   # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
   # PATH includes /usr/local/bin, where each is linked.
   local dist=${TI_DIST:-$here/../dist} b
-  for b in ti-reporter ti-dashboard operator journal-query universe-rank; do
+  for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start universe-rank; do
     if test -f "$dist/$b"; then
       install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
       log "installed $b from $dist"
