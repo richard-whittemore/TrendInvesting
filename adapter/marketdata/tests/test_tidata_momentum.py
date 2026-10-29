@@ -1286,5 +1286,90 @@ class RepeatFiringOnceTest(unittest.TestCase):
             self.assertEqual(checked.count("trad-ira-2026-11-30.jsonl"), 1)
 
 
+
+class RetractionRuleTest(unittest.TestCase):
+    """The one retraction rule: a file covers first..last and is encoded, when published and every time it
+    is checked, under the retractions of sessions on or before last; a later session's retraction travels
+    with the next file."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name) / "data"
+        self.data.mkdir()
+        build(str(self.data))
+        os.remove(self.data / "universe_2026-11-30.json")
+        self.client = FakeMassive({D(2026, 12, 1): bars_for(D(2026, 12, 1))})
+        self.job = MomentumJob(self.tmp.name, data=self.data, client=self.client, ranker=FakeRanker())
+        self.assertEqual(self.job.main(after_settle(D(2026, 11, 25)), "--backfill-from", "2026-11-23")[0], 0)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def retract(self, day, at):
+        encode.record_retraction(str(self.data), day, "NYSE closed (rehearsed)", recorded_at=at)
+
+    def fire(self, now):
+        status, out, err = self.job.main(now)
+        self.assertEqual(status, 0, err)
+        return out.strip()
+
+    def test_a_closure_recorded_before_the_preceding_sessions_file_is_written(self):
+        # The delayed file: the 11-27 file is not yet written when the 11-30 closure is recorded (the same
+        # holds for a closure announced days ahead). The 11-27 file is written with the rules' calendar, the
+        # repeat firings return it unchanged, and the 12-01 file brings the retraction.
+        self.retract(D(2026, 11, 30), "2026-11-30T15:00:00Z")
+        self.assertEqual(self.fire(after_settle(D(2026, 11, 30))), str(self.job.path(D(2026, 11, 27))))
+        written = self.job.path(D(2026, 11, 27)).read_bytes()
+        self.assertNotIn(b"market.session.retracted", written)
+        self.assertEqual(self.fire(after_settle(D(2026, 11, 30), minutes=600)), str(self.job.path(D(2026, 11, 27))))
+        self.assertEqual(self.job.path(D(2026, 11, 27)).read_bytes(), written)
+        self.assertEqual(self.fire(after_settle(D(2026, 12, 1))), str(self.job.path(D(2026, 12, 1))))
+        self.assertEqual(self.job.path(D(2026, 11, 27)).read_bytes(), written)
+        self.assertEqual([e["payload"]["session"] for e in self.job.envelopes(D(2026, 12, 1))
+                          if e["type"] == "market.session.retracted"], ["2026-11-30"])
+        self.assertEqual(self.fire(after_settle(D(2026, 12, 1), minutes=600)), str(self.job.path(D(2026, 12, 1))))
+
+    def test_a_closure_announced_before_the_warm_up(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data))
+            os.remove(data / "universe_2026-11-30.json")
+            encode.record_retraction(str(data), D(2026, 11, 30), "NYSE closed (announced)",
+                                     recorded_at="2026-11-20T15:00:00Z")
+            job = MomentumJob(root, data=data, client=FakeMassive({D(2026, 12, 1): bars_for(D(2026, 12, 1))}),
+                              ranker=FakeRanker())
+            for now, extra in ((after_settle(D(2026, 11, 25)), ("--backfill-from", "2026-11-23")),
+                               (after_settle(D(2026, 11, 27)), ()), (after_settle(D(2026, 11, 30)), ()),
+                               (after_settle(D(2026, 12, 1)), ()), (after_settle(D(2026, 12, 1), minutes=600), ())):
+                status, _, err = job.main(now, *extra)
+                self.assertEqual(status, 0, err)
+
+    def test_bars_recorded_on_a_cancelled_session_refuse_the_firing_that_steps_over_it(self):
+        self.assertEqual(self.fire(after_settle(D(2026, 11, 27))), str(self.job.path(D(2026, 11, 27))))
+        record.write(str(self.data), {"kind": "grouped", "source": "massive", "session": "2026-11-30",
+                                      "fetched_at": "2026-12-01T11:05:00Z", "adjusted": False,
+                                      "bars": bars_for(D(2026, 11, 30))})
+        self.retract(D(2026, 11, 30), "2026-12-01T12:00:00Z")
+        status, _, err = self.job.main(after_settle(D(2026, 11, 30), minutes=900))
+        self.assertEqual(status, 1, err)
+        self.assertIn("2026-11-30 is retracted, but its grouped bars are recorded", err)
+
+    def test_an_action_recording_made_while_the_requested_file_is_checked_is_not_acknowledged(self):
+        self.assertEqual(self.fire(after_settle(D(2026, 11, 27))), str(self.job.path(D(2026, 11, 27))))
+        manifest_path = self.job.stream_dir() / "manifest.json"
+        original = tidata._verify_momentum
+        late = "dividends_2026-11-20_2026-11-27.json"
+
+        def racing(files, *args, **kw):
+            if not (self.data / late).exists():
+                record.write(str(self.data), {"kind": "dividends", "source": "massive", "session": "2026-11-27",
+                                              "from": "2026-11-20", "fetched_at": "2026-11-28T12:00:00Z", "rows": []})
+            return original(files, *args, **kw)
+        with mock.patch.object(tidata, "_verify_momentum", racing):
+            self.fire(after_settle(D(2026, 11, 27), minutes=600))
+        self.assertNotIn(late, json.loads(manifest_path.read_text())["actions"])
+
+
 if __name__ == "__main__":
     unittest.main()

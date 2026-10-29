@@ -125,10 +125,25 @@ the same file contract, with these differences:
   record a window long past) is re-encoded alone, each with the holdings its
   own bars name, and must match byte for byte (_reencode_changed; more than
   MAX_REENCODED is a run by hand, --reencode-all);
-- a file is never named after a cancelled session: when the latest settled
-  session is retracted, the job's session is the last real close before
-  it, and a file is checked only against the retractions up to its last
-  session (a later one is delivered with the next file);
+- retractions (one rule, on every path): a published file covers sessions
+  first..last and is encoded under exactly the retractions recorded for
+  sessions on or before last (encode's ``retracted_through=last``), when it
+  is published and every time it is checked. A retraction of a later
+  session travels with the next file (its calendar and retraction). One of
+  a session on or before last recorded after the file was published
+  changes a stream the engine has already read, so the file no longer
+  encodes the same and the job stops for a person. The firing's session is
+  the last real close on or before the latest settled session (a file is
+  never named after a cancelled day, and a cancelled day with bars recorded
+  refuses); when that session's file exists the firing returns it
+  unchanged, after the same checks a new session's firing makes (the
+  folder against its manifest, the file encoded again, the action
+  recordings read before it). So a closure announced in advance, or one
+  recorded before a delayed file is written, gives that file the calendar
+  of the rules through the cancelled day, and the next file brings the
+  retraction. If the cancelled day ended its month, the session before it
+  becomes the decision session after its file was written without that
+  month's histories, so the month is withheld (histories-missing);
 - the latest session is not published without its universe before the last
   morning firing (its labels can still be fetched); once published without
   it, a file is never rewritten;
@@ -950,7 +965,9 @@ def _check_chain(spans, retracted):
 
 
 def _session_before(day):
-    """The NYSE session before ``day``."""
+    """The NYSE session before ``day`` by the committed rules calendar (nyse_calendar.py, plan.md section 4).
+    It does not know recorded retractions: a caller stepping off a cancelled day skips those itself
+    (_run_momentum's session, encode.py's retraction rule)."""
     day -= dt.timedelta(days=1)
     while not nyse_calendar.is_trading_day(day):
         day -= dt.timedelta(days=1)
@@ -1291,15 +1308,18 @@ def _runs(days):
     return ", ".join(str(r[0]) if len(r) == 1 else "{}..{}".format(r[0], r[-1]) for r in out)
 
 
-def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ranker, reencode_all):
+def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ranker, reencode_all, now_set=None):
     """Encodes again (AGENTS.md rule 5; ADR 0027: an input the engine may have read is never rewritten, only
     checked) every published file that a split or dividend recording which appeared, changed or went
     since the manifest's check could reach (its last session on or after the earliest window start among
     them), however old, and returns the action recordings now read. More than MAX_REENCODED files is more
     than one morning firing can check before the open (docs/live-trading/lessons-2026-10.md L1 and L2):
     refused, naming the remedy (a run by hand with
-    --reencode-all), unless ``reencode_all``."""
-    now_set = _action_set(data)
+    --reencode-all), unless ``reencode_all``. ``now_set`` is the action recordings read before any file the
+    caller checked against them was encoded (never a set read afterwards, which could hold a recording no
+    file was checked against); by default they are read here, before this encodes any."""
+    if now_set is None:
+        now_set = _action_set(data)
     before = manifest["actions"] if manifest else {}
     changed = {k for k in set(now_set) | set(before) if now_set.get(k) != before.get(k)}
     if not changed or not spans:
@@ -1338,6 +1358,12 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
     # A file is never named after a session the exchange cancelled: the job's session, and the latest, are
     # the last real closes on or before them (encode.py treats a retracted day as no session).
     while session in retracted:
+        # The cancelled day was recorded with no bars (encode.py refuses a retracted day with bars, and so
+        # does this job before it steps over it).
+        for kind in ("grouped", "universe"):
+            if os.path.exists(os.path.join(data, "{}_{}.json".format(kind, session.isoformat()))):
+                raise Refused("{} is retracted, but its {} bars are recorded; this stops the job for a person "
+                              "(docs/manual/market-data.md, \"A session the exchange cancels\")".format(session, kind))
         session = _session_before(session)
     if session < base:
         raise Refused("session {} precedes the run's base {}".format(session, base))
@@ -1349,11 +1375,13 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
     for first, last, path in spans:
         if first <= session <= last:
             # The requested file is always encoded again: any recording it reads (a retraction, a bar, a
-            # universe or a sector recording) may have changed, not only the action recordings tracked.
+            # universe or a sector recording) may have changed, not only the action recordings tracked. The
+            # action recordings are read first, so one recorded meanwhile is never acknowledged unchecked.
+            snapshot = _action_set(data)
             _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker)
             others = [s for s in spans if s[2] != path]   # the requested file is encoded once, above
             manifest["actions"] = _reencode_changed(manifest, others, data, cfg, base, identity, engine_log, ranker,
-                                                    reencode_all)
+                                                    reencode_all, now_set=snapshot)
             _write_manifest(directory, manifest)
             entry = next(e for e in manifest["files"] if e["name"] == os.path.basename(path))
             recent = [d for d in entry["without_universe"] if dt.date.fromisoformat(d) >= latest - dt.timedelta(days=7)]
@@ -1367,7 +1395,7 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
     if previous is None and len([d for d in nyse_calendar.sessions(base, session) if d not in retracted]) < cfg.trend_closes:
         raise Refused("the history {}..{} holds fewer sessions than the {} closes of the trend".format(
             base, session, cfg.trend_closes))
-    if session == latest and session not in retracted:
+    if session == latest:
         _record_sectors(data, session, sectors_get, now, settle, warn)
     client = _LatestSession(client_factory(key), session if session == latest else None)
     try:
@@ -1405,9 +1433,11 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
     # already delivered, or one another job recorded, stops the job here.
     actions = _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ranker, reencode_all)
     excluded = {}
+    # Under the retractions of sessions up to its last only, as every later check encodes it (the rule above).
     envelopes = encode.iter_encode(data, first, session, identity, required=list(cfg.required),
                                    optional=[t for t in log.holdings if t not in cfg.required], base=base,
-                                   first_sequence=1, engine=MOMENTUM, excluded=excluded, ranker=ranker)
+                                   first_sequence=1, engine=MOMENTUM, excluded=excluded, ranker=ranker,
+                                   retracted_through=session)
     os.makedirs(directory, exist_ok=True)
     if manifest is None:
         # Written before the run's first file, so a stop between the two leaves a file the next firing takes

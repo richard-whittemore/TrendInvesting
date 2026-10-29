@@ -894,9 +894,10 @@ wait; one still there at 08:15 is a failure that pages, as for Boost.
    whole-market bars once (skipped if Boost's job already recorded them; a
    cancelled session recorded with `retract` is never asked for, and a file
    is never named after one: when the latest session is cancelled, the
-   firing's session is the last real close before it, which is already
-   written, and the next file begins after the cancelled day and carries its
-   retraction), and the
+   firing's session is the last real close before it (its file, if not yet
+   written, is written now and named after that close), and the next file
+   begins after the cancelled day and carries its retraction; see
+   "Cancelled sessions, one rule" below), and the
    universe (the common-stock listing dated that session, written with the
    very bars just recorded, so the two recordings agree) of every such
    session that has labels from both sources within the week up to it. So
@@ -936,6 +937,21 @@ wait; one still there at 08:15 is a failure that pages, as for Boost.
    private copy of the configuration checked against the engine's log, so
    a file edited while the job runs cannot change the ranking. The stocks
    left out for bad data are named on stderr after the file is written.
+
+**Cancelled sessions, one rule.** A file covers its sessions from first to
+last and is written under exactly the retractions recorded for sessions on
+or before its last, and every later check of it encodes it the same way. A
+retraction of a later session travels with the next file: its calendar and
+a `market.session.retracted` right after it, before any session closes. So
+a closure announced days ahead, or one recorded before a delayed file is
+written, leaves that file with the rules' calendar through the cancelled
+day, and the next file brings the retraction. A retraction of a session on
+or before a file's last, recorded after the file was published, changes a
+stream the engine has already read: the job stops for a person ("A file
+already written differs", above; a cancelled day recorded with bars stops
+it too). The firing's session is the last real close on or before the
+latest settled session; when its file exists, the firing returns it
+unchanged, after every check a new session's firing makes.
 
 **Memory.** The stream is the one-session-at-a-time path above, inside the
 same 64 MiB budget; a test runs this job's warm-up and daily firing, with
@@ -1026,6 +1042,19 @@ waiting for the account's first run: ... (start the trad-ira engine once)`.
   firing"): check the run holding the lock (`systemctl list-units
   'ti-warmup-ira*'`). A run by hand is stopped after four hours
   (`RuntimeMaxSec=4h` above), so a hung one cannot hold the lock for days.
+- A month's last session cancelled after the session before it was written:
+  that earlier session becomes the decision session once the retraction
+  arrives with the next file, but its file was written, under the rule
+  above, without the month's histories (the ranker then saw a session
+  still to come in the month). The engine withholds the month
+  (`histories-missing`, [momentum universe](momentum-universe.md)). Nothing
+  repairs it automatically; the next month decides as usual. Recording
+  the closure before that earlier session's file is written does not help
+  either, by the same rule.
+- "... is retracted, but its grouped bars are recorded": a session was
+  cancelled after its bars were recorded. Check which is true; a wrong
+  retraction is moved to `/var/lib/trend-investing/data/quarantine/` as for
+  a wrong action recording.
 - "cannot read holdings: ... previous log ...": the fresh run took the
   previous run's book, and that log is missing or not the one its approval
   names. Restore it beside the run's log, as the engine wrote it.
