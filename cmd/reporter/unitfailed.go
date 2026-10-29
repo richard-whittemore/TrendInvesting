@@ -692,7 +692,6 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 		if changed {
 			hardErrs = append(hardErrs, u.record())
 		}
-		hardErrs = append(hardErrs, flushClosing(u, senders, at, every))
 		return nil
 	})
 	return errors.Join(softErrs...), errors.Join(append(hardErrs, err)...)

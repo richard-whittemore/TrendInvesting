@@ -13,6 +13,9 @@ script=$repo/deploy/maintenance.sh
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export TI_MAINTENANCE_FILE=$work/maintenance.json TI_MAINTENANCE_NO_ROOT=1
+# The script needs flock(1); a machine without it (the Mac the tests run on)
+# gets the stand-in beside this file.
+if ! command -v flock >/dev/null 2>&1; then PATH=$here/stubs:$PATH; export PATH; fi
 failures=0
 fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
 expect() { if test "$2" != "$3"; then fail "$1: want '$2', got '$3'"; fi; }
@@ -80,6 +83,33 @@ test -e "$TI_MAINTENANCE_FILE" || fail "a window started while end --id ran was 
 expect "the new window's length" $((t0 + 1200)) "$(field until_unix)"
 if grep -q "\"id\":\"$id\"" "$TI_MAINTENANCE_FILE"; then fail "the old window is still there"; fi
 rm -f "$TI_MAINTENANCE_FILE"
+# The lock has a time limit: a command that cannot get it in time says so and
+# fails, so a stalled holder never blocks ti-release's cleanup for ever.
+run $t0 start --replace 5m >/dev/null
+( exec 9>>"$work/.lock"; flock 9; sleep 3 ) &
+holder=$!
+sleep 0.5
+set +e; TI_MAINTENANCE_LOCK_WAIT=1 run $t0 end >"$work/out" 2>&1; rc=$?; set -e
+test "$rc" -ne 0 || fail "end got the lock while another command held it"
+grep -q "maintenance lock busy" "$work/out" || fail "a lock timeout does not say so: $(cat "$work/out")"
+test -e "$TI_MAINTENANCE_FILE" || fail "end removed the marker without the lock"
+wait "$holder"
+# A window's expiry counts from when the lock is got, not from when the
+# command began: the clock is the real one here, and the holder keeps the lock
+# for 2 seconds.
+rm -f "$TI_MAINTENANCE_FILE"
+( exec 9>>"$work/.lock"; flock 9; sleep 2 ) &
+holder=$!
+sleep 0.3
+began=$(date +%s)
+TI_MAINTENANCE_NOW='' bash "$script" start --replace 1m >/dev/null || fail "start after waiting for the lock failed"
+wait "$holder"
+[[ $(sed -n 's/.*"opened_unix":\([0-9]*\).*/\1/p' "$TI_MAINTENANCE_FILE") -ge $((began + 1)) ]] || fail "the window opened before the lock was got: $(cat "$TI_MAINTENANCE_FILE")"
+rm -f "$TI_MAINTENANCE_FILE"
+# Without flock the script refuses and says what is missing; it has no fallback.
+bash_bin=$(command -v bash)
+set +e; TI_MAINTENANCE_FLOCK=no-such-flock "$bash_bin" "$script" status >"$work/out" 2>&1; rc=$?; set -e
+{ test "$rc" -ne 0 && grep -q "flock" "$work/out"; } || fail "a missing flock is not refused with a message: $(cat "$work/out")"
 # status with no marker at all (after end, or before the first start) says
 # closed and succeeds; is-open agrees by its exit status.
 rm -f "$TI_MAINTENANCE_FILE"

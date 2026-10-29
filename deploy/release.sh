@@ -293,15 +293,13 @@ seconds_to_quiet_mark() {
 }
 
 # start_window: open a window of our own for the given seconds and keep its id,
-# the only window this run ever ends. A window opened meanwhile by anyone else
-# (start refuses, status 3) is used as it is.
+# the only window this run ever ends. Returns 3, having opened nothing, when a
+# window opened meanwhile by anyone else made start refuse: the caller looks at
+# how much of it is left.
 start_window() {
   local out rc=0
   out=$("$maint" start "$1s") || rc=$?
-  if test "$rc" -eq 3; then
-    log "a maintenance window was opened meanwhile; using it (it is left open)"
-    return 0
-  fi
+  if test "$rc" -eq 3; then return 3; fi
   test "$rc" -eq 0 || die "could not open a maintenance window; nothing installed"
   printf '%s\n' "$out" | grep -v '^id '
   window_id=$(printf '%s\n' "$out" | sed -n 's/^id \([0-9a-f]\{16\}\)$/\1/p' | head -n 1)
@@ -320,7 +318,8 @@ open_window() {
   if "$maint" is-open; then
     log "a maintenance window is already open; using it (it is not extended and is left open): $("$maint" status)"
   else
-    start_window "$((wait_for + 300))"
+    # Refused because one opened meanwhile (3): ensure_window checks its length.
+    start_window "$((wait_for + 300))" || log "a maintenance window was opened meanwhile; using it (it is left open)"
   fi
   if test "$wait_for" -gt 0; then
     log "waiting $wait_for seconds for a quiet moment after a 5-minute mark, so a reporter firing rarely overlaps the swap"
@@ -333,18 +332,23 @@ open_window() {
 # or this run's own, is waited out, never relied on or added to, and then this
 # run opens one of its own for 300 seconds (never past the 30 minutes
 # ti-maintenance allows per window): never two windows at once, and never an
-# install with none.
+# install with none. A window that appears while it waits is looked at again,
+# up to three times, and the install is refused if none holds.
 ensure_window() {
-  local left
-  left=$("$maint" left) || left=0
-  test "$left" -ge 120 && return 0
-  if test "$left" -gt 0; then
-    log "the maintenance window has only $left seconds left; waiting for it to end before opening one for the install"
-    "$sleep_cmd" "$((left + 1))"
-  else
-    log "the maintenance window ended during the wait; opening a new one before installing"
-  fi
-  start_window 300
+  local left tries=0
+  while test "$tries" -lt 3; do
+    tries=$((tries + 1))
+    left=$("$maint" left) || left=0
+    test "$left" -ge 120 && return 0
+    if test "$left" -gt 0; then
+      log "the maintenance window has only $left seconds left; waiting for it to end before opening one for the install"
+      "$sleep_cmd" "$((left + 1))"
+    else
+      log "the maintenance window ended during the wait; opening a new one before installing"
+    fi
+    start_window 300 && return 0
+  done
+  die "could not get a maintenance window with 120 seconds left; nothing installed"
 }
 
 # close_window: runs as ti-release exits, on every path, and ends only the
@@ -651,6 +655,8 @@ if test "$mode" = release; then
     fi
   fi
   ensure_window
+  # The wait may have been long: the engine is looked at again just before the swap.
+  refuse_if_engine_busy
   if ! install_from "$stage" || ! restart_dashboard_verified; then
     log "$tag did not install, or the dashboard did not stay up on it; putting $cur back"
     put_back "$cur" || true
@@ -711,6 +717,7 @@ check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) fai
 open_window
 refuse_if_engine_busy
 ensure_window
+refuse_if_engine_busy
 if ! install_from "$releases/$prev" || ! restart_dashboard_verified; then
   log "rolling back to $prev failed, or the dashboard did not stay up on it; putting $cur back"
   put_back "$cur" || true

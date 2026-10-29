@@ -894,17 +894,60 @@ func TestEveryNeverHeldKindPagesThroughARealFiringInsideAWindow(t *testing.T) {
 	}
 }
 
-// A window holds the Gateway's outage; the close tells it too.
-func TestTheCloseSummaryNamesAHeldGatewayOutage(t *testing.T) {
+// A window holds the Gateway's outage and the units' failures alike; the close
+// tells both in ONE routine message.
+func TestTheCloseTellsAHeldGatewayOutageAndUnitsInOneMessage(t *testing.T) {
+	const unit = "ti-adapter-boost.service"
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.logout()
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	openWindow(t, dir, tuesday(14, 20), tuesday(14, 25))
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), tuesday(14, 20), unit); err != nil {
+		t.Fatal(err)
+	}
+	for _, at := range []time.Time{tuesday(14, 20), tuesday(14, 22)} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", at, "-units", unit); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, at := range []time.Time{tuesday(14, 26), tuesday(14, 31), tuesday(14, 36)} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", at, "-units", unit); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := r.to("ntfy.private.test")
+	if n := count(got, "maintenance window closed"); n != 1 {
+		t.Fatalf("%d close messages, want exactly one for units and Gateway together:\n%v", n, got)
+	}
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"IB Gateway still logged out", unit + " recovered"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the one close message lacks %q:\n%s", want, joined)
+		}
+	}
+}
+
+// A Gateway that logs in again while the window is still open is just
+// recovered: it is told at the close, like a unit, and not before.
+func TestAGatewayThatRecoversInsideTheWindowIsToldAtTheClose(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
 	g.logout()
 	dir := t.TempDir()
-	openWindow(t, dir, tuesday(14, 20), tuesday(14, 25))
-	for _, at := range []time.Time{tuesday(14, 20), tuesday(14, 22)} {
+	openWindow(t, dir, tuesday(14, 5), tuesday(14, 25))
+	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 5)); err != nil {
+		t.Fatal(err)
+	}
+	g.login()
+	for _, at := range []time.Time{tuesday(14, 10), tuesday(14, 15), tuesday(14, 20)} {
 		if err := gatewayRun(t, r, dir, g.path(), "boost", at); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if n := count(r.to("ntfy.private.test"), "maintenance window closed"); n != 0 {
+		t.Fatalf("a close message while the window was still open: %v", r.to("ntfy.private.test"))
 	}
 	for _, at := range []time.Time{tuesday(14, 26), tuesday(14, 31)} {
 		if err := gatewayRun(t, r, dir, g.path(), "boost", at); err != nil {
@@ -912,7 +955,92 @@ func TestTheCloseSummaryNamesAHeldGatewayOutage(t *testing.T) {
 		}
 	}
 	joined := strings.Join(r.to("ntfy.private.test"), "\n")
-	if n := strings.Count(joined, "maintenance window closed; held: IB Gateway still logged out"); n != 1 {
-		t.Errorf("the close summary named the held Gateway outage %d times, want once:\n%s", n, joined)
+	if n := strings.Count(joined, "held: IB Gateway recovered"); n != 1 {
+		t.Errorf("the recovery was told %d times after the close, want once:\n%s", n, joined)
+	}
+}
+
+// Two windows back to back, the first one's summary undelivered: both are
+// told, each once, neither lost.
+func TestTwoWindowsBackToBackAreEachToldAndNeitherIsLost(t *testing.T) {
+	const a, b = "ti-adapter-boost.service", "ti-engine@boost.service"
+	base := &relay{sent: map[string][]string{}}
+	flaky := &flakyRelay{relay: base, failHost: ntfyHost, failBody: "maintenance window closed"}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	openWindow(t, dir, start, start.Add(10*time.Minute))
+	if err := notifyAt(t, flaky, dir, systemd, monitored(a, firstRun), start, a); err != nil {
+		t.Fatal(err)
+	}
+	_ = firing(t, flaky, dir, systemd, start.Add(15*time.Minute), a+","+b) // the first summary is refused
+	second := start.Add(30 * time.Minute)
+	openWindow(t, dir, second, second.Add(10*time.Minute))
+	if err := notifyAt(t, flaky, dir, systemd, monitored(b, firstRun), second, b); err != nil {
+		t.Fatal(err)
+	}
+	flaky.setFailing(false)
+	for i := 0; i < 2; i++ {
+		if err := firing(t, flaky, dir, systemd, second.Add(time.Duration(15+5*i)*time.Minute), a+","+b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	joined := strings.Join(base.to(ntfyHost), "\n")
+	for _, want := range []string{"held: " + a + " recovered", "held: " + b + " recovered"} {
+		if n := strings.Count(joined, want); n != 1 {
+			t.Errorf("%q was told %d times, want once:\n%s", want, n, joined)
+		}
+	}
+}
+
+// A summary channel that is configured but set aside (its secret is missing
+// today) is not an absent one: the summaries stay owed and are sent once it
+// works, and only after a stated number of firings are they given up.
+func TestASummaryChannelSetAsideKeepsTheSummaryOwed(t *testing.T) {
+	const unit = "ti-adapter-boost.service"
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	openWindow(t, dir, start, start.Add(10*time.Minute))
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), start, unit); err != nil {
+		t.Fatal(err)
+	}
+	noNtfy := func(k string) string {
+		if k == "TI_NTFY_TOPIC" {
+			return ""
+		}
+		return twoChannels()(k)
+	}
+	var out bytes.Buffer
+	fire := func(getenv func(string) string, at time.Time) {
+		args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-units", unit + ",ti-engine@boost.service", "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+		_ = run(args, getenv, func() time.Time { return at }, &out, &http.Client{Transport: r})
+	}
+	fire(noNtfy, start.Add(15*time.Minute))
+	fire(noNtfy, start.Add(20*time.Minute))
+	if !strings.Contains(recordText(t, dir, "unit-failures.json"), "closing:") {
+		t.Fatalf("the owed summary was discarded while its channel was set aside:\n%s", recordText(t, dir, "unit-failures.json"))
+	}
+	fire(twoChannels(), start.Add(25*time.Minute))
+	if n := strings.Count(strings.Join(r.to(ntfyHost), "\n"), "held: "+unit+" recovered"); n != 1 {
+		t.Errorf("the summary reached ntfy %d times once the channel worked, want once", n)
+	}
+	// And a channel that never comes back is given up on, said once, recorded.
+	other := "ti-engine@boost.service"
+	second := start.Add(60 * time.Minute)
+	openWindow(t, dir, second, second.Add(10*time.Minute))
+	if err := notifyAt(t, r, dir, systemd, monitored(other, firstRun), second, other); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	for i := 0; i < maxClosingAttempts+2; i++ {
+		fire(noNtfy, second.Add(time.Duration(15+5*i)*time.Minute))
+	}
+	if n := strings.Count(out.String(), "gave up"); n != 1 {
+		t.Errorf("the give-up was said %d times, want once:\n%s", n, out.String())
+	}
+	if strings.Contains(recordText(t, dir, "unit-failures.json"), "closing:") {
+		t.Errorf("a summary given up on is still owed:\n%s", recordText(t, dir, "unit-failures.json"))
 	}
 }

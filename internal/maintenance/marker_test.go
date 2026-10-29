@@ -98,7 +98,7 @@ func TestWhatTheScriptWritesReadsOpenAndEndClosesIt(t *testing.T) {
 	run := func(args ...string) {
 		t.Helper()
 		c := exec.Command("bash", append([]string{"../../deploy/maintenance.sh"}, args...)...)
-		c.Env = append(os.Environ(), "TI_MAINTENANCE_FILE="+path, "TI_MAINTENANCE_NO_ROOT=1", "TI_MAINTENANCE_NOW="+strconv.FormatInt(t0.Unix(), 10))
+		c.Env = append(os.Environ(), "PATH="+flockPath(), "TI_MAINTENANCE_FILE="+path, "TI_MAINTENANCE_NO_ROOT=1", "TI_MAINTENANCE_NOW="+strconv.FormatInt(t0.Unix(), 10))
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("ti-maintenance %v: %v\n%s", args, err, out)
 		}
@@ -119,4 +119,12 @@ func TestWhatTheScriptWritesReadsOpenAndEndClosesIt(t *testing.T) {
 	if _, open := Read(read(), t0); open {
 		t.Error("the marker is open after end")
 	}
+}
+
+// flockPath is PATH with the stand-in flock added where the machine has none.
+func flockPath() string {
+	if _, err := exec.LookPath("flock"); err == nil {
+		return os.Getenv("PATH")
+	}
+	return "../../deploy/rehearsal/stubs:" + os.Getenv("PATH")
 }

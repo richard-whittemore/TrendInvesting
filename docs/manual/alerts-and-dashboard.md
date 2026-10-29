@@ -282,13 +282,20 @@ length plus 5 minutes.
 Every held condition is also told once, in one routine message (not an urgent
 page) that goes only where the daily summary goes, your own ntfy server, never
 to Pushover or the alerts repository's issues: "maintenance window closed;
-held: ti-adapter-boost.service recovered, ti-engine@boost.service still failed
-(paged)", and a line for the Gateway ("IB Gateway recovered", or "IB Gateway
-still logged out" with whether it has paged). "Paged" is said only for a page
-that was delivered; otherwise it says "page failed, retrying". The message is
-saved before the held records are forgotten and is sent again at a later firing
-if it could not be delivered. A held failure of a unit that this reporter
-instance does not itself watch is left as it is for the instance that does.
+held: IB Gateway still logged out (paged), ti-adapter-boost.service recovered,
+ti-engine@boost.service still failed (paged)". The units and the Gateway are
+held by the same record and told together, at the first firing after the
+window has closed, so a Gateway that logged in again inside the window is
+reported at the close, like a unit, never before. "Paged" is said only for a
+page that was delivered; otherwise it says "page failed, retrying". The line
+for each held condition is saved in the same write that forgets the hold, so a
+stop in between loses nothing; a message that could not be delivered, or whose
+ntfy channel is set aside today (a missing secret), stays owed, one message for
+each window, and is tried at every later firing. It is given up only after 12
+firings, and that is said once in the reporter's output and recorded. If no
+own-ntfy channel is configured at all, there is nowhere to send it and it is
+not kept. A held failure of a unit that this reporter instance does not itself
+watch is left as it is for the instance that does.
 
 ## Where alerts go
 

@@ -457,9 +457,14 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 		if sched, err := gatewayScheduleFrom(getenv); err != nil {
 			failures = append(failures, err)
-		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, senders, setAside, now); err != nil {
+		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, senders, setAside, now); err != nil {
 			failures = append(failures, err)
 		}
+	}
+	// What a closed window held, the units' failures and the Gateway's outage
+	// together, is told in one routine message, owed until it is delivered.
+	if err := flushClosingStep(unitStatePath, senders, setAside, now(), *repeat, out); err != nil {
+		failures = append(failures, err)
 	}
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
@@ -697,6 +702,9 @@ func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[stri
 	return errors.Join(failures...)
 }
 
+// journalReader reads the journal for a firing; a test wraps it.
+var journalReader = readJournal
+
 // readJournal reads and verifies the journal and returns the history of the
 // runs before it, its envelopes, its account and its alerts, including every
 // venue report the engine did not read and every order to be sent not
@@ -704,9 +712,6 @@ func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[stri
 // refused. Only the summary's equity comparison reads the earlier runs, so a
 // broken chain of them refuses nothing: it is one more alert, delivered once
 // (ADR 0019, "Alerting").
-// journalReader reads the journal for a firing; a test wraps it.
-var journalReader = readJournal
-
 func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[string]bool) (history report.History, envelopes []event.Envelope, account string, alerts []report.Alert, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

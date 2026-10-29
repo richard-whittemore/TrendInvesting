@@ -38,8 +38,8 @@
 # replaced, and a seventh program would join the release's checksum, build and
 # attestation lists for a dozen lines of work.
 #
-# Every command takes the lock /run/ti-maintenance/.lock (flock; where flock is
-# missing, a lock folder beside it), so a start can never land between an
+# Every command takes the lock /run/ti-maintenance/.lock (flock, with a time
+# limit), so a start can never land between an
 # end --id's check of the window's id and its removal of the file, and two
 # starts cannot both pass the check that no window is open.
 #
@@ -53,7 +53,8 @@
 # reader removes a marker, expired or not: it reads closed whoever sees it,
 # and the next start replaces it, so a start in flight is never undone.
 #
-# Settings for tests (the server needs none): TI_MAINTENANCE_FILE,
+# Settings for tests (the server needs none): TI_MAINTENANCE_FILE, TI_MAINTENANCE_FLOCK,
+# TI_MAINTENANCE_LOCK_WAIT, TI_MAINTENANCE_AFTER_CHECK,
 # TI_MAINTENANCE_NOW (epoch seconds), TI_MAINTENANCE_NO_ROOT.
 set -euo pipefail
 
@@ -109,31 +110,25 @@ read_marker() {
   marker_until=$u
 }
 
-# take_lock: the commands that change or judge the marker run one at a time. A
-# reader that cannot write the folder takes the lock for reading, or none when
+# take_lock: the commands that change or judge the marker run one at a time,
+# each waiting at most TI_MAINTENANCE_LOCK_WAIT seconds (10) for its turn and
+# failing with "maintenance lock busy" when it cannot have it, so a stalled
+# holder never blocks ti-release's cleanup for ever. flock(1) is required: a
+# lock that outlives its owner (a lock folder) would block every later command.
+# A reader that cannot write the folder takes the lock for reading, or none when
 # there is no lock yet (there is then no writer either).
 lockfile=$(dirname "$file")/.lock
+flock_cmd=${TI_MAINTENANCE_FLOCK:-flock}
 take_lock() {
-  if command -v flock >/dev/null 2>&1; then
-    if ( : >>"$lockfile" ) 2>/dev/null; then
-      exec 9>>"$lockfile"
-    elif test -r "$lockfile"; then
-      exec 9<"$lockfile"
-    else
-      return 0
-    fi
-    flock 9 || die "could not take the lock"
+  command -v "$flock_cmd" >/dev/null 2>&1 || die "flock (util-linux) is required and is not installed; nothing changed"
+  if ( : >>"$lockfile" ) 2>/dev/null; then
+    exec 9>>"$lockfile"
+  elif test -r "$lockfile"; then
+    exec 9<"$lockfile"
+  else
     return 0
   fi
-  # No flock (the Mac the tests run on): a lock folder, for writers only.
-  local i=0
-  test -d "$(dirname "$file")" || return 0
-  while ! mkdir "$lockfile.d" 2>/dev/null; do
-    i=$((i + 1))
-    test "$i" -lt 100 || die "could not take the lock"
-    sleep 0.1
-  done
-  trap 'rmdir "$lockfile.d" 2>/dev/null || true' EXIT
+  "$flock_cmd" -w "${TI_MAINTENANCE_LOCK_WAIT:-10}" 9 || die "maintenance lock busy: another ti-maintenance command is holding it; nothing changed"
 }
 
 cmd=${1:-}
@@ -152,11 +147,13 @@ case $cmd in
     fi
     test "$secs" -ge 1 || die "the window must be at least a second long"
     test "$secs" -le "$max_s" || die "a window is at most 30 minutes; '$d' is longer, so none was opened"
-    t=$(now)
-    end=$((t + secs))
     dir=$(dirname "$file")
     ( umask 022; mkdir -p "$dir" ) || die "could not make $dir"
     take_lock
+    # The window counts from when the lock is got, not from when this command
+    # began waiting for it.
+    t=$(now)
+    end=$((t + secs))
     read_marker
     if test -n "$marker_until" && test "$replace" = 0; then
       echo "ti-maintenance: a window is already open until $(iso "$marker_until") (id $marker_id); nothing changed. End it first, or start --replace" >&2

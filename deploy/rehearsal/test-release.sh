@@ -86,6 +86,7 @@ case $1 in
     n=$(($(cat "$FAKE_CTL_LOG.lists" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE_CTL_LOG.lists"
     from=${FAKE_ENGINE_BUSY_FROM:-}
     if test -n "${FAKE_ENGINE_BUSY:-}"; then from=1; fi
+    if test -e "$FAKE_CTL_LOG.busy"; then from=1; fi
     if test -n "$from" && test "$n" -ge "$from"; then echo "ti-engine@boost.service loaded deactivating stop"; fi ;;
   is-active)
     if grep -q BAD "$TI_PREFIX/bin/ti-dashboard"; then exit 3; fi
@@ -181,7 +182,7 @@ fresh_server() {
   local p
   for p in $programs; do fake_program "$TI_PREFIX/bin/$p" "echo $p hand"; chmod 0755 "$TI_PREFIX/bin/$p"; done
   : >"$work/ctl.log"
-  rm -f "$work/ctl.log.lists" "$work/ctl.log.active" "$work/ctl.log.maint" "$work/ctl.log.opencalls"
+  rm -f "$work/ctl.log.lists" "$work/ctl.log.active" "$work/ctl.log.maint" "$work/ctl.log.opencalls" "$work/ctl.log.other" "$work/ctl.log.start3" "$work/ctl.log.busy"
   : >"$work/gh.log"
   : >"$work/gh.log.verified"
   : >"$work/curl.log"
@@ -200,17 +201,25 @@ state=$FAKE_CTL_LOG.maint
 case $1 in
   start)
     test -z "${FAKE_MAINT_FAIL:-}" || test "$1" != "${FAKE_MAINT_FAIL}" || { echo "ti-maintenance: refused" >&2; exit 1; }
+    # FAKE_MAINT_START3=N: someone else's window, with N seconds left, appears
+    # just before the first start, which is refused (status 3).
+    if test -n "${FAKE_MAINT_START3:-}" && { test -n "${FAKE_MAINT_START3_ALWAYS:-}" || test ! -e "$FAKE_CTL_LOG.start3"; }; then
+      echo "$FAKE_MAINT_START3" >"$FAKE_CTL_LOG.other"; : >"$FAKE_CTL_LOG.start3"
+      echo "ti-maintenance: a window is already open" >&2; exit 3
+    fi
+    rm -f "$FAKE_CTL_LOG.other"
     echo open >"$state"
     echo "id 0123456789abcdef"
     echo "ti-maintenance: maintenance window open until later" ;;
   end) rm -f "$state" ;;
   status) echo "maintenance window open until later" ;;
   left)
-    if test -e "$state"; then echo 300; else
+    if test -e "$state"; then echo 300; elif test -e "$FAKE_CTL_LOG.other"; then cat "$FAKE_CTL_LOG.other"; else
       case ${FAKE_MAINT_OPEN:-} in 1) echo "${FAKE_MAINT_LEFT:-600}" ;; *) echo 0 ;; esac
     fi ;;
   is-open)
     test ! -e "$state" || exit 0
+    test ! -e "$FAKE_CTL_LOG.other" || exit 0
     case ${FAKE_MAINT_OPEN:-} in
       1) exit 0 ;;
       first) n=$(($(cat "$FAKE_CTL_LOG.opencalls" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE_CTL_LOG.opencalls"; test "$n" -le 1; exit ;;
@@ -221,6 +230,8 @@ STUB
 cat >"$work/stub/sleep" <<'STUB'
 #!/bin/bash
 echo "SLEEP $*" >>"$FAKE_CTL_LOG"
+# FAKE_BUSY_AFTER_SLEEP: an engine unit starts restarting while we wait.
+test -z "${FAKE_BUSY_AFTER_SLEEP:-}" || : >"$FAKE_CTL_LOG.busy"
 STUB
 chmod +x "$work/stub/ti-maintenance" "$work/stub/sleep"
 export TI_MAINTENANCE=$work/stub/ti-maintenance TI_RELEASE_SLEEP=$work/stub/sleep TI_RELEASE_NOW=120
@@ -977,6 +988,30 @@ if test "$(line_no '^SLEEP')" -ge "$(line_no '^MAINT start')"; then fail "its ow
 fresh_server
 expect "a release in a window with 120 seconds left installs" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=120 run v1.0.0)"
 expect "120 seconds is enough" "" "$(lines_of '^MAINT (start|end)')"
+# A window that appears between the check and the start (start is refused,
+# status 3) is checked again: with enough left it is used, with too little it
+# is waited out and replaced by one of our own.
+fresh_server
+expect "a release when a window appears with 600 seconds left" 0 "$(FAKE_MAINT_START3=600 run v1.0.0)"
+expect "the window that appeared is checked, used and left alone" "MAINT end" "MAINT end$(lines_of '^MAINT end' | cut -d' ' -f3-)"
+expect "it asked how long was left" 1 "$(grep -c '^MAINT left' "$work/ctl.log")"
+fresh_server
+expect "a release when a window appears with 30 seconds left" 0 "$(FAKE_MAINT_START3=30 run v1.0.0)"
+expect "it waited the short one out" "SLEEP 31;" "$(lines_of '^SLEEP')"
+expect "it then started its own, ending only that one" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
+# The same when it is the start after the wait that is refused: the short
+# window that appeared is not enough either, so it is waited out in turn.
+fresh_server
+expect "a release when a short window appears during the wait" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_MAINT_START3=40 run v1.0.0)"
+expect "both short windows were waited out" "SLEEP 31;SLEEP 41;" "$(lines_of '^SLEEP')"
+fresh_server
+expect "windows that keep appearing short stop the release" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_MAINT_START3=40 FAKE_MAINT_START3_ALWAYS=1 run v1.0.0)")"
+expect "nothing installed" "echo ti-dashboard hand" "$(installed ti-dashboard)"
+# An engine that starts restarting during the wait is caught: the guard is
+# asked again after the wait, right before the swap.
+fresh_server
+expect "an engine that goes mid-restart during the wait is refused" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_BUSY_AFTER_SLEEP=1 run v1.0.0)")"
+expect "nothing installed after the wait" "echo ti-dashboard hand" "$(installed ti-dashboard)"
 # A window this run did not open is never ended, however the run goes.
 fresh_server
 expect "a failed release in a borrowed window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run v1.2.0)")"

@@ -4,8 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -147,7 +150,19 @@ const (
 	closingPending   = "pending"
 	closingPaged     = "paged"
 	closingRetrying  = "retrying"
+	closingNotYet    = "notyet"
 )
+
+// gatewayClosingName names the Gateway among the held conditions of a close
+// summary, and gatewayHeldPrefix begins its held record's alert key
+// (gatewayHeldKey): the Gateway is held and told by the same machinery as a
+// unit, in the unit-failure record.
+const (
+	gatewayClosingName = "IB Gateway"
+	gatewayHeldPrefix  = "gateway-out:"
+)
+
+func gatewayHeldKey(host string) string { return gatewayHeldPrefix + host }
 
 // closingPrefix begins the channel part of a closing record's key in the unit
 // state's sent times: closing:<status>:<window's end>|<unit>. A closing record
@@ -197,6 +212,19 @@ func closingOf(sent map[string]time.Time) (found []closing) {
 
 // closingText is how the summary says what a held unit came to.
 func closingText(c closing) string {
+	if c.unit == gatewayClosingName {
+		switch c.status {
+		case closingRecovered:
+			return "IB Gateway recovered"
+		case closingPaged:
+			return "IB Gateway still logged out (paged)"
+		case closingRetrying:
+			return "IB Gateway still logged out (page failed, retrying)"
+		case closingPending:
+			return "IB Gateway still logged out (page pending)"
+		}
+		return "IB Gateway still logged out (not paged yet: its 10 minutes have not passed)"
+	}
 	switch c.status {
 	case closingRecovered:
 		return c.unit + " recovered"
@@ -218,15 +246,35 @@ func summaryTakerAmong(senders []sender) bool {
 	return false
 }
 
-// flushClosing sends, for each window that has closed, the one routine message
-// that says what it held: "maintenance window closed; held: <unit> recovered,
-// <unit> still failed (paged)". It goes only where the daily summary goes (the
-// owner's own ntfy server: deliver restricts kindSummary to such a channel),
-// never to an urgent channel or the issue tracker. A message that could not be
-// delivered leaves its closing records, and is sent at the next firing; one
-// that has been delivered, or has nowhere to go, leaves nothing behind. A page
-// is called "paged" only when it was delivered.
-func flushClosing(u *unitState, senders []sender, at time.Time, every time.Duration) error {
+// flushClosingStep is flushClosing under the unit-failure record's lock. It
+// does nothing, and creates nothing, when there is no record yet.
+func flushClosingStep(path string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, out io.Writer) error {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return withUnitState(path, at, func(u *unitState) error {
+		return flushClosing(u, senders, setAside, at, every, out)
+	})
+}
+
+// attemptsKey counts the firings that have tried to deliver the close summary
+// of the window that ended at w.
+func attemptsKey(w string) string { return channelKey("closing-attempts", w) }
+
+// flushClosing sends, for each window that has closed, the ONE routine message
+// that says what it held, the units and the Gateway together: "maintenance
+// window closed; held: <unit> recovered, <unit> still failed (paged)". It goes
+// only where the daily summary goes (the owner's own ntfy server: deliver
+// restricts kindSummary to such a channel), never to an urgent channel or the
+// issue tracker. A message that could not be delivered, or whose channel is
+// configured but set aside today, stays owed in its closing records and is
+// tried at each later firing; it is given up only after maxClosingAttempts
+// firings, said once in out and recorded. One that has been delivered, or has
+// nowhere to go because no such channel is configured, leaves nothing behind.
+// A page is called "paged" only when it was delivered.
+func flushClosing(u *unitState, senders []sender, setAside []channelFault, at time.Time, every time.Duration, out io.Writer) error {
 	byWindow := map[string][]closing{}
 	for _, c := range closingOf(u.sent) {
 		w := c.until.UTC().Format(time.RFC3339)
@@ -237,6 +285,7 @@ func flushClosing(u *unitState, senders []sender, at time.Time, every time.Durat
 		windows = append(windows, w)
 	}
 	sort.Strings(windows)
+	routeSetAside := slices.ContainsFunc(setAside, func(f channelFault) bool { return f.channel == "ntfy" })
 	var errs []error
 	for _, w := range windows {
 		recs := byWindow[w]
@@ -247,16 +296,28 @@ func flushClosing(u *unitState, senders []sender, at time.Time, every time.Durat
 		}
 		body := "maintenance window closed; held: " + strings.Join(parts, ", ")
 		key := "maintenance-closed:" + w + ":" + shortHash(body)
-		if summaryTakerAmong(senders) {
+		var failure error
+		switch {
+		case summaryTakerAmong(senders):
 			a := report.Alert{Key: key, Kind: kindSummary, Severity: report.Routine, AccountID: hostName(), At: at, Title: hostName() + ": maintenance window closed", Body: body, PublicBody: body}
-			if err := deliver(senders, a, u.seen, u.sent, u.repeats, at, every, u.record); err != nil {
-				errs = append(errs, err)
+			failure = deliver(senders, a, u.seen, u.sent, u.repeats, at, every, u.record)
+		case routeSetAside:
+			failure = errors.New("the owner's ntfy channel is set aside")
+		}
+		if failure != nil {
+			n := u.repeats[attemptsKey(w)] + 1
+			u.repeats[attemptsKey(w)] = n
+			if n < maxClosingAttempts {
+				errs = append(errs, failure, u.record())
 				continue
 			}
+			_, _ = fmt.Fprintf(out, "reporter: gave up delivering the close summary of the maintenance window that ended %s after %d firings (%s): %s\n", w, n, failure, body)
+			u.sent[channelKey("closing-gaveup", w)] = at
 		}
 		for _, c := range recs {
 			delete(u.sent, closingKey(c.status, c.until, c.unit))
 		}
+		delete(u.repeats, attemptsKey(w))
 		forgetAlert(key, nil, u.seen, u.sent, u.repeats)
 		errs = append(errs, u.record())
 	}
@@ -269,3 +330,6 @@ func shortHash(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:6])
 }
+
+// maxClosingAttempts is how many firings a close summary is tried for.
+const maxClosingAttempts = 12
