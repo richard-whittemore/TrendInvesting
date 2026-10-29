@@ -283,12 +283,13 @@ func TestAFiringThatFindsATradingUnitFailedSendsNoPing(t *testing.T) {
 	}
 }
 
+// Every IRA reporter instance provisioning knows gets the opt-out; Boost alone pings.
 func TestProvisioningAssignsOnlyBoostTheHeartbeatEnvironment(t *testing.T) {
 	raw, err := os.ReadFile("../../deploy/provision.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ti-reporter@trad-ira.service.d/heartbeat.conf", "Environment=TI_HEARTBEAT=off", "a second pinger would mask the loss of the first"} {
+	for _, want := range []string{"trad-ira roth-ira", "ti-reporter@$instance.service.d/heartbeat.conf", "Environment=TI_HEARTBEAT=off", "A second pinger would mask the loss of Boost"} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("provisioning lacks %q", want)
 		}
