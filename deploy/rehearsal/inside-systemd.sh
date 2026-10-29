@@ -30,6 +30,11 @@ fail() {
 pass() { echo "REHEARSAL ok: $*"; }
 note() { echo "REHEARSAL note: $*"; }
 
+# The deployed account templates and the measurement record's synthetic
+# fixtures, offline (ADR 0026; Boost lessons L1/L3/L8).
+python3 -m unittest discover -s /deploy/rehearsal -p test_roth.py
+python3 -m unittest discover -s /deploy/rehearsal -p test_memory.py
+
 engine=ti-engine@boost.service
 hook=ti-unit-failed@ti-engine@boost.service.service
 reports=/var/lib/trend-investing/reports
@@ -368,7 +373,8 @@ pass "a failing data job starts $data_hook with %i = ti-data.service and the fai
 
 # The IRA's instance of the data job pages the same way: a stand-in
 # ti-data@.service with the real template's OnFailure= line.
-ira_data_hook=ti-unit-failed@ti-data@trad-ira.service.service
+for ira in trad-ira roth-ira; do
+ira_data_hook=ti-unit-failed@ti-data@${ira}.service.service
 ondata=$(grep -x 'OnFailure=.*' /deploy/systemd/ti-data@.service) || fail "the IRA data job's unit names no OnFailure="
 cat >/etc/systemd/system/ti-data@.service <<UNIT
 [Unit]
@@ -383,27 +389,31 @@ systemctl daemon-reload
 rm -f "$reports/unit-failures.json"
 before=$(instances)
 data_pushover=$(pushover_pages)
-systemctl start ti-data@trad-ira.service 2>/dev/null && fail "the stand-in IRA data job did not fail"
+systemctl start ti-data@${ira}.service 2>/dev/null && fail "the stand-in IRA data job did not fail"
 for _ in $(seq 150); do
   if test "$(instances)" -gt "$before" && test "$(systemctl show -p ActiveState --value "$ira_data_hook")" != activating; then break; fi
   sleep 0.1
 done
-test "$(instances)" -gt "$before" || fail "systemd did not start $ira_data_hook when ti-data@trad-ira failed"
-ira_run=$(systemctl show -p InvocationID --value ti-data@trad-ira.service)
-test "$(tail -n 1 "$reports/hook-instances")" = "ti-data@trad-ira.service $ira_run" ||
-  fail "the IRA data job's hook was given '$(tail -n 1 "$reports/hook-instances")', want 'ti-data@trad-ira.service $ira_run'"
+test "$(instances)" -gt "$before" || fail "systemd did not start $ira_data_hook when ti-data@${ira} failed"
+ira_run=$(systemctl show -p InvocationID --value ti-data@${ira}.service)
+test "$(tail -n 1 "$reports/hook-instances")" = "ti-data@${ira}.service $ira_run" ||
+  fail "the IRA data job's hook was given '$(tail -n 1 "$reports/hook-instances")', want 'ti-data@${ira}.service $ira_run'"
 test "$(systemctl show -p Result --value "$ira_data_hook")" = success || fail "$ira_data_hook did not succeed"
 test "$(pushover_pages)" = "$((data_pushover + 1))" || fail "the failed IRA data job did not page Pushover once"
-decoded_bodies | grep -q 'ti-data@trad-ira.service failed' || fail "the page does not name ti-data@trad-ira.service"
+decoded_bodies | grep -q "ti-data@${ira}.service failed" || fail "the page does not name ti-data@${ira}.service"
 decoded_bodies | grep -q 'marker-I' || fail "the page's reason is not the failed IRA data job's own line"
 decoded_bodies | grep -q 'The data job fails' || fail "the IRA data job's page does not give the data job's manual row"
-systemctl reset-failed ti-data@trad-ira.service
-cp /deploy/systemd/ti-data@.service /etc/systemd/system/ti-data@.service
+systemctl reset-failed ti-data@${ira}.service
 rm -f "$reports/unit-failures.json"
 systemctl daemon-reload
-pass "a failing IRA data job starts $ira_data_hook with %i = ti-data@trad-ira.service and the failed run's invocation, and it pages with the run's own line and the data job's manual row"
+pass "a failing IRA data job starts $ira_data_hook with %i = ti-data@${ira}.service and the failed run's invocation, and it pages with the run's own line and the data job's manual row"
+
+done
+cp /deploy/systemd/ti-data@.service /etc/systemd/system/ti-data@.service
+systemctl daemon-reload
 
 # The maintenance window, as the owner meets it (deploy/rehearsal/maintenance-window.sh).
+# shellcheck source=deploy/rehearsal/maintenance-window.sh
 . /deploy/rehearsal/maintenance-window.sh
 rehearse_maintenance_window
 
@@ -446,5 +456,6 @@ pass "after the unlock the hook read its channels from the credential systemd ha
 
 # --- The owner's first dry-run day, step by step
 # (docs/runbooks/first-dry-run-day.md).
+# shellcheck source=deploy/rehearsal/first-day.sh
 . /deploy/rehearsal/first-day.sh
 echo "REHEARSAL (systemd) complete"

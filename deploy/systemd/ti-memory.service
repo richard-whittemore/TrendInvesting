@@ -1,0 +1,22 @@
+[Unit]
+Description=Record the server and trading units' memory for the owner's measurement week
+# docs/live-trading/lessons-2026-10.md L1/L8: a failed reading must be visible, never a zero.
+OnFailure=ti-unit-failed@%n.service
+
+[Service]
+Type=oneshot
+User=ti-trader
+Group=ti-trader
+EnvironmentFile=/etc/trend-investing/memory.env
+ExecStart=/usr/bin/python3 /usr/local/libexec/trend-investing/memory.py sample --week-start ${TI_MEMORY_WEEK_START} --record /var/lib/trend-investing/memory/${TI_MEMORY_WEEK_START}.jsonl
+TimeoutStartSec=2min
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/memory
+InaccessiblePaths=-/var/lib/trend-investing/engines/boost/operator -/var/lib/trend-investing/engines/trad-ira/operator -/var/lib/trend-investing/engines/roth-ira/operator
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

@@ -1,0 +1,20 @@
+{
+  "host": "127.0.0.1",
+  "port": 4002,
+  "client_id": 13,
+  "mode": "dry-run",
+  "paper_sending_enabled": false,
+  "connect_timeout": 10,
+  "request_timeout": 10,
+  "mark_timeout": 15,
+  "heartbeat_interval": 30,
+  "heartbeat_timeout": 10,
+  "restore_timeout": 300,
+  "backoff_initial": 1,
+  "backoff_max": 60,
+  "max_connect_attempts": 10,
+  "commission_wait": 60,
+  "con_ids": {},
+  "account_snapshot_version": 4,
+  "resolve_contracts": true
+}

@@ -485,7 +485,8 @@ class AdapterTemplateTests(unittest.TestCase):
 
     def test_provisioning_creates_the_iras_configuration_once_and_never_enables_the_adapter(self):
         provision = (REPO / "deploy" / "provision.sh").read_text()
-        self.assertIn('"$here/etc/adapters/trad-ira.json.example"', provision)
+        # Every account's adapter configuration is created once from its example.
+        self.assertIn('for f in "$src"/*.json.example; do', provision)
         self.assertIn("systemctl disable ti-adapter-boost.service ti-adapter@trad-ira.service", provision)
 
     def test_the_trad_ira_flex_reader_fires_at_its_own_staggered_times(self):
@@ -495,7 +496,8 @@ class AdapterTemplateTests(unittest.TestCase):
                                  "OnCalendar=Mon..Fri 06:45 America/New_York",
                                  "OnCalendar=Mon..Fri 07:45 America/New_York"])
         provision = (REPO / "deploy" / "provision.sh").read_text()
-        self.assertIn("ti-flex@trad-ira.timer.d", provision)
+        self.assertIn("for instance in boost trad-ira roth-ira; do", provision)
+        self.assertIn('"$unit_dir/ti-flex@$instance.timer.d"', provision)
 
 
 class ClientIdTests(unittest.TestCase):

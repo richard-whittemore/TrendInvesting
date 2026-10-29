@@ -558,12 +558,12 @@ test -x /opt/trend-investing/adapter-venv/bin/python3 || install -m 0755 /dev/nu
 cd /etc/systemd/system
 verify_log=$(mktemp)
 verify_status=0
-systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer ti-data@trad-ira.service ti-data@trad-ira.timer \
+systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer ti-data@trad-ira.service ti-data@trad-ira.timer ti-data@roth-ira.service ti-data@roth-ira.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
   ti-reporter@boost.service ti-reporter@boost.timer \
   ti-unit-failed@ti-engine@boost.service.service ti-unit-failed@ti-adapter-boost.service.service ti-unit-failed@ti-reporter@boost.service.service \
   ti-unit-failed@ti-data@trad-ira.service.service \
-  ti-dashboard.service ti-adapter-boost.service ti-adapter@trad-ira.service ti-ntfy.service \
+  ti-dashboard.service ti-adapter-boost.service ti-adapter@trad-ira.service ti-adapter@roth-ira.service ti-memory.service ti-memory.timer ti-ntfy.service \
   ti-unit-failed@ti-adapter@trad-ira.service.service \
   ti-flex@boost.service ti-flex@boost.timer ti-flex@trad-ira.service ti-flex@trad-ira.timer \
   ti-flex@roth-ira.service ti-flex@roth-ira.timer >"$verify_log" 2>&1 || verify_status=$?
@@ -788,42 +788,44 @@ pass "the owner's kill switch, recorded as ti-operator, makes the engine refuse 
 # and SIGTERM stops the run cleanly, its journal written. The account was
 # named above; the birth placeholder is named here as the owner names it, a
 # rehearsal value. The shipped placeholder alone refuses to start.
-ira_state=/var/lib/trend-investing/engines/trad-ira
-ira_line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-engine@.service)
-ira_line=${ira_line//%i/trad-ira}
-ira_line=${ira_line//%t//run}
-ira_mode=$(sed -n 's/^TI_MODE=//p' /etc/trend-investing/engines/trad-ira.env)
-test "$ira_mode" = dry-run || fail "trad-ira.env declares TI_MODE=$ira_mode, not dry-run"
-ira_line=${ira_line//"\${TI_MODE}"/$ira_mode}
-ira_line=${ira_line//"\${TI_CONFIG}"/$ira_config}
-ira_line=${ira_line//"\${TI_STATE_DIR}"/$ira_state}
-ira_line=${ira_line//"\${TI_FLEX_DIR}"/\/var\/lib\/trend-investing\/flex\/trad-ira}
-ira_line=${ira_line//"\${TI_RUN}"/run-rehearsal}
-ira_line=${ira_line//"\${TI_AS_OF}"/2025-01-02T21:00:00Z}
-# shellcheck disable=SC2016
-ira_line=${ira_line//'$TI_RESTART_ARGS'/}
-case $ira_line in *'$'* | *%*) fail "the IRA engine's ExecStart has a variable the rehearsal does not expand: $ira_line" ;; esac
-install -d -o ti-trader -g ti-trader -m 0700 /run/ti-engine-trad-ira
-# shellcheck disable=SC2086
-if out=$(sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York timeout 20 $ira_line 2>&1); then
-  fail "the IRA engine started with its birth a placeholder"
-fi
-case $out in *birth*) ;; *) fail "the IRA engine's refusal of its placeholder birth does not name it: $out" ;; esac
-rm -f "$ira_state"/run-rehearsal.*
-sed -i 's/"birth": "YYYY-MM"/"birth": "1975-06"/' "$ira_config"
-ira_out=$(mktemp)
-# The output file is root's on purpose; the engine writes to the inherited descriptor.
-# shellcheck disable=SC2086,SC2024
-sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York $ira_line >"$ira_out" 2>&1 &
-ira_engine=$!
-for _ in $(seq 100); do
-  test -S /run/ti-engine-trad-ira/engine.sock && break
-  sleep 0.1
+for ira in roth-ira trad-ira; do
+  ira_config=/etc/trend-investing/engines/$ira.config
+  ira_state=/var/lib/trend-investing/engines/$ira
+  ira_line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-engine@.service)
+  ira_line=${ira_line//%i/$ira}
+  ira_line=${ira_line//%t//run}
+  ira_mode=$(sed -n 's/^TI_MODE=//p' "/etc/trend-investing/engines/$ira.env")
+  test "$ira_mode" = dry-run || fail "$ira.env declares TI_MODE=$ira_mode, not dry-run"
+  ira_line=${ira_line//"\${TI_MODE}"/$ira_mode}
+  ira_line=${ira_line//"\${TI_CONFIG}"/$ira_config}
+  ira_line=${ira_line//"\${TI_STATE_DIR}"/$ira_state}
+  ira_line=${ira_line//"\${TI_FLEX_DIR}"/\/var\/lib\/trend-investing\/flex\/$ira}
+  ira_line=${ira_line//"\${TI_RUN}"/run-rehearsal}
+  ira_line=${ira_line//"\${TI_AS_OF}"/2025-01-02T21:00:00Z}
+  # shellcheck disable=SC2016
+  ira_line=${ira_line//'$TI_RESTART_ARGS'/}
+  case $ira_line in *'$'* | *%*) fail "the IRA engine's ExecStart has a variable the rehearsal does not expand: $ira_line" ;; esac
+  install -d -o ti-trader -g ti-trader -m 0700 /run/ti-engine-$ira
+  # shellcheck disable=SC2086
+  if out=$(sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York timeout 20 $ira_line 2>&1); then
+    fail "the IRA engine started with its birth a placeholder"
+  fi
+  case $out in *birth*) ;; *) fail "the IRA engine's refusal of its placeholder birth does not name it: $out" ;; esac
+  rm -f "$ira_state"/run-rehearsal.*
+  sed -i 's/"birth": "YYYY-MM"/"birth": "1975-06"/' "$ira_config"
+  ira_out=$(mktemp)
+  # The output file is root's on purpose; the engine writes to the inherited descriptor.
+  # shellcheck disable=SC2086,SC2024
+  sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York $ira_line >"$ira_out" 2>&1 &
+  ira_engine=$!
+  for _ in $(seq 100); do
+    test -S /run/ti-engine-$ira/engine.sock && break
+    sleep 0.1
 done
-test -S /run/ti-engine-trad-ira/engine.sock || { cat "$ira_out"; fail "the IRA engine did not listen on its socket"; }
+test -S /run/ti-engine-$ira/engine.sock || { cat "$ira_out"; fail "the IRA engine did not listen on its socket"; }
 install -m 0644 /root/dist/momentum-month.jsonl /tmp/momentum-month.jsonl
 install -m 0644 /root/deploy/feed-month.py /tmp/feed-month.py
-decided=$(sudo -u ti-trader python3 /tmp/feed-month.py --socket /run/ti-engine-trad-ira/engine.sock --log "$ira_state/run-rehearsal.log" \
+decided=$(sudo -u ti-trader python3 /tmp/feed-month.py --socket /run/ti-engine-$ira/engine.sock --log "$ira_state/run-rehearsal.log" \
   --config "$ira_config" --month /tmp/momentum-month.jsonl) || { cat "$ira_out"; fail "the synthetic month was refused: $decided"; }
 kill -TERM "$ira_engine"
 wait "$ira_engine" || { cat "$ira_out"; fail "the IRA engine did not stop cleanly"; }
@@ -833,7 +835,9 @@ case $decided in *DUREHEARS1*) fail "the feed printed the account" ;; esac
 test -s "$ira_state/run-rehearsal.journal" || { cat "$ira_out"; fail "the stopped IRA run wrote no journal"; }
 grep -q "wrote $ira_state/run-rehearsal.journal" "$ira_out" || fail "the IRA engine did not report its journal: $(cat "$ira_out")"
 rm -rf "$ira_state"/run-rehearsal.* "$ira_state/operator-notes" /tmp/momentum-month.jsonl /tmp/feed-month.py
-pass "the traditional IRA's engine starts in dry-run from its own settings and configuration, refuses its placeholder birth, records the synthetic month's decision withheld and stops cleanly"
+pass "the $ira engine starts in dry-run from its own settings and configuration, refuses its placeholder birth, records the synthetic month's decision withheld and stops cleanly"
+
+done
 
 # The IRA's data job, run with ti-data@trad-ira's own command line (expanded
 # as systemd would) as ti-trader, on synthetic recordings of the last 210
@@ -899,6 +903,7 @@ done
 test -f /etc/systemd/system/ti-flex@.service && test -f /etc/systemd/system/ti-flex@.timer || fail "ti-flex@ unit or timer not installed"
 test ! -e /etc/systemd/system/ti-flex-boost.service && test ! -e /etc/systemd/system/ti-flex-boost.timer || fail "the Boost-only Flex reader unit is still installed"
 grep -q '"paper_sending_enabled": false' /etc/trend-investing/adapters/boost.json || fail "adapter configuration not created from the example"
+cmp -s /root/deploy/etc/adapters/roth-ira.json.example /etc/trend-investing/adapters/roth-ira.json || fail "Roth adapter configuration not installed"
 cmp -s /root/deploy/etc/adapters/trad-ira.json.example /etc/trend-investing/adapters/trad-ira.json || fail "the IRA adapter's configuration not created from its example"
 test "$(stat -c %U:%a /var/lib/trend-investing/adapters/trad-ira)" = ti-trader:750 || fail "the IRA adapter's state directory not ti-trader 0750"
 # The Traditional IRA's Flex reader fires 15 minutes after Boost's (lessons L3).

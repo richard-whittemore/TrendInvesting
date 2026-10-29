@@ -27,3 +27,16 @@ func TestAnIRADataJobIsWordedAsTheDataJob(t *testing.T) {
 		t.Errorf("the state-at-start line words the IRA data job as not restarted:\n%s", a.Body)
 	}
 }
+
+// TestMemorySampleIsWordedAsATimerJob preserves the retry and episode wording
+// for measurement failures (lessons-2026-10.md L1/L8; ADR 0019, "Alerting").
+func TestMemorySampleIsWordedAsATimerJob(t *testing.T) {
+	page := report.UnitFailedAlert("lightsail", "ti-memory.service", "0123456789abcdef0123456789abcdef", "refused", time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC))
+	for _, text := range []string{page.Body, page.PublicBody} {
+		for _, want := range []string{"timer at the next firing", "The memory sample fails", "resolved when a run ends well"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("missing %q in %s", want, text)
+			}
+		}
+	}
+}

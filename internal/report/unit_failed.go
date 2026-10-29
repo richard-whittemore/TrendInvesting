@@ -32,6 +32,7 @@ var UnitManualRows = []struct{ prefix, row string }{
 	{"ti-gateway.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "ti-gateway failed and stays down" (login file, or login retries stopped)`},
 	{"ti-data.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
 	{"ti-data@", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The data job fails"`},
+	{"ti-memory.", `docs/manual/server.md, "What can go wrong, and what happens then", the row "The memory sample fails"`},
 	{"ti-flex@", `docs/manual/reconciliation.md, "What can go wrong, and what the program does then", the rows that begin "ti-flex@<instance> failed"`},
 }
 
@@ -62,14 +63,20 @@ func isDataJob(unit string) bool {
 // and only resolved (ADR 0019, "Alerting"; lessons L8).
 func isFlexReader(unit string) bool { return strings.HasPrefix(unit, "ti-flex@") }
 
-// isTimerJob is a unit its timer runs again: a data job or a Flex reader.
-func isTimerJob(unit string) bool { return isDataJob(unit) || isFlexReader(unit) }
+// isTimerJob is a unit its timer runs again: a data job, Flex reader or memory
+// sampler (ADR 0019, "Alerting"; lessons-2026-10.md L1/L8).
+func isTimerJob(unit string) bool {
+	return isDataJob(unit) || isFlexReader(unit) || unit == "ti-memory.service"
+}
 
 // restartSentence says who starts the failed unit again, per unit. The rule
 // is the restart model (ADR 0027): systemd never restarts the engine or the
 // adapter, so a stop waits for the owner; the data job is the exception,
 // run again by its timer, ti-data.timer or ti-data@.timer (ADR 0019, "Alerting").
 func restartSentence(unit string) string {
+	if unit == "ti-memory.service" {
+		return "The memory sampler is run again by its timer at the next firing; fix the cause and retry to avoid gaps in the measurement week."
+	}
 	if isDataJob(unit) {
 		return "The data job is run again by its timer at the next firing; you need not start it unless you fixed its cause and want the session recorded sooner."
 	}

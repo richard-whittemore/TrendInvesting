@@ -180,6 +180,15 @@ called "systemctl mask ti-gateway.service" || fail "the Mac mini does not re-mas
 rm -f "$work/units/ti-gateway.service"
 FAKE_LIVE=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "Lightsail live services failed: $(cat "$work/out")"
 called "systemctl enable ti-gateway.service" || fail "Lightsail does not enable the Gateway: $(cat "$work/calls")"
+for u in ti-data@roth-ira.timer ti-reporter@roth-ira.timer; do
+  called "$u" || fail "Roth timer not enabled: $u"
+done
+called "systemctl disable ti-adapter-boost.service ti-adapter@trad-ira.service ti-adapter@roth-ira.service" || fail "Roth adapter not disabled"
+for instance in boost trad-ira roth-ira; do
+  called "install -m 0644 $work/deploy/systemd/ti-flex@$instance.timer.d/stagger.conf $work/units/ti-flex@$instance.timer.d/" || fail "missing Flex stagger for $instance"
+done
+called "install -m 0644 $work/deploy/systemd/ti-data@roth-ira.timer.d/stagger.conf $work/units/ti-data@roth-ira.timer.d/" || fail "missing Roth data stagger"
+if grep -E 'systemctl (enable|start).*ti-memory' "$work/calls" >/dev/null; then fail "measurement enabled without owner"; fi
 if called "systemctl mask"; then fail "Lightsail masks a unit: $(cat "$work/calls")"; fi
 
 # --- services refuses a Go program built for another architecture.

@@ -24,11 +24,43 @@ src=$(cd "$here/../etc/engines" && pwd)
 dest=$work/etc/engines
 mkdir -p "$dest"
 
-install_engine_settings "$src" "$dest" >"$work/out"
-for f in "$src"/*.env "$src"/*.config; do
+initial=$work/initial
+mkdir -p "$initial"
+cp "$src"/*.env "$src"/*.config "$initial/"
+rm -f "$initial/roth-ira.env" "$initial/roth-ira.config"
+install_engine_settings "$initial" "$dest" >"$work/out"
+for f in "$initial"/*.env "$initial"/*.config; do
   cmp -s "$f" "$dest/$(basename "$f")" || fail "the first install did not install $(basename "$f")"
 done
 test -e "$dest/trad-ira.config" || fail "no trad-ira.config shipped"
+
+# Adding the second IRA preserves every existing account's settings (docs/live-trading/lessons-2026-10.md L7), including the second IRA's own settings on a later run.
+for f in "$dest"/*.config "$dest"/*.env; do
+  cp "$f" "$work/$(basename "$f").before"
+done
+install_engine_settings "$src" "$dest" >"$work/out"
+for f in "$work"/*.before; do
+  name=$(basename "${f%.before}")
+  cmp -s "$f" "$dest/$name" || fail "adding roth-ira changed $name"
+done
+test -e "$dest/roth-ira.config" || fail "no roth-ira.config installed from its example"
+
+# Adapters are also created once, including the Roth's; the host substitution
+# is target-specific and never rewrites an existing owner's file (ADR 0026).
+adapters=$work/adapters
+mkdir -p "$adapters"
+printf 'owner-boost\n' >"$adapters/boost.json"
+printf 'owner-trad\n' >"$adapters/trad-ira.json"
+install_adapter_settings "$here/etc/adapters" "$adapters" >"$work/out"
+grep -qx owner-boost "$adapters/boost.json" || fail "adapter install changed Boost"
+grep -qx owner-trad "$adapters/trad-ira.json" || fail "adapter install changed Traditional IRA"
+cmp -s "$here/etc/adapters/roth-ira.json.example" "$adapters/roth-ira.json" || fail "Roth adapter not created"
+printf 'owner-roth\n' >"$adapters/roth-ira.json"
+install_adapter_settings "$here/etc/adapters" "$adapters" >"$work/out"
+grep -qx owner-roth "$adapters/roth-ira.json" || fail "adapter install changed Roth"
+rm "$adapters/roth-ira.json"
+target=mac-mini install_adapter_settings "$here/etc/adapters" "$adapters" >"$work/out"
+grep -q '"host": "host.docker.internal"' "$adapters/roth-ira.json" || fail "Roth adapter on Mac mini uses Linux Gateway"
 
 # The owner names the account on the server, as the runbooks do.
 sed -i.bak 's/"account_id": "trad-ira"/"account_id": "DUEDITED1"/' "$dest/trad-ira.config"

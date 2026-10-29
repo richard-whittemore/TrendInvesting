@@ -46,15 +46,17 @@ All are system users with no login shell. You log in as `ubuntu` and use
 
 ## The units and timers
 
-All times are New York time (each unit sets `TZ=America/New_York`).
+Times below are New York time unless marked UTC (the memory timer uses UTC).
 
 | Unit | What it does | When it runs | Today |
 | --- | --- | --- | --- |
 | `ti-gateway.service` | IB Gateway under IBC, logged in to IBKR | Starts at boot (enabled). Restarts itself 30 seconds after IBC exits (for example when the weekly phone approval times out), except when the login file is empty or malformed, or after 3 login attempts of any kind within 24 hours ("The Gateway is logged out"). IBC restarts the Gateway nightly at 11:45 PM and logs in again from cold every Sunday at 09:00 (`/etc/trend-investing/gateway.env`) | Installed; not yet run against a real IBKR login |
 | `ti-data.timer` and `ti-data.service` | The daily data job: records the day's market data from Massive and writes the Boost engine's input ([market data](market-data.md), "The daily data job") | Monday to Friday at 06:05, 07:05 and 08:05, for the previous session: Massive's free plan serves a session's prices only the next morning, and the adapter's morning reading stands for the session's close only with the Flex reader's executions proof, else the session is withheld ([market data](market-data.md), "The free plan's timing"; [reconciliation](reconciliation.md), "The executions proof"). A 403 at the first two firings is a quiet wait; one that persists at 08:05 fails the unit and pages you ("The free plan's timing" in [market data](market-data.md)). A firing missed while the server was off runs when it starts again. A run is stopped after an hour | Built and installed by `provision.sh services` when `dist/ti-data` is beside `deploy/`. Until the Boost engine has been started once (no `run.env` and no run log in its folder) a firing waits quietly and succeeds; it refuses, and the unit fails, for a real fault, including a `run.env` lost after a run (a run log or a run stream folder is the sign) ("The reporter before the first run", below) |
-| `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. `@trad-ira` starts in dry-run once you name its account and birth month ([momentum](momentum.md), "Starting the Traditional IRA's engine in dry-run"); `@roth-ira` is skipped: it has no configuration file |
-| `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; only Boost's timer is enabled, since the IRA engines have no configuration yet | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, until the engine has been started once it logs that it is waiting for the account's first run, skips only the reading of the log, and otherwise runs as usual ("The reporter before the first run", below); it fails, with a message, until the `secrets.env` entries below are filled in |
-| `ti-unit-failed@.service` | The page that a unit failed: the engine, the adapter, the reporter and the data job each name it in `OnFailure=`, so systemd starts one instance, named after the failed unit (for the engine, `ti-unit-failed@ti-engine@boost.service.service`), the moment that unit fails. It sends one urgent page through the reporter's channels naming the unit, the failed run's last journal line and the manual row to read ("A failed unit", below) | Only when one of those four units fails; never by itself otherwise | Installed by `provision.sh services` with the other units |
+| `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. `@trad-ira` starts in dry-run once you name its account and birth month ([momentum](momentum.md), "Starting the Traditional IRA's engine in dry-run"); `@roth-ira` has its configuration and starts in dry-run once you name its account and birth month |
+| `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; Boost's and both IRA reporter timers are enabled | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, until the engine has been started once it logs that it is waiting for the account's first run, skips only the reading of the log, and otherwise runs as usual ("The reporter before the first run", below); it fails, with a message, until the `secrets.env` entries below are filled in |
+| `ti-memory.timer` | Triggers the memory sampler ([Measuring the server](#measuring-the-server)) | Every five minutes in UTC; the sampler appends only within the selected week | Installed; the owner enables it for the measurement week |
+| `ti-memory.service` | Records server total memory, unit counters and installed schedules | On each memory timer firing or a manual start; stopped after two minutes | Requires `memory.env`; failed samples page once and a good run resolves the episode |
+| `ti-unit-failed@.service` | The page that a unit failed: the engine, the adapter, the reporter, the data jobs, the Flex readers and the memory sampler each name it in `OnFailure=`, so systemd starts one instance, named after the failed unit (for the engine, `ti-unit-failed@ti-engine@boost.service.service`), the moment that unit fails. It sends one urgent page through the reporter's channels naming the unit, the failed run's last journal line and the manual row to read ("A failed unit", below) | Only when one of those units fails; never by itself otherwise | Installed by `provision.sh services` with the other units |
 | `ti-dashboard.service` | The read-only dashboard, on loopback port 8088 | Starts at boot (enabled) | Built and installed by `provision.sh services`; it finds the Boost engine's current run, the newest link of its chain of runs, on every request and follows the chain of runs back to the first, so a restart or an upgrade of the engine needs no dashboard restart. It shows a message, not a figure, until the engine has run once |
 | `ti-ntfy.service` | Your own ntfy server: the only place the daily summary goes ("Your own ntfy server", below). Listens on the server's Tailscale address, port 2586, and nowhere else | Starts at boot once `provision.sh ntfy` has enabled it; tried again every 10 seconds if the Tailscale address is not up yet | Installed by `provision.sh ntfy`, which you run after joining Tailscale. Not part of `provision.sh all` |
 | `tailscaled` | Tailscale | At boot | Installed by `provision.sh base` |
@@ -88,7 +90,7 @@ Boost instance's account id is `joint`.
 | File | What it holds | Who writes it |
 | --- | --- | --- |
 | `/etc/trend-investing/engines/<instance>.env` | the account's label (`TI_ACCOUNT`), its adapter client ID (Boost 11, Traditional IRA 12, Roth IRA 13) and the engine's start mode (`TI_MODE`, `dry-run`) | installed from `deploy/etc/engines/` by `provision.sh services` when there is none, then kept; the shipped one beside it as `<instance>.env.example` |
-| `/etc/trend-investing/engines/<instance>.config` | the account's configuration: strategy, account, mode, rule figures, hard limits. Hashed into every run (ADR 0016). `boost.config` and `trad-ira.config` exist; the Roth IRA has none yet. Each ships with placeholders (`joint`, `trad-ira`; the IRA's birth month `YYYY-MM`), never your account or birth month, which you name on the server | installed from `deploy/etc/engines/` by `provision.sh services` only when there is none; then yours, kept by every later run (the shipped one goes beside it as `<instance>.config.example`) |
+| `/etc/trend-investing/engines/<instance>.config` | the account's configuration: strategy, account, mode, rule figures, hard limits. Hashed into every run (ADR 0016). All three accounts have templates. Each ships with placeholders (`joint`, `trad-ira`, `roth-ira`; each IRA's birth month `YYYY-MM`), never your account or birth month, which you name on the server. Each IRA reads its own glide anchors and retirement horizon from this file | installed from `deploy/etc/engines/` by `provision.sh services` only when there is none; then yours, kept by every later run (the shipped one goes beside it as `<instance>.config.example`) |
 | `/var/lib/trend-investing/engines/<instance>/run.env` | one engine start: `TI_RUN` (the run's name, never reused), `TI_AS_OF` (its first decided session) and `TI_RESTART_ARGS` (empty, `-approval <file>` or `-resume <log>`) | you, before every start (`docs/runbooks/durable-log.md`, "Restarting an engine"; example in `deploy/etc/engines/run.env.example`) |
 | `/etc/trend-investing/gateway.env` | the Gateway's restart times | `provision.sh services` |
 | `/etc/trend-investing/adapters/boost.json` | the Boost adapter's settings: the Gateway's address and port (4002), client ID 11, mode and the paper sending switch (`paper_sending_enabled`), timeouts; no account number | created once from `deploy/etc/adapters/boost.json.example` by `provision.sh services`, never overwritten; you edit it for paper |
@@ -128,7 +130,7 @@ the same disk as the files, and a snapshot would carry both.
 | `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY`, `TI_PAGERDUTY_ROUTING_KEY` (unused: the server pages through Pushover), `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL`, and the Flex reader's `TI_IBKR_FLEX_TOKEN`, `TI_IBKR_FLEX_QUERY_ID` and `TI_IBKR_FLEX_TRADES_QUERY_ID` | handed as a private credential file (`LoadCredential`) to the data job, the engines, the reporter and the Flex readers; the dashboard is given none |
 | `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
 | `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's adapter (`ti-adapter@trad-ira.service`) and its Flex reader (`ti-flex@trad-ira.service`) |
-| `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@roth-ira.service`) |
+| `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to its adapter (`ti-adapter@roth-ira.service`, client ID 13) and Flex reader (`ti-flex@roth-ira.service`) |
 
 An existing server's `secrets.env` keeps the layout it was provisioned with, because provisioning never overwrites it, so the owner may tidy it by hand to match `deploy/etc/secrets.env.example`.
 
@@ -585,6 +587,103 @@ needs"). If a job is ever killed for memory anyway (`journalctl -k | grep -i
 systemctl start ti-gateway ti-dashboard` (the Gateway logs in again and may
 ask for the phone approval).
 
+## Measuring the server
+
+Boost lesson L1 requires a week of evidence with the Gateway, all three
+engines and adapters, data jobs, reporters and dashboard sharing the 2 GB
+server before the IRAs go live. This measures the existing server; the owner
+decides whether its figures require a larger instance (ADR 0026). Run the
+accounts in dry-run; the paper and restart gates remain separate.
+
+`deploy/memory.py` uses only Python's standard library and `systemctl`.
+`ti-memory.timer` samples every five minutes, including weekends, into
+`/var/lib/trend-investing/memory/<week-start>.jsonl`. Provisioning installs
+the script, units, directory and `MemoryAccounting=yes` service drop-ins;
+it **does not enable the measurement timer** or choose a week. Existing
+evidence is append-only. Keep each week's JSONL and report, failed weeks
+included; never truncate or replace one to obtain a passing report.
+
+For an existing server, install by hand from the staged repository root:
+
+```bash
+sudo install -m 0755 deploy/memory.py /usr/local/libexec/trend-investing/memory.py
+sudo install -m 0644 deploy/systemd/ti-memory.service deploy/systemd/ti-memory.timer /etc/systemd/system/
+sudo install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/memory
+for file in deploy/systemd/*.service; do
+  unit=$(basename "$file")
+  sudo install -d -m 0755 "/etc/systemd/system/$unit.d"
+  printf '[Service]\nMemoryAccounting=yes\n' | sudo tee "/etc/systemd/system/$unit.d/memory.conf" >/dev/null
+done
+sudo systemctl daemon-reload
+```
+
+Choose the first of seven **UTC dates** in `memory.env`. An arbitrary start
+date is allowed. Start at its midnight for the fullest coverage; starting
+later on that date records a partial first day explicitly. For example,
+replace `YYYY-MM-DD` below with the chosen date. This file holds no secret:
+
+```bash
+printf 'TI_MEMORY_WEEK_START=YYYY-MM-DD\n' | sudo tee /etc/trend-investing/memory.env >/dev/null
+sudo chmod 0644 /etc/trend-investing/memory.env
+sudo systemctl enable --now ti-memory.timer
+sudo systemctl start ti-memory.service
+sudo systemctl status ti-memory.service --no-pager
+sudo systemctl list-timers ti-memory.timer --no-pager
+```
+
+On that same day, after the selected UTC week has begun, check that the
+JSONL has a new record and check the `active_state` of all three engines,
+all three adapters and the Gateway. Missing/inactive services are recorded,
+not assumed to be running. An active unit with unavailable counters fails
+the sample and pages through `OnFailure`; check `MemoryAccounting` and, for
+an already running unit, use `sudo systemctl set-property --runtime <unit>
+MemoryAccounting=yes`, then retry. The sampler records all loaded `ti-*`
+services plus an explicit list of the accounts' services and the Gateway,
+so even an inactive or unloaded required unit appears.
+
+The record includes each unit's `MemoryCurrent`, `MemoryPeak`, active/load
+state, the server's `MemTotal` and `MemAvailable` from `/proc/meminfo`, and
+the installed timer text including instance drop-ins. Schedule changes
+during the week remain visible in the report's `schedules`: each entry records
+`since` (UTC), the installed `schedule` text and the number of `samples`
+taken under it. A change and a return to an earlier schedule are separate
+entries in timestamp order. The Flex
+starts are Boost 05:30/06:30/07:30, Traditional IRA 05:45/06:45/07:45 and
+Roth IRA 06:00/07:00/08:00 New York. Roth data runs at
+06:30/07:30/08:30, thirty minutes after its Flex starts, before the 09:00
+proof cutoff. The stagger separates starts; a slow Flex request can outlive
+its fifteen-minute window, and each adapter still requires the executions
+proof (Boost lesson L3).
+
+After the seven dates, substitute the same start date and save the report:
+
+```bash
+sudo systemctl disable --now ti-memory.timer
+sudo -u ti-trader python3 /usr/local/libexec/trend-investing/memory.py report \
+  --week-start YYYY-MM-DD --record /var/lib/trend-investing/memory/YYYY-MM-DD.jsonl
+```
+
+Copy stdout to a new report file and keep it beside the JSONL. The sampler
+appends nothing outside the selected week even if the owner leaves its
+timer enabled. The report exits non-zero with `memory: FAIL: missing samples
+for <date>` if any UTC day has no sample; malformed/truncated records also
+fail. It states counts per day (288 expected), first/last observations and
+the largest gap: a day with one observation meets the missing-day check,
+but is visibly incomplete and is not enough evidence for a capacity decision.
+
+All figures are bytes. Typical use is the median of available
+`MemoryCurrent` observations per unit. `peak_bytes` includes the largest
+cgroup `MemoryPeak` seen: this is a lifetime high-water mark and can predate
+the week, and a short-lived job can finish between samples without leaving
+a readable counter. `sampled_peak_bytes` is the highest observed
+`MemoryCurrent`; neither claims to capture every short spike. Unavailable
+counters are null with observation counts and unit states, never invented
+zeros. Server peak and median use `MemTotal - MemAvailable` at each sample;
+they include the whole host, and are never a sum of non-simultaneous unit
+peaks. Compare these figures and coverage with `capacity_bytes`, and retain
+the schedule under which they were taken before making the owner's sizing
+decision.
+
 ## The clock
 
 The program compares the server's clock with IBKR's. If the server's clock
@@ -1031,7 +1130,8 @@ stop, not after two sessions of silence.
 | The IBKR password is wrong | The refused login is retried at most twice (3 attempts in all; any start counts, so after a good login fewer), then the unit stops, so IBKR cannot lock the login; you are paged | Correct the file (`sudo ti-secrets edit ibkr-login.env`), delete `/var/lib/ti-gateway/login-failures`, start it again (`docs/runbooks/gateway-login.md`) |
 | The journal of `ti-data` or `ti-reporter@boost` says "waiting for the account's first run" (the unit is not failed) | No engine run has been started, so there is nothing to record or report. The data job writes nothing; the reporter sends no alert and, if nothing else is wrong, pings the heartbeat. Nothing is paged ("The reporter before the first run", below) | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine") |
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |
-| `ti-engine@<instance>`, `ti-adapter-boost` or `ti-adapter@<instance>` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the Roth IRA's engine has no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
+| `ti-engine@<instance>`, `ti-adapter-boost` or `ti-adapter@<instance>` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account; the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
+| The memory sample fails (you are paged: "ti-memory.service failed") | Nothing complete is appended: a fault before the write adds no row, and a half-written last row is refused by the report, which names it; `journalctl -u ti-memory.service` says why | Check `memory.env`, memory accounting and the record directory permissions, then `sudo systemctl start ti-memory.service`. Its timer retries every five minutes; one page covers the episode, the reporter pages if the hook could not, and a good run resolves it. Keep any measurement gaps visible |
 | The data job fails (you are paged: "ti-data.service failed") | The unit shows failed; `journalctl -u ti-data` says why (a 403 that is still there at 08:05 reads "Massive still refuses session ..."); no file is written for the session | Fix the cause and `sudo systemctl start ti-data` ([market data](market-data.md)); you are paged once, not reminded, and the incident ends when a run ends well, so wait for that run to finish ("A failed unit") |
 | The end-to-end test (step 5 of "Your own ntfy server") shows nothing on the phone | The phone is not on the tailnet (Tailscale off, or not set to stay on), the app is subscribed on another server, or the server cannot reach ntfy.sh to wake an iPhone (`journalctl -u ti-ntfy` names the upstream) | Turn Tailscale on and set it to stay on (step 3); check the subscription's server URL is exactly `TI_NTFY_SERVER`; check the server reaches the internet (`curl -sI https://ntfy.sh`) |
 | `ti-ntfy` fails, or the summary stops reaching your phone while Pushover pages still do; `journalctl -u ti-ntfy` names it | Your own ntfy server is down or has no Tailscale address yet. The unit tries again every 10 seconds; the reporter retries the summary at every firing and the run ends with an error naming `ntfy:`. Incident pages go to Pushover as well and are not held back | `sudo systemctl status ti-ntfy`; if Tailscale was signed out, `sudo tailscale up --ssh` and `sudo systemctl restart ti-ntfy`; if the configuration is missing, `sudo deploy/provision.sh ntfy` |

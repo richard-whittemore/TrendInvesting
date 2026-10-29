@@ -133,7 +133,7 @@ deploy-test:
 	./deploy/rehearsal/test-provision-arch.sh
 	./deploy/rehearsal/test-engine-configs.sh
 	./deploy/mac-mini/test-programs-lib.sh
-	cd deploy/rehearsal && python3 -m unittest test_twsapi_archive test_github_standin test_feed_month
+	cd deploy/rehearsal && python3 -m unittest test_twsapi_archive test_github_standin test_feed_month test_roth test_memory
 	cd deploy/tailscale && python3 -m unittest test_policy
 	./deploy/rehearsal/test-clock.sh
 	./deploy/rehearsal/test-target.sh
