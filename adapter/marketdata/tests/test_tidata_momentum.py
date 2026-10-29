@@ -371,9 +371,11 @@ class MomentumJobTest(unittest.TestCase):
             raise tidata.massive.MarketDataError("HTTP 503 from a sector source")
         client = FakeMassive({D(2026, 11, 27): bars_for(D(2026, 11, 27))})
         job = MomentumJob(self.tmp.name, data=self.data, client=client, ranker=FakeRanker(), sectors_get=down)
-        status, _, err = job.main(after_settle(D(2026, 11, 27)), "--backfill-from", "2026-11-23")
+        last_firing = dt.datetime(2026, 11, 30, 8, 15, tzinfo=nyse_calendar.NEW_YORK)
+        status, _, err = job.main(last_firing, "--backfill-from", "2026-11-23")
         self.assertEqual(status, 0, err)
-        self.assertIn("the universe of 2026-11-27 is not recorded", err)
+        self.assertIn("no universe is recorded for", err)
+        self.assertIn("2026-11-27", err)
         self.assertFalse((self.data / "universe_2026-11-27.json").exists())
         self.assertNotIn("market.universe.snapshot", {e["type"] for e in job.envelopes(D(2026, 11, 27))})
         self.assertEqual([c for c in client.calls if c[0] == "tickers"], [])
@@ -382,6 +384,9 @@ class MomentumJobTest(unittest.TestCase):
         self.assertEqual(status, 0, err)
         self.assertEqual([e["payload"]["session"] for e in job.envelopes(D(2026, 11, 30))
                           if e["type"] == "market.universe.snapshot"], ["2026-11-30"])
+        manifest = json.loads((job.stream_dir() / "manifest.json").read_text())
+        self.assertEqual([f["without_universe"] for f in manifest["files"]],
+                         [["2026-11-23", "2026-11-24", "2026-11-25", "2026-11-27"], []])
 
     def test_a_missing_run_env_is_a_quiet_wait_naming_the_instance(self):
         job = MomentumJob(self.tmp.name, data=self.data)
@@ -567,10 +572,6 @@ class TemplateUnitTest(unittest.TestCase):
         self.assertIn("-resolve-units ti-data.service,ti-data@trad-ira.service ", reporter)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class LogHoldingsRefusalTest(unittest.TestCase):
     """The holdings are read only from inputs whose versions the job reads, from a log whose record hash
     chain holds; anything else refuses the firing (AGENTS.md rule 5: fail closed)."""
@@ -644,8 +645,7 @@ class StreamChainTest(unittest.TestCase):
             # The 11-30 file is outside no action window, but the firing that finds it still sees the gap.
             status, _, err = job.main(after_settle(D(2026, 11, 30)))
             self.assertEqual(status, 1)
-            self.assertIn("missing", err)
-            self.assertIn("the sessions from 2026-11-27", err)
+            self.assertIn("trad-ira-2026-11-27.jsonl is missing", err)
 
 
 class RankerConfigurationTest(unittest.TestCase):
@@ -795,3 +795,244 @@ class MissedMonthStartTest(unittest.TestCase):
             self.assertEqual(sorted({e["payload"]["session"] for e in stream if e["type"] == "market.close.history"}),
                              ["2026-11-30"])
             self.assertIn(("tickers", D(2026, 11, 30), "CS"), client.calls)
+
+
+def warmed(root, data=None, **kw):
+    """A MomentumJob on the encoder's small fixture, warmed up through 11-25 and then 11-27 and 11-30."""
+    data = Path(data or Path(root) / "data")
+    data.mkdir(exist_ok=True)
+    build(str(data))
+    job = MomentumJob(root, data=data, ranker=FakeRanker(), **kw)
+    status, _, err = job.main(after_settle(D(2026, 11, 25)), "--backfill-from", "2026-11-23")
+    assert status == 0, err
+    for day in (D(2026, 11, 27), D(2026, 11, 30)):
+        status, _, err = job.main(after_settle(day))
+        assert status == 0, err
+    return job
+
+
+def sha256_of(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+class ManifestTest(unittest.TestCase):
+    """The job keeps a manifest of every file it published for the run (its sessions, length and digest),
+    written whole beside them, and every firing checks the folder against it: a file truncated, changed or
+    gone, the newest included, stops the job; it is never written again from today's holdings."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.job = warmed(self.tmp.name)
+        self.manifest = self.job.stream_dir() / "manifest.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_each_published_file_is_in_the_manifest(self):
+        manifest = json.loads(self.manifest.read_text())
+        self.assertEqual(manifest["base"], "2026-11-23")
+        self.assertEqual([(f["name"], f["first"], f["last"]) for f in manifest["files"]],
+                         [("trad-ira-2026-11-25.jsonl", "2026-11-23", "2026-11-25"),
+                          ("trad-ira-2026-11-27.jsonl", "2026-11-27", "2026-11-27"),
+                          ("trad-ira-2026-11-30.jsonl", "2026-11-30", "2026-11-30")])
+        for f in manifest["files"]:
+            path = self.job.stream_dir() / f["name"]
+            self.assertEqual((f["bytes"], f["sha256"]), (path.stat().st_size, sha256_of(path)))
+        self.assertTrue(manifest["actions"])
+
+    def refused(self, now, *words):
+        status, _, err = self.job.main(now)
+        self.assertEqual(status, 1, err)
+        for w in words:
+            self.assertIn(w, err)
+        return err
+
+    def test_an_older_file_cut_after_its_calendar_is_refused(self):
+        path = self.job.path(D(2026, 11, 25))
+        path.write_text(path.read_text().splitlines()[0] + "\n")
+        self.refused(after_settle(D(2026, 11, 30)), str(path), "changed since it was published")
+
+    def test_a_missing_newest_file_is_refused_never_written_again(self):
+        os.remove(self.job.path(D(2026, 11, 30)))
+        self.refused(after_settle(D(2026, 11, 30)), "trad-ira-2026-11-30.jsonl", "missing")
+        self.assertFalse(self.job.path(D(2026, 11, 30)).exists())
+
+    def test_a_file_published_but_not_yet_in_the_manifest_is_taken_in_when_it_reencodes(self):
+        # A stop between the file's publication and the manifest's: the file is checked like any written one.
+        manifest = json.loads(self.manifest.read_text())
+        manifest["files"].pop()
+        self.manifest.write_text(json.dumps(manifest))
+        status, out, err = self.job.main(after_settle(D(2026, 11, 30)))
+        self.assertEqual(status, 0, err)
+        self.assertEqual(out.strip(), str(self.job.path(D(2026, 11, 30))))
+        self.assertEqual(len(json.loads(self.manifest.read_text())["files"]), 3)
+
+    def test_files_without_a_manifest_are_refused(self):
+        os.remove(self.manifest)
+        self.refused(after_settle(D(2026, 11, 30)), "manifest")
+
+
+class ActionRecordingChangeTest(unittest.TestCase):
+    """A split or dividend recording that appears after a file was published (another account's backfill
+    records a window the run had not seen), dated inside an older file, makes that file and every later one
+    be encoded again, however old: the files are checked against the action recordings their manifest says
+    they were checked with, not only against the morning's own window."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.job = warmed(self.tmp.name)
+        self.job.client = FakeMassive({D(2026, 12, 1): bars_for(D(2026, 12, 1))})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add_dividends(self, rows):
+        record.write(str(self.job.data), {"kind": "dividends", "source": "massive", "session": "2026-11-24",
+                                          "from": "2026-11-20", "fetched_at": "2026-11-28T12:00:00Z", "rows": rows})
+
+    def test_a_new_recording_reaching_an_older_file_has_it_encoded_again(self):
+        self.add_dividends([])
+        checked = []
+        original = tidata._verify_momentum
+
+        def spy(files, *args, **kw):
+            checked.extend(os.path.basename(f[2]) for f in files)
+            return original(files, *args, **kw)
+        with mock.patch.object(tidata, "ACTION_OVERLAP", dt.timedelta(days=1)), \
+                mock.patch.object(tidata, "_verify_momentum", spy):
+            status, _, err = self.job.main(after_settle(D(2026, 12, 1)))
+        self.assertEqual(status, 0, err)
+        self.assertIn("trad-ira-2026-11-25.jsonl", checked)
+
+    def test_a_new_dividend_inside_an_older_file_stops_the_job_naming_it(self):
+        self.add_dividends([{"id": "V-late", "ticker": "IEF", "ex_dividend_date": "2026-11-24", "cash_amount": 0.5}])
+        with mock.patch.object(tidata, "ACTION_OVERLAP", dt.timedelta(days=1)):
+            status, _, err = self.job.main(after_settle(D(2026, 12, 1)))
+        self.assertEqual(status, 1)
+        self.assertIn("trad-ira-2026-11-25.jsonl differs", err)
+
+    def test_more_files_than_one_firing_checks_refuse_until_checked_by_hand(self):
+        self.add_dividends([])
+        with mock.patch.object(tidata, "ACTION_OVERLAP", dt.timedelta(days=1)), \
+                mock.patch.object(tidata, "MAX_REENCODED", 1):
+            status, _, err = self.job.main(after_settle(D(2026, 12, 1)))
+            self.assertEqual(status, 1)
+            self.assertIn("--reencode-all", err)
+            status, _, err = self.job.main(after_settle(D(2026, 12, 1)), "--reencode-all")
+        self.assertEqual(status, 0, err)
+
+
+class RunLockTest(unittest.TestCase):
+    def test_a_firing_while_another_holds_the_instances_lock_writes_nothing_and_waits_for_it(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data))
+            job = MomentumJob(root, data=data, ranker=FakeRanker())
+            (job.streams / INSTANCE).mkdir(parents=True)
+            with open(job.streams / INSTANCE / ".ti-data.lock", "a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                status, out, err = job.main(after_settle(D(2026, 11, 25)), "--backfill-from", "2026-11-23")
+            self.assertEqual((status, out), (0, ""), err)
+            self.assertIn("another run of the trad-ira data job holds its lock", err)
+            self.assertFalse(job.stream_dir().exists())
+
+
+class LabelsNotYetTest(unittest.TestCase):
+    """The latest session's labels can still be fetched until its next close, so before the last morning
+    firing a file that would lack that session's universe is not written: the firing waits and the next asks
+    again. At the last firing it is written without it, a decision on it is withheld, and the manifest and
+    every later firing that finds the file name the session."""
+
+    def test_before_the_last_firing_the_job_waits_for_the_labels(self):
+        def down(url):
+            raise tidata.massive.MarketDataError("HTTP 503 from a sector source")
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / "data"
+            data.mkdir()
+            build(str(data), sector_session=None)
+            os.remove(data / "universe_2026-11-30.json")
+            client = FakeMassive({D(2026, 11, 30): bars_for(D(2026, 11, 30))})
+            job = MomentumJob(root, data=data, client=client, ranker=FakeRanker(), sectors_get=down)
+            warm = dt.datetime(2026, 11, 30, 8, 15, tzinfo=nyse_calendar.NEW_YORK)   # the last firing for 11-27
+            status, _, err = job.main(warm, "--backfill-from", "2026-11-23")
+            self.assertEqual(status, 0, err)
+            status, out, err = job.main(dt.datetime(2026, 12, 1, 7, 15, tzinfo=nyse_calendar.NEW_YORK))
+            self.assertEqual((status, out), (0, ""), err)
+            self.assertIn("the sector labels of 2026-11-30 are not recorded yet", err)
+            self.assertFalse(job.path(D(2026, 11, 30)).exists())
+            status, _, err = job.main(dt.datetime(2026, 12, 1, 8, 15, tzinfo=nyse_calendar.NEW_YORK))
+            self.assertEqual(status, 0, err)
+            self.assertNotIn("market.universe.snapshot", {e["type"] for e in job.envelopes(D(2026, 11, 30))})
+            status, _, err = job.main(dt.datetime(2026, 12, 1, 8, 30, tzinfo=nyse_calendar.NEW_YORK))
+            self.assertEqual(status, 0, err)
+            self.assertIn("written without the universe of 2026-11-30", err)
+
+
+class InheritedBookTest(unittest.TestCase):
+    """A fresh run approved without a starting book takes the previous run's book (ADR 0027): its holdings
+    are the previous run's, read from the log its approval names, through the same reader, never nothing."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def approval(self, previous, final_hash):
+        return ("operator.run.approved", 6, {"approved_by": "owner", "previous_log": previous,
+                                             "previous_log_final_hash": final_hash})
+
+    def test_the_previous_runs_last_snapshot_is_the_book(self):
+        write_momentum_log(self.dir / "run-0.log", momentum_config(), [snapshot("CCC"), fill("DDD")])
+        final = tidata.engine_log.read(str(self.dir / "run-0.log")).final_hash
+        write_momentum_log(self.dir / "run-1.log", momentum_config(), [self.approval("run-0.log", final), fill("AAA")])
+        self.assertEqual(tidata.read_engine_log(str(self.dir / "run-1.log"), engine="momentum").holdings,
+                         ("AAA", "CCC", "DDD"))
+
+    def test_a_previous_log_that_is_not_the_one_approved_is_refused(self):
+        write_momentum_log(self.dir / "run-0.log", momentum_config(), [snapshot("CCC")])
+        write_momentum_log(self.dir / "run-1.log", momentum_config(), [self.approval("run-0.log", "sha256:" + "0" * 64)])
+        with self.assertRaises(tidata.Refused) as caught:
+            tidata.read_engine_log(str(self.dir / "run-1.log"), engine="momentum")
+        self.assertIn("run-0.log", str(caught.exception))
+        write_momentum_log(self.dir / "run-1.log", momentum_config(), [self.approval("run-9.log", "sha256:" + "0" * 64)])
+        with self.assertRaises(tidata.Refused):
+            tidata.read_engine_log(str(self.dir / "run-1.log"), engine="momentum")
+
+
+class SharedRecordingCheckTest(unittest.TestCase):
+    def test_a_grouped_recording_another_job_wrote_first_is_checked_for_bars(self):
+        from marketdata import history
+        with tempfile.TemporaryDirectory() as d:
+            class Racing:
+                def grouped(self, day):
+                    record.write(d, {"kind": "grouped", "source": "massive", "session": day.isoformat(),
+                                     "fetched_at": "2026-11-27T22:10:00Z", "adjusted": False, "bars": []})
+                    return {"results": bars_for(day)}
+            with self.assertRaises(history.Gap):
+                history.backfill(Racing(), d, D(2026, 11, 27), 1, now=lambda: after_settle(D(2026, 11, 27)))
+
+    def test_a_splits_recording_another_job_wrote_first_does_not_skip_the_dividends(self):
+        from marketdata import history
+        with tempfile.TemporaryDirectory() as d:
+            window = {"source": "massive", "session": "2026-11-27", "from": "2026-11-13",
+                      "fetched_at": "2026-11-27T22:10:00Z", "rows": []}
+
+            class Racing:
+                def splits(self, first, last):
+                    record.write(d, dict(window, kind="splits"))
+                    return [{"results": []}]
+
+                def all_dividends(self, first, last):
+                    return [{"results": []}]
+            paths = history.record_actions(Racing(), D(2026, 11, 13), D(2026, 11, 27), d,
+                                           now=lambda: after_settle(D(2026, 11, 27)))
+            self.assertTrue(all(os.path.exists(p) for p in paths))
+            self.assertTrue(os.path.exists(os.path.join(d, "dividends_2026-11-13_2026-11-27.json")))
+
+
+if __name__ == "__main__":
+    unittest.main()

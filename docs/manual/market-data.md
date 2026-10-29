@@ -859,7 +859,10 @@ wait; one still there at 08:15 is a failure that pages, as for Boost.
    engine's last account snapshot (version 3, as the adapter writes today,
    or 4, which adds the cash an IRA's buys are budgeted from), or, before
    the first one, of the Run approval's starting book, plus every stock
-   filled since. Those get their own daily bars (`--optional`); nothing else
+   filled since. A fresh run approved without a starting book takes the
+   previous run's book, so its holdings are read from the previous run's
+   log, the one its approval names (checked by its final record hash, and
+   so on back through earlier runs that did the same). Those get their own daily bars (`--optional`); nothing else
    does. There is no flag to name them, so a holding cannot be forgotten. A
    first run before its first reading holds nothing. A snapshot, fill or
    approval of another version, or a log whose record hash chain is broken
@@ -868,9 +871,18 @@ wait; one still there at 08:15 is a failure that pages, as for Boost.
    the memory it needs is its longest line (a day's universe snapshot, under
    1 MB) and a few hundred bytes an input, not the log: a test reads a year of
    daily snapshots inside the 64 MiB budget.
-4. Checks the run's files are one unbroken chain from the warm-up: each
-   begins at the session after the one before it ends. A missing file stops
-   the job (restore it from the backup, unchanged).
+4. Checks the run's folder against its **manifest**, `manifest.json`
+   beside the files, which the job writes whole each time it publishes one:
+   each file's name, first and last session, length and SHA-256, the
+   sessions in it written without a universe, and the split and dividend
+   recordings the files were last checked against. A file truncated,
+   changed or gone (the newest included) stops the job; it is never written
+   again from today's recordings and holdings. The files must form one
+   unbroken chain from the warm-up. A newest file that the manifest does not
+   list yet (the job stopped between the two writes) is taken in only if it
+   encodes again byte for byte. One run of the instance's job at a time
+   holds its lock (`streams/trad-ira/.ti-data.lock`); a firing that finds it
+   held prints one line and writes nothing.
 5. Records first, before asking Massive anything, the latest session's
    sector labels (the sources serve only that session's files, so a morning
    when Massive fails still keeps them; a source that is down is named in a
@@ -882,16 +894,29 @@ wait; one still there at 08:15 is a failure that pages, as for Boost.
    session that has labels from both sources within the week up to it. So
    when every firing of a month's first morning failed, the next morning's
    catch-up still writes the month-end universe and histories. A session
-   with no labels within a week gets no universe: a decision on it is
-   withheld (`missing-universe`), and the next mornings carry on. Then the
-   splits and dividends of the last two weeks, as Boost's job does.
-6. Checks the files already written that a newly recorded split or
-   dividend could reach (those ending on or after the start of the two-week
-   window), each encoded again alone, with the holdings its own bars name.
+   with no labels within a week gets no universe. For the latest session
+   the labels can still be fetched until its next close, so before 08:00
+   (the last morning firing) the job writes nothing and the next firing asks
+   again (`the sector labels of ... are not recorded yet`). From the last
+   firing on it writes the file without that universe, one warning line names
+   every session left without one, a decision on any of them is withheld
+   (`missing-universe`) and the next mornings carry on. A published file is
+   never rewritten, so a month-end universe published without its labels is
+   lost for good: that month is withheld and the next decides afresh; a
+   later firing that finds the file says so. Then the splits and dividends
+   of the last two weeks, as Boost's job does.
+6. Checks the files already written that a split or dividend recording
+   which appeared, changed or went since the manifest's check could reach
+   (those ending on or after the earliest window among them: this firing's
+   own two-week window, Boost's, or one another account's backfill recorded
+   long ago), each encoded again alone, with the holdings its own bars name.
    One that differs stops the job ("A file already written differs",
-   above). Older files are not re-encoded: no action dated before the
-   window is recorded, and re-encoding the whole market's history once per
-   file every morning would not finish before the open.
+   above). Each takes a whole-history encoding, so a firing checks at most
+   15 files; more (a backfill reaching far back) stops the job with a line
+   naming the recordings, and you run it once by hand with
+   `--reencode-all` (the warm-up command below with `--reencode-all` in
+   place of `--backfill-from ...`), which checks them all, however long it
+   takes.
 7. Writes the compact stream for the new sessions, exactly what `encode
    --ranker` writes for them (a test compares the bytes, on the recorded
    fixture of the compact stream above): the calendar from the run's base,
@@ -909,10 +934,10 @@ the real Go ranker, on the two-year fixture of 2,000 stocks. On the server
 each new session has two recordings (Boost's whole-market bars and the
 universe), which are read together to check they agree: about 6 MB more at
 the real market's size, still inside the budget. The engine's durable log
-is read whole, as for Boost; an IRA's log grows with each day's universe
-snapshot (about half a megabyte a day), so that read must be bounded before
-months of IRA logs accumulate (measured with the three engines before the
-IRAs go live).
+is read a line at a time, keeping only a few fields of each input (step 3),
+so its growth (about half a megabyte a day of universe snapshots) does not
+grow the job's memory: the same test reads a log of a year of daily
+snapshots inside the budget.
 
 **The one-time warm-up.** Once the IRA engine has been started for its run
 (so its durable log exists) and before its adapter delivers anything, run
@@ -964,8 +989,20 @@ waiting for the account's first run: ... (start the trad-ira engine once)`.
   holds an input this build does not read, or was changed after the engine
   wrote it. Nothing is written; restore the log from the backup, or install
   the build that reads that version.
-- "the run's files are not one unbroken chain": a file the job wrote for
-  the run is missing. Restore it from the backup, unchanged.
+- "the run's files are not one unbroken chain", "... is missing: the job
+  published it", "... changed since it was published", or "holds stream
+  files but no manifest": a file the job wrote for the run, or its manifest,
+  is gone or changed. Restore it from the backup, unchanged; never write
+  it again.
+- "split and dividend recordings appeared or changed ... more than one
+  firing checks": run the job once by hand with `--reencode-all` (it names
+  the recordings); if a file then differs, see "A file already written
+  differs".
+- "another run of the trad-ira data job holds its lock": a warm-up or a
+  start by hand is running; the firing wrote nothing and succeeded.
+- "cannot read holdings: ... previous log ...": the fresh run took the
+  previous run's book, and that log is missing or not the one its approval
+  names. Restore it beside the run's log, as the engine wrote it.
 - "the ranker refused" or "did not answer within 60 s": `universe-rank` is
   missing, from another build, or given another configuration
   ([momentum universe](momentum-universe.md), "What can go wrong").

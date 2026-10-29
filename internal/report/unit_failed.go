@@ -44,7 +44,12 @@ func UnitManualRow(unit string) string {
 }
 
 // isDataJob is Boost's data job, ti-data.service, or an IRA's instance of it,
-// ti-data@<instance>.service: each is run again by its timer.
+// ti-data@<instance>.service: each is run again by its timer, so its page and
+// a state-at-start line say the timer runs it again instead of "systemd does
+// not restart it" (ADR 0019, "Alerting"; ADR 0027, the restart model: systemd
+// never restarts the engine or the adapter). Only timer-retried data jobs
+// qualify; an engine, adapter or reporter unit must never match, or its page
+// would tell the owner it restarts by itself.
 func isDataJob(unit string) bool {
 	return strings.HasPrefix(unit, "ti-data.") || strings.HasPrefix(unit, "ti-data@")
 }

@@ -846,6 +846,7 @@ case $data_line in *'$'* | *%*) fail "the IRA data job's ExecStart has a variabl
 warm=$(sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York $data_line --backfill-from "$base" 2>"$ira_out") || { cat "$ira_out"; fail "the IRA data job's warm-up failed"; }
 case $warm in "$ira_data/streams/trad-ira/run-rehearsal/trad-ira-"*.jsonl) ;; *) cat "$ira_out"; fail "the IRA data job's warm-up wrote $warm" ;; esac
 head -c 200 "$warm" | grep -q '"type":"market.session.calendar"' || fail "the IRA stream does not begin with its calendar"
+grep -q "\"name\": \"$(basename "$warm")\"" "$(dirname "$warm")/manifest.json" || fail "the IRA job's manifest does not list the file it published"
 test "$(grep -c '"type":"market.universe.snapshot"' "$warm")" = 1 || fail "the IRA stream does not hold the latest session's universe snapshot"
 grep -q '"instrument_id":"SHY"' "$warm" || fail "the IRA stream has no SHY bars"
 grep -q '"instrument_id":"R00","period_end"' "$warm" && fail "the IRA stream carries a bar for a stock it does not hold"

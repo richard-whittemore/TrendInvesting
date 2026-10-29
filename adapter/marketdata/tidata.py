@@ -115,20 +115,26 @@ the same file contract, with these differences:
   with the instance's configuration, go_ranker), read one session at a time
   within the stated memory budget (docs/live-trading/lessons-2026-10.md L1;
   docs/manual/market-data.md);
-- every firing first checks the run's files are one unbroken chain from
-  the warm-up (_check_chain: each begins where the one before it ends, read
-  from its own calendar), so a missing file stops the job; before a new
-  file is written, the files a newly recorded split or
-  dividend could reach (those whose last session is on or after the start
-  of this run's action window) are re-encoded alone, each with the holdings
-  its own bars name, and must match byte for byte; a firing that finds the
-  session written re-verifies that file only. Older files are never
-  re-encoded: the run records no action dated before its window, and a
-  whole-market history re-encoded per file every morning would not fit the
-  morning before the 09:00 cutoff.
+- every firing holds the instance's lock (_instance_lock) and checks the
+  run's folder against its manifest (_published: each published file's
+  sessions, length and digest, written whole beside them), so a file
+  truncated, changed or gone, the newest included, stops the job and is
+  never written again; before a new file is written, every published file a
+  split or dividend recording that appeared, changed or went since the
+  manifest's check could reach (however old: another account's backfill may
+  record a window long past) is re-encoded alone, each with the holdings its
+  own bars name, and must match byte for byte (_reencode_changed; more than
+  MAX_REENCODED is a run by hand, --reencode-all);
+- the latest session is not published without its universe before the last
+  morning firing (its labels can still be fetched); once published without
+  it, a file is never rewritten;
+- a fresh run approved without a starting book holds the previous run's
+  book, read through the previous log its approval names.
 """
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import glob
 import hashlib
 import json
@@ -144,6 +150,18 @@ from . import encode, engine_log, history, kinds, massive, nyse_calendar, record
 ENGINE = "boost"
 MOMENTUM = "momentum"
 STREAM = re.compile(r"boost-(\d{4}-\d{2}-\d{2})\.jsonl")
+# The run's manifest of the files it published, beside them, and the
+# instance's lock (run_momentum).
+MANIFEST = "manifest.json"
+MANIFEST_VERSION = 1
+LOCK = ".ti-data.lock"
+# How many runs back a fresh run's inherited book is followed (_Holdings).
+MAX_PREVIOUS_LOGS = 64
+# The most published files one firing encodes again after split and dividend
+# recordings change: a daily firing's own two-week window reaches about ten,
+# and each takes a whole-history encoding, so more is a run by hand
+# (--reencode-all) rather than a morning past the 09:00 cutoff.
+MAX_REENCODED = 15
 # An instance's name: its stream folder and file prefix, its engine folder
 # and its configuration's name (ti-data@<instance>.service).
 INSTANCE = re.compile(r"[a-z][a-z0-9-]*")
@@ -362,8 +380,10 @@ class _Holdings:
     keep is engine_log.read's ``keep``: it reads each committed group as it is committed and keeps the first
     (the configuration) whole and of the others only the input's ID, type, version and recorded time."""
 
-    def __init__(self, path):
-        self.path, self.current, self.groups = path, set(), 0
+    def __init__(self, path, depth=0):
+        self.path, self.current, self.groups, self.depth = path, set(), 0, depth
+        # (previous log's name, its final record hash) while the holdings are the previous run's book.
+        self.inherit = None
 
     def keep(self, group):
         n, kind, e = group[0]
@@ -378,13 +398,22 @@ class _Holdings:
                                                "versions {})".format(e.get("schema_version"), ", ".join(
                                                    str(v) for _, v in kinds.POSITIONS_SNAPSHOTS)))
             self.current = _positions(self.path, n, payload.get("positions") if isinstance(payload, dict) else None)
+            self.inherit = None
         elif e.get("type") == RUN_APPROVED:
             if e.get("schema_version") not in kinds.RUN_APPROVED_VERSIONS:
                 raise _log_error(self.path, n, "cannot read holdings: {} version {}".format(
                     RUN_APPROVED, e.get("schema_version")))
-            book = payload.get("starting_book") if isinstance(payload, dict) else None
-            if e.get("schema_version") >= kinds.RUN_APPROVED_BOOK_FROM and book is not None:
+            payload = payload if isinstance(payload, dict) else {}
+            book = payload.get("starting_book") if e.get("schema_version") >= kinds.RUN_APPROVED_BOOK_FROM else None
+            if book is not None:
                 self.current = _positions(self.path, n, book.get("positions") if isinstance(book, dict) else None)
+                self.inherit = None
+            elif payload.get("previous_log"):
+                # A fresh run that takes the previous run's book (ADR 0027): its holdings are that run's.
+                self.current, self.inherit = set(), (payload.get("previous_log"), payload.get("previous_log_final_hash"))
+            else:
+                raise _log_error(self.path, n, "cannot read holdings: its Run approval states no starting book and "
+                                               "names no previous log")
         elif e.get("type") == FILL_TYPE:
             if kind_version != kinds.TARGET_WEIGHT_FILL:
                 raise _log_error(self.path, n, "cannot read holdings: {} version {}".format(
@@ -396,7 +425,30 @@ class _Holdings:
         return [(n, kind, {k: e.get(k) for k in ("id", "type", "schema_version", "recorded_at")})]
 
     def held(self):
-        return tuple(sorted(self.current))
+        """The holdings, the previous runs' book read through their logs when a fresh run took it, each
+        through this reader, its record hash chain and its final hash the approval names checked."""
+        if self.inherit is None:
+            return tuple(sorted(self.current))
+        name, final_hash = self.inherit
+        if not isinstance(name, str) or os.path.basename(name) != name or not name.endswith(".log"):
+            raise Refused("cannot read holdings: the Run approval in {} names the previous log {!r}, not a log's "
+                          "file name".format(self.path, name))
+        if self.depth >= MAX_PREVIOUS_LOGS:
+            raise Refused("cannot read holdings: more than {} previous logs before {}".format(MAX_PREVIOUS_LOGS,
+                                                                                          self.path))
+        previous = os.path.join(os.path.dirname(os.path.abspath(self.path)), name)
+        before = _Holdings(previous, self.depth + 1)
+        try:
+            log = engine_log.read(previous, keep=before.keep)
+        except engine_log.LogUnreadable as err:
+            raise Refused("cannot read holdings: the run of {} takes the book of the previous run, whose log cannot "
+                          "be read: {}".format(self.path, err)) from None
+        if log.chain_break is not None or log.final_hash != final_hash:
+            raise Refused("cannot read holdings: the previous log {} is not the one the Run approval in {} names "
+                          "(its final record hash {}, the approval's {}{}); restore it from the backup as the engine "
+                          "wrote it".format(previous, self.path, log.final_hash, final_hash,
+                                            "; its record hash chain breaks" if log.chain_break is not None else ""))
+        return tuple(sorted(set(before.held()) | self.current))
 
 
 def head_identity(path):
@@ -939,7 +991,7 @@ def _record_universe(client, data, day, now, settle, warn):
 
 def run_momentum(data, streams, config, engine_log, key, now, settle, instance, ranker_bin=None, ranker=None,
                  session=None, backfill_from=None, client_factory=massive.Client, sectors_get=sectors.http_get,
-                 warn=None):
+                 warn=None, reencode_all=False):
     """Runs the momentum engine's job once (see above) and returns the stream's path. The ranker is
     ``ranker`` if given, else cmd/universe-rank at ``ranker_bin``, run on a private copy of the configuration's
     bytes checked against the engine's log, never on the file's path, which may change while the job runs."""
@@ -962,18 +1014,192 @@ def run_momentum(data, streams, config, engine_log, key, now, settle, instance, 
     if log.boost != cfg:
         raise Refused("the momentum configuration {} is not the one the engine's durable log {} holds: the stream "
                       "would carry the run's configuration hash over another ranking".format(config, engine_log))
-    with tempfile.TemporaryDirectory(prefix="ti-data-") as private:
+    with tempfile.TemporaryDirectory(prefix="ti-data-") as private, _instance_lock(streams, instance):
         if ranker is None:
             checked = os.path.join(private, "configuration.json")
             with open(checked, "wb") as f:
                 f.write(raw)
             ranker = encode.go_ranker([ranker_bin, "-config", checked])
         return _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session, backfill_from,
-                             client_factory, sectors_get, warn, cfg, log)
+                             client_factory, sectors_get, warn, cfg, log, reencode_all)
+
+
+class Busy(Exception):
+    """Another run of the instance's job holds its lock; this one writes nothing."""
+
+
+@contextlib.contextmanager
+def _instance_lock(streams, instance):
+    """The instance's lock (STREAMS/<instance>/.ti-data.lock), held from the reading of the run's folder to the
+    publication of its file and manifest, so a start by hand, a warm-up and a timer firing never publish
+    overlapping files. Not waited for: the run holding it writes the file or fails and pages."""
+    folder = os.path.join(streams, instance)
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, LOCK), "a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Busy("another run of the {} data job holds its lock; this one writes nothing (the run holding it "
+                       "writes the file, or fails and pages)".format(instance)) from None
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _action_set(data):
+    """{name: sha256} of every split and dividend recording: the action recordings an encoding reads."""
+    out = {}
+    for kind in history.KINDS:
+        for path in glob.glob(os.path.join(data, kind + "_*_*.json")):
+            out[os.path.basename(path)] = _file_digest(path)
+    return out
+
+
+def _action_from(name):
+    """The first day of an action recording's window, from its name (record.filename: kind_from_session)."""
+    return dt.date.fromisoformat(name.split("_")[1])
+
+
+def _manifest_entry(path, first, last, without):
+    return {"name": os.path.basename(path), "first": first.isoformat(), "last": last.isoformat(),
+            "bytes": os.path.getsize(path), "sha256": _file_digest(path),
+            "without_universe": [d.isoformat() for d in without]}
+
+
+def _read_manifest(directory):
+    path = os.path.join(directory, MANIFEST)
+    try:
+        with open(path) as f:
+            manifest = json.load(f)
+        if manifest.get("manifest_version") != MANIFEST_VERSION:
+            raise ValueError("version {!r}".format(manifest.get("manifest_version")))
+        dt.date.fromisoformat(manifest["base"])
+        for e in manifest["files"]:
+            dt.date.fromisoformat(e["first"]), dt.date.fromisoformat(e["last"])
+            if not isinstance(e["name"], str) or not isinstance(e["bytes"], int) or not isinstance(e["sha256"], str):
+                raise ValueError("an entry is not a file's")
+        if not isinstance(manifest["actions"], dict):
+            raise ValueError("its action recordings are not a table")
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise Refused("the run's manifest {} cannot be read ({}); this stops the job for a person".format(
+            path, e)) from None
+    return manifest
+
+
+def _write_manifest(directory, manifest):
+    """The manifest, written whole or not at all (a synced temporary file renamed over it, then the folder
+    synced: ADR 0018)."""
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".manifest-", suffix=".part")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(manifest, f, sort_keys=True, indent=1)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, os.path.join(directory, MANIFEST))
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    record._sync_dir(directory)
+
+
+def _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker, retracted):
+    """The run's published files as its manifest lists them, checked: every listed file is there with the
+    length and digest the manifest gives, the files form one unbroken chain from the base, and no other
+    stream file is in the folder, except one newest file published by a run that stopped before its manifest
+    was written, which is taken in only if it re-encodes byte for byte. Returns (manifest, [(first, last,
+    path)]); refuses anything else, so a published file truncated, changed or gone, the newest included, is
+    never written again from today's recordings and holdings."""
+    manifest = _read_manifest(directory)
+    if manifest is None:
+        if existing:
+            raise Refused("the run's folder {} holds stream files but no manifest of what the job published; this "
+                          "stops the job for a person (restore the manifest with the files from the backup)".format(
+                              directory))
+        return None, []
+    if dt.date.fromisoformat(manifest["base"]) != base:
+        raise Refused("the run's manifest gives the base {}, but its first file's calendar {}".format(
+            manifest["base"], base))
+    listed = []
+    for e in manifest["files"]:
+        path = os.path.join(directory, e["name"])
+        if not os.path.exists(path):
+            raise Refused("{} is missing: the job published it for the run (its manifest lists it), so nothing more "
+                          "is written for the run: this stops the job for a person (restore it from the backup, "
+                          "unchanged; docs/manual/market-data.md, \"A job for the IRAs\")".format(path))
+        if os.path.getsize(path) != e["bytes"] or _file_digest(path) != e["sha256"]:
+            raise Refused("{} changed since it was published (its manifest gives {} bytes, sha256 {}); nothing more is "
+                          "written for the run: this stops the job for a person (restore it from the backup, "
+                          "unchanged)".format(path, e["bytes"], e["sha256"]))
+        listed.append((dt.date.fromisoformat(e["first"]), dt.date.fromisoformat(e["last"]), path))
+    names = {os.path.basename(p) for _, _, p in listed}
+    unlisted = [(last, path) for last, path in existing if os.path.basename(path) not in names]
+    spans = _spans([(last, path) for _, last, path in listed], base)
+    if [(a, b) for a, b, _ in spans] != [(a, b) for a, b, _ in listed]:
+        raise Refused("the run's manifest {} does not list one unbroken chain of files from the base {}; this stops "
+                      "the job for a person".format(os.path.join(directory, MANIFEST), base))
+    if unlisted:
+        last, path = unlisted[0]
+        newest = listed[-1][1] if listed else None
+        if len(unlisted) > 1 or (newest is not None and last <= newest):
+            raise Refused("the run's folder {} holds stream files its manifest does not list ({}); this stops the "
+                          "job for a person".format(directory, ", ".join(os.path.basename(p) for _, p in unlisted)))
+        first = base if newest is None else nyse_calendar.sessions_after(newest, 1)[0]
+        _check_chain(spans + [(first, last, path)], retracted)
+        _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker)
+        manifest["files"].append(_manifest_entry(path, first, last, _without_universe(data, first, last, retracted)))
+        spans.append((first, last, path))
+    _check_chain(spans, retracted)
+    return manifest, spans
+
+
+def _without_universe(data, first, last, retracted):
+    return [d for d in nyse_calendar.sessions(first, last)
+            if d not in retracted and not os.path.exists(os.path.join(data, "universe_{}.json".format(d.isoformat())))]
+
+
+def _runs(days):
+    """Consecutive sessions as "first..last" runs, for one line naming many."""
+    out, run = [], []
+    for d in days:
+        if run and nyse_calendar.sessions_after(run[-1], 1)[0] != d:
+            out.append(run)
+            run = []
+        run.append(d)
+    if run:
+        out.append(run)
+    return ", ".join(str(r[0]) if len(r) == 1 else "{}..{}".format(r[0], r[-1]) for r in out)
+
+
+def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ranker, reencode_all):
+    """Encodes again every published file that a split or dividend recording which appeared, changed or went
+    since the manifest's check could reach (its last session on or after the earliest window start among
+    them), however old, and returns the action recordings now read. More than MAX_REENCODED files is more
+    than one morning firing can check before the open: refused, naming the remedy (a run by hand with
+    --reencode-all), unless ``reencode_all``."""
+    now_set = _action_set(data)
+    before = manifest["actions"] if manifest else {}
+    changed = {k for k in set(now_set) | set(before) if now_set.get(k) != before.get(k)}
+    if not changed or not spans:
+        return now_set
+    reach = min(_action_from(k) for k in changed)
+    affected = [s for s in spans if s[1] >= reach]
+    if len(affected) > MAX_REENCODED and not reencode_all:
+        raise Refused("split and dividend recordings appeared or changed since the run's files were checked ({}), "
+                      "reaching back to {}: the {} files published from {} on would have to be encoded again, more "
+                      "than one firing checks ({}); nothing is written. Run the job once by hand with --reencode-all "
+                      "(docs/manual/market-data.md, \"A job for the IRAs\")".format(
+                          ", ".join(sorted(changed)), reach, len(affected), affected[0][0], MAX_REENCODED))
+    _verify_momentum(affected, data, cfg, base, identity, engine_log, ranker)
+    return now_set
 
 
 def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session, backfill_from,
-                  client_factory, sectors_get, warn, cfg, log):
+                  client_factory, sectors_get, warn, cfg, log, reencode_all):
     run_id = stream_run(os.path.join(streams, instance), engine_log, log, engine=MOMENTUM)
     identity = encode.Identity(log.configuration_hash, log.strategy_version, run_id)
     directory = os.path.join(streams, instance, run_id)
@@ -991,19 +1217,26 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
     if session < base:
         raise Refused("session {} precedes the run's base {}".format(session, base))
     retracted = encode.load_retractions(data)
-    spans = _spans(existing, base)
-    _check_chain(spans, retracted)
+    manifest, spans = _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker,
+                                 retracted)
+    latest = settled_session(now(), settle)
     for first, last, path in spans:
         if first <= session <= last:
-            _verify_momentum([(first, last, path)], data, cfg, base, identity, engine_log, ranker)
+            manifest["actions"] = _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ranker,
+                                                    reencode_all)
+            _write_manifest(directory, manifest)
+            entry = next(e for e in manifest["files"] if e["name"] == os.path.basename(path))
+            recent = [d for d in entry["without_universe"] if dt.date.fromisoformat(d) >= latest - dt.timedelta(days=7)]
+            if recent:
+                warn("{} was written without the universe of {}: a decision on it is withheld "
+                     "(missing-universe)".format(path, ", ".join(recent)))
             return path
-    previous = existing[-1][0] if existing else None
+    previous = spans[-1][1] if spans else None
     first = base if previous is None else nyse_calendar.sessions_after(previous, 1)[0]
     span = [d for d in nyse_calendar.sessions(first, session) if d not in retracted]
     if previous is None and len([d for d in nyse_calendar.sessions(base, session) if d not in retracted]) < cfg.trend_closes:
         raise Refused("the history {}..{} holds fewer sessions than the {} closes of the trend".format(
             base, session, cfg.trend_closes))
-    latest = settled_session(now(), settle)
     if session == latest and session not in retracted:
         _record_sectors(data, session, sectors_get, now, settle, warn)
     client = _LatestSession(client_factory(key), session if session == latest else None)
@@ -1013,14 +1246,9 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
                 history.backfill(client, data, day, 1, now=now, settle=settle)
         labels = _sector_dates(data)
         for day in span:
-            if os.path.exists(os.path.join(data, "universe_{}.json".format(day.isoformat()))):
-                continue
-            if _labelled(day, labels):
+            if (not os.path.exists(os.path.join(data, "universe_{}.json".format(day.isoformat())))
+                    and _labelled(day, labels)):
                 _record_universe(client, data, day, now, settle, warn)
-            elif day >= latest - dt.timedelta(days=7):
-                warn("the universe of {} is not recorded: no sector labels of both sources within the week up to "
-                     "it, so its snapshot could never be labelled; a decision on it is withheld "
-                     "(missing-universe)".format(day))
     except NotAvailableYet as e:
         if now() >= quiet_until(session):
             raise Refused("Massive still refuses session {} at or after {} New York on the next trading day, when "
@@ -1028,6 +1256,15 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
                               session, QUIET_BEFORE.strftime("%H:%M"), e)) from None
         raise NotAvailableYet("session {} is not available yet on this plan ({}); the next firing asks again"
                               .format(session, e)) from None
+    without = _without_universe(data, first, session, retracted)
+    if session in without and session == latest and now() < quiet_until(session):
+        # The latest session's labels can still be fetched until its next close: the file is not published
+        # without its universe before the last morning firing (a month-end decision would be lost for good).
+        raise NotAvailableYet("the sector labels of {} are not recorded yet, so neither is its universe; the file is "
+                              "not written before the last morning firing, which asks again".format(session))
+    if without:
+        warn("no universe is recorded for {} session(s) without sector labels of both sources within the week up to "
+             "them: {}; a decision on any of them is withheld (missing-universe)".format(len(without), _runs(without)))
     start = base + dt.timedelta(days=1)
     window = max(min(_actions_reach(data, start) + dt.timedelta(days=1), session - ACTION_OVERLAP), start)
     try:
@@ -1035,14 +1272,18 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
     except record.AlreadyRecorded:
         pass
     # After the actions are recorded, so one published late against a file
-    # already delivered stops the job here.
-    _verify_momentum([s for s in spans if s[1] >= window], data, cfg, base, identity, engine_log, ranker)
+    # already delivered, or one another job recorded, stops the job here.
+    actions = _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ranker, reencode_all)
     excluded = {}
     envelopes = encode.iter_encode(data, first, session, identity, required=list(cfg.required),
                                    optional=[t for t in log.holdings if t not in cfg.required], base=base,
                                    first_sequence=1, engine=MOMENTUM, excluded=excluded, ranker=ranker)
     os.makedirs(directory, exist_ok=True)
     path = encode.write_stream(os.path.join(directory, "{}-{}.jsonl".format(instance, session)), envelopes)
+    manifest = manifest or {"manifest_version": MANIFEST_VERSION, "base": base.isoformat(), "files": []}
+    manifest["files"].append(_manifest_entry(path, first, session, without))
+    manifest["actions"] = actions
+    _write_manifest(directory, manifest)
     # After the stream is written, so every exclusion its encoding found is named.
     for ticker in sorted(excluded):
         for left in excluded[ticker]:
@@ -1077,9 +1318,12 @@ def parse(argv):
                     help="the engine whose stream is written (default boost; momentum: an IRA's compact stream)")
     ap.add_argument("--instance", help="momentum: the engine's instance (trad-ira), its stream folder and file prefix")
     ap.add_argument("--ranker", help="momentum: cmd/universe-rank, run with -config CONFIG")
+    ap.add_argument("--reencode-all", action="store_true",
+                    help="momentum, by hand: encode again every published file that changed split or dividend "
+                         "recordings reach, however many (a morning firing checks at most {})".format(MAX_REENCODED))
     args = ap.parse_args(argv)
-    if args.engine == ENGINE and (args.instance or args.ranker):
-        ap.error("--instance and --ranker are for --engine momentum")
+    if args.engine == ENGINE and (args.instance or args.ranker or args.reencode_all):
+        ap.error("--instance, --ranker and --reencode-all are for --engine momentum")
     if args.engine == MOMENTUM:
         if not args.instance or not INSTANCE.fullmatch(args.instance) or args.instance == ENGINE:
             ap.error("--engine momentum needs --instance, an IRA's name such as trad-ira")
@@ -1189,13 +1433,14 @@ def main(argv, now=steps._now, client_factory=massive.Client, ranker=None, secto
         if momentum:
             path = run_momentum(args.data, args.streams, args.config, args.engine_log, key, now,
                                 dt.timedelta(minutes=args.settle_minutes), args.instance,
-                                ranker_bin=args.ranker, ranker=ranker, session=args.session, backfill_from=args.backfill_from,
+                                ranker_bin=args.ranker, ranker=ranker, reencode_all=args.reencode_all,
+                                session=args.session, backfill_from=args.backfill_from,
                                 client_factory=client_factory, sectors_get=sectors_get)
         else:
             path = run(args.data, args.streams, args.config, args.engine_log, key, now,
                        dt.timedelta(minutes=args.settle_minutes), session=args.session,
                        backfill_from=args.backfill_from, client_factory=client_factory)
-    except NotAvailableYet as e:
+    except (NotAvailableYet, Busy) as e:
         print("ti-data: " + (str(e).replace(key, KEY_MASK) if key else str(e)), file=sys.stderr)
         return 0
     except Exception as e:   # every refusal, including MissingData, Gap, NotSettled and NotDurable

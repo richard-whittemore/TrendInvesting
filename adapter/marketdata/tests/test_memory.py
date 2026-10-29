@@ -281,7 +281,7 @@ class MomentumMemoryBudgetTest(unittest.TestCase):
                 self.assertEqual(status, 0, err)
                 self.check_peak(name, peak)
             self.assertEqual(self.histories(job.path(MOMENTUM_LAST)), {MOMENTUM_LAST.isoformat(): RANKED})
-            self.assertEqual(sorted(os.listdir(job.stream_dir())),
+            self.assertEqual(sorted(n for n in os.listdir(job.stream_dir()) if n.endswith(".jsonl")),
                              ["{}-{}.jsonl".format(INSTANCE, d) for d in self.days[-2:]])
 
 
