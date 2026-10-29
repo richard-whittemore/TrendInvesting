@@ -209,3 +209,38 @@ func TestIRAHandSaleUnitsDoNotUseBrokerAccount(t *testing.T) {
 		t.Errorf("broker account used as a unit: %s", got[0].Body)
 	}
 }
+
+// Dashboard copies retain incidents without guessing units; reporter callers
+// still require a momentum instance (ADR 0019, "Alerting").
+func TestDashboardHandSaleWithUnknownInstanceOmitsUnits(t *testing.T) {
+	for _, momentum := range []bool{true, false} {
+		var s *stream
+		if momentum {
+			s = newIRAStream(t)
+		} else {
+			s = newStream(t)
+		}
+		s.saleWithheld(0, "sale-unknown", event.SaleWithheldNotPositive)
+		got, err := report.AlertsForDashboard(s.out, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages := ofKind(got, report.KindSaleByHand)
+		if len(pages) != 1 {
+			t.Fatalf("pages: %+v", got)
+		}
+		if !strings.Contains(pages[0].Body, "instance unknown: run the reporter for the account to get the exact units") {
+			t.Error("missing unknown-instance instruction")
+		}
+		for _, forbidden := range []string{"systemctl stop", "ti-adapter", "ti-engine"} {
+			if strings.Contains(pages[0].Body, forbidden) {
+				t.Errorf("unknown instance contains %q", forbidden)
+			}
+		}
+		if momentum {
+			if _, err := report.Alerts(s.out, ""); err == nil {
+				t.Error("reporter accepted missing momentum instance")
+			}
+		}
+	}
+}

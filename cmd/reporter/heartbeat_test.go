@@ -296,7 +296,8 @@ func TestProvisioningAssignsOnlyBoostTheHeartbeatEnvironment(t *testing.T) {
 	}
 }
 
-// Boost reads its URL from the credential; only trad-ira needs an override.
+// Boost reads its URL from the credential without a drop-in; every non-Boost
+// reporter instance gets the opt-out (docs/manual/alerts-and-dashboard.md, "Where alerts go").
 func TestHeartbeatUsesCredentialWithoutBoostDropIn(t *testing.T) {
 	raw, err := os.ReadFile("../../deploy/systemd/ti-reporter@.service")
 	if err != nil {

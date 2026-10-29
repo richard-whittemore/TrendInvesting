@@ -2,14 +2,15 @@ package main
 
 import (
 	"bytes"
-	"github.com/richard-whittemore/TrendInvesting/internal/event"
-	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
 func iraEnvelope(t *testing.T, seq uint64, typ string, version uint32, id string, at time.Time, p any) event.Envelope {
@@ -76,7 +77,9 @@ func TestDashboardShowsIncompleteSellInHTMLAndJSON(t *testing.T) {
 	}
 }
 
-func TestDashboardIRAUnitsUseEngineDirectoryInsteadOfBrokerAccount(t *testing.T) {
+// Alert commands use deployment folders, never a copied journal's basename
+// or broker account ID (ADR 0019, "Alerting"; docs/live-trading/lessons-2026-10.md L8).
+func TestDashboardIRAUnitIdentity(t *testing.T) {
 	var buf memoryFile
 	log, err := journal.CreateLog(&buf, journal.NewLogHeader("h", "v"))
 	if err != nil {
@@ -88,27 +91,68 @@ func TestDashboardIRAUnitsUseEngineDirectoryInsteadOfBrokerAccount(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	dir := filepath.Join(t.TempDir(), "trad-ira")
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "run.log"), buf.Bytes(), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	h := newHandlerFor(nil, []string{dir}, nil, "SPY")
-	for _, url := range []string{"/", "/api/summary.json"} {
-		rec := get(h, http.MethodGet, url)
-		text := rec.Body.String()
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s: %d: %s", url, rec.Code, text)
-		}
-		for _, unit := range []string{"ti-adapter@trad-ira", "ti-engine@trad-ira"} {
-			if !strings.Contains(text, unit) {
-				t.Errorf("%s: missing %s: %s", url, unit, text)
+	root := t.TempDir()
+	t.Chdir(root)
+	for _, tc := range []struct {
+		name, path, enginesRoot string
+		directory, known        bool
+	}{
+		{name: "standalone relative", path: "ira.log"},
+		{name: "standalone absolute", path: filepath.Join(root, "ira.log")},
+		{name: "copied journal", path: filepath.Join(root, "trad-ira", "run.log")},
+		{name: "rehearsal directory", path: filepath.Join(root, "trad-ira"), directory: true},
+		{name: "relative rehearsal directory", path: "trad-ira/", directory: true},
+		{name: "configured directory", path: filepath.Join(root, "engines", "trad-ira"), enginesRoot: filepath.Join(root, "engines"), directory: true, known: true},
+		{name: "relative configured directory", path: "engines/trad-ira/", enginesRoot: "engines", directory: true, known: true},
+		{name: "dot configured directory", path: "engines/trad-ira/.", enginesRoot: "engines", directory: true, known: true},
+		{name: "configured journal", path: filepath.Join(root, "engines", "trad-ira", "run.log"), enginesRoot: filepath.Join(root, "engines"), known: true},
+		{name: "configured root is not instance", path: filepath.Join(root, "engines", "run.log"), enginesRoot: filepath.Join(root, "engines")},
+		{name: "provisioned journal", path: "/var/lib/trend-investing/engines/trad-ira/run.log", known: true},
+		{name: "nested non-instance folder", path: "/var/lib/trend-investing/engines/archive/trad-ira/run.log"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h http.Handler
+			if tc.directory {
+				if err := os.MkdirAll(tc.path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(tc.path, "run.log"), buf.Bytes(), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				h = newHandlerWith(source{dirs: []string{tc.path}, enginesRoot: tc.enginesRoot}, "SPY", os.ReadFile)
+			} else {
+				h = newHandlerWith(source{journals: []string{tc.path}, enginesRoot: tc.enginesRoot}, "SPY", func(string) ([]byte, error) { return buf.Bytes(), nil })
 			}
-		}
-		if strings.Contains(text, "ti-adapter@DU") || strings.Contains(text, "ti-engine@DU") {
-			t.Errorf("broker account used as a unit: %s", text)
-		}
+			for _, url := range []string{"/", "/api/summary.json"} {
+				rec := get(h, http.MethodGet, url)
+				text := rec.Body.String()
+				if rec.Code != http.StatusOK || !strings.Contains(text, "sell of AAA incomplete") {
+					t.Fatalf("%s: %d: incomplete sell absent", url, rec.Code)
+				}
+				unknown := "instance unknown: run the reporter for the account to get the exact units"
+				if tc.known {
+					for _, unit := range []string{"ti-adapter@trad-ira", "ti-engine@trad-ira"} {
+						if !strings.Contains(text, unit) {
+							t.Errorf("%s: missing %s", url, unit)
+						}
+					}
+					if strings.Contains(text, unknown) {
+						t.Errorf("%s: provisioned instance marked unknown", url)
+					}
+				} else {
+					if !strings.Contains(text, unknown) {
+						t.Errorf("%s: missing unknown-instance instruction", url)
+					}
+					for _, forbidden := range []string{"systemctl stop", "ti-adapter@", "ti-engine@"} {
+						if strings.Contains(text, forbidden) {
+							t.Errorf("%s: unknown instance contains %q", url, forbidden)
+						}
+					}
+				}
+				if strings.Contains(text, "ti-adapter@DU") || strings.Contains(text, "ti-engine@DU") {
+					t.Errorf("%s: broker account used as a unit", url)
+				}
+			}
+		})
 	}
 }

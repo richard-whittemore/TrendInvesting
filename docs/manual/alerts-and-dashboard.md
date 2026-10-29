@@ -318,7 +318,8 @@ empty. On the server the secrets go in `secrets.env` (stored encrypted under
 names are in `deploy/etc/secrets.env.example`), whose unlocked copy systemd
 hands the reporter as a private credential file (`%d/secrets`). This also
 supplies `TI_HEARTBEAT_URL`, which is never printed. Boost needs no drop-in.
-Provisioning writes only trad-ira's heartbeat drop-in,
+Provisioning writes heartbeat opt-out drop-ins for every non-Boost reporter
+instance (trad-ira and roth-ira),
 `Environment=TI_HEARTBEAT=off`, because a second pinger would mask the
 loss of the first. With this switch the reporter pings nothing, even with
 a URL in the credential, and prints `reporter: heartbeat: not this instance`
@@ -1128,8 +1129,9 @@ which is refused on its own, so always name a real channel); `-summary`
 (also send the day's summary); `-date YYYY-MM-DD` (default: the latest day
 whose session has closed in the log; a stated day whose session has not
 closed is an error); `-benchmark` (default SPY); `-heartbeat-sessions`
-(default 2 NYSE sessions with nothing written); `-account` (the name for
-alerts when the log cannot name its account; default the log file's name);
+(default 2 NYSE sessions with nothing written); `-account` (the systemd unit
+instance name used to build the account's units, such as `trad-ira`; required
+for momentum journals);
 `-send-timeout` (default 30 seconds per send); `-repeat-interval` (default 30
 minutes; how often an unacknowledged Degraded, Halted or reconciliation alert
 is sent again; must be positive); `-ack-within` (default 10 minutes: how long
@@ -1174,6 +1176,13 @@ what the triage job reads ("Alerts analysed by Claude", above); like every
 route, it answers `GET` and `HEAD` only. The tailnet's policy admits only
 your devices and the Mac mini to it (`docs/runbooks/lightsail-deployment.md`,
 step 12).
+
+Alert unit names come only from engine folders directly under
+`/var/lib/trend-investing/engines` or the root configured with `-engines-root`.
+Relative paths are normalized first. For a standalone journal or an engine
+folder outside those roots, alerts say "instance unknown: run the reporter
+for the account to get the exact units" and give no unit-stop command.
+Boost keeps its own unit names when its deployment is known.
 
 `-engine-dir` names the folder the engine keeps its logs in. On every request
 the page finds the account's current run there, the newest link of the chain

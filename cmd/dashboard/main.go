@@ -45,6 +45,9 @@ func main() {
 // with `tailscale serve` (deploy/systemd/ti-dashboard.service).
 const defaultAddr = "127.0.0.1:8088"
 
+// defaultEnginesRoot holds provisioned deployment instances (docs/manual/server.md).
+const defaultEnginesRoot = "/var/lib/trend-investing/engines"
+
 type stringList []string
 
 func (l *stringList) String() string     { return strings.Join(*l, ",") }
@@ -57,6 +60,7 @@ func run(args []string, log io.Writer) error {
 	flags.Var(&journals, "journal", "path to an account's journal; repeat for each account")
 	var engineDirs stringList
 	flags.Var(&engineDirs, "engine-dir", "an engine's log directory: each request shows the current run in it, the newest link of its chain of runs, followed back to the first; repeat for each account")
+	enginesRoot := flags.String("engines-root", defaultEnginesRoot, "root whose direct child engine folders identify deployment instances for alert commands")
 	addr := flags.String("addr", defaultAddr, "listen address: loopback or a Tailscale address")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	var cashLedgers stringList
@@ -75,7 +79,7 @@ func run(args []string, log io.Writer) error {
 		return err
 	}
 	server := &http.Server{
-		Addr: *addr, Handler: newHandlerFor(journals, engineDirs, ledgers, *benchmark),
+		Addr: *addr, Handler: newHandlerWith(source{journals: journals, dirs: engineDirs, ledgers: ledgers, enginesRoot: *enginesRoot, maintenance: maintenanceFileFor(engineDirs)}, *benchmark, os.ReadFile),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute,
 	}
 	_, _ = fmt.Fprintf(log, "dashboard: read-only, listening on %s\n", *addr)
@@ -335,6 +339,7 @@ func fail(w http.ResponseWriter, err error) {
 type source struct {
 	journals, dirs []string
 	ledgers        map[string]string
+	enginesRoot    string
 	// maintenance is the host's maintenance marker (maintenanceFileFor).
 	maintenance string
 }
@@ -379,13 +384,12 @@ func ledgersOf(values, journals, dirs []string) (map[string]string, error) {
 // the current run's holdings, state, alerts and day's figures do not depend
 // on it.
 func load(src source, benchmark string, logs *logCache) ([]account, error) {
-	// instance is the account's instance name, which its ledger's folder
-	// must carry (report.LoadCashLedgerFor): an engine directory's own name,
-	// or for a journal the name of the engine directory it is in.
-	type current struct{ path, warning, name, message, ledger, instance string }
+	// Ledger folders retain their account check (report.LoadCashLedgerFor);
+	// alert commands require a provisioned deployment (ADR 0019, "Alerting").
+	type current struct{ path, warning, name, message, ledger, ledgerInstance, instance string }
 	var paths []current
 	for _, path := range src.journals {
-		paths = append(paths, current{path: path, ledger: src.ledgers[path], instance: filepath.Base(filepath.Dir(path))})
+		paths = append(paths, current{path: path, ledger: src.ledgers[path], ledgerInstance: filepath.Base(filepath.Dir(path)), instance: deploymentInstance(filepath.Dir(path), src.enginesRoot)})
 	}
 	for _, dir := range src.dirs {
 		path, warning, err := currentLogIn(dir, logs)
@@ -394,11 +398,11 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 			paths = append(paths, current{name: filepath.Base(dir), message: filepath.Base(dir) + ": " + reason(err)})
 			continue
 		}
-		paths = append(paths, current{path: path, warning: warning, name: filepath.Base(dir), ledger: src.ledgers[dir], instance: filepath.Base(dir)})
+		paths = append(paths, current{path: path, warning: warning, name: filepath.Base(dir), ledger: src.ledgers[dir], ledgerInstance: filepath.Base(filepath.Clean(dir)), instance: deploymentInstance(dir, src.enginesRoot)})
 	}
 	var out []account
 	for i, c := range paths {
-		a, err := loadOne(c.path, c.warning, c.ledger, c.instance, benchmark, logs)
+		a, err := loadOne(c.path, c.warning, c.ledger, c.ledgerInstance, c.instance, benchmark, logs)
 		if c.message == "" && err != nil && c.name != "" {
 			// An engine directory's head log that cannot be shown is that
 			// account's card; only a fixed journal fails the page.
@@ -416,10 +420,31 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 	return out, nil
 }
 
+// deploymentInstance identifies only a direct child of the provisioned engines
+// root or its configured equivalent (docs/manual/server.md; ADR 0019, "Alerting").
+// Relative paths are normalized before deriving a name; all others stay unknown.
+func deploymentInstance(dir, enginesRoot string) string {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	for _, root := range []string{defaultEnginesRoot, enginesRoot} {
+		if root == "" {
+			continue
+		}
+		root, err := filepath.Abs(root)
+		if err == nil && filepath.Dir(absolute) == root {
+			return filepath.Base(absolute)
+		}
+	}
+	return ""
+}
+
 // loadOne reads, verifies and views the log at path, with the cash ledger at
 // ledger ("" for none), and the costs ledger beside it, when they are
-// instance's, read afresh on every request as the log is.
-func loadOne(path, warning, ledger, instance, benchmark string, logs *logCache) (account, error) {
+// ledgerInstance's (report.LoadCashLedgerFor), read afresh as the log is.
+// instance names the deployment for alerts, or is empty when unknown.
+func loadOne(path, warning, ledger, ledgerInstance, instance, benchmark string, logs *logCache) (account, error) {
 	if path == "" {
 		return account{}, nil
 	}
@@ -439,7 +464,7 @@ func loadOne(path, warning, ledger, instance, benchmark string, logs *logCache) 
 	if recovery != nil {
 		history = report.EarlierRunsOfRecovery(path, *recovery, logs.earlier)
 	}
-	a, err := view(history, report.LoadCashLedgerFor(ledger, instance, logs.readFile), report.LoadCostLedgerFor(ledger, instance, logs.readFile), envelopes, entries, instance, benchmark)
+	a, err := view(history, report.LoadCashLedgerFor(ledger, ledgerInstance, logs.readFile), report.LoadCostLedgerFor(ledger, ledgerInstance, logs.readFile), envelopes, entries, instance, benchmark)
 	if err != nil {
 		return account{}, err
 	}
@@ -702,7 +727,7 @@ func view(history report.History, ledger report.CashLedger, costs report.CostLed
 	if err != nil {
 		return account{}, err
 	}
-	alerts, err := report.Alerts(envelopes, instance)
+	alerts, err := report.AlertsForDashboard(envelopes, instance)
 	if err != nil {
 		return account{}, err
 	}

@@ -21,8 +21,9 @@ const KindSellIncomplete Kind = "sell-incomplete"
 // completes nothing. A dry-run release ends by its synthetic report, and a
 // run of any other strategy has no such sells, so neither pages. entries are
 // the log's committed records in recording order. The caller supplies the
-// nonempty deployment instance, never the journal's broker account ID
-// (ADR 0019, "Alerting"; docs/live-trading/lessons-2026-10.md L8).
+// deployment instance, never the journal's broker account ID; empty means
+// unknown and omits unit commands (ADR 0019, "Alerting";
+// docs/live-trading/lessons-2026-10.md L8).
 func IncompleteSellAlerts(instance string, entries []journal.Entry, strategyID string) []Alert {
 	if !isMomentum(strategyID) {
 		return nil
@@ -89,11 +90,18 @@ func incompleteSellAlert(instance string, at event.Envelope, o *event.ReportedOr
 	r := o.Released
 	left := r.Quantity - o.Filled
 	day := session.UTC().Format(time.DateOnly)
+	label := instance
+	stop := unknownInstance + "; follow that reporter's instructions to stop the account's adapter, then its engine, and confirm the stops succeeded"
+	if instance == "" {
+		label = "instance unknown"
+	} else {
+		stop = fmt.Sprintf("stop the account's adapter (sudo systemctl stop %s), then its engine (sudo systemctl stop ti-engine@%s)", adapterUnitOf(instance), instance)
+	}
 	return Alert{
 		Key: fmt.Sprintf("sell-incomplete:%s:%s@%s", r.ClientOrderID, day, r.AccountID), Kind: KindSellIncomplete, Severity: Urgent,
 		AccountID: r.AccountID, At: at.EventTime, Standing: true,
-		Title: fmt.Sprintf("%s: sell of %s incomplete after the session ending %s (%d shares outstanding)", instance, r.InstrumentID, day, left),
-		Body: fmt.Sprintf("Order %s, the rebalance's sell of %s, has not completed: the current journal shows %d of its %d shares outstanding. Sells must finish by fill or another accepted terminal event before buys are budgeted from settled cash; unsold holdings may remain (docs/manual/momentum.md). To act safely: (1) stop the account's adapter (sudo systemctl stop %s), then its engine (sudo systemctl stop ti-engine@%s); (2) in IBKR cancel the program's working order for this instrument and confirm no open order exists for the account from any client, including cancel-pending orders, then check the actual position; (3) only then sell the outstanding shares by hand; (4) record the hand sale as docs/runbooks/missed-rebalance.md says: only after the manual order has filled or been canceled, start a fresh run approved with the post-sale book, then use operator rebalance-cleared to clear the carried unfinished rebalance. A fresh run carries the unfinished rebalance and withholds every month until the owner clears it (docs/manual/momentum.md; docs/runbooks/missed-rebalance.md, 'A restart mid-rebalance'); it does not plan this rebalance again. This page comes once per session while the sell is incomplete.",
-			r.ClientOrderID, r.InstrumentID, left, r.Quantity, adapterUnitOf(instance), instance),
+		Title: fmt.Sprintf("%s: sell of %s incomplete after the session ending %s (%d shares outstanding)", label, r.InstrumentID, day, left),
+		Body: fmt.Sprintf("Order %s, the rebalance's sell of %s, has not completed: the current journal shows %d of its %d shares outstanding. Sells must finish by fill or another accepted terminal event before buys are budgeted from settled cash; unsold holdings may remain (docs/manual/momentum.md). To act safely: (1) %s; (2) in IBKR cancel the program's working order for this instrument and confirm no open order exists for the account from any client, including cancel-pending orders, then check the actual position; (3) only then sell the outstanding shares by hand; (4) record the hand sale as docs/runbooks/missed-rebalance.md says: only after the manual order has filled or been canceled, start a fresh run approved with the post-sale book, then use operator rebalance-cleared to clear the carried unfinished rebalance. A fresh run carries the unfinished rebalance and withholds every month until the owner clears it (docs/manual/momentum.md; docs/runbooks/missed-rebalance.md, 'A restart mid-rebalance'); it does not plan this rebalance again. This page comes once per session while the sell is incomplete.",
+			r.ClientOrderID, r.InstrumentID, left, r.Quantity, stop),
 	}
 }
