@@ -248,7 +248,7 @@ probe: ok the adapter started: mode=dry-run client_id=12 sending=off ibapi=10.51
 probe: Gateway server version 205 (contract details read from IBKR's protobuf messages)
 probe: ok connected to IB Gateway as client_id=12 (1 time(s))
 probe: ok reconciled client_id=12: positions=0 open_orders=0 executions=0
-probe: ok queued run=<TI_RUN> files=trad-ira-<last session>.jsonl inputs=<n>
+probe: ok queued run=<TI_RUN> files=trad-ira-<last session>.jsonl inputs=<n> (delivered: <n> answered, 0 already committed)
 probe: ok account snapshot version 4 as of <time>: net_liquidation <n>, settled_cash <n>, total_cash <n>
 probe: ok reconciliation journalled (1)
 probe: ok <n> mark(s) at version 3, <n> session close(s), the last <time>
@@ -257,18 +257,26 @@ probe: no decision yet: the first is made at the close of a month's last session
 probe: passed
 ```
 
-Every batch the start queued must have reached the engine whole (an
-earlier batch delivered never covers a later one still waiting), and the
-latest is the one judged. A start that queued none passes only on the
+The adapter states one outcome line per batch, from its own accounting:
+`ibkr stream batch files=<files> inputs=N answered=A struck=S
+outcome=delivered` once every input it queued is answered by the engine or
+struck off as already committed (a retraction a later file repeats, say),
+A + S = N; `outcome=waiting reason=<the line the reading logged>` while a
+batch waits for its reading; `outcome=dropped` when a fresh run strikes an
+earlier run's batch off. The probe judges the latest batch by that line
+alone: delivered with its count adding up passes; waiting, dropped, or no
+outcome line at all fails, and a later batch waiting is never covered by an
+earlier one delivered. A start that queued none passes only on the
 adapter's own word that its stream is caught up: the adapter logs `ibkr
 stream no new file since <file>; caught up` once every file of the run is
 delivered, and the probe then says `probe: ok no new batch since start;
 caught up (...)`. A start still waiting for its reading (`ibkr broker
 snapshot waits ...`: the Flex proof, or between attempts) fails, naming
-that line, and so does one with no word either way. Give `--expect-batch`
-after an install or the morning after a session, when this start must
-deliver a batch (the runbook's block does); leave it out only to check a
-restart you know has nothing new. In
+that line, and so does one with no word either way. Two forms, as the runbook's I-8 states: with
+`--expect-batch` on the first day, after a data-job firing and on a
+month-end morning (the start must deliver a batch); without it after a plain
+restart or a binary install with no new file (the start must say it is
+caught up). In
 dry-run an order released marked to be sent is a `FAIL`; in paper the
 probe only counts them (whether IBKR acknowledged each is in the order
 reports). After a month-end the second-to-last line names the latest decision instead

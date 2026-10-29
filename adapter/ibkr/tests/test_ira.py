@@ -589,7 +589,11 @@ class ProbeTests(unittest.TestCase):
 
     def answered(self, journal, ident, kind):
         """journal with a line saying this start delivered input ident: the probe's evidence is this start's only."""
-        journal.write_text(journal.read_text() + "x ibkr input={} type={} answered with 1 decisions\n".format(ident, kind))
+        line = "x ibkr input={} type={} answered with 1 decisions".format(ident, kind)
+        lines = journal.read_text().splitlines()
+        # Inside the batch: before the adapter's outcome line for it, so it is one of the batch's records.
+        at = next((i for i, l in enumerate(lines) if "ibkr stream batch files=" in l), len(lines))
+        journal.write_text("\n".join(lines[:at] + [line] + lines[at:]) + "\n")
         return journal
 
     def test_a_missing_or_empty_journal_fails_loudly(self):
@@ -1005,6 +1009,141 @@ class ProbeCatchUpTests(ProbeTests):
         status, out = self.probe(self.journal_of(journal[:-1] + [later, journal[-1]]))
         self.assertEqual(status, 1, out)
         self.assertTrue(any(line.startswith("probe: FAIL") and "trad-ira-2027-01-15.jsonl" in line for line in out), out)
+
+
+
+OUTCOME = "ibkr stream batch files="
+
+
+class BatchOutcomeTests(IraBatchHarness):
+    """The adapter states one outcome per batch from its own accounting (delivery.Deliverer): every entry it queued,
+    answered by the engine or struck off as already committed, and nothing else counted."""
+
+    def loop_with(self, now=datetime(2027, 1, 14, 22, 5, tzinfo=timezone.utc)):
+        clock = Clock()
+
+        def sleep(seconds):
+            clock.now += seconds
+            self.fake.waited()
+        loop = AdapterLoop(config(**IRA), self.fake, self.engine, self.pending, self.engine_log, now=lambda: now,
+                           today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0, new_id=Ids(),
+                           streams=str(self.streams))
+        self.addCleanup(loop.close)
+        return loop
+
+    def steps(self, loop, n=40):
+        for _ in range(n):
+            loop.step()
+
+    def outcomes(self, logged):
+        return [line.split("ibkr ", 1)[1] for line in logged.output if OUTCOME in line]
+
+    def test_a_delivered_batch_states_delivered_with_its_count(self):
+        write_stream(self.folder, FRIDAY, ira_session(FRIDAY), prefix="trad-ira")
+        loop = self.loop_with()
+        with self.assertLogs("ibkr", "INFO") as logged:
+            loop.start()
+            self.steps(loop)
+        out = self.outcomes(logged)
+        self.assertEqual(len(out), 1, out)
+        self.assertRegex(out[0], r"files=trad-ira-2027-01-14\.jsonl inputs=(\d+) answered=\1 struck=0 outcome=delivered")
+
+    def test_a_later_file_whose_reading_waits_states_waiting_with_the_reason(self):
+        write_stream(self.folder, FRIDAY, ira_session(FRIDAY), prefix="trad-ira")
+        loop = self.loop_with()
+        loop.start()
+        self.steps(loop)
+        # The next morning's file, read on a later date before 09:00 with no executions proof written yet.
+        later = date(2027, 1, 15)
+        write_stream(self.folder, later, ira_session(later), prefix="trad-ira")
+        loop._now = lambda: datetime(2027, 1, 18, 12, 5, tzinfo=timezone.utc)
+        loop._cash_ledger = str(Path(self.dir.name) / "engine" / "cash-movements.jsonl")
+        with self.assertLogs("ibkr", "INFO") as logged:
+            self.steps(loop)
+        out = self.outcomes(logged)
+        self.assertTrue(out, logged.output)
+        self.assertIn("files=trad-ira-2027-01-15.jsonl", out[-1])
+        self.assertIn("outcome=waiting", out[-1])
+        self.assertIn("reason=", out[-1])
+
+    def test_a_repeated_retraction_struck_off_as_committed_counts_and_the_batch_is_delivered(self):
+        retraction = ("market.session.retracted", 1, "marketdata:retracted:2027-01-12", "2027-01-13T21:00:00Z",
+                      {"source": "nyse", "session": "2027-01-12", "reason": "synthetic closure"})
+        first = [_envelope(*retraction, sequence=1)] + [dict(e, sequence=n) for n, e in enumerate(ira_session(FRIDAY), 2)]
+        write_stream(self.folder, FRIDAY, first, prefix="trad-ira")
+        loop = self.loop_with()
+        loop.start()
+        self.steps(loop)
+        later = date(2027, 1, 15)
+        again = [_envelope(*retraction, sequence=1)] + [dict(e, sequence=n) for n, e in enumerate(ira_session(later), 2)]
+        write_stream(self.folder, later, again, prefix="trad-ira")
+        self.fake.server_time = int(datetime(2027, 1, 15, 22, 5, tzinfo=timezone.utc).timestamp())
+        loop._now = lambda: datetime(2027, 1, 15, 22, 5, tzinfo=timezone.utc)
+        with self.assertLogs("ibkr", "INFO") as logged:
+            self.steps(loop)
+        out = self.outcomes(logged)
+        self.assertEqual(len(out), 1, logged.output)
+        self.assertRegex(out[0], r"inputs=(\d+) answered=(\d+) struck=1 outcome=delivered")
+        inputs, answered = map(int, re.search(r"inputs=(\d+) answered=(\d+)", out[0]).groups())
+        self.assertEqual(answered + 1, inputs)
+
+    def test_a_batch_a_stop_left_queuing_and_this_start_finished_states_its_outcome(self):
+        from unittest import mock
+        from loop import Outbox
+        write_stream(self.folder, FRIDAY, ira_session(FRIDAY), prefix="trad-ira")
+        loop = self.loop_with()
+        loop.start()
+        with mock.patch.object(Outbox, "extend", side_effect=OSError("synthetic: the machine stopped")):
+            with self.assertRaises(OSError):
+                loop.step()
+        loop.close()
+        restarted = self.loop_with()
+        with self.assertLogs("ibkr", "INFO") as logged:
+            restarted.start()
+            self.steps(restarted)
+        out = self.outcomes(logged)
+        self.assertEqual(len(out), 1, logged.output)
+        self.assertRegex(out[0], r"files=trad-ira-2027-01-14\.jsonl inputs=(\d+) answered=\1 struck=0 outcome=delivered")
+        self.assertTrue(any("ibkr stream queued" in line for line in logged.output), "the finished batch is queued too")
+
+
+class ProbeOutcomeTests(ProbeTests):
+    """The probe judges the latest batch by the adapter's own outcome line, never by counting answered lines."""
+
+    test_a_good_start_passes_naming_each_check = None
+
+    def made(self, lines):
+        path = self.dir / "made.txt"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def test_a_later_waiting_batch_fails_though_an_earlier_one_was_delivered(self):
+        lines = self.start().read_text().splitlines()
+        lines.append("x ibkr stream batch files=trad-ira-2027-01-15.jsonl inputs=0 answered=0 struck=0 "
+                     "outcome=waiting reason=ibkr broker snapshot waits for the Flex reader's executions proof")
+        status, out = self.probe(self.made(lines))
+        self.assertEqual(status, 1, out)
+        self.assertTrue(any(l.startswith("probe: FAIL") and "waits for the Flex reader" in l for l in out), out)
+
+    def test_interleaved_answers_do_not_pad_a_batch_the_adapter_did_not_finish(self):
+        lines = [l for l in self.start().read_text().splitlines() if OUTCOME not in l]
+        lines.append("x ibkr input=reconciliation:after-reconnect type=account.reconciliation answered with 0 decisions")
+        status, out = self.probe(self.made(lines))
+        self.assertEqual(status, 1, out)
+        self.assertTrue(any(l.startswith("probe: FAIL") and "no outcome" in l for l in out), out)
+
+    def test_a_delivered_outcome_whose_count_does_not_add_up_fails(self):
+        lines = [l.replace("struck=0", "struck=0").replace(" answered=", " answered=1") if OUTCOME in l else l
+                 for l in self.start().read_text().splitlines()]
+        lines = [re.sub(r"answered=\d+", "answered=3", l) if OUTCOME in l else l for l in lines]
+        status, out = self.probe(self.made(lines))
+        self.assertEqual(status, 1, out)
+
+    def test_an_impossible_date_or_the_zero_time_is_no_close(self):
+        from probe import mark_fault
+        good = MarkValidationTests().good()
+        for stamp in ("2027-02-30T21:00:00Z", "0001-01-01T00:00:00Z"):
+            self.assertEqual(mark_fault(dict(good, as_of=stamp), 3, stamp), "as_of", stamp)
 
 
 if __name__ == "__main__":

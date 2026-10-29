@@ -602,7 +602,9 @@ install_engine_settings() {
       install -m 0644 "$f" "$dest/$name.example"
       log "kept $dest/$name, which names the server's account; the shipped one is $dest/$name.example"
     else
-      install -m 0644 "$f" "$dest/$name"
+      # Whole beside it, then renamed into place, as each settings file is.
+      install -m 0644 "$f" "$dest/.$name.new"
+      mv -f "$dest/.$name.new" "$dest/$name"
       log "installed $dest/$name; name its account on the server (docs/runbooks/first-dry-run-day.md)"
     fi
   done

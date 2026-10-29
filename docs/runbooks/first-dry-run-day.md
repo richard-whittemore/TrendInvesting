@@ -1090,7 +1090,17 @@ an IRA").
 Run it right after I-7, the same day (`docs/live-trading/lessons-2026-10.md`
 L10), and after every later install of the adapter. It reads this start's
 journal and the engine's log, talks to nothing, and prints one line per
-check; it prints no account number.
+check; it prints no account number. There are two forms, and which one to
+use depends only on whether this start had a file to deliver:
+
+- **With `--expect-batch`** (the block below): on the first day (after I-7),
+  after a data-job firing has written a new file, and on a month-end
+  morning. The start must have delivered a batch, and its outcome line must
+  say `outcome=delivered`.
+- **Without `--expect-batch`**: after a plain restart of the adapter, or a
+  binary install, when no new stream file was waiting. The start must have
+  said `ibkr stream no new file since <file>; caught up`, and the probe then
+  passes with `probe: ok no new batch since start; caught up (...)`.
 
 <!-- rehearsed: ira-probe -->
 ```sh
@@ -1110,7 +1120,7 @@ sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr 
 ~ probe: Gateway server version [0-9]+ \(contract details read from IBKR's (protobuf|text) messages\)
 ~ probe: ok connected to IB Gateway as client_id=12
 ~ probe: ok reconciled client_id=12: positions=[0-9]+ open_orders=0 executions=0
-~ probe: ok queued run=run-ira-2026-10-29 files=trad-ira-[0-9-]+\.jsonl
+~ probe: ok queued run=run-ira-2026-10-29 files=trad-ira-[0-9-]+\.jsonl inputs=[0-9]+ \(delivered: [0-9]+ answered, [0-9]+ already committed\)
 ~ probe: ok account snapshot version 4 as of .*settled_cash .*total_cash
 ~ probe: ok reconciliation journalled
 ~ probe: ok [0-9]+ mark\(s\) at version 3

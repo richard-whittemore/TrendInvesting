@@ -69,7 +69,7 @@ set +e
   install() {
     local last=${*: -1}
     case $last in
-      */.trad-ira.env.new) head -n 1 "${*: -2:1}" >"$last"; return 1 ;;
+      */.trad-ira.env.new | */.trad-ira.config.new) head -n 1 "${*: -2:1}" >"$last"; return 1 ;;
       *) command install "$@" ;;
     esac
   }
@@ -77,8 +77,27 @@ set +e
 )
 set -e
 test ! -e "$fresh/trad-ira.env" || fail "an interrupted first install left a partial trad-ira.env under its own name"
+# The same for a configuration, which names the account and is hashed into the run: its copy cut short (the
+# .env copies above now succeeding) never stands under its own name either.
+rm -rf "$fresh" && mkdir -p "$fresh"
+set +e
+(
+  set -e
+  # shellcheck disable=SC2329 # called by install_engine_settings in this subshell
+  install() {
+    local last=${*: -1}
+    case $last in
+      */.trad-ira.config.new) head -n 1 "${*: -2:1}" >"$last"; return 1 ;;
+      *) command install "$@" ;;
+    esac
+  }
+  install_engine_settings "$src" "$fresh" >/dev/null 2>&1
+)
+set -e
+test ! -e "$fresh/trad-ira.config" || fail "an interrupted first install left a partial trad-ira.config under its own name"
 install_engine_settings "$src" "$fresh" >"$work/out"
 cmp -s "$src/trad-ira.env" "$fresh/trad-ira.env" || fail "the install after an interrupted one did not install the whole trad-ira.env"
+cmp -s "$src/trad-ira.config" "$fresh/trad-ira.config" || fail "the install after an interrupted one did not install the whole trad-ira.config"
 test -z "$(find "$fresh" -name '.*.new')" || fail "a temporary settings file is left behind: $(find "$fresh" -name '.*.new')"
 
 if test "$failures" -gt 0; then

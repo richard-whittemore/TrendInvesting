@@ -574,8 +574,10 @@ class AdapterLoop:
         # gateway_clock_problem).
         self._execution_zones = set()
         self._gateway_zone = "IB Gateway's connection time has not been read yet (no reconcile has run)"
+        self._last_wait = ""
         self.delivery = None if streams is None else Deliverer(
-            streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._post_close_reading, new_id)
+            streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._batch_reading, new_id,
+            wait_reason=lambda: self._last_wait)
 
     def start(self):
         """Take the pending file's lock, connect, reconcile, and settle any input left awaiting its reply."""
@@ -1004,6 +1006,23 @@ class AdapterLoop:
         and cash as much as this adapter's do.
         """
         return self._reports_recorded, self.reports.executions_seen(), len(self._account_executions)
+
+    def _batch_reading(self, close, closes):
+        """_post_close_reading, keeping the last line it logged when it gives no reading: the reason the batch's
+        outcome line states (delivery.Deliverer, outcome=waiting)."""
+        said = []
+
+        class Last(logging.Handler):
+            def emit(self, record):
+                said.append(record.getMessage())
+        handler = Last(logging.INFO)
+        log.addHandler(handler)
+        try:
+            reading = self._post_close_reading(close, closes)
+        finally:
+            log.removeHandler(handler)
+        self._last_wait = "" if reading is not None else (said[-1] if said else "")
+        return reading
 
     def _post_close_reading(self, close, closes):
         """The batch's account read (delivery.PostCloseReading) for the session closing at close (see the module).
@@ -1678,6 +1697,7 @@ class AdapterLoop:
                     # Settled as left by an earlier run, or recorded behind
                     # an input so settled: never sent.
                     self.outbox.strike(entry["id"])
+                    self._settled(entry["id"], answered=False)
                     continue
                 batch_run = _batch_run(entry)
                 # The run's stream folder name: a crash resume keeps the
@@ -1708,6 +1728,7 @@ class AdapterLoop:
                             "that ID; it is neither sent nor struck off: a person decides which is right "
                             "(docs/manual/paper-trading.md)".format(entry["id"]))
                     self.outbox.strike(entry["id"])
+                    self._settled(entry["id"], answered=False)
                     continue
                 if batch_run is not None and self._reconciliation_due:
                     # The reconciliation a reconcile owes goes ahead of the
@@ -1729,6 +1750,7 @@ class AdapterLoop:
                 self.pending.record_run(entry["id"], run_identity(self._engine_log_path),
                                         os.path.basename(self._engine_log_path))
                 self._exchange(self._envelope(entry, engine_log))
+                self._settled(entry["id"], answered=True)
         except (NotReconciled, NotConnected) as err:
             # The link went while an order was due: the input stays on disk
             # and is asked for again once the link is back and reconciled.
@@ -1745,6 +1767,11 @@ class AdapterLoop:
                 # socket, where the abandoned list's late end would complete
                 # the next read: the link is made again (see the module).
                 self.conn.drop("untagged-read-interrupted")
+
+    def _settled(self, entry_id, answered):
+        """Tell the delivery an outbox entry is settled: answered by the engine, or struck off as committed."""
+        if self.delivery is not None:
+            self.delivery.settled(entry_id, answered)
 
     def _status(self, status):
         log.info("ibkr link %s %s", status.state, status.reason)
