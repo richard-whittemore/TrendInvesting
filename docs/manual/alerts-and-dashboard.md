@@ -285,13 +285,14 @@ which nothing else gates) or, if it recovered, marked handled and said in one
 line in the reporter's output, "held during maintenance and recovered:
 ti-adapter-boost.service (<window end>)" (the same for "IB Gateway"). A Gateway
 that logged in again inside the window is handled at the close, like a unit,
-never before. The next daily summary then carries one line listing what was
-held and recovered since the previous one ("Held during maintenance and
-recovered since the last daily summary: ..."), read from those records and
-removed once a summary carrying it has been delivered. A fault in this
-bookkeeping is reported with the firing's errors and never holds back a page or
-the summary. A held failure of a unit that this reporter instance does not
-itself watch is left as it is for the instance that does.
+never before; an outage a window held that is still under 10 minutes old at the
+close keeps its hold until it pages or logs in. You read these lines in the
+reporter's journal on the server: `journalctl -u ti-reporter@boost.service
+--since yesterday | grep 'held during maintenance'`. A fault in the hold
+bookkeeping is reported with the firing's errors and never delays or stops a
+page (the Gateway's bookkeeping waits at most 10 seconds for the shared record).
+A held failure of a unit that this reporter instance does not itself watch is
+left as it is for the instance that does.
 
 ## Where alerts go
 

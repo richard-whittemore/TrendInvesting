@@ -482,23 +482,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		case err != nil:
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
 		case due:
-			// What a maintenance window held and that then recovered is listed
-			// once, in the first summary delivered after it; a summary already
-			// delivered today carries nothing new. Reading or clearing that list
-			// never holds the summary back.
-			var listed []string
-			if !deliveredAnywhere(seen, a.Key) {
-				var line string
-				line, listed = recoveredHeldLine(unitStatePath)
-				a.Body += line
-			}
 			a.Body += notDelivering(setAside)
 			if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
 				failures = append(failures, err)
-			} else if len(listed) > 0 && deliveredAnywhere(seen, a.Key) {
-				if err := forgetRecoveredHeld(unitStatePath, listed, at); err != nil {
-					failures = append(failures, err)
-				}
 			}
 		}
 	}

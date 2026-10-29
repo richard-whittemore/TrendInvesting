@@ -792,43 +792,6 @@ func TestARecoveredHeldUnitIsMarkedHandledAndSaidInOneLineAtTheClose(t *testing.
 	}
 }
 
-// The daily summary lists what was held and recovered since the previous one,
-// every window of them, once.
-func TestTheNextDailySummaryListsWhatWasHeldAndRecovered(t *testing.T) {
-	const a, b = "ti-adapter-boost.service", "ti-engine@boost.service"
-	r := &relay{sent: map[string][]string{}}
-	systemd := newStandInSystemd(t)
-	dir := t.TempDir()
-	start := t0.Add(time.Hour)
-	openWindow(t, dir, start, start.Add(10*time.Minute))
-	if err := notifyAt(t, r, dir, systemd, monitored(a, firstRun), start, a); err != nil {
-		t.Fatal(err)
-	}
-	firingWith(t, r, dir, systemd, start.Add(15*time.Minute), a+","+b)
-	second := start.Add(30 * time.Minute)
-	openWindow(t, dir, second, second.Add(10*time.Minute))
-	if err := notifyAt(t, r, dir, systemd, monitored(b, firstRun), second, b); err != nil {
-		t.Fatal(err)
-	}
-	firingWith(t, r, dir, systemd, second.Add(15*time.Minute), a+","+b)
-	if n := count(r.to(ntfyHost), "daily summary"); n != 0 {
-		t.Fatalf("a daily summary before one was asked for: %d", n)
-	}
-	firingWith(t, r, dir, systemd, second.Add(20*time.Minute), a+","+b, "-summary")
-	joined := strings.Join(r.to(ntfyHost), "\n")
-	for _, want := range []string{"Held during maintenance and recovered since the last daily summary:", a + " (", b + " ("} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("the daily summary lacks %q:\n%s", want, joined)
-		}
-	}
-	// And once delivered it is not listed again.
-	before := strings.Count(joined, "Held during maintenance and recovered since")
-	firingWith(t, r, dir, systemd, second.Add(25*time.Minute), a+","+b, "-summary")
-	if after := strings.Count(strings.Join(r.to(ntfyHost), "\n"), "Held during maintenance and recovered since"); after != before {
-		t.Errorf("the line was repeated: %d then %d", before, after)
-	}
-}
-
 // A Gateway that logs in again inside the window is handled at the close, like
 // a unit, with one line and none before.
 func TestAGatewayThatRecoversInsideTheWindowIsHandledAtTheClose(t *testing.T) {
@@ -838,8 +801,6 @@ func TestAGatewayThatRecoversInsideTheWindowIsHandledAtTheClose(t *testing.T) {
 	dir := t.TempDir()
 	openWindow(t, dir, tuesday(14, 5), tuesday(14, 25))
 	say := func(at time.Time) string {
-		var out bytes.Buffer
-		_ = out
 		return gatewayOutput(t, r, dir, g, at)
 	}
 	say(tuesday(14, 5))
@@ -894,15 +855,16 @@ func TestAGatewayPageIsNotBlockedByTheHoldBookkeeping(t *testing.T) {
 	if err := os.Mkdir(shared, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 26)) // may report the bookkeeping fault
+	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 26)); err == nil {
+		t.Error("the bookkeeping fault was not reported with the firing's errors")
+	}
 	if n := gatewayPages(r); n != 2 {
 		t.Errorf("%d gateway pages with the hold bookkeeping broken, want 1 per channel", n)
 	}
 }
 
 // Two windows back to back, each holding a Gateway outage and a unit's failure
-// that then recover: every hold of each window is handled once, said once, and
-// the next daily summary names all four.
+// that then recover: every hold of each window is handled once and said once.
 func TestTwoWindowsEachHandleTheirGatewayAndUnitHoldsOnce(t *testing.T) {
 	const a, b = "ti-adapter-boost.service", "ti-engine@boost.service"
 	r := &relay{sent: map[string][]string{}}
@@ -940,7 +902,6 @@ func TestTwoWindowsEachHandleTheirGatewayAndUnitHoldsOnce(t *testing.T) {
 	fire(tuesday(14, 12))
 	window(tuesday(14, 30), tuesday(14, 40), b)
 	fire(tuesday(14, 45))
-	fire(tuesday(14, 50), "-summary")
 	out := said.String()
 	for _, want := range []string{"held during maintenance and recovered: " + a, "held during maintenance and recovered: " + b} {
 		if n := strings.Count(out, want); n != 1 {
@@ -949,15 +910,6 @@ func TestTwoWindowsEachHandleTheirGatewayAndUnitHoldsOnce(t *testing.T) {
 	}
 	if n := strings.Count(out, "held during maintenance and recovered: IB Gateway"); n != 2 {
 		t.Errorf("the Gateway's two recoveries were said %d times, want 2:\n%s", n, out)
-	}
-	joined := strings.Join(r.to("ntfy.private.test"), "\n")
-	if n := strings.Count(joined, "IB Gateway ("); n != 2 {
-		t.Errorf("the daily summary names the Gateway's holds %d times, want 2:\n%s", n, joined)
-	}
-	for _, want := range []string{a + " (", b + " ("} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("the daily summary lacks %q:\n%s", want, joined)
-		}
 	}
 	if n := gatewayPages(r); n != 0 {
 		t.Errorf("%d gateway pages for outages that recovered", n)
@@ -973,4 +925,27 @@ func replaceFlag(args []string, flag, value string) []string {
 		}
 	}
 	return out
+}
+
+// An outage a window held that is still under ten minutes old when the window
+// closes keeps its hold: if it then logs in, the window's hold is handled and
+// said, never lost.
+func TestAShortHeldOutageThatRecoversAfterTheCloseIsHandled(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	g := newStandInGateway(t)
+	g.logout()
+	dir := t.TempDir()
+	openWindow(t, dir, tuesday(14, 0), tuesday(14, 25))
+	gatewayOutput(t, r, dir, g, tuesday(14, 20))
+	if out := gatewayOutput(t, r, dir, g, tuesday(14, 26)); strings.Contains(out, "held during maintenance") {
+		t.Fatalf("said while the outage was still out: %s", out)
+	}
+	g.login()
+	out := gatewayOutput(t, r, dir, g, tuesday(14, 31))
+	if n := strings.Count(out, "held during maintenance and recovered: IB Gateway"); n != 1 {
+		t.Errorf("the recovery was said %d times, want once:\n%s", n, out)
+	}
+	if n := gatewayPages(r); n != 0 {
+		t.Errorf("%d gateway pages for an outage of 6 minutes", n)
+	}
 }

@@ -91,13 +91,34 @@ func (u *unitState) record() error {
 
 // withUnitState runs fn on the unit-failure record under an exclusive lock.
 func withUnitState(path string, at time.Time, fn func(*unitState) error) error {
+	return withUnitStateWait(path, at, 0, fn)
+}
+
+// withUnitStateWait is withUnitState that gives up, with an error, when the
+// lock is not got within wait (0 waits as long as it takes). The Gateway's
+// bookkeeping uses it so that a stalled lock holder never delays its page.
+func withUnitStateWait(path string, at time.Time, wait time.Duration, fn func(*unitState) error) error {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the unit-failure record's lock: %w", err)
 	}
 	defer func() { _ = lock.Close() }()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("reporter: the unit-failure record's lock: %w", err)
+	if wait <= 0 {
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			return fmt.Errorf("reporter: the unit-failure record's lock: %w", err)
+		}
+	} else {
+		deadline := time.Now().Add(wait)
+		for {
+			err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+				return fmt.Errorf("reporter: the unit-failure record's lock was not got within %s: %w", wait, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 	seen, sent, repeats, baselines, err := loadState(path)
 	if err != nil {
@@ -584,11 +605,12 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 		// Held records are a window's. Whether one holds a failed unit is asked
 		// of window at that unit's decision, under this lock, never once for
 		// the step. A failed unit inside a window is recorded and not paged; with
-		// none open it pages (failedRun). A unit that recovered has its older
-		// held runs marked handled, so a stale redelivery of one never pages it,
-		// and, once the window has closed, they are forgotten and told in one
-		// close summary. A record newer than the sample, or of a unit this
-		// instance does not sample, is left exactly as it is (maintenance.go).
+		// none open it pages (failedRun). A unit that recovered has its older held
+		// runs marked handled, so a stale redelivery of one never pages it, and,
+		// once the window has closed, the hold is forgotten and note is given one
+		// line saying it was held and recovered. A record newer than the sample,
+		// or of a unit this instance does not sample, is left exactly as it is
+		// (maintenance.go).
 		changed := false
 		for _, unit := range append(append([]string{}, units...), resolveOnly...) {
 			sample := samples[unit]
@@ -658,9 +680,8 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 			}
 			if holdFor(report.KindUnitFailed, window).IsZero() {
 				for _, h := range takeHeld(u.sent, report.UnitFailedKeyPrefix(unit), cutoff) {
-					line := recordRecoveredHeld(u, unit, h.until, at)
 					if note != nil {
-						note(line)
+						note(recoveredLine(unit, h.until))
 					}
 					changed = true
 				}

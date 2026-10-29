@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -154,80 +153,12 @@ func gatewayHeldKey(host string) string { return gatewayHeldPrefix + host }
 // A held condition ends in one of two ways at the first firing after the
 // window closes. If it is still wrong it is paged by the ordinary path (the
 // page is never gated by any of this bookkeeping). If it recovered it is
-// marked handled and recorded here as held and recovered: the firing says so
-// in one output line, and the next daily summary lists it, read from these
-// records and removed once that summary has been delivered.
-const recoveredHeldPrefix = "recovered-held:"
+// marked handled (the handled record, with its time, is the record) and the
+// firing says so in one output line, which the owner reads in the reporter's
+// journal (docs/manual/alerts-and-dashboard.md, "Maintenance windows").
 
-// maxRecoveredHeld bounds the records kept for a daily summary that is never
-// sent.
-const maxRecoveredHeld = 50
-
-// recordRecoveredHeld records that the window ending at until held name and
-// that it recovered, and returns the output line that says so.
-func recordRecoveredHeld(u *unitState, name string, until, at time.Time) string {
-	w := until.UTC().Format(time.RFC3339)
-	u.sent[channelKey(recoveredHeldPrefix+w, name)] = at
-	if len(recoveredHeldIn(u.sent)) > maxRecoveredHeld {
-		all := recoveredHeldIn(u.sent)
-		sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
-		for _, r := range all[:len(all)-maxRecoveredHeld] {
-			delete(u.sent, r.key)
-		}
-	}
-	return "held during maintenance and recovered: " + name + " (" + w + ")"
-}
-
-type recoveredHeld struct {
-	key, name, window string
-	at                time.Time
-}
-
-func recoveredHeldIn(sent map[string]time.Time) (found []recoveredHeld) {
-	for k, at := range sent {
-		ch, name, ok := strings.Cut(k, "|")
-		w, isRecovered := strings.CutPrefix(ch, recoveredHeldPrefix)
-		if ok && isRecovered {
-			found = append(found, recoveredHeld{key: k, name: name, window: w, at: at})
-		}
-	}
-	return found
-}
-
-// recoveredHeldLine is the daily summary's line listing what was held and
-// recovered since the previous daily summary, and the records it lists; empty
-// when there are none or the record cannot be read (a summary never waits for
-// it).
-func recoveredHeldLine(path string) (line string, keys []string) {
-	if path == "" {
-		return "", nil
-	}
-	_, sent, _, _, err := loadState(path)
-	if err != nil {
-		return "", nil
-	}
-	found := recoveredHeldIn(sent)
-	sort.Slice(found, func(i, j int) bool { return found[i].window+found[i].name < found[j].window+found[j].name })
-	var parts []string
-	for _, r := range found {
-		parts = append(parts, r.name+" ("+r.window+")")
-		keys = append(keys, r.key)
-	}
-	if len(parts) == 0 {
-		return "", nil
-	}
-	return "Held during maintenance and recovered since the last daily summary: " + strings.Join(parts, ", ") + "\n", keys
-}
-
-// forgetRecoveredHeld removes the records a delivered daily summary listed.
-func forgetRecoveredHeld(path string, keys []string, at time.Time) error {
-	if path == "" || len(keys) == 0 {
-		return nil
-	}
-	return withUnitState(path, at, func(u *unitState) error {
-		for _, k := range keys {
-			delete(u.sent, k)
-		}
-		return u.record()
-	})
+// recoveredLine is that output line for name, held by the window ending at
+// until.
+func recoveredLine(name string, until time.Time) string {
+	return "held during maintenance and recovered: " + name + " (" + until.UTC().Format(time.RFC3339) + ")"
 }
