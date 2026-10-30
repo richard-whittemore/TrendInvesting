@@ -309,9 +309,9 @@ def _new_york_readings(text, what):
 def gateway_zone_problem(text, what="IBKR's execution time"):
     """Why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", is not a New York reading; "" when it is.
 
-    The zone check alone (_new_york_readings), for each execution's time: an execution may be hours old, so its
-    time cannot be held against the adapter's clock; the connection time's clock check (gateway_clock_problem) is
-    what shows the Gateway's clock, and so its executions' times, are New York's.
+    The zone check alone (_new_york_readings), for each execution's time (ADR 0019). The handshake establishes
+    clock trust; _cross_check_gateway_clock compares execution times allowing their plausible age, since a
+    requested execution may be hours old.
     """
     return _new_york_readings(text, what)[0]
 
@@ -574,8 +574,8 @@ class AdapterLoop:
         # clock evidence belongs to the handshake (gateway_zone_problem, gateway_clock_problem).
         self._execution_zones = set()
         self._gateway_zone = "IB Gateway's connection time has not been read yet (no reconcile has run)"
+        self._clock_fault = ""
         self._clock_checked_inbox = None
-        self._clock_reports = None
         self._last_wait = ""
         self.delivery = None if streams is None else Deliverer(
             streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._batch_reading, new_id,
@@ -620,7 +620,8 @@ class AdapterLoop:
             late_fills=self.pending.acknowledged_late_fills())
         self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record,
                                     unverified_receipt=lambda: unverified_receipt(self.conn))
-        self.conn.subscribe(self._track_report)
+        self.conn.subscribe(self._cross_check_gateway_clock)
+        self.conn.subscribe(self.tracker.on_event)
         self.conn.subscribe(self._count_execution)
         self.conn.connect_with_backoff()
         self.reconcile()
@@ -638,6 +639,8 @@ class AdapterLoop:
     def _gateway_problem(self):
         """Why IB Gateway's clock is not known to be New York's now ("" when it is): its latest check
         (gateway_clock_problem), an expired interval, or New York's clocks having changed since (clock_change_problem)."""
+        if self._clock_fault:
+            return self._clock_fault
         if self._gateway_zone or gateway_clock_trusted(self.conn):
             return self._gateway_zone
         return (clock_change_problem(self.conn.connected_at, self._now())
@@ -645,57 +648,60 @@ class AdapterLoop:
                     self.config.gateway_clock_check_interval))
 
     def _check_gateway_clock(self):
-        """Recheck the handshake clock before a reading or reconcile (ADR 0019).
+        """Observe handshake validity and staleness without touching the link (ADR 0019).
 
-        ibapi's twsConnectionTime is cached at the handshake: there is no
-        Gateway-local resampling path on this link. reqCurrentTime returns
-        IBKR's server time, not the Gateway's local clock, so it is NOT a
-        substitute. An expired check requires a fresh handshake with the
-        same client ID, and the usual reconciliation before any delivery.
-        Each handshake's result, including failure, is observed once and
-        retained only within the interval. Connection gives each handshake
-        its own Inbox, even when its timestamp matches the previous one's.
-        Before a deliberate reconnect, queued broker reports are retained
-        in receipt order and journalled after the check, even if it fails:
-        a cancellation may not be replayed, and executions must be stamped
-        under the verdict before the fresh link's reconciliation replays them.
-        These journal lines are observations only, never engine inputs.
+        Only a natural handshake refreshes evidence: ibapi caches its
+        connection time, and reqCurrentTime measures IBKR's server instead
+        of Gateway's local clock. Faults remain latched for this Inbox.
+        Each reading journals an observation, never an engine input.
         """
-        if self.conn.gateway_clock_fresh() and self._clock_checked_inbox is self.conn.inbox:
-            return
-        deferred = []
-        try:
-            if not self.conn.gateway_clock_fresh():
-                self._clock_reports = deferred
-                try:
-                    while self.conn.pump(0) is not None:
-                        pass
-                finally:
-                    self._clock_reports = None
+        if self._clock_checked_inbox is not self.conn.inbox:
             self._observe_gateway_clock()
-        finally:
-            for event in deferred:
-                self.tracker.on_event(event)
+        problem = self._gateway_problem()
+        if problem:
+            self.conn.gateway_clock_offset = None
+        log.info("ibkr gateway clock staleness at=%s checked_at=%s interval_seconds=%s verdict=%s reason=%s",
+                 _stamp(self._now()), _stamp(self.conn.connected_at) if self.conn.connected_at else "unknown",
+                 self.config.gateway_clock_check_interval, "unchecked" if problem else "checked",
+                 problem or "within interval", extra={"clock_observation": True})
 
-    def _track_report(self, event):
-        """Keep reports across a deliberate clock refresh; otherwise journal them at once (ADR 0019, ADR 0025)."""
-        if self._clock_reports is None:
-            self.tracker.on_event(event)
+    def _cross_check_gateway_clock(self, event):
+        """Invalidate a checked link before stamping a report whose time is implausible (ADR 0019).
+
+        Live executions have no plausible age beyond the clock tolerance;
+        requested executions may reach back to New York midnight (ADR 0025
+        point 5). Compare to callback arrival, never later queue consumption.
+        IBKR's orderStatus has no Gateway timestamp, so it cannot cross-check
+        a clock. A fault remains unchecked until a natural new handshake.
+        """
+        if event.name != "exec_details" or not gateway_clock_trusted(self.conn):
+            return
+        req_id, _, execution = event.args
+        received = event.received_at or self._now()
+        age = timedelta(0)
+        if req_id != -1:
+            requested = self.conn.execution_requested_at(req_id) or received
+            midnight = datetime.combine(requested.astimezone(NEW_YORK).date(), clock_time(0), NEW_YORK)
+            age = max(timedelta(0), received - midnight.astimezone(timezone.utc))
+        problem, readings = _new_york_readings(execution.time, "IB Gateway's execution time")
+        at = min(readings, key=lambda at: abs(at - received)) if readings else None
+        if not problem and -GATEWAY_CLOCK_TOLERANCE - age <= at - received <= GATEWAY_CLOCK_TOLERANCE:
+            verdict, reason = "checked", "within tolerance and plausible age"
         else:
-            self._clock_reports.append(event)
+            self.conn.gateway_clock_offset = None
+            self._clock_fault = "IB Gateway's clock cross-check failed: " + (problem or
+                "execution time {} is outside the tolerance and plausible age at receipt {}".format(
+                    _stamp(at), _stamp(received)))
+            verdict, reason = "unchecked", self._clock_fault
+        log.info("ibkr gateway clock cross-check gateway_at=%s received_at=%s plausible_age_seconds=%s "
+                 "verdict=%s reason=%s", _stamp(at) if at else "unreadable", _stamp(received),
+                 age.total_seconds(), verdict, reason, extra={"clock_observation": True})
 
     def _observe_gateway_clock(self):
-        """Refresh expired handshake evidence and record its verdict before retained reports are stamped (ADR 0019)."""
+        """Check the current natural handshake once; never reconnect for clock evidence (ADR 0019)."""
         self.conn.gateway_clock_offset = None
         offset = "unknown"
-        if not self.conn.gateway_clock_fresh():
-            try:
-                self.conn.reconnect()
-            except Exception as err:
-                self._gateway_zone = "IB Gateway's clock re-check failed to reconnect ({})".format(type(err).__name__)
-                log.warning("ibkr gateway clock recheck at=%s offset_seconds=%s verdict=unchecked reason=%s",
-                            _stamp(self._now()), offset, self._gateway_zone, extra={"clock_observation": True})
-                raise
+        self._clock_fault = ""
         try:
             text = self._api.connection_time()
             self._gateway_zone = gateway_clock_problem(text, self.conn.connected_at, self._now())
@@ -740,8 +746,8 @@ class AdapterLoop:
         drops in every reconcile would otherwise cycle with nothing sent
         and no one told (fail closed and tell a person, AGENTS.md).
 
-        Each reconcile reads the execution zones afresh and ensures the
-        handshake clock check is current (_check_gateway_clock). A Gateway
+        Each reconcile reads the execution zones afresh and observes the
+        handshake verdict and staleness (_check_gateway_clock). A Gateway
         set right and reconnected is trusted again without a restart
         (ADR 0019, amended 2026-10-27 and 2026-10-28).
         """
@@ -878,12 +884,7 @@ class AdapterLoop:
         self._pump_all()
         if not self.ready():
             return False
-        # ADR 0019 and ADR 0025 point 5: refresh before recording the owed
-        # reconciliation. If it reconnects, the next step reconciles that
-        # link and satisfies this same obligation from fresh reads once.
         self._check_gateway_clock()
-        if not self.ready():
-            return False
         if self.reports.awaiting_commission():
             log.info("ibkr reconciliation waits: an execution awaits its commission, so its fill is not recorded yet")
             return False
@@ -933,12 +934,6 @@ class AdapterLoop:
     def step(self):
         """One turn of the loop: keep the link up, reconcile it if needed, take one callback, check, and drain."""
         self.conn.maintain()
-        if self.conn.connected:
-            # Refresh before pumping reports (ADR 0019: one cutoff). A fill
-            # stamped under expired evidence is durable: a later passed
-            # check cannot put it back before an approval or session close.
-            # The fresh link replays executions during the usual reconcile.
-            self._check_gateway_clock()
         if self.conn.connected and self.conn.needs_reconciliation:
             self.reconcile()
         self.conn.pump(self._poll)
@@ -1146,9 +1141,6 @@ class AdapterLoop:
         Callers must not deliver anything when it raises SnapshotRefused.
         """
         self._check_gateway_clock()
-        if not self.ready():
-            log.info("ibkr clock recheck made a fresh link; the stream waits until it is reconciled")
-            return None
         if self._awaits_proof(close):
             return None
         unread = None
@@ -1383,6 +1375,10 @@ class AdapterLoop:
         elif read_ny.date() != close_ny.date():
             reasons.extend(self._morning_proof(reading, close))
         gateway = self._gateway_problem() if read_ny.date() == close_ny.date() else ""
+        if gateway and (self._clock_fault or not self.conn.gateway_clock_fresh()):
+            # Staleness and passive faults withhold the next reading even
+            # without an execution in this account (docs/manual/reconciliation.md).
+            reasons.append(gateway)
         if reading.open_orders:
             reasons.append("IBKR shows {} open order(s) for the account (working, pending or cancel-pending): "
                            "{}".format(len(reading.open_orders),

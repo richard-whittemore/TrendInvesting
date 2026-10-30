@@ -159,7 +159,7 @@ class Connection:
         self._wall_clock = wall_clock
         self._subscribers = []
         self._pending = deque()
-        self.inbox = Inbox()
+        self.inbox = Inbox(self.now_utc)
         self.connected = False
         self.needs_reconciliation = True
         # The adapter's own wall-clock time when the current link's handshake
@@ -170,6 +170,7 @@ class Connection:
         # 2026-10-28).
         self.connected_at = None
         self._connected_monotonic = None
+        self._execution_request = None
         # New York's UTC offset when the current link connected, set by its
         # clock check once IB Gateway's clock is shown to be New York's,
         # None until then (orders.gateway_clock_trusted; ADR 0019, amended
@@ -285,6 +286,22 @@ class Connection:
         interval = self.config.gateway_clock_check_interval
         return (0 <= (self.now_utc() - self.connected_at).total_seconds() <= interval
                 and 0 <= self._monotonic() - self._connected_monotonic <= interval)
+
+    def ask_executions(self, req_id):
+        """Request this account's executions and retain the request's date (ADR 0025 point 5).
+
+        Reads are serial. Keep only the latest request, including after its
+        end, so a response crossing midnight keeps its original replay window.
+        """
+        self.require_connected()
+        self._execution_request = (req_id, self.now_utc())
+        self.api.req_executions(req_id, self.config.account_id)
+
+    def execution_requested_at(self, req_id):
+        """The current execution request's send time, or None for another request (ADR 0019)."""
+        if self._execution_request is not None and self._execution_request[0] == req_id:
+            return self._execution_request[1]
+        return None
 
     def request_server_time(self):
         """Ask IBKR for its server time; return the ticket its answer will carry.
@@ -606,10 +623,11 @@ class Connection:
         log.info("ibkr connecting host=%s port=%d client_id=%d", cfg.host, cfg.port, cfg.client_id)
         # A fresh Inbox per attempt: a callback from an abandoned session can
         # never be read as part of this one.
-        self.inbox = Inbox()
+        self.inbox = Inbox(self.now_utc)
         self._pending.clear()
         self.connected_at = None
         self._connected_monotonic = None
+        self._execution_request = None
         self.gateway_clock_offset = None
         self.managed_accounts = frozenset()
         self._probe_sent_at = None

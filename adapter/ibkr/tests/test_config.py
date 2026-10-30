@@ -12,10 +12,11 @@ from config import AdapterConfig, ConfigError
 
 
 class ConfigTests(unittest.TestCase):
-    def test_clock_recheck_interval_defaults_to_sixty_minutes_and_is_configurable(self):
-        self.assertEqual(config().gateway_clock_check_interval, 3600)
-        self.assertEqual(config(gateway_clock_check_interval=120).gateway_clock_check_interval, 120)
-        for bad in (0, -1, True, "3600", float("nan"), float("inf")):
+    def test_clock_check_interval_defaults_to_twelve_hours_and_is_bounded(self):
+        self.assertEqual(config().gateway_clock_check_interval, 43200)
+        for value in (3600, 43200, 172800):
+            self.assertEqual(config(gateway_clock_check_interval=value).gateway_clock_check_interval, value)
+        for bad in (0, -1, 0.001, 3599, 172801, True, "3600", float("nan"), float("inf")):
             with self.subTest(bad=bad), self.assertRaises(ConfigError):
                 config(gateway_clock_check_interval=bad)
 

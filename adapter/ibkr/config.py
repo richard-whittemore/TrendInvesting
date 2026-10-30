@@ -30,7 +30,7 @@ MARK_TIMEOUT = 15
 # inputs (ADR 0026 points 2 and 3): left out, they are Boost's, so a Boost
 # configuration written before them reads exactly as it did.
 _OPTIONAL = {"paper_sending_enabled": False, "account_snapshot_version": 3, "resolve_contracts": False,
-             "gateway_clock_check_interval": 3600}
+             "gateway_clock_check_interval": 43200}
 # The account.snapshot versions the adapter writes: 3, positions and net
 # liquidation, which Boost reads (internal/event AccountSnapshotPositionsVersion),
 # and 4, with IBKR's settled and total cash, which the momentum engine reads
@@ -51,7 +51,7 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
 
     One engine per account, each with its own client ID to one IB Gateway
     (ADR 0026 point 8, decided 2026-10-16). Except gateway_clock_check_interval
-    (3600 seconds, 60 minutes), every timing value is required: ADR 0019 makes them versioned operational configuration with
+    (43200 seconds, 12 hours), every timing value is required: ADR 0019 makes them versioned operational configuration with
     no permissive defaults. restore_timeout is how long Gateway may stay cut
     off from IBKR's servers (codes 1100/2110) before the adapter gives up
     waiting for Gateway's own restoration and reconnects. commission_wait
@@ -79,7 +79,8 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     0026 point 3); a name that does not resolve to one contract gets no mark.
     Both are optional, Boost's values when left out, and strictly typed.
     gateway_clock_check_interval bounds the age of the handshake clock check:
-    before a reading or reconcile an older link reconnects (ADR 0019).
+    an older link is unchecked until a natural handshake (ADR 0019).
+    The supported interval is 1 to 48 hours; see docs/manual/reconciliation.md.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -137,6 +138,8 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
             # NaN and infinity pass "> 0" but would switch a deadline off.
             if not _is_number(value) or not math.isfinite(value) or value <= 0:
                 raise ConfigError("{} must be a positive number of seconds".format(name))
+        if not 3600 <= self.gateway_clock_check_interval <= 172800:
+            raise ConfigError("gateway_clock_check_interval must be between 3600 and 172800 seconds (1 to 48 hours)")
         if self.backoff_max < self.backoff_initial:
             raise ConfigError("backoff_max must be at least backoff_initial")
         if not _is_int(self.max_connect_attempts) or self.max_connect_attempts < 1:
