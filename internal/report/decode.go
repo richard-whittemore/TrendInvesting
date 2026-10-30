@@ -118,7 +118,7 @@ func readSnapshot(e event.Envelope, strategy string) (event.AccountCashSnapshotP
 	if isMomentum(strategy) {
 		var p event.AccountCashSnapshotPayload
 		if e.SchemaVersion != event.AccountSnapshotCashVersion && e.SchemaVersion != event.AccountSnapshotFractionalCashVersion {
-			return p, false, fmt.Errorf("report: momentum snapshot must be version %d", event.AccountSnapshotCashVersion)
+			return p, false, fmt.Errorf("report: momentum snapshot must be version %d or %d", event.AccountSnapshotCashVersion, event.AccountSnapshotFractionalCashVersion)
 		}
 		err := read(e, snapshotVersions, &p)
 		return p, true, err

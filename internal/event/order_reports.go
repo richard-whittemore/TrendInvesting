@@ -177,7 +177,7 @@ func (r *OrderReports) Fill(p TargetWeightFillPayload) (o *ReportedOrder, redeli
 	}
 	// Against what remains, not the sum: the sum can wrap past int64.
 	if p.Quantity > q.Quantity-o.Filled {
-		return nil, false, fmt.Errorf("takes order %s past its %d shares", q.ClientOrderID, q.Quantity)
+		return nil, false, fmt.Errorf("takes order %s past its %s shares", q.ClientOrderID, FormatQuantity(q.Quantity, q.QuantityScale))
 	}
 	if p.Side == OrderSideBuy {
 		if _, err := BuyCost(p.Quantity, p.QuantityScale, p.Price, p.Commission); err != nil {

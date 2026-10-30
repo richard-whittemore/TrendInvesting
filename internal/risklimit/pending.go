@@ -637,7 +637,7 @@ func CheckFill(p event.TargetWeightFillPayload, account string, order *FillOrder
 		return false, fmt.Errorf("risklimit: fill quantity scale %d differs from order scale %d", p.QuantityScale, order.QuantityScale)
 	}
 	if p.Quantity > order.Quantity-order.Reported {
-		return false, fmt.Errorf("risklimit: fill %s takes order %s past its %d shares", p.FillID, p.ClientOrderID, order.Quantity)
+		return false, fmt.Errorf("risklimit: fill %s takes order %s past its %s shares", p.FillID, p.ClientOrderID, event.FormatQuantity(order.Quantity, order.QuantityScale))
 	}
 	return false, nil
 }
