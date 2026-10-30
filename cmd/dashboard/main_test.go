@@ -284,3 +284,30 @@ func TestThePackageHasNoWritePath(t *testing.T) {
 		})
 	}
 }
+
+func TestJournalSliceReadsFractionalFillsAndOrders(t *testing.T) {
+	s := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
+		AccountID: "synthetic", AsOf: t0, NetLiquidation: 100, Currency: "USD", QuantityScale: 10000,
+		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: 10, TotalCash: 10}
+	f := event.TargetWeightFillPayload{AccountID: s.AccountID, ClientOrderID: "synthetic-order", FillID: "synthetic-fill",
+		InstrumentID: "AAA", Side: "sell", Quantity: 12500, QuantityScale: 10000, Price: 2, FilledAt: t0}
+	l := event.LimitOrderLifecyclePayload{AccountID: s.AccountID, ClientOrderID: f.ClientOrderID, OrderID: "synthetic-venue",
+		InstrumentID: "AAA", Side: "sell", Status: "submitted", Quantity: 72500, QuantityScale: 10000, LimitPrice: 2, OccurredAt: t0}
+	path := writeJournalWith(t, t.TempDir(),
+		journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 4, event.AccountSnapshotEventType, s.SchemaVersion(), "fractional-snapshot", s)},
+		journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 5, event.FillEventType, f.SchemaVersion(), "fractional-fill", f)},
+		journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 6, event.OrderLifecycleEventType, l.SchemaVersion(), "fractional-life", l)})
+	h := newHandlerFor([]string{path}, nil)
+	got := get(h, http.MethodGet, "/api/journal-slice")
+	body := got.Body.String()
+	if got.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", got.Code, body)
+	}
+	for _, view := range []string{"fills", "orders"} {
+		_, part, found := strings.Cut(body, "journal-query "+view+"\n")
+		part, _, _ = strings.Cut(part, "\n## ")
+		if !found || strings.Contains(part, "REFUSED") || !strings.Contains(part, "AAA") {
+			t.Fatalf("%s view was not read: %s", view, part)
+		}
+	}
+}

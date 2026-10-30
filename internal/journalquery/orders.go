@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	eventpkg "github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
 // Orders lists the orders the run planned, released and refused, the trades
@@ -23,18 +25,21 @@ func Orders(journals []Journal, f Filter) (Table, error) {
 		}
 		for _, it := range items {
 			var instrument, event, side, note string
-			var quantity int64
+			var quantity, scale int64
 			var price float64
 			switch {
 			case it.planned != nil:
 				p := it.planned
+				scale = p.QuantityScale
 				instrument, event, side, quantity, price, note = p.InstrumentID, "planned", p.Side, p.Quantity, p.LimitPrice, p.Tag
 			case it.released != nil:
 				p := it.released
+				scale = p.QuantityScale
 				instrument, event, side, quantity, price = p.InstrumentID, "released", p.Side, p.Quantity, p.LimitPrice
 				note = fmt.Sprintf("mode=%s,send=%t", p.Mode, p.Send)
 			case it.refused != nil:
 				p := it.refused
+				scale = p.QuantityScale
 				instrument, event, side, quantity, price, note = p.InstrumentID, "refused", p.Side, p.Quantity, p.LimitPrice, p.Reason
 			case it.skipped != nil:
 				p := it.skipped
@@ -42,6 +47,7 @@ func Orders(journals []Journal, f Filter) (Table, error) {
 				note = p.Reason + ": " + p.SharesText() + " shares wanted"
 			case it.lifecycle != nil:
 				p := it.lifecycle
+				scale = p.QuantityScale
 				instrument, event, side, quantity, price, note = p.InstrumentID, "lifecycle-"+p.Status, p.Side, p.Quantity, p.Price, p.Note
 				if p.Synthetic {
 					// A dry-run engine's own report, never a venue's.
@@ -55,7 +61,7 @@ func Orders(journals []Journal, f Filter) (Table, error) {
 			}
 			t.Rows = append(t.Rows, []string{
 				it.journal, strconv.FormatUint(it.seq, 10), it.at.UTC().Format("2006-01-02"), accountCell(it.account), instrument,
-				event, dash(side), strconv.FormatInt(quantity, 10), money(price), note,
+				event, dash(side), eventpkg.FormatQuantity(quantity, scale), money(price), note,
 			})
 		}
 	}

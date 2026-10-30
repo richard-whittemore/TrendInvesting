@@ -596,6 +596,17 @@ class OrderMappingTests(unittest.TestCase):
         self.assertEqual(built.tif, "DAY")
         self.assertIs(built.transmit, True)
 
+    def test_fractional_mapping_uses_the_account_policy(self):
+        real_client = self.module()
+        _, order = request_shape(paper_request()._replace(quantity=Decimal("7.25"), quantity_scale=10000))
+        built = real_client.ibapi_order(order, _Order, scale=10000)
+        self.assertEqual(built.totalQuantity, Decimal("7.25"))
+        with self.assertRaises(real_client.OrderShapeRefused):
+            real_client.ibapi_order(order, _Order, scale=0)
+        order.totalQuantity = Decimal("7.25001")
+        with self.assertRaises(real_client.OrderShapeRefused):
+            real_client.ibapi_order(order, _Order, scale=10000)
+
     def test_every_order_field_that_changes_what_is_sent_is_set_never_left_to_ibapi(self):
         # tws.TWSApi promises these; each is set to its plain value whatever
         # the installed ibapi defaults it to.
@@ -733,6 +744,12 @@ class PlacingOrdersTests(unittest.TestCase):
         if accounts is not None:
             client._wrapper.managedAccounts(accounts)
         return client
+
+    def test_fractional_paper_client_places_exact_shares(self):
+        client = self.client(paper_config(account_snapshot_version=6))
+        client.place_order(7, *request_shape(paper_request(quantity=Decimal("7.25"), quantity_scale=10000)))
+        placed = [r for r in client._client.requests if r[0] == "placeOrder"]
+        self.assertEqual(placed[0][3].totalQuantity, Decimal("7.25"))
 
     def test_a_paper_configuration_with_sending_switched_on_places_the_order_it_was_asked_for(self):
         client = self.client(paper_config())

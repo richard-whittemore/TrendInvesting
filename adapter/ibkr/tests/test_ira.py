@@ -1649,8 +1649,11 @@ class FractionalOrdersTests(unittest.TestCase):
                     written = []
                     sender = paper_sender(h, written)
                     next_id = h.conn.next_order_id
-                    with self.assertRaisesRegex(UnsendableOrder, "quantity scale"):
+                    with self.assertRaisesRegex(ValueError, "quantity scale") as caught:
                         getattr(sender, method)(request)
+                    self.assertNotIsInstance(caught.exception, UnsendableOrder)
+                    self.assertIn("account_snapshot_version", str(caught.exception))
+                    self.assertIn("restart", str(caught.exception))
                     self.assertEqual(h.fake.placed, [])
                     self.assertEqual(written, [])
                     self.assertEqual(h.conn.next_order_id, next_id)
@@ -1660,9 +1663,10 @@ class FractionalOrdersTests(unittest.TestCase):
         h.conn.connect()
         h.conn.mark_reconciled()
         request = limit_request(quantity=Decimal("7.25"), quantity_scale=10000)
-        with self.assertRaisesRegex(UnsendableOrder, "whole"):
+        with self.assertRaisesRegex(ValueError, "quantity scale"):
             paper_sender(h, []).check(request)
         h.conn.config = h.conn.config._replace(account_snapshot_version=6)
+        h.fake.quantity_scale = 10000
         paper_sender(h, []).send(request)
         self.assertEqual(h.fake.placed[0][2].totalQuantity, Decimal("7.25"))
         with self.assertRaisesRegex(UnsendableOrder, "four decimal"):

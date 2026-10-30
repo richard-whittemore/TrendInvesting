@@ -14,6 +14,7 @@ The re-check of ADR 0026 point 3's limits before sending is not here yet: it
 needs the hashed configuration, which the live engine configuration that
 names adapter ibkr will carry (ADR 0025 point 3).
 """
+import math
 from collections import namedtuple
 from datetime import date, datetime
 from decimal import Decimal
@@ -241,16 +242,14 @@ class PaperSender:
         if request.account_id != config.account_id:
             raise ValueError("request for account {!r} on the connection to paper account {!r}".format(
                 request.account_id, config.account_id))
-        if request.order_type != RELEASE_ORDER_TYPE:
-            raise UnsendableOrder("a released order is a limit order, not {!r}".format(request.order_type))
-        if request.tif != RELEASE_TIF:
-            raise ValueError("a released order is a {} order, not {!r}".format(RELEASE_TIF, request.tif))
-        try:
-            units(request.quantity, quantity_scale(config), "order quantity")
-        except ValueError as err:
-            raise UnsendableOrder(str(err)) from None
         if request.quantity_scale != quantity_scale(config):
-            raise UnsendableOrder("released order quantity scale does not match adapter account policy (ADR 0026 D7-F)")
+            raise ValueError("released order quantity scale does not match adapter account policy; "
+                             "check account_snapshot_version against the engine's quantity policy, "
+                             "complete the configuration migration and restart (ADR 0026 D7-F; "
+                             "docs/runbooks/first-dry-run-day.md)")
+        if not isinstance(request.symbol, str) or not request.symbol:
+            raise ValueError("the contract names no symbol")
+        check_order_shape(request_shape(request)[1], quantity_scale(config))
         if not isinstance(request.con_id, int) or isinstance(request.con_id, bool) or request.con_id <= 0:
             raise UnsendableOrder("con_id must be IBKR's positive contract ID")
         return config
@@ -267,6 +266,34 @@ class PaperSender:
         return record
 
 
+def check_order_shape(order, scale):
+    """Check the DAY limit shape shared by pre-handover checks and ibapi mapping.
+
+    ADR 0026 point 2 and D7-F: quantities are positive Decimal shares at
+    the configured account's scale, with no rounding; the wire price must
+    remain positive and finite after conversion to float.
+    """
+    if not isinstance(order.orderRef, str) or not order.orderRef or not isinstance(order.account, str) or not order.account:
+        raise ValueError("an order carries its client order ID (orderRef) and its account")
+    if order.action not in ACTIONS:
+        raise ValueError("action {!r} is not BUY or SELL".format(order.action))
+    quantity = order.totalQuantity
+    if not isinstance(quantity, Decimal) or not quantity.is_finite() or quantity <= 0:
+        raise ValueError("totalQuantity must be positive finite Decimal shares")
+    try:
+        units(quantity, scale, "order quantity")
+    except ValueError as err:
+        raise UnsendableOrder(str(err)) from None
+    if order.orderType != RELEASE_ORDER_TYPE:
+        raise UnsendableOrder("a released order is a limit order, not {!r}".format(order.orderType))
+    if not isinstance(order.lmtPrice, float) or not math.isfinite(order.lmtPrice) or order.lmtPrice <= 0:
+        raise ValueError("lmtPrice must be a positive finite float")
+    if order.tif != RELEASE_TIF:
+        raise ValueError("a released order is a {} order, not {!r}".format(RELEASE_TIF, order.tif))
+    if order.transmit is not True:
+        raise ValueError("an order the adapter sends is transmitted")
+
+
 def request_shape(request):
     """The (contract, order) a request is handed to TWSApi.place_order as: plain objects with ibapi's attribute names.
 
@@ -278,7 +305,8 @@ def request_shape(request):
                                currency=CURRENCY, exchange=EXCHANGE)
     order = SimpleNamespace(orderRef=request.client_order_id, account=request.account_id,
                             action=request.action, totalQuantity=request.quantity,
-                            orderType=request.order_type, lmtPrice=float(request.limit_price),
+                            orderType=request.order_type,
+                            lmtPrice=float(request.limit_price) if request.limit_price is not None else None,
                             tif=request.tif, transmit=True)
     return contract, order
 

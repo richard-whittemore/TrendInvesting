@@ -49,7 +49,7 @@ func addQuantity(a, b int64) (int64, bool) {
 // one such a fill hit, so rebuild refuses it rather than guess. A
 // target-weight fill (version 5) names its own account.
 func rebuild(j Journal) (steps []step, checks []check, trailing []step, err error) {
-	items, err := decode(j)
+	items, err := decodeWholeQuantities(j)
 	if err != nil {
 		return nil, nil, nil, err
 	}

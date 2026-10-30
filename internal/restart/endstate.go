@@ -307,7 +307,8 @@ func (r *retirements) observe(entry journal.Entry, input string, decode func(eve
 		if err := decode(env, &p); err != nil {
 			return err
 		}
-		if o, ok := r.released[p.ClientOrderID]; ok && env.SchemaVersion == event.OrderLifecycleLimitVersion && p.AccountID == r.account && !r.retired[p.ClientOrderID] && p.Describes(o) {
+		if o, ok := r.released[p.ClientOrderID]; ok && ((env.SchemaVersion == event.OrderLifecycleLimitVersion && p.QuantityScale == 0) ||
+			(env.SchemaVersion == event.OrderLifecycleFractionalVersion && p.QuantityScale == event.FractionalQuantityScale)) && !p.Synthetic && p.AccountID == r.account && !r.retired[p.ClientOrderID] && p.Describes(o) {
 			r.named[p.ClientOrderID] = true
 		}
 	case env.Type == event.FillEventType:

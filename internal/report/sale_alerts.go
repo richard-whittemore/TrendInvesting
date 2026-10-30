@@ -154,8 +154,8 @@ func (s sales) refused(account, instance string, e event.Envelope, p event.Order
 	return Alert{
 		Key: "sale-refused:" + p.ClientOrderID + "@" + account, Kind: KindSaleByHand, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: sale back to 98%% refused, sell by hand (%s)", account, p.InstrumentID),
-		Body: fmt.Sprintf("The risk gate refused the %s sale back to 98%% of net liquidation (%s, order %s, sell %d %s) as %s: it is larger than IBKR's holding net of working sells. %s. The refusal spends this incident's one attempt, so the program will not try again: if the account is still above 98%% of net liquidation, sell back to 98%% by hand (docs/runbooks/margin-warning.md). %s",
-			sl.planned.Sale.Kind, sl.planned.Sale.Trigger, p.ClientOrderID, p.Quantity, p.InstrumentID, p.Reason, p.Detail, handSaleSteps(account, instance)),
+		Body: fmt.Sprintf("The risk gate refused the %s sale back to 98%% of net liquidation (%s, order %s, sell %s %s) as %s: it is larger than IBKR's holding net of working sells. %s. The refusal spends this incident's one attempt, so the program will not try again: if the account is still above 98%% of net liquidation, sell back to 98%% by hand (docs/runbooks/margin-warning.md). %s",
+			sl.planned.Sale.Kind, sl.planned.Sale.Trigger, p.ClientOrderID, event.FormatQuantity(p.Quantity, p.QuantityScale), p.InstrumentID, p.Reason, p.Detail, handSaleSteps(account, instance)),
 	}, true
 }
 

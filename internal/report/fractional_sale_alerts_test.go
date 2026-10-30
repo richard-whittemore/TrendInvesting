@@ -88,3 +88,15 @@ func TestFractionalSaleDoesNotCountLegacyFillUnits(t *testing.T) {
 		t.Fatalf("mismatched units raised %+v", got)
 	}
 }
+
+func TestFractionalSaleRefusalShowsShares(t *testing.T) {
+	s, r := fractionalSale(t)
+	p := event.OrderRefusedPayload{AccountID: r.AccountID, PlanID: r.PlanID, Tag: r.Tag, ClientOrderID: r.ClientOrderID,
+		InstrumentID: r.InstrumentID, Side: r.Side, Quantity: 72500, QuantityScale: 10000, LimitPrice: r.LimitPrice,
+		Reason: event.RefusedBrokerHolding, Detail: "synthetic holding shortfall", Figures: r.Figures}
+	s.add(event.OrderRefusedEventType, p.SchemaVersion(), "refused", monthEnd(1), p)
+	pages := ofKind(alertsOf(t, s), report.KindSaleByHand)
+	if len(pages) != 1 || !strings.Contains(pages[0].Body, "sell 7.25 AAA") || strings.Contains(pages[0].Body, "72500") {
+		t.Fatalf("sale refusal must show shares: %+v", pages)
+	}
+}

@@ -306,6 +306,25 @@ class MomentumHoldingsTest(unittest.TestCase):
         self.assertEqual(bars, ["CCC", "IEF", "SPY"])
         self.assertEqual(histories, ["AAA", "BBB"])
 
+    def test_fractional_snapshot_scale_is_checked_before_replacing_holdings(self):
+        for scale in (None, 0, 1, 10000.0, "10000", True):
+            with self.subTest(scale=scale):
+                held = tidata._Holdings("synthetic.log")
+                held.groups = 1
+                held.current = {"AAA"}
+                payload = {"positions": []}
+                if scale is not None:
+                    payload["quantity_scale"] = scale
+                with self.assertRaisesRegex(tidata.Refused, "quantity_scale"):
+                    held.keep([(2, "input", {"type": "account.snapshot", "schema_version": 6,
+                                            "payload": payload})])
+                self.assertEqual(held.held(), ("AAA",))
+
+    def test_positions_contract_documents_fractional_snapshots(self):
+        self.assertIn("6", tidata._positions.__doc__)
+        self.assertIn("ADR 0026", tidata._positions.__doc__)
+        self.assertIn("never read as holding nothing", tidata._positions.__doc__)
+
     def test_fractional_snapshot_and_fill_keep_holdings_coverage(self):
         inputs = [("account.snapshot", 6, {"positions": [
             {"instrument_id": "CCC", "quantity": 123456}], "quantity_scale": 10000}),

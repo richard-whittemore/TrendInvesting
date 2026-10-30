@@ -41,15 +41,16 @@ type item struct {
 
 // fill is one execution in either fill version the queries read: a Turtle
 // fill (version 4), whose Kind is entry, add, stop or exit, or a
-// target-weight limit order's fill (version 5, ADR 0026), whose Kind is its
-// side, buy or sell. Quantity is the executed size, unsigned. Exactly one of
+// target-weight limit order's fill (versions 5 and 6, ADR 0026 D7-F), whose Kind is its
+// side, buy or sell. Quantity is unsigned units at QuantityScale. Exactly one of
 // turtle and limit holds the record as written.
 type fill struct {
-	InstrumentID string
-	Kind         string
-	Quantity     int64
-	Price        float64
-	Commission   float64
+	InstrumentID  string
+	Kind          string
+	Quantity      int64
+	QuantityScale int64
+	Price         float64
+	Commission    float64
 
 	turtle *event.FillPayload
 	limit  *event.TargetWeightFillPayload
@@ -60,9 +61,11 @@ type fill struct {
 // target-weight limit order's (version 2, ADR 0026), priced at its limit and
 // noted with its client order id. Synthetic marks a dry-run engine's own
 // report on an order it never sent (version 3), which is never an execution.
+// Versions 4 and 5 carry the same distinction at fractional scale (ADR 0026 D7-F).
 type lifecycle struct {
 	InstrumentID, Status, Side, Note string
 	Quantity                         int64
+	QuantityScale                    int64
 	Price                            float64
 	Synthetic                        bool
 }
@@ -138,9 +141,8 @@ func decode(j Journal) ([]item, error) {
 			it.at, it.account = it.approved.ApprovedAt, it.approved.AccountID
 		case event.AccountSnapshotEventType:
 			// Version 2 (equity and cash) carries no positions and is not
-			// read here. Version 3 is the broker's positions and version 4
-			// adds the account's cash to them; any other version is refused
-			// by read, never skipped.
+			// read here. Positions and cash may use whole or fractional
+			// quantities (ADR 0026 D7-F); readSnapshot checks their scale.
 			if env.SchemaVersion == event.AccountSnapshotSchemaVersion {
 				continue
 			}
@@ -221,17 +223,15 @@ func read(env event.Envelope, schemas []uint32, into any) error {
 	if err := json.Unmarshal(env.Payload, into); err != nil {
 		return fmt.Errorf("decode %s: %w", env.Type, err)
 	}
-	// These tables still label integer quantities as shares. Refuse D7-F
-	// until the surface migration rather than display ticks as shares
-	// (ADR 0015; ADR 0026 D7-F).
+	// Legacy payloads without quantity metadata must still refuse it (ADR 0015).
 	var units struct {
 		QuantityScale int64 `json:"quantity_scale"`
 	}
 	if err := json.Unmarshal(env.Payload, &units); err != nil {
 		return err
 	}
-	if units.QuantityScale != 0 {
-		return fmt.Errorf("%s: fractional quantities require the journal-query surface migration", env.Type)
+	if _, ok := into.(versioned); !ok && units.QuantityScale != 0 {
+		return fmt.Errorf("%s: quantity_scale is not supported at this version", env.Type)
 	}
 	// Chain verification does not check payload values, and a journal keeps
 	// rejected inputs, so a record is validated before it can move a figure.
@@ -252,17 +252,18 @@ func read(env event.Envelope, schemas []uint32, into any) error {
 	return nil
 }
 
-// readFill decodes a fill of either version; any other version is refused.
+// readFill decodes Turtle and whole or fractional target-weight fills
+// (ADR 0026 D7-F); unknown versions or mismatched scales are refused.
 func readFill(env event.Envelope) (*fill, error) {
-	if env.SchemaVersion == event.FillTargetWeightVersion {
+	if slices.Contains(event.TargetWeightFillVersions(), env.SchemaVersion) {
 		p := new(event.TargetWeightFillPayload)
-		if err := read(env, []uint32{event.FillTargetWeightVersion}, p); err != nil {
+		if err := read(env, event.TargetWeightFillVersions(), p); err != nil {
 			return nil, err
 		}
-		return &fill{InstrumentID: p.InstrumentID, Kind: p.Side, Quantity: p.Quantity, Price: p.Price, Commission: p.Commission, limit: p}, nil
+		return &fill{InstrumentID: p.InstrumentID, Kind: p.Side, Quantity: p.Quantity, QuantityScale: p.QuantityScale, Price: p.Price, Commission: p.Commission, limit: p}, nil
 	}
 	p := new(event.FillPayload)
-	if err := read(env, []uint32{event.FillSchemaVersion, event.FillTargetWeightVersion}, p); err != nil {
+	if err := read(env, []uint32{event.FillSchemaVersion}, p); err != nil {
 		return nil, err
 	}
 	return &fill{InstrumentID: p.InstrumentID, Kind: p.Kind, Quantity: p.Quantity, Price: p.Price, Commission: p.Commission, turtle: p}, nil
@@ -270,7 +271,7 @@ func readFill(env event.Envelope) (*fill, error) {
 
 // readLifecycle decodes an order state change of any version, with the
 // account a limit order's change names; any other version is refused. A
-// limit order's version 2 is a venue's report and version 3 a synthetic one,
+// limit order's versions 2/4 are venue reports and 3/5 synthetic reports,
 // and each is refused at the other's version.
 func readLifecycle(env event.Envelope) (*lifecycle, string, error) {
 	limit := event.LimitOrderLifecycleVersions()
@@ -279,7 +280,7 @@ func readLifecycle(env event.Envelope) (*lifecycle, string, error) {
 		if err := read(env, limit, p); err != nil {
 			return nil, "", err
 		}
-		return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Side: p.Side, Note: p.ClientOrderID, Quantity: p.Quantity, Price: p.LimitPrice, Synthetic: p.Synthetic}, p.AccountID, nil
+		return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Side: p.Side, Note: p.ClientOrderID, Quantity: p.Quantity, QuantityScale: p.QuantityScale, Price: p.LimitPrice, Synthetic: p.Synthetic}, p.AccountID, nil
 	}
 	p := new(event.OrderLifecyclePayload)
 	if err := read(env, append([]uint32{event.OrderLifecycleSchemaVersion}, limit...), p); err != nil {
@@ -288,18 +289,18 @@ func readLifecycle(env event.Envelope) (*lifecycle, string, error) {
 	return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Note: p.Tag, Quantity: p.Quantity, Price: p.StopPrice}, "", nil
 }
 
-// readSnapshot decodes a positions snapshot of version 3 or 4 (version 4's
-// cash is not reported); any other version is refused.
+// readSnapshot decodes whole or fractional positions, with or without cash
+// (ADR 0026 D7-F). Cash is not reported; the declared scale is validated.
 func readSnapshot(env event.Envelope) (*event.AccountPositionsSnapshotPayload, error) {
-	if env.SchemaVersion == event.AccountSnapshotCashVersion {
+	if slices.Contains(event.AccountCashSnapshotVersions(), env.SchemaVersion) {
 		p := new(event.AccountCashSnapshotPayload)
-		if err := read(env, []uint32{event.AccountSnapshotCashVersion}, p); err != nil {
+		if err := read(env, event.AccountCashSnapshotVersions(), p); err != nil {
 			return nil, err
 		}
 		return &p.AccountPositionsSnapshotPayload, nil
 	}
 	p := new(event.AccountPositionsSnapshotPayload)
-	if err := read(env, []uint32{event.AccountSnapshotPositionsVersion, event.AccountSnapshotCashVersion}, p); err != nil {
+	if err := read(env, event.AccountPositionsSnapshotVersions(), p); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -333,4 +334,22 @@ func sameFill(x, y fill) bool {
 		return reflect.DeepEqual(a, b)
 	}
 	return false
+}
+
+// decodeWholeQuantities preserves the fail-closed contract of aggregations
+// that still add whole shares (ADR 0015; ADR 0026 D7-F). Detail tables use
+// decode and format each record at its own scale.
+func decodeWholeQuantities(j Journal) ([]item, error) {
+	for _, record := range j.Records {
+		var units struct {
+			QuantityScale int64 `json:"quantity_scale"`
+		}
+		if err := json.Unmarshal(record.Envelope.Payload, &units); err != nil {
+			return nil, err
+		}
+		if units.QuantityScale != 0 {
+			return nil, fmt.Errorf("%s: fractional quantities require the journal-query aggregation migration", record.Envelope.Type)
+		}
+	}
+	return decode(j)
 }

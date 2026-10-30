@@ -90,6 +90,7 @@ class FakeTWS(TWSApi):
 
     def __init__(self):
         self.calls = []
+        self.quantity_scale = 0
         self.callbacks = None
         self.connected = False
         self.connect_behaviours = []
@@ -505,6 +506,12 @@ class FakeTWS(TWSApi):
         return self.tws_connection_time
 
     def place_order(self, order_id, contract_, order_):
+        # Exercise the real mapper, including D7-F precision, before the fake
+        # accepts anything, at its configured account scale (ADR 0026 D7-F).
+        from real_client import ibapi_order, ORDER_REQUEST_FIELDS, ORDER_FIELDS_SET
+        fields = dict.fromkeys(ORDER_REQUEST_FIELDS)
+        fields.update(dict(ORDER_FIELDS_SET))
+        ibapi_order(order_, lambda: SimpleNamespace(**fields), scale=self.quantity_scale)
         self.calls.append(("place_order", order_id))
         if self.place_error is not None:
             raise self.place_error
