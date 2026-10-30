@@ -244,6 +244,9 @@ def drill(interactive=False):
         require(not plans(venue, tag), 'abandoned January buys were released')
         recovered = [d['payload'] for d in venue.decisions if d['type'] == 'strategy.targets.decided'][-1]
         require(recovered['outcome'] == 'decided', 'next month did not decide')
+        # The month's orders as decided: the fake's cancellations below end the sells, after which the
+        # engine plans the buy phase (ADR 0026, point 2), so the comparison must read the plans first.
+        recovered_plans = plans(venue, febtag)
         venue.cancel_all('2025-03-03T14:30:00Z')
     finally:
         venue.stop()
@@ -255,7 +258,7 @@ def drill(interactive=False):
         control.feed(jan + feb)
         ontime = [d['payload'] for d in control.decisions if d['type'] == 'strategy.targets.decided'][-1]
         require(recovered['targets'] == ontime['targets'], 'targets differ from on-time control')
-        mine, theirs = plans(venue, febtag), plans(control, febtag)
+        mine, theirs = recovered_plans, plans(control, febtag)
 
         def gate_trail(v):
             # What the gate did with each planned order: released (send?) or refused (why).
