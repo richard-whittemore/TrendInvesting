@@ -1383,3 +1383,28 @@ func TestAFractionalSkippedTradeIsListedWithTheOrders(t *testing.T) {
 		t.Fatalf("orders: %v %+v", err, o)
 	}
 }
+
+func TestAggregationsSkipUnrelatedScalarInputsBesideWholeShareRecords(t *testing.T) {
+	// An unrelated input whose payload is not an object is skipped by every
+	// aggregation, as before the fractional scale check (ADR 0015).
+	d := at(time.March, 2)
+	other := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, other, fillInput(validFill("f-1", 4, d))))}
+	for name, fn := range map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+		"totals": journalquery.Totals, "positions": journalquery.Positions,
+	} {
+		if _, err := fn(js, journalquery.Filter{}); err != nil {
+			t.Errorf("%s refused a journal with an unrelated scalar input: %v", name, err)
+		}
+	}
+}
+
+func TestAMalformedScaleOnAnyRecordIsRefusedByAggregations(t *testing.T) {
+	// A record whose scale is not a number cannot be trusted to add whole shares (ADR 0015).
+	d := at(time.March, 2)
+	bad := rec{journal.KindInput, "other.thing", 1, d, map[string]any{"quantity_scale": "ten"}}
+	js := []journalquery.Journal{load(t, "j", build(t, bad, fillInput(validFill("f-1", 4, d))))}
+	if _, err := journalquery.Totals(js, journalquery.Filter{}); err == nil {
+		t.Fatal("a non-numeric quantity_scale was accepted by totals")
+	}
+}

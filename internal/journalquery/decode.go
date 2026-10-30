@@ -1,6 +1,7 @@
 package journalquery
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -341,6 +342,11 @@ func sameFill(x, y fill) bool {
 // decode and format each record at its own scale.
 func decodeWholeQuantities(j Journal) ([]item, error) {
 	for _, record := range j.Records {
+		// Only an object can carry a scale; a record decode skips, such as an
+		// unrelated input whose payload is a scalar, is left to decode.
+		if trimmed := bytes.TrimLeft(record.Envelope.Payload, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
+			continue
+		}
 		var units struct {
 			QuantityScale int64 `json:"quantity_scale"`
 		}
