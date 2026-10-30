@@ -1689,3 +1689,31 @@ paper account can be approved. This stays fail closed with the adapter and
 surfaces slice. Venue fills, lifecycle reports and retirements must use the
 same quantity scale as their released order; historical whole-share reports
 are not silently reinterpreted against fractional releases.
+
+### Per-execution rounding reserve
+
+Owner decision, 2026-10-30: the fractional buy planner reserves explicit
+rounding slack per planned buy. `execution.rounding_slack_per_order` defaults
+to $0.10 and accepts finite values from $0.01 through $1.00, inclusive.
+Omission and an explicit default hash identically; every changed effective
+allowance changes the configuration hash (ADR 0016). D7-L and Boost retain
+their earlier execution encodings and cash checks.
+
+The basket is scaled against cash minus the sum of these allowances before
+quantity rounding. Each kept buy reserves its entire quantity at the limit,
+rounded up to cents, plus the order's maximum fees and its rounding slack.
+The planner and independent insufficient-cash gate use the same allowance;
+both journal it as `rounding_slack`. The allowance stays committed while the
+order is working and only its unused portion is released at termination.
+Actual fills debit their own cent-rounded cost and commission, without
+charging the allowance again.
+
+Each execution can add less than one cent of upward rounding. Reserving one
+cent per possible execution covers every quantity split through
+floor(100 × rounding_slack_per_order) executions: ten at the default. For
+example, four executions of 1.8125 shares at $10.10 book $73.24, which fits
+the $73.23 whole-order reservation plus $0.10 slack. This bound assumes fills
+at or below the buy limit and aggregate fees within the order's fee allowance.
+It is not a structural reserve for execution counts beyond that cap or other
+cash changes. The structural cash buffer remains an owner decision pending
+under #622; this execution allowance does not settle that decision.

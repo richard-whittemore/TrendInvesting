@@ -165,10 +165,11 @@ const OrderLifecycleLimitVersion uint32 = 2
 const OrderLifecycleSyntheticVersion uint32 = 3
 
 // LimitOrderLifecycleVersions returns the versions a target-weight limit
-// order's state change is recorded at: a venue's report (2) and a dry-run
-// engine's synthetic one (3). Every reader that shows the log reads by this
+// order's state change is recorded at: venue reports use whole-share version
+// 2 or fractional version 4; dry-run synthetic reports use versions 3 or 5.
+// Every reader that shows the log reads by this
 // list, so none falls behind the version a writer records (ADR 0015). An
-// engine reading the venue's reports as inputs reads version 2 alone. Each
+// engine reading venue inputs accepts only versions 2 and 4 (ADR 0026, D7-F). Each
 // call returns a new slice.
 func LimitOrderLifecycleVersions() []uint32 {
 	return []uint32{OrderLifecycleLimitVersion, OrderLifecycleSyntheticVersion, OrderLifecycleFractionalVersion, OrderLifecycleFractionalSyntheticVersion}
@@ -229,8 +230,9 @@ func (p LimitOrderLifecyclePayload) Terminal() bool {
 	return p.Status == OrderLifecycleStatusCanceled || p.Status == OrderLifecycleStatusInvalid
 }
 
-// SchemaVersion returns the version a writer journals p at: 3 for a
-// synthetic report, otherwise 2.
+// SchemaVersion returns the journal version for the quantity encoding:
+// venue reports use 2/4 (whole/fractional), synthetic reports 3/5. Engine
+// inputs accept only venue versions (ADR 0015; ADR 0026, D7-F).
 func (p LimitOrderLifecyclePayload) SchemaVersion() uint32 {
 	if p.QuantityScale != 0 {
 		if p.Synthetic {

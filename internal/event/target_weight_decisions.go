@@ -1595,9 +1595,12 @@ const OrderTypeLimit = "limit"
 // net liquidation V, the holding q and the raw reference close p, all as of
 // the previous close (ADR 0026, point 2, "Valuation basis").
 type OrderPlannedPayload struct {
-	FractionalIncrement string `json:"fractional_increment,omitzero"`
-	QuantityScale       int64  `json:"quantity_scale,omitempty"`
-	AccountID           string `json:"account_id"`
+	// RoundingSlack is the per-buy execution reserve under ADR 0026,
+	// "Per-execution rounding reserve", in dollars, separate from fees.
+	RoundingSlack       float64 `json:"rounding_slack,omitzero"`
+	FractionalIncrement string  `json:"fractional_increment,omitzero"`
+	QuantityScale       int64   `json:"quantity_scale,omitempty"`
+	AccountID           string  `json:"account_id"`
 	// Tag is the ID of the strategy.targets.decided envelope this order
 	// serves; ClientOrderID derives from it, the instrument and the phase.
 	Tag           string `json:"tag"`
@@ -1683,6 +1686,9 @@ func checkSafetyVersion(eventType string, schemaVersion, need, latest uint32) er
 // buy's limit at or above it, a sell's at or below. A sale back to 98% also
 // checks its sizing figures.
 func (p OrderPlannedPayload) Validate() error {
+	if p.RoundingSlack != 0 && (!ValidRoundingSlack(p.RoundingSlack) || p.QuantityScale != FractionalQuantityScale || p.Side != OrderSideBuy) {
+		return errors.New("rounding slack requires a fractional buy and [0.01, 1.00] dollars")
+	}
 	if p.QuantityScale == FractionalQuantityScale && p.Sale.set() {
 		return errors.New("fractional IRA orders carry no margin-account sale figures")
 	}
@@ -1885,7 +1891,10 @@ type RiskFigures struct {
 	OrdersInDecision int     `json:"orders_in_decision"`
 	CashChecked      bool    `json:"cash_checked,omitzero"`
 	BuyCost          float64 `json:"buy_cost,omitzero"`
-	CashAvailable    float64 `json:"cash_available,omitzero"`
+	// RoundingSlack is the component of BuyCost held for partial-execution
+	// cent rounding (ADR 0026, "Per-execution rounding reserve").
+	RoundingSlack float64 `json:"rounding_slack,omitzero"`
+	CashAvailable float64 `json:"cash_available,omitzero"`
 	// RiskReducing marks an order ADR 0026 point 4 calls risk-reducing: a
 	// sell within the broker-reported holding net of every working or
 	// pending sell (BrokerSet), or, with no readable broker snapshot, within
@@ -1953,6 +1962,8 @@ func (f RiskFigures) validate(side string) []error {
 		errs = append(errs, errors.New("figures broker holding and working sells carry values but no broker snapshot is set"))
 	}
 	switch {
+	case f.RoundingSlack != 0 && (!ValidRoundingSlack(f.RoundingSlack) || !f.CashChecked || side != OrderSideBuy || f.BuyCost < f.RoundingSlack):
+		errs = append(errs, errors.New("figures rounding slack requires a cash-checked buy, [0.01, 1.00] dollars, and inclusion in buy cost"))
 	case !isFinite(f.BuyCost) || f.BuyCost < 0 || !isFinite(f.CashAvailable):
 		errs = append(errs, errors.New("figures buy cost must be finite and not negative, and cash available finite"))
 	case !f.CashChecked && (f.BuyCost != 0 || f.CashAvailable != 0):
@@ -2015,6 +2026,9 @@ func (p OrderReleasedPayload) ValidateSchema(schemaVersion uint32) error {
 
 // Validate checks identity, mode, the dry-run rule and the figures.
 func (p OrderReleasedPayload) Validate() error {
+	if p.Figures.RoundingSlack != 0 && p.QuantityScale != FractionalQuantityScale {
+		return errors.New("rounding slack requires fractional quantities")
+	}
 	if p.QuantityScale == FractionalQuantityScale && p.Figures.BrokerHolding < 0 {
 		return errors.New("fractional broker holding must not be negative")
 	}
@@ -2108,6 +2122,9 @@ func (p OrderRefusedPayload) ValidateSchema(schemaVersion uint32) error {
 
 // Validate checks identity, the reason, the detail and the figures.
 func (p OrderRefusedPayload) Validate() error {
+	if p.Figures.RoundingSlack != 0 && p.QuantityScale != FractionalQuantityScale {
+		return errors.New("rounding slack requires fractional quantities")
+	}
 	if p.QuantityScale == FractionalQuantityScale && p.Figures.BrokerHolding < 0 {
 		return errors.New("fractional broker holding must not be negative")
 	}

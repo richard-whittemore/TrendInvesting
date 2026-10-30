@@ -135,7 +135,9 @@ func TestFractionalEngineMonth(t *testing.T) {
 	if releases == 0 || cancels != releases {
 		t.Fatalf("released %d, canceled %d", releases, cancels)
 	}
-	goldenPath := "testdata/momentum-fractional.golden.jsonl"
+	// ADR 0026, "Per-execution rounding reserve": preserve the earlier
+	// unrounded-cost and cents-only fixtures as evidence of those decisions.
+	goldenPath := "testdata/momentum-fractional-slack.golden.jsonl"
 	if os.Getenv("TI_WRITE_FRACTIONAL_GOLDEN") == "1" {
 		if err := os.WriteFile(goldenPath, golden.Bytes(), 0o644); err != nil {
 			t.Fatal(err)

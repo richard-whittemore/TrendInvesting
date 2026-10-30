@@ -2,6 +2,7 @@ package risklimit_test
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,8 +35,8 @@ func TestFractionalLimitsUseSharesInsteadOfTicks(t *testing.T) {
 		cash     float64
 		want     string
 	}{
-		{"fits", 72500, 0, 8.25, ""},
-		{"cash", 72500, 0, 8.2499, event.RefusedInsufficientCash},
+		{"fits", 72500, 0, 8.35, ""},
+		{"cash", 72500, 0, 8.3499, event.RefusedInsufficientCash},
 		{"order fraction", 70000001, 0, 10000, event.RefusedOrderSize},
 		{"exposure", 60000001, 40000000, 10000, event.RefusedIRAExposure},
 	} {
@@ -47,7 +48,7 @@ func TestFractionalLimitsUseSharesInsteadOfTicks(t *testing.T) {
 				return
 			}
 			released(t, got)
-			if got.Released.QuantityScale != 10000 || got.Released.Quantity != 72500 || got.Released.Figures.BuyCost != 8.25 || got.Released.Figures.OrderFraction != 7.25/10000 {
+			if got.Released.QuantityScale != 10000 || got.Released.Quantity != 72500 || got.Released.Figures.BuyCost != 8.35 || got.Released.Figures.OrderFraction != 7.25/10000 {
 				t.Fatalf("release: %+v", got.Released)
 			}
 		})
@@ -313,5 +314,42 @@ func TestCheckFillRefusesMatchingIdentityWithDifferentQuantityUnits(t *testing.T
 	}
 	if order.Reported != 0 {
 		t.Fatal("refused fill changed reported quantity")
+	}
+}
+
+func TestFractionalGateReservesCeilingCents(t *testing.T) {
+	o := fractionalOrder("AAA", event.OrderSideBuy, 72500)
+	o.Planned.LimitPrice, o.Planned.ReferencePrice, o.Mark = 10.10, 10.10, 10.10
+	out := checkBook(t, fractionalGate(t, 0), risklimit.Book{QuantityScale: 10000, CashAvailable: 73.225}, o)[0]
+	refusedFor(t, out, event.RefusedInsufficientCash)
+	if out.Refused.Figures.BuyCost != 73.33 {
+		t.Fatalf("cost %v", out.Refused.Figures.BuyCost)
+	}
+}
+
+func TestFractionalRefusalDetailsUseShares(t *testing.T) {
+	for _, brokerSet := range []bool{false, true} {
+		t.Run(map[bool]string{false: "book", true: "broker"}[brokerSet], func(t *testing.T) {
+			g := fractionalGate(t, 0)
+			if brokerSet {
+				b := broker(70000, event.BrokerOrder{BrokerOrderID: "working", InstrumentID: "AAA", Side: event.OrderSideSell, RemainingQuantity: 2500, Status: event.BrokerOrderWorking})
+				b.QuantityScale = 10000
+				b.Positions[0].InstrumentID = "AAA"
+				if _, err := g.ObserveBroker("broker", b); err != nil {
+					t.Fatal(err)
+				}
+			}
+			o := fractionalOrder("AAA", event.OrderSideSell, 72500)
+			out := checkBook(t, g, risklimit.Book{QuantityScale: 10000, Holdings: map[string]int64{"AAA": 70000}, Prices: map[string]float64{"AAA": 1}}, o)[0]
+			if out.Refused == nil {
+				t.Fatal("sale was not refused")
+			}
+			if !strings.Contains(out.Refused.Detail, "sell of 7.25") || strings.Contains(out.Refused.Detail, "72500") || strings.Contains(out.Refused.Detail, "70000") {
+				t.Fatalf("detail %q", out.Refused.Detail)
+			}
+			if brokerSet && !strings.Contains(out.Refused.Detail, "holding 7 net of 0.25 working sells") {
+				t.Fatalf("broker quantities %q", out.Refused.Detail)
+			}
+		})
 	}
 }

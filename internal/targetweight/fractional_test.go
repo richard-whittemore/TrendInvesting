@@ -2,6 +2,7 @@ package targetweight
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
 	"github.com/richard-whittemore/TrendInvesting/internal/reconcile"
 )
 
@@ -92,5 +94,64 @@ func TestFractionalInputUnits(t *testing.T) {
 	retired := event.OrderRetiredPayload{AccountID: cfg.AccountID, ClientOrderID: "synthetic", InstrumentID: "AAA", Side: event.OrderSideSell, Quantity: 7, LimitPrice: 10, RetiredAt: at, RetiredBy: event.OrderRetiredByAdapter, Reason: event.OrderRetiredSessionOver, Detail: "synthetic session ended"}
 	if _, err := h.momentum.applyRetired(envelope(event.OrderRetiredEventType, 1, retired)); err == nil || !strings.Contains(err.Error(), "scale") {
 		t.Fatalf("legacy retirement on fractional account: %v", err)
+	}
+}
+
+// ADR 0026, Worst-case cost and D5: available cash rounds sales down and buys up.
+func TestFractionalFillBudgetUsesDirectionalCents(t *testing.T) {
+	for _, side := range []string{event.OrderSideBuy, event.OrderSideSell} {
+		for _, price := range []float64{10.10, 10.101} {
+			t.Run(side+fmt.Sprint(price), func(t *testing.T) {
+				raw, err := os.ReadFile("../../cmd/engine/testdata/momentum-dry-run.json")
+				if err != nil {
+					t.Fatal(err)
+				}
+				var cfg event.TargetWeightConfigurationPayload
+				if err := json.Unmarshal(raw, &cfg); err != nil {
+					t.Fatal(err)
+				}
+				cfg.Execution.ShareQuantity = event.ShareQuantityFractional
+				cfg.Execution.CashRule = event.CashRuleTotal
+				at := time.Date(2025, 1, 2, 21, 0, 0, 0, time.UTC)
+				h, err := New("momentum/test", cfg, Options{DecideFrom: at})
+				if err != nil {
+					t.Fatal(err)
+				}
+				o := event.OrderReleasedPayload{AccountID: cfg.AccountID, ClientOrderID: "fractional", InstrumentID: "AAA", Side: side, Quantity: 145000, QuantityScale: 10000, LimitPrice: price}
+				r := h.momentum
+				r.orders.Release(o)
+				if err := h.gate.RestoreReleased(o, nil, time.Time{}, ""); err != nil {
+					t.Fatal(err)
+				}
+				r.rebalance = &rebalance{budget: orderplan.NewBudget(100), sold: map[string]int64{}}
+				if side == event.OrderSideBuy {
+					r.rebalance.budget.Release(o.ClientOrderID, 90)
+				}
+				f := event.TargetWeightFillPayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: side, Quantity: 72500, QuantityScale: 10000, Price: price, Commission: 0.01, FillID: "fill", FilledAt: at}
+				payload, err := json.Marshal(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := r.applyFill(event.Envelope{ID: "fill", Type: event.FillEventType, SchemaVersion: f.SchemaVersion(), EventTime: at, Payload: payload}); err != nil {
+					t.Fatal(err)
+				}
+				// Close releases the unused reservation, exposing the actual fill debit.
+				if side == event.OrderSideBuy {
+					r.rebalance.budget.Close(o.ClientOrderID)
+				}
+				want := 26.76
+				if side == event.OrderSideSell {
+					want = 173.21
+					if price == 10.101 {
+						want = 173.22
+					}
+				} else if price == 10.101 {
+					want = 26.75
+				}
+				if got := r.rebalance.budget.Remaining(); math.Abs(got-want) > 1e-12 {
+					t.Fatalf("budget %.8f; want %.2f", got, want)
+				}
+			})
+		}
 	}
 }

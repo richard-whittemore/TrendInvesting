@@ -70,8 +70,11 @@ func (p OrderSkippedPayload) Validate() error {
 		if _, err := FractionalIncrementTicks(p.FractionalIncrement); err != nil {
 			return err
 		}
+		if !plainDecimal(p.RequestedValue) {
+			return errors.New("requested value must be a nonnegative decimal")
+		}
 		value, ok := new(big.Rat).SetString(p.RequestedValue)
-		if !ok || value.Sign() < 0 || strings.ContainsAny(p.RequestedValue, "/eE") {
+		if !ok || value.Sign() < 0 {
 			return errors.New("requested value must be a nonnegative decimal")
 		}
 		if p.Shares != 0 {
@@ -188,4 +191,23 @@ func (p OrderSkippedPayload) MarshalJSON() ([]byte, error) {
 		plain
 		Shares *float64 `json:"shares,omitempty"`
 	}{plain: plain(p)})
+}
+
+// plainDecimal accepts only digits, one optional point and an optional leading
+// minus (ADR 0026, D7-F's exact decimal monetary evidence). SetString alone
+// also accepts base prefixes and underscores, which are not wire decimals.
+func plainDecimal(value string) bool {
+	value = strings.TrimPrefix(value, "-")
+	digits, points := 0, 0
+	for _, ch := range value {
+		switch {
+		case ch >= '0' && ch <= '9':
+			digits++
+		case ch == '.':
+			points++
+		default:
+			return false
+		}
+	}
+	return digits > 0 && points <= 1
 }

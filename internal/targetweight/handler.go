@@ -303,7 +303,8 @@ import (
 //     evidence for an urgent page (ADR 0026, amendment of 2026-10-29).
 //     Decisions use payload version 10; market.mark.unavailable is an input.
 //   - 1.30.0 adds D7-F exact four-place quantities, increment rounding,
-//     decimal capital checks and versioned quantity evidence (ADR 0026 D7-F).
+//     decimal capital checks, the per-execution rounding reserve and
+//     versioned quantity evidence (ADR 0026 D7-F).
 const RulesVersion = "1.30.0"
 
 // source names this handler on every envelope it emits.

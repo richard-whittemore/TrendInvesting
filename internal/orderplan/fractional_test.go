@@ -1,11 +1,13 @@
 package orderplan_test
 
 import (
+	"math"
 	"reflect"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
+	"github.com/richard-whittemore/TrendInvesting/internal/reconcile"
 )
 
 // TestFractionalIRAPlansExactTicks exercises ADR 0026 D7-F with synthetic
@@ -139,7 +141,8 @@ func TestFractionalIRAScalingNeverRoundsBeyondCash(t *testing.T) {
 		price, fees, budget float64
 		want                int64
 	}{
-		{9531250, 10.5, 0.1, 2510.2929999999997, 2390659},
+		// ADR 0026's cent ceiling leaves at most 2510.19 before the 0.10 fee.
+		{9531250, 10.5, 0.1, 2510.2929999999997, 2390657},
 		{6071572541162903999, 100, 0, 7170629157645890, 717062915764589000},
 	} {
 		order := event.OrderPlannedPayload{AccountID: "ira", Tag: iraTag, ClientOrderID: "synthetic-buy", InstrumentID: "AAA", Side: event.OrderSideBuy, Phase: event.OrderSideBuy, OrderType: event.OrderTypeLimit, Quantity: tt.quantity, QuantityScale: 10000, FractionalIncrement: "0.0001", LimitPrice: tt.price, ReferencePrice: tt.price, NetLiquidation: 1e18, PriceBand: 0.05}
@@ -215,10 +218,11 @@ func TestFractionalIRAScaleEdges(t *testing.T) {
 	if kept, skipped, _ := orderplan.ScaleBuys([]event.OrderPlannedPayload{order}, 5, 10); len(kept) != 0 || len(skipped) != 1 {
 		t.Fatalf("fee exceeds cash %+v %+v", kept, skipped)
 	}
-	order.Quantity, order.LimitPrice = 1000000000000000001, 1
-	if kept, _, scale := orderplan.ScaleBuys([]event.OrderPlannedPayload{order}, 1e14, 0); len(kept) != 1 || kept[0].Quantity != 1000000000000000000 || !(scale < 1) {
+	order.Quantity, order.LimitPrice = 1000000000000000010, 10
+	if kept, _, scale := orderplan.ScaleBuys([]event.OrderPlannedPayload{order}, 1e15, 0); len(kept) != 1 || kept[0].Quantity != 1000000000000000000 || !(scale < 1) {
 		t.Fatalf("almost one scale %+v scale%.17g", kept, scale)
 	}
+	order.LimitPrice = 1
 	orders := make([]event.OrderPlannedPayload, 30)
 	for i := range orders {
 		orders[i] = order
@@ -248,5 +252,57 @@ func TestFractionalIRANoHoldingAndCommittedHolding(t *testing.T) {
 	plan := planIRA(t, in)
 	if len(plan.Sells) != 0 || len(plan.Skipped) != 1 || plan.Skipped[0].Reason != event.OrderSkippedHeldByWorkingSells {
 		t.Fatalf("committed holding %+v", plan)
+	}
+}
+
+// ADR 0026, Worst-case cost: two half-cent executions must not borrow a cent.
+func TestFractionalBuyReservationsCoverPostedDebits(t *testing.T) {
+	o := event.OrderPlannedPayload{Quantity: 72500, QuantityScale: 10000, FractionalIncrement: "0.0001", LimitPrice: 10.10}
+	if got := orderplan.BuyCost(o, 0) * 2; got != 146.46 {
+		t.Errorf("two reservations = %.8f; want 146.46", got)
+	}
+	kept, _, _ := orderplan.ScaleBuys([]event.OrderPlannedPayload{o, o}, 146.45, 0)
+	if len(kept) != 2 {
+		t.Fatalf("kept %+v", kept)
+	}
+	cash := int64(14645)
+	for _, b := range kept {
+		if b.Quantity >= o.Quantity {
+			t.Errorf("quantity was not reduced: %d", b.Quantity)
+		}
+		f := event.TargetWeightFillPayload{Quantity: b.Quantity, QuantityScale: b.QuantityScale, Price: b.LimitPrice, Side: event.OrderSideBuy}
+		debit := -reconcile.FillChange(f).Cash
+		if orderplan.BuyCost(b, 0)*100 < float64(debit) {
+			t.Errorf("reservation below booked debit %d", debit)
+		}
+		cash -= debit
+	}
+	if cash < 0 {
+		t.Fatalf("posted cash = %d cents; IRA borrowed", cash)
+	}
+	o.FractionalIncrement = "0.25"
+	kept, _, _ = orderplan.ScaleBuys([]event.OrderPlannedPayload{o, o}, 146.45, 0)
+	if len(kept) != 2 || kept[0].Quantity != 70000 || kept[1].Quantity != 70000 {
+		t.Fatalf("quarter-share basket must lose one increment per order: %+v", kept)
+	}
+}
+
+// ADR 0026, Scaling: the basket must pass the gate's sequential cash checks.
+func TestFractionalBasketFitsRunningCash(t *testing.T) {
+	orders := []event.OrderPlannedPayload{}
+	for _, q := range []int64{3000, 6000, 1000} {
+		orders = append(orders, event.OrderPlannedPayload{Quantity: q, QuantityScale: 10000, FractionalIncrement: "0.0001", LimitPrice: 1})
+	}
+	kept, _, _ := orderplan.ScaleBuys(orders, 1, 0)
+	cash := 1.0
+	for _, o := range kept {
+		cost := orderplan.BuyCost(o, 0)
+		if cost > cash {
+			t.Fatalf("cost %.17g exceeds running cash %.17g", cost, cash)
+		}
+		cash -= cost
+	}
+	if len(kept) != 3 || math.IsNaN(cash) {
+		t.Fatalf("basket %+v cash %v", kept, cash)
 	}
 }

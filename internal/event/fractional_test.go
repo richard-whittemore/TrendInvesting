@@ -461,3 +461,49 @@ func TestFractionalSkipRejectsAmbiguousMonetaryEvidence(t *testing.T) {
 		t.Fatal("planned fractional quantity accepted an invalid increment")
 	}
 }
+
+func TestFractionalRequestedValueRequiresPlainDecimal(t *testing.T) {
+	p := validOrderSkipped()
+	p.QuantityScale, p.Shares, p.Reason = 10000, 0, event.OrderSkippedBelowIncrement
+	for _, value := range []string{"0x10", "0b10", "1_000", "+1", "1e2", "1/2", "1..2", ".", "-"} {
+		t.Run(value, func(t *testing.T) {
+			p.RequestedValue = value
+			if err := p.ValidateSchema(p.SchemaVersion()); err == nil {
+				t.Fatalf("accepted %q", value)
+			}
+		})
+	}
+	for _, value := range []string{"0", "0.001", "123.4500", "-0"} {
+		p.RequestedValue = value
+		if err := p.ValidateSchema(p.SchemaVersion()); err != nil {
+			t.Fatalf("rejected %q: %v", value, err)
+		}
+	}
+}
+
+// ADR 0026, "Worst-case cost" and D5: preserve exact cents, charge buys up,
+// and credit sales down before applying fees.
+func TestConservativeExecutionCents(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		quantity, scale int64
+		price, fees     float64
+		buy             string
+		sale            float64
+	}{
+		{"half cent", 72500, 10000, 10.10, 0.01, "73.24", 73.21},
+		{"above half cent", 72500, 10000, 10.101, 0.01, "73.25", 73.22},
+		{"below cent", 1, 10000, 0.01, 0, "0.01", 0},
+		{"whole exact cents", 3, 0, 0.07, 0, "0.21", 0.21},
+		{"fractional exact cents", 2900, 10000, 1, 0, "0.29", 0.29},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := event.BuyCost(tc.quantity, tc.scale, tc.price, tc.fees).FloatString(2); got != tc.buy {
+				t.Fatalf("buy %s, want %s", got, tc.buy)
+			}
+			if got := event.SaleProceeds(tc.quantity, tc.scale, tc.price, tc.fees); got != tc.sale {
+				t.Fatalf("sale %v, want %v", got, tc.sale)
+			}
+		})
+	}
+}

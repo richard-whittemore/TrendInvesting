@@ -696,3 +696,16 @@ func TestARejectionWhileBuysAreStoppedNamesItsPlace(t *testing.T) {
 		}
 	}
 }
+
+func TestFractionalRefusalAlertDisplaysShares(t *testing.T) {
+	s := newStream(t)
+	p := event.OrderRefusedPayload{AccountID: "joint", PlanID: "plan", Tag: "targets", ClientOrderID: "fractional", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 72500, QuantityScale: 10000, LimitPrice: 10.10, Reason: event.RefusedInsufficientCash, Detail: "insufficient cash", Figures: figures}
+	s.add(event.OrderRefusedEventType, p.SchemaVersion(), "refusal", day(0), p)
+	alerts, err := report.Alerts(s.out, event.TargetWeightStrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || !strings.Contains(alerts[0].Body, "buy 7.25 SPY") || strings.Contains(alerts[0].Body, "72500") {
+		t.Fatalf("alerts %+v", alerts)
+	}
+}

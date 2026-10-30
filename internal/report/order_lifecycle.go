@@ -43,6 +43,7 @@ type Order struct {
 	InstrumentID  string
 	Side          string
 	Quantity      int64
+	QuantityScale int64
 	LimitPrice    float64
 	Mode          string
 	// Send is false for a dry-run release, which is never sent and so is
@@ -187,7 +188,7 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 		}
 		o := &Order{
 			ClientOrderID: p.ClientOrderID, AccountID: p.AccountID, InstrumentID: p.InstrumentID, Side: p.Side,
-			Quantity: p.Quantity, LimitPrice: p.LimitPrice, Mode: p.Mode, Send: p.Send,
+			Quantity: p.Quantity, QuantityScale: p.QuantityScale, LimitPrice: p.LimitPrice, Mode: p.Mode, Send: p.Send,
 			State: LifecycleCommitted, CommittedAt: e.RecordedAt, committedIn: group,
 		}
 		orders = append(orders, o)
@@ -438,7 +439,7 @@ func retire(e event.Envelope, strategyID string, byID map[string]*Order, reports
 // event.LimitOrderLifecyclePayload's Describes.
 func (o *Order) released() event.OrderReleasedPayload {
 	return event.OrderReleasedPayload{ClientOrderID: o.ClientOrderID, AccountID: o.AccountID, InstrumentID: o.InstrumentID,
-		Side: o.Side, Quantity: o.Quantity, LimitPrice: o.LimitPrice}
+		Side: o.Side, Quantity: o.Quantity, QuantityScale: o.QuantityScale, LimitPrice: o.LimitPrice}
 }
 
 // UnacknowledgedAlerts returns an urgent alert for every order to be sent
@@ -458,7 +459,7 @@ func UnacknowledgedAlerts(orders []Order, now time.Time, within time.Duration, d
 			continue
 		}
 		key := "order-unacknowledged:" + o.ClientOrderID + "@" + o.AccountID
-		order := fmt.Sprintf("%s %d %s, limit %.2f, client order ID %s", o.Side, o.Quantity, o.InstrumentID, o.LimitPrice, o.ClientOrderID)
+		order := fmt.Sprintf("%s %s %s, limit %.2f, client order ID %s", o.Side, event.FormatQuantity(o.Quantity, o.QuantityScale), o.InstrumentID, o.LimitPrice, o.ClientOrderID)
 		switch {
 		case o.State == LifecycleRetired:
 			// Told once, whether or not it was paged as unacknowledged first.

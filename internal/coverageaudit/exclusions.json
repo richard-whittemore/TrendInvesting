@@ -1013,6 +1013,14 @@
       "statement": "return nil, err",
       "category": "unreachable-by-invariant",
       "reason": "ExecutionConfiguration.QuantityScale returns only 0 or event.FractionalQuantityScale (10000). Immediately above, NewIRAGate constructs an IRA gate with no book, broker snapshot, orders, ledger snapshots or capital changes. SetQuantityScale accepts both supported scales on that fresh IRA gate, so none of its unsupported-scale, non-IRA or existing-capital-state refusals can occur."
+    },
+    {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "newMomentum",
+      "statement": "return nil, err",
+      "occurrence": 2,
+      "category": "unreachable-by-invariant",
+      "reason": "New validates the execution configuration before calling newMomentum, so fractional rounding slack is either the valid default 0.10 or an explicit value accepted by event.ValidRoundingSlack. NewIRAGate has already constructed an IRA gate, and SetQuantityScale preserves its IRA status. SetRoundingSlackPerOrder refuses only a non-IRA gate or invalid slack, neither of which can occur here (ADR 0026, Per-execution rounding reserve)."
     }
   ]
 }

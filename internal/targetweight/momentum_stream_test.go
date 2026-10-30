@@ -321,7 +321,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	if opts.approval != nil {
 		handler.AwaitApproval()
 	}
-	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
+	apply(s.envelope(t, event.TargetWeightConfigurationEventType, cfg.SchemaVersion(), "configuration", start, cfg))
 	if opts.approval != nil {
 		apply(s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "operator-run-approved", start, *opts.approval))
 	}

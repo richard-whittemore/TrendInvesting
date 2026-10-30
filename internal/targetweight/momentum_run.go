@@ -201,6 +201,15 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 	if err := gate.SetQuantityScale(cfg.Execution.QuantityScale()); err != nil {
 		return nil, err
 	}
+	if cfg.Execution.ShareQuantity == event.ShareQuantityFractional {
+		slack := cfg.Execution.RoundingSlack()
+		// Own the optional value: a caller cannot mutate a frozen run's
+		// cash rule after its configuration hash is derived (ADR 0016).
+		cfg.Execution.RoundingSlackPerOrder = &slack
+		if err := gate.SetRoundingSlackPerOrder(slack); err != nil {
+			return nil, err
+		}
+	}
 	h := &Handler{
 		strategyVersion: strategyVersion,
 		hash:            event.TargetWeightConfigurationHash(cfg),
@@ -956,7 +965,11 @@ func (r *momentumRun) planBuys(b *emissions) {
 	if unexplained := r.h.gate.PendingCashIncrease(reconcile.CashBook(reb.decisionID, reb.snapshot)); unexplained > 0 {
 		reb.budget.Remove(unexplained)
 	}
-	buys, skipped, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
+	buys := slices.Clone(reb.buys)
+	for i := range buys {
+		buys[i].RoundingSlack = r.exec.RoundingSlack()
+	}
+	buys, skipped, _ := orderplan.ScaleBuys(buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
 	r.skipped(b, skipped)
 	var released []string
 	for _, o := range r.check(b, reb, buys, reb.sellsPlanned) {
@@ -983,7 +996,7 @@ func (r *momentumRun) unexplainedCashDrop(reb *rebalance) float64 {
 			o, _ := r.orders.Order(id)
 			for _, fillID := range slices.Sorted(maps.Keys(o.Fills)) {
 				if f := o.Fills[fillID]; !f.FilledAt.After(latest.AsOf) {
-					expected += event.QuantityValue(f.Quantity, f.QuantityScale, f.Price) - f.Commission
+					expected += event.SaleProceeds(f.Quantity, f.QuantityScale, f.Price, f.Commission)
 				}
 			}
 		}
@@ -1168,14 +1181,15 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	if err := r.h.gate.ObserveFill(p); err != nil {
 		return nil, fmt.Errorf("targetweight: fill %s: %w", in.ID, err)
 	}
-	value, reb := event.QuantityValue(p.Quantity, p.QuantityScale, p.Price), r.rebalance
+	reb := r.rebalance
 	if p.Side == event.OrderSideSell {
 		reb.sold[p.InstrumentID] += p.Quantity
 		if r.exec.CashRule == event.CashRuleTotal {
-			reb.budget.AddProceeds(value - p.Commission)
+			reb.budget.AddProceeds(event.SaleProceeds(p.Quantity, p.QuantityScale, p.Price, p.Commission))
 		}
 	} else {
-		reb.budget.Fill(p.ClientOrderID, value+p.Commission)
+		cost, _ := event.BuyCost(p.Quantity, p.QuantityScale, p.Price, p.Commission).Float64()
+		reb.budget.Fill(p.ClientOrderID, cost)
 	}
 	if o.Terminal {
 		return r.terminal(in, o, p.FilledAt)

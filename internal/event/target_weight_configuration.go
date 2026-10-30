@@ -242,6 +242,10 @@ type ExecutionConfiguration struct {
 	// only and defaults to 0.0001 (ADR 0026, point 2).
 	ShareQuantity       string `json:"share_quantity,omitzero"`
 	FractionalIncrement string `json:"fractional_increment,omitzero"`
+	// RoundingSlackPerOrder reserves one cent per possible partial execution
+	// for D7-F (ADR 0026, "Per-execution rounding reserve"). Omitted means
+	// $0.10; an explicit value must lie in [0.01, 1.00].
+	RoundingSlackPerOrder *float64 `json:"rounding_slack_per_order,omitempty"`
 	// MaxFeesPerOrder is the most commission and fees one order can cost,
 	// added to every buy's worst-case cost (ADR 0026, point 2, "Worst-case
 	// cost").
@@ -557,6 +561,14 @@ func (c ExecutionConfiguration) validate() []error {
 	} else if c.FractionalIncrement != "" {
 		errs = append(errs, errors.New("fractional increment requires fractional share quantities"))
 	}
+	if c.RoundingSlackPerOrder != nil {
+		if c.ShareQuantity != ShareQuantityFractional {
+			errs = append(errs, errors.New("rounding slack requires fractional share quantities"))
+		}
+		if !ValidRoundingSlack(*c.RoundingSlackPerOrder) {
+			errs = append(errs, errors.New("execution rounding slack per order must be finite and in [0.01, 1.00] dollars"))
+		}
+	}
 	if !isFinite(c.MaxFeesPerOrder) || c.MaxFeesPerOrder < 0 {
 		errs = append(errs, errors.New("execution max fees per order must be finite and not negative"))
 	}
@@ -643,6 +655,10 @@ func validTradingMode(mode string) bool {
 func TargetWeightConfigurationHash(payload TargetWeightConfigurationPayload) string {
 	if payload.Execution.ShareQuantity == ShareQuantityFractional && payload.Execution.FractionalIncrement == "" {
 		payload.Execution.FractionalIncrement = "0.0001"
+	}
+	if payload.Execution.ShareQuantity == ShareQuantityFractional {
+		slack := payload.Execution.RoundingSlack()
+		payload.Execution.RoundingSlackPerOrder = &slack
 	}
 	prefix := fmt.Sprintf("target-weight-configuration/v%d\n", payload.SchemaVersion())
 	var canonical []byte

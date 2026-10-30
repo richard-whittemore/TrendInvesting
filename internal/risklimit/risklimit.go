@@ -86,6 +86,7 @@ type Gate struct {
 	accountID     string
 	ira           bool
 	maxFees       float64
+	roundingSlack float64
 	limits        event.MarginLimits
 	mode          string
 	decided       map[string]bool
@@ -242,8 +243,9 @@ func NewGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 
 // NewIRAGate returns a Normal gate for an IRA: its exposure limit is at most
 // 1, since an IRA never uses margin, its limits set no margin cushion, and
-// every buy's worst-case cost, its quantity at its limit plus maxFees, must
-// fit the cash available (ADR 0026, point 3). maxSnapshotAge bounds the
+// every buy's worst-case cost, its quantity at its limit plus maxFees and
+// D7-F's rounding slack, must fit the cash available (ADR 0026, point 3 and
+// "Per-execution rounding reserve"). maxSnapshotAge bounds the
 // broker snapshot its broker-holding check reads, as for the margin account.
 func NewIRAGate(accountID string, limits event.MarginLimits, mode string, maxFees float64, maxSnapshotAge time.Duration) (*Gate, error) {
 	if limits.MaxExposure > 1 {
@@ -260,7 +262,19 @@ func NewIRAGate(accountID string, limits event.MarginLimits, mode string, maxFee
 		return nil, err
 	}
 	g.ira, g.maxFees = true, maxFees
+	g.roundingSlack = event.DefaultRoundingSlack
 	return g, nil
+}
+
+// SetRoundingSlackPerOrder configures D7-F's independent cash check from the
+// execution rule (ADR 0026, "Per-execution rounding reserve"). Configure it
+// before checking orders; whole-share orders do not consume this allowance.
+func (g *Gate) SetRoundingSlackPerOrder(slack float64) error {
+	if !g.ira || !event.ValidRoundingSlack(slack) {
+		return errors.New("risklimit: IRA rounding slack must be in [0.01, 1.00] dollars")
+	}
+	g.roundingSlack = slack
+	return nil
 }
 
 func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapshotAge time.Duration) (*Gate, error) {
@@ -778,9 +792,9 @@ func (g *Gate) breach(o Order, f event.RiskFigures, counted int, book *Book, unv
 	available := subtractPending(book.Holdings[p.InstrumentID], book.WorkingSells[p.InstrumentID])
 	switch {
 	case p.Side == event.OrderSideSell && f.BrokerSet && p.Quantity > brokerHeld:
-		return event.RefusedBrokerHolding, fmt.Sprintf("sell of %d exceeds the broker's holding %d net of %d working sells (snapshot %s)", p.Quantity, f.BrokerHolding, f.WorkingSells, g.brokerID)
+		return event.RefusedBrokerHolding, fmt.Sprintf("sell of %s exceeds the broker's holding %s net of %s working sells (snapshot %s)", event.FormatQuantity(p.Quantity, p.QuantityScale), event.FormatQuantity(f.BrokerHolding, p.QuantityScale), event.FormatQuantity(f.WorkingSells, p.QuantityScale), g.brokerID)
 	case p.Side == event.OrderSideSell && p.Quantity > available:
-		return event.RefusedSellExceedsHolding, fmt.Sprintf("sell of %d %s exceeds the %d held net of working and pending sells", p.Quantity, p.InstrumentID, available)
+		return event.RefusedSellExceedsHolding, fmt.Sprintf("sell of %s %s exceeds the %s held net of working and pending sells", event.FormatQuantity(p.Quantity, p.QuantityScale), p.InstrumentID, event.FormatQuantity(available, p.QuantityScale))
 	case counted > g.limits.MaxOrdersPerDecision && p.Side == event.OrderSideBuy:
 		return event.RefusedOrderCount, fmt.Sprintf("%d orders that are not risk-reducing planned at one decision time; the limit is %d, so the plan's buys are refused", counted, g.limits.MaxOrdersPerDecision)
 	case g.riskReducing(p):
@@ -846,7 +860,10 @@ func (g *Gate) figures(o Order, planSize int, book *Book) (f event.RiskFigures, 
 	}
 	if g.ira && p.Side == event.OrderSideBuy {
 		f.CashChecked = true
-		f.BuyCost = event.QuantityValue(p.Quantity, p.QuantityScale, p.LimitPrice) + g.maxFees
+		if p.QuantityScale == event.FractionalQuantityScale {
+			f.RoundingSlack = g.roundingSlack
+		}
+		f.BuyCost, _ = event.BuyReservation(p.Quantity, p.QuantityScale, p.LimitPrice, g.maxFees, f.RoundingSlack).Float64()
 		f.CashAvailable = book.CashAvailable
 	}
 	if holding, working, ok := g.brokerHolding(p.InstrumentID); ok {
