@@ -255,7 +255,9 @@ def drill(interactive=False):
         control.feed(jan + feb)
         ontime = [d['payload'] for d in control.decisions if d['type'] == 'strategy.targets.decided'][-1]
         require(recovered['targets'] == ontime['targets'], 'targets differ from on-time control')
-        require(plans(venue, febtag) and plans(venue, febtag) == plans(control, febtag), 'orders differ from on-time control')
+        mine, theirs = plans(venue, febtag), plans(control, febtag)
+        require(mine and mine == theirs, 'orders differ from on-time control; restarted: ' + json.dumps(mine, sort_keys=True) +
+                '; on-time: ' + json.dumps(theirs, sort_keys=True))
         control.cancel_all('2025-03-03T14:30:00Z')
     finally:
         control.stop()
