@@ -697,7 +697,11 @@ the morning reading at **06:07** uses a check within the default interval.
 A Gateway that missed that nightly restart is stale by the next morning.
 When the interval expires, the link is **unchecked**: executions take the
 later of Gateway time and receipt time, and the next post-close reading
-withholds, naming Gateway's clock. Expiry
+withholds, saying `IB Gateway's clock check passed at <checked_at> but is
+older than the interval (<N> hours); only a new handshake (the Gateway's
+nightly restart or a reconnect) renews it`. If no check passed on this link,
+it says `IB Gateway's clock check has not passed on this link; only a new
+handshake (the Gateway's nightly restart or a reconnect) renews it`. Expiry
 causes no reconnect, queue drain, or delay in journalling reports. New York's
 clocks changing also invalidates the check until a fresh handshake passes.
 

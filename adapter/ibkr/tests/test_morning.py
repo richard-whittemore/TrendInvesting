@@ -612,8 +612,53 @@ class MorningTests(unittest.TestCase):
         loop.start()
         self.at(ny(THURSDAY, 17))
         self.deliver(THURSDAY, loop)
-        self.assert_withheld("Gateway's clock", "stale")
+        self.assert_withheld("IB Gateway's clock check passed at", "older than the interval (12 hours)")
         self.assertEqual(len(self.fake.called("connect")), 1)
+
+    def test_expired_clock_reason_names_the_passed_handshake_and_renewal(self):
+        self.at(ny(THURSDAY, 4))
+        loop = self.loop()
+        loop.config = loop.config._replace(gateway_clock_check_interval=5400)
+        loop.start()
+        self.at(ny(THURSDAY, 17))
+        expected = ("IB Gateway's clock check passed at 2027-01-14T09:00:00Z but is older than the interval "
+                    "(1.5 hours); only a new handshake (the Gateway's nightly restart or a reconnect) renews it")
+        self.assertEqual(loop._gateway_problem(), expected)
+        loop._check_gateway_clock()
+        self.assertEqual(loop._gateway_problem(), expected, "clearing the offset must retain the passed check's time")
+
+    def test_clock_reason_distinguishes_no_passed_check_on_this_link(self):
+        loop = self.loop()
+        loop.start()
+        loop._gateway_zone = ""
+        loop.conn.gateway_clock_offset = None
+        loop._clock_checked_inbox = None
+        self.assertEqual(loop._gateway_problem(),
+                         "IB Gateway's clock check has not passed on this link; only a new handshake "
+                         "(the Gateway's nightly restart or a reconnect) renews it")
+
+    def test_same_date_unchecked_link_with_execution_names_clock_reason_once(self):
+        for faulted in (False, True):
+            with self.subTest(faulted=faulted):
+                self.setUp()
+                self.at(ny(THURSDAY, 16 if faulted else 4))
+                loop = self.loop()
+                loop.start()
+                self.at(ny(THURSDAY, 17))
+                if faulted:
+                    self.release_clock_order(loop)
+                    self.clock_execution(loop, "20270114 16:00:00 EST")
+                    self.assertTrue(loop._clock_fault)
+                    self.fake.positions = [(ACCOUNT, contract(), Decimal("151"), 312.5)]
+                    self.fake.summary = [(a, t, "99594.00" if t == "TotalCashValue" else v, c)
+                                         for a, t, v, c in SUMMARY]
+                self.fake.executions = [(contract(), execution(order_id=0, perm_id=7474, order_ref="", client_id=0,
+                                                               time="20270114 16:30:00 EST"))]
+                reason = loop._gateway_problem()
+                self.assertTrue(reason)
+                self.deliver(THURSDAY, loop)
+                withheld = self.assert_withheld(reason, "execution(s) in the account since the close")
+                self.assertEqual(withheld.count(reason), 1, withheld)
 
     def release_clock_order(self, loop):
         from test_loop import released_order
@@ -674,7 +719,7 @@ class MorningTests(unittest.TestCase):
         self.assertIs(loop.conn.inbox, inbox)
         self.assertEqual(len(self.fake.called("connect")), 1)
         self.deliver(THURSDAY, loop)
-        self.assert_withheld("Gateway's clock", "stale")
+        self.assert_withheld("IB Gateway's clock check passed at", "older than the interval (12 hours)")
 
     def test_passive_hour_jump_faults_first_report_and_withholds_next_reading(self):
         self.at(ny(FRIDAY_MORNING, 7))
@@ -788,7 +833,7 @@ class MorningTests(unittest.TestCase):
         self.assertEqual(self.fake.placed, [])
         self.assertIsNone(loop.tracker._unverified_receipt())
         self.at(ny(FRIDAY_MORNING, 21))
-        self.assertIn("stale", loop._gateway_problem())
+        self.assertIn("older than the interval (12 hours)", loop._gateway_problem())
 
     def test_order_status_has_no_gateway_timestamp_to_cross_check(self):
         loop = self.loop()
@@ -857,7 +902,7 @@ class MorningTests(unittest.TestCase):
         self.assertEqual(loop.tracker._unverified_receipt(), self.now)
         self.fake.executions = [(contract(), execution(time="20270114 15:30:00 EST"))]
         self.assertEqual(collect_broker_orders(loop.conn).executions[0].occurred_at, self.now)
-        self.assertIn("stale", loop._gateway_problem())
+        self.assertIn("older than the interval (1 hours)", loop._gateway_problem())
 
     def test_clock_recheck_does_not_extend_a_cached_handshakes_lifetime(self):
         self.at(ny(FRIDAY_MORNING, 7))
@@ -914,7 +959,7 @@ class MorningTests(unittest.TestCase):
         self.assertIsNone(loop.conn.gateway_clock_offset)
         self.assertEqual(loop.tracker._unverified_receipt(), self.now)
         self.assertTrue(any("clock staleness" in line and "verdict=unchecked" in line for line in logs.output))
-        self.assert_withheld("Gateway's clock", "stale")
+        self.assert_withheld("IB Gateway's clock check passed at", "older than the interval (12 hours)")
 
     # -- IB Gateway's zone: where IBKR's own list starts -------------------------
     def test_a_gateway_in_another_zone_withholds_with_no_execution_listed(self):

@@ -647,9 +647,14 @@ class AdapterLoop:
             return self._clock_fault
         if self._gateway_zone or gateway_clock_trusted(self.conn):
             return self._gateway_zone
-        return (clock_change_problem(self.conn.connected_at, self._now())
-                or "IB Gateway's clock check is stale or has not passed on this link (interval {} seconds)".format(
-                    self.config.gateway_clock_check_interval))
+        changed = clock_change_problem(self.conn.connected_at, self._now())
+        if changed:
+            return changed
+        renewal = "; only a new handshake (the Gateway's nightly restart or a reconnect) renews it"
+        if self._clock_checked_inbox is self.conn.inbox and self.conn.connected_at is not None:
+            return ("IB Gateway's clock check passed at {} but is older than the interval ({:g} hours)".format(
+                _stamp(self.conn.connected_at), self.config.gateway_clock_check_interval / 3600) + renewal)
+        return "IB Gateway's clock check has not passed on this link" + renewal
 
     def _check_gateway_clock(self):
         """Observe handshake validity and staleness without touching the link (ADR 0019).
@@ -1407,6 +1412,8 @@ class AdapterLoop:
             since = [e for e in broker.executions if e.occurred_at >= close_window(close)]
             if since:
                 if gateway:
+                    if gateway in reasons:
+                        reasons.remove(gateway)
                     # The cause first: on a link whose clock is not believed, each execution is stamped no earlier
                     # than the adapter received it (orders.execution_report), so all of the day's are after the close.
                     reasons.insert(0, "{}; so IBKR's execution times on this link are not believed, and each is "

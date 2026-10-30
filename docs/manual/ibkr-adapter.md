@@ -270,7 +270,12 @@ New York**, leaving the **06:07** morning reading within the interval; a
 Gateway that missed its nightly restart is stale by the next morning.
 The staleness verdict is journalled when it changes (its verdict, reason or check time), not on every waiting step. An expired check uses the
 later of Gateway time and receipt time for executions and withholds the
-next post-close reading, naming Gateway's clock.
+next post-close reading, saying `IB Gateway's clock check passed at
+<checked_at> but is older than the interval (<N> hours); only a new handshake
+(the Gateway's nightly restart or a reconnect) renews it`. When no check
+passed on this link, it says `IB Gateway's clock check has not passed on
+this link; only a new handshake (the Gateway's nightly restart or a
+reconnect) renews it`.
 
 On a checked link, a first live execution for an order this adapter run
 actually sent is passively compared with its callback arrival time. An
