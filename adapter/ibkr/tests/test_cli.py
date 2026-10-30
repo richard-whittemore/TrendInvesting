@@ -113,26 +113,45 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(self.run_main(self.argv()), 1)
         self.assertEqual(self.made, [])
 
-    def test_a_missing_ibkr_time_zone_refuses_to_start_before_connecting_and_names_the_package(self):
-        from zoneinfo import ZoneInfoNotFoundError
+    def test_missing_new_york_refuses_even_when_legacy_eastern_resolves(self):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
         asked = []
 
-        def no_legacy_zones(name):
+        def no_new_york(name):
             asked.append(name)
-            if name == "US/Eastern":
+            if name == "America/New_York":
                 raise ZoneInfoNotFoundError(name)
-            return None
+            return ZoneInfo("UTC")
 
         status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
                       should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
-                      zone_lookup=no_legacy_zones)
+                      protobuf_version=lambda: "5.29.5", zone_lookup=no_new_york)
         self.assertEqual(status, 1)
-        self.assertIn("US/Eastern", asked)
+        self.assertEqual(asked, ["America/New_York"])
         message = self.err.getvalue()
-        for word in ("US/Eastern", "tzdata-legacy", "provision.sh base"):
+        for word in ("America/New_York", "execution", "connection", "tzdata", "provision.sh base"):
             self.assertIn(word, message)
-        self.assertEqual(self.made, [], "nothing connects when a zone IBKR names is missing")
+        self.assertNotIn("tzdata-legacy", message)
+        self.assertEqual(self.made, [], "nothing connects when New York's zone is missing")
+
+    def test_new_york_resolves_without_legacy_eastern_and_startup_succeeds(self):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        asked = []
+
+        def no_legacy_eastern(name):
+            asked.append(name)
+            if name == "US/Eastern":
+                raise ZoneInfoNotFoundError(name)
+            return ZoneInfo(name)
+
+        status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
+                      should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                      protobuf_version=lambda: "5.29.5", zone_lookup=no_legacy_eastern)
+        self.assertEqual(status, 0, self.err.getvalue())
+        self.assertEqual(asked, ["America/New_York"])
+        self.assertEqual(len(self.made), 1)
 
     def test_an_unreadable_ibkr_time_zone_file_is_reported_as_corrupt_not_as_not_installed(self):
         def corrupt_zone(name):
@@ -143,7 +162,7 @@ class CommandTests(unittest.TestCase):
                       zone_lookup=corrupt_zone)
         self.assertEqual(status, 1)
         message = self.err.getvalue()
-        self.assertIn("US/Eastern", message)
+        self.assertIn("America/New_York", message)
         self.assertIn("corrupt", message)
         self.assertNotIn("not installed", message)
         self.assertNotIn("cannot be read", message)
@@ -164,7 +183,7 @@ class CommandTests(unittest.TestCase):
                               zone_lookup=unreadable_zone)
                 self.assertEqual(status, 1)
                 message = self.err.getvalue()
-                self.assertIn("US/Eastern", message)
+                self.assertIn("America/New_York", message)
                 self.assertIn(error.strerror, message)
                 self.assertIn("cannot be read", message)
                 self.assertEqual(self.made, [], "nothing connects when a zone IBKR names cannot be read")
@@ -178,12 +197,12 @@ class CommandTests(unittest.TestCase):
         saved = zoneinfo_module.TZPATH
         self.addCleanup(zoneinfo_module.reset_tzpath, to=saved)
         zone_root = self.dir / "zoneinfo"
-        (zone_root / "US" / "Eastern").mkdir(parents=True)
+        (zone_root / "America" / "New_York").mkdir(parents=True)
         zoneinfo_module.reset_tzpath(to=[str(zone_root)])
         # With no tzdata pip package installed, a host has no fallback for the zone; a
         # machine that has one would resolve the name from it, so the fallback is switched off here.
         no_fallback = mock.patch("zoneinfo._common.load_tzdata",
-                                 side_effect=ZoneInfoNotFoundError("US/Eastern"))
+                                 side_effect=ZoneInfoNotFoundError("America/New_York"))
         no_fallback.start()
         self.addCleanup(no_fallback.stop)
 
@@ -192,7 +211,7 @@ class CommandTests(unittest.TestCase):
                       protobuf_version=lambda: "5.29.5", zone_lookup=ZoneInfo.no_cache)
         self.assertEqual(status, 1)
         message = self.err.getvalue()
-        for word in ("US/Eastern", "is not installed", "tzdata-legacy", "provision.sh base"):
+        for word in ("America/New_York", "is not installed", "tzdata", "provision.sh base"):
             self.assertIn(word, message)
         self.assertNotIn("cannot be read", message)
         self.assertEqual(self.made, [], "nothing connects when a zone IBKR names is a directory")

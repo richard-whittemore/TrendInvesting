@@ -19,6 +19,13 @@ It is separate from the engine because IBKR's own client library is Python
 (`ibapi`), and because a fault on the IBKR side should stop one account's
 link, not the program that holds the record (ADR 0025, plan section 3).
 
+Before connecting, the start command checks that `America/New_York` is
+installed. It uses that zone for IBKR's execution and connection times
+under every New York name or Eastern label (ADR 0019, note of 2026-10-28).
+If it is missing, run `sudo deploy/provision.sh base` to install `tzdata`,
+then start the adapter again. The legacy `US/Eastern` zone and
+`tzdata-legacy` package are not required.
+
 ## What it does, piece by piece
 
 | Piece (file) | What it does | Built? |

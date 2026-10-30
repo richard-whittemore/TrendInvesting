@@ -4,7 +4,7 @@
 # x86_64 installer; the Mac mini's arm64 container, TI_TARGET=mac-mini, the
 # same release's pinned Mac/Unix archive: owner decision 2026-10-18, no
 # emulation), that the Mac mini fetches no amd64 Tailscale, that both targets
-# install tzdata-legacy (IBKR's "US/Eastern"), and that `services` refuses a
+# install tzdata for New York (ADR 0019, amended 2026-10-28), and that `services` refuses a
 # Go program in dist/ built for another architecture than the machine's,
 # installing nothing. Each case sources a copy of the provisioner, replaces
 # every command that would change the machine with a stand-in that records
@@ -131,12 +131,14 @@ said "installer not executed" || fail "the skip does not say the installer was n
 if said "not x86_64"; then fail "the skip on x86_64 says 'not x86_64': $(cat "$work/out")"; fi
 if called "runuser"; then fail "the skip ran the installer"; fi
 
-# --- base: tzdata-legacy everywhere; no amd64 Tailscale on the Mac mini.
+# --- base: tzdata without legacy aliases everywhere; no amd64 Tailscale on the Mac mini.
 scenario "" x86_64 base || fail "Lightsail base failed: $(cat "$work/out")"
-called "tzdata-legacy" || fail "Lightsail base does not install tzdata-legacy"
+called " tzdata " || fail "Lightsail base does not install tzdata"
+if called "tzdata-legacy"; then fail "Lightsail base still installs tzdata-legacy"; fi
 called "fetch $TAILSCALE_URL" || fail "Lightsail base no longer fetches Tailscale"
 scenario mac-mini aarch64 base || fail "Mac mini base failed: $(cat "$work/out")"
-called "tzdata-legacy" || fail "Mac mini base does not install tzdata-legacy"
+called " tzdata " || fail "Mac mini base does not install tzdata"
+if called "tzdata-legacy"; then fail "Mac mini base still installs tzdata-legacy"; fi
 if called "tailscale"; then fail "Mac mini base fetches the amd64 Tailscale tarball: $(cat "$work/calls")"; fi
 
 # --- The Mac mini runs no Linux Gateway: `gateway` fetches and runs nothing,

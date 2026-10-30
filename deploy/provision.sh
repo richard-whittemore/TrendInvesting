@@ -196,11 +196,11 @@ step_base() {
     # the owner's tools as ti-trader, and nano for editing the configuration
     # and secret files in place.
     apt-get install -y -qq --no-install-recommends \
-      ca-certificates curl unzip unattended-upgrades python3 tzdata tzdata-legacy sudo nano gnupg >/dev/null
+      ca-certificates curl unzip unattended-upgrades python3 tzdata sudo nano gnupg >/dev/null
   else
     apt-get install -y -qq --no-install-recommends \
       ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
-      libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata tzdata-legacy iptables gnupg >/dev/null
+      libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata iptables gnupg >/dev/null
   fi
 
   log "service users (non-root, no login shell)"

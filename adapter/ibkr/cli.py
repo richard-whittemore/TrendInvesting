@@ -4,7 +4,7 @@ Everything is read and checked before anything connects: the configuration
 (config.AdapterConfig, strict), the account number from exactly one place
 (the configuration file, or one named KEY=VALUE line of the account's own
 file, read bare and never echoed: the repository is public), the time
-zones IBKR's reports name (require_zones), the installed ibapi against the
+zone used to read IBKR's times (require_zones), the installed ibapi against the
 pin (ibapi_pin), and the engine's durable log (read at start by the loop).
 Then the loop runs (loop.AdapterLoop) until SIGTERM or SIGINT, or until it
 stops for a person. Exit status: 0 for a requested stop, 1 for a refusal or
@@ -51,13 +51,11 @@ class Refused(Exception):
     """The command's inputs are unusable; nothing was started."""
 
 
-# The time zones IBKR's reports name: execution times are stated in
-# "US/Eastern" (orders.parse_execution_time), a legacy name Ubuntu 24.04
-# ships only in tzdata-legacy, which `provision.sh base` installs. A missing
-# zone is refused at start, before anything connects, rather than stopping
-# the adapter at the first execution report mid-session (fail closed,
-# AGENTS.md).
-IBKR_ZONES = ("US/Eastern",)
+# Require New York's zone before anything connects: execution and connection
+# times under every New York name or Eastern label are read on this clock
+# (ADR 0019, note of 2026-10-28). A missing zone must refuse startup rather
+# than stop the adapter at the first execution report mid-session.
+IBKR_ZONES = ("America/New_York",)
 
 
 def require_zones(lookup=ZoneInfo):
@@ -66,21 +64,21 @@ def require_zones(lookup=ZoneInfo):
         try:
             lookup(name)
         except ZoneInfoNotFoundError:
-            raise Refused("the time zone {} that IBKR's execution times name is not installed; install the "
-                          "tzdata-legacy package with `sudo deploy/provision.sh base` and start the adapter "
+            raise Refused("the time zone {} used to read IBKR's execution and connection times is not installed; install the "
+                          "tzdata package with `sudo deploy/provision.sh base` and start the adapter "
                           "again".format(name)) from None
         except ValueError:
             # zoneinfo raises ValueError for a zone file that exists but whose content it cannot parse.
-            raise Refused("the time zone {} that IBKR's execution times name is present but corrupt (its "
+            raise Refused("the time zone {} used to read IBKR's execution and connection times is present but corrupt (its "
                           "content cannot be parsed); reinstall the package that provides it with `sudo "
-                          "apt-get install --reinstall tzdata-legacy tzdata` (or restore the zone database "
+                          "apt-get install --reinstall tzdata` (or restore the zone database "
                           "from a good copy) and start the adapter again".format(name)) from None
         except OSError as err:
             # OSError covers PermissionError and other read errors; each is refused as an unreadable zone.
             # A directory in the zone's place never gets here: zoneinfo skips non-regular files, so it is refused above as not installed.
-            raise Refused("the time zone {} that IBKR's execution times name cannot be read ({}); restore the "
+            raise Refused("the time zone {} used to read IBKR's execution and connection times cannot be read ({}); restore the "
                           "zone database's permissions or reinstall it with `sudo apt-get install --reinstall "
-                          "tzdata-legacy tzdata` and start the adapter again".format(
+                          "tzdata` and start the adapter again".format(
                               name, err.strerror or type(err).__name__)) from None
 
 

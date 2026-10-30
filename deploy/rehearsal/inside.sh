@@ -132,10 +132,10 @@ for f in ibkr-login.env secrets.env accounts/boost.env accounts/trad-ira.env acc
 done
 pass "users are non-root, nologin; the secret files are encrypted only, root:root 0600"
 
-# IBKR's execution times name "US/Eastern", which Ubuntu 24.04 ships only in
-# tzdata-legacy; the adapter cannot read an execution without it.
-python3 -c 'from zoneinfo import ZoneInfo; ZoneInfo("US/Eastern")' || fail "the US/Eastern zone IBKR's execution times name is missing"
-pass "the US/Eastern zone is installed"
+# Execution and connection times use New York's clock for every Eastern label
+# (ADR 0019, note of 2026-10-28); tzdata provides the required zone.
+python3 -c 'from zoneinfo import ZoneInfo; ZoneInfo("America/New_York")' || fail "the America/New_York zone used to read IBKR's times is missing"
+pass "the America/New_York zone is installed"
 
 # Pinned artefacts are really installed.
 if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
