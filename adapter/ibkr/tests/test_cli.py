@@ -1,6 +1,7 @@
 """`python3 -m adapter.ibkr run`: the adapter's start command, read strictly before anything connects."""
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -103,6 +104,22 @@ class CommandTests(unittest.TestCase):
         for word in ("--config", "--pending", "--engine-log", "--socket", "--secrets", "--account-key",
                      "--ibapi-record", "--versions", "--streams", "--cash-ledger", "paper_sending_enabled"):
             self.assertIn(word, out)
+
+    def test_entry_point_refuses_missing_new_york_before_importing_adapter_modules(self):
+        zone_root = self.dir / "empty-zoneinfo"
+        zone_root.mkdir()
+        env = dict(os.environ, PYTHONTZPATH=str(zone_root), PYTHONNOUSERSITE="1")
+        # -S also excludes system site-packages, so an installed tzdata cannot
+        # hide the missing server zone database with a pip fallback.
+        result = subprocess.run([sys.executable, "-S", "-m", "adapter.ibkr", *self.argv()],
+                                cwd=str(repo), env=env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.stderr,
+                         "refused: the time zone America/New_York used to read IBKR's execution and connection "
+                         "times is not installed; install the tzdata package with `sudo deploy/provision.sh base` "
+                         "and start the adapter again\n")
 
     def test_an_ibapi_other_than_the_pinned_build_refuses_to_start_before_connecting(self):
         self.record.write_text(record(version="10.50.02"))

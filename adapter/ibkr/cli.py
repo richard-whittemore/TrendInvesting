@@ -20,11 +20,6 @@ import signal
 import sys
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from config import AdapterConfig, ConfigError
-from ibapi_pin import IbapiNotPinned, check_installed
-from loop import AdapterLoop
-from masking import mask_accounts
-
 # How long one exchange with the engine may take (seconds): the engine
 # flushes the input's decisions to its durable log before it replies.
 ENGINE_TIMEOUT = 30.0
@@ -80,6 +75,20 @@ def require_zones(lookup=ZoneInfo):
                           "zone database's permissions or reinstall it with `sudo apt-get install --reinstall "
                           "tzdata` and start the adapter again".format(
                               name, err.strerror or type(err).__name__)) from None
+
+
+# Adapter modules construct New York clocks at import time. Check the zone
+# first so startup reports the same actionable refusal before those imports.
+try:
+    require_zones()
+except Refused as refusal:
+    print("refused: {}".format(refusal), file=sys.stderr)
+    sys.exit(1)
+
+from config import AdapterConfig, ConfigError  # noqa: E402
+from ibapi_pin import IbapiNotPinned, check_installed  # noqa: E402
+from loop import AdapterLoop  # noqa: E402
+from masking import mask_accounts  # noqa: E402
 
 
 def _parser():
