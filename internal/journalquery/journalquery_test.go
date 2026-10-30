@@ -1354,3 +1354,17 @@ func TestMalformedFractionalUnitsCannotPassALegacySurface(t *testing.T) {
 		t.Fatal("accepted malformed fractional unit metadata")
 	}
 }
+
+func TestQuantityScaleOnAnUnversionedPayloadIsRefused(t *testing.T) {
+	// A payload whose fields do not depend on its version carries no quantity
+	// scale; one that claims a scale is refused rather than read as whole shares.
+	d := at(time.March, 2)
+	r := rec{journal.KindInput, event.KillSwitchEventType, event.KillSwitchSchemaVersion, d,
+		map[string]any{"account_id": "A", "as_of": d, "engaged": true, "operator": "owner", "detail": "news",
+			"quantity_scale": 10000}}
+	js := []journalquery.Journal{load(t, "j", build(t, r))}
+	_, err := journalquery.Orders(js, journalquery.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "quantity_scale is not supported at this version") {
+		t.Fatalf("scale on an unversioned payload accepted or unnamed: %v", err)
+	}
+}
