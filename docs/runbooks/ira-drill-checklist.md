@@ -17,9 +17,13 @@ Every recorded attempt needs a valid date, outcome and evidence, including
 failed attempts. The latest attempt for each step determines its status: a
 blank or latest FAIL keeps the gate pending, while a later PASS resolves an
 earlier FAIL without erasing it. Only Richard signs the last row and changes
-Gate status to PASS after every step's latest attempt passes.
+Gate status to PASS after every step's latest attempt passes. The latest
+owner-signoff date must be on or after every other step's latest attempt
+(CONTEXT.md: "IRA dry-run gate"). Use exactly five cells enclosed by leading
+and trailing pipes for every attempt; do not put pipes in evidence text, even
+escaped ones. Malformed attempt rows fail the audit.
 `go test ./internal/manualaudit/` rejects a passed gate with missing, undated
-or latest-failed steps. Evidence paths must be private; record
+or latest-failed steps, or a sign-off that predates a later attempt. Evidence paths must be private; record
 logical instance names only, never account numbers, credentials or screenshots
 with identifiers. Mask `DU` plus **letters and digits** (lesson L12).
 

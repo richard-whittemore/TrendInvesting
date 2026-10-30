@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// TestIRAGateDocumentsOwnerDecisions keeps the operational gate tied to plan.md
-// section 9 and its dated owner decision, rather than elapsed calendar months.
+// TestIRAGateDocumentsOwnerDecisions checks the dated owner decision and each
+// installation's retained evidence (CONTEXT.md: "IRA dry-run gate").
 func TestIRAGateDocumentsOwnerDecisions(t *testing.T) {
 	root := repoRoot(t)
 	raw, err := os.ReadFile(filepath.Join(root, "docs", "live-trading", "plan.md"))
@@ -25,13 +25,20 @@ func TestIRAGateDocumentsOwnerDecisions(t *testing.T) {
 	if strings.Contains(plan, "2 clean dry-run rebalances") {
 		t.Error("plan.md retains superseded gate")
 	}
+	context, err := os.ReadFile(filepath.Join(root, "CONTEXT.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(context), "**IRA dry-run gate**:") {
+		t.Error("CONTEXT.md lacks the IRA dry-run gate rule cited by the checklist audit")
+	}
 	if problems := iraChecklistsProblems(filepath.Join(root, "docs", "runbooks")); len(problems) != 0 {
 		t.Fatal(problems)
 	}
 }
 
-// iraChecklistsProblems includes each installation's retained checklist alongside
-// the template, as required by ira-drill-checklist.md's per-installation sign-off.
+// iraChecklistsProblems audits the template and each installation's retained
+// checklist, as required by CONTEXT.md: "IRA dry-run gate".
 func iraChecklistsProblems(folder string) []string {
 	paths, err := filepath.Glob(filepath.Join(folder, "ira-drill-checklist*.md"))
 	if err != nil || len(paths) == 0 {
@@ -51,9 +58,9 @@ func iraChecklistsProblems(folder string) []string {
 	return problems
 }
 
-// iraChecklistProblems validates the sign-off seam of ira-drill-checklist.md:
-// all attempts remain dated evidence; the latest attempt per step must pass
-// before the gate passes (plan.md section 9 and ira-drill-checklist.md).
+// iraChecklistProblems validates all dated attempts and the owner's sign-off
+// (CONTEXT.md: "IRA dry-run gate"). Each latest attempt must pass, and sign-off
+// must cover every latest attempt; earlier evidence remains in the checklist.
 func iraChecklistProblems(doc string) []string {
 	ids := []string{"paper-free", "no-borrow", "fractional", "market-data", "same-day", "gateway-restart", "logged-out-page", "withheld-page", "restart-hold", "clearance", "missed-recovery", "real-month", "rehearsed-month", "owner-signoff"}
 	var problems []string
@@ -74,12 +81,18 @@ func iraChecklistProblems(doc string) []string {
 	if statuses != 1 {
 		problems = append(problems, "expected one gate status")
 	}
+	latestDates := make(map[string]string, len(ids))
 	for _, id := range ids {
 		found := false
 		lastDate, lastOutcome := "", ""
 		for _, line := range strings.Split(doc, "\n") {
+			attempt := strings.TrimPrefix(strings.TrimSpace(line), "|")
+			if strings.TrimSpace(strings.SplitN(attempt, "|", 2)[0]) != id {
+				continue
+			}
 			cells := strings.Split(line, "|")
-			if len(cells) != 7 || strings.TrimSpace(cells[1]) != id {
+			if len(cells) != 7 || strings.TrimSpace(cells[0]) != "" || strings.TrimSpace(cells[6]) != "" {
+				problems = append(problems, "invalid attempt "+id)
 				continue
 			}
 			date, outcome, evidence := strings.TrimSpace(cells[3]), strings.TrimSpace(cells[4]), strings.TrimSpace(cells[5])
@@ -94,10 +107,18 @@ func iraChecklistProblems(doc string) []string {
 			found = true
 			lastDate, lastOutcome = date, outcome
 		}
+		latestDates[id] = lastDate
 		if !found {
 			problems = append(problems, "missing step "+id)
 		} else if passed && lastOutcome != "PASS" {
 			problems = append(problems, "latest attempt has not passed "+id)
+		}
+	}
+	if passed {
+		for _, id := range ids {
+			if latestDates["owner-signoff"] < latestDates[id] {
+				problems = append(problems, "owner-signoff predates "+id)
+			}
 		}
 	}
 	return problems
@@ -181,5 +202,51 @@ func TestIRAChecklistAuditsInstallationCopies(t *testing.T) {
 	problems := iraChecklistsProblems(folder)
 	if len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), "ira-drill-checklist-roth-ira.md") {
 		t.Fatalf("invalid second installation escaped audit: %v", problems)
+	}
+}
+
+func TestIRAChecklistRejectsMalformedRetry(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "runbooks", "ira-drill-checklist.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := strings.ReplaceAll(string(raw), "| | | |", "| 2026-10-30 | PASS | private evidence |")
+	doc = strings.Replace(doc, "Gate status: PENDING", "Gate status: PASS", 1)
+	for name, retry := range map[string]string{
+		"extra pipe":       "| rehearsed-month | Retry | 2026-10-31 | FAIL | journal output | tail |",
+		"escaped pipe":     `| rehearsed-month | Retry | 2026-10-31 | FAIL | journal output \| tail |`,
+		"no outer pipes":   "rehearsed-month | Retry | 2026-10-31 | FAIL | private evidence",
+		"no trailing pipe": "| rehearsed-month | Retry | 2026-10-31 | FAIL | private evidence",
+		"no leading pipe":  "rehearsed-month | Retry | 2026-10-31 | FAIL | private evidence |",
+	} {
+		t.Run(name, func(t *testing.T) {
+			problems := iraChecklistProblems(doc + "\n" + retry + "\n")
+			if !strings.Contains(strings.Join(problems, "\n"), "invalid attempt rehearsed-month") {
+				t.Fatalf("malformed retry escaped audit: %v", problems)
+			}
+		})
+	}
+}
+
+func TestIRAChecklistSignoffMustCoverLatestAttempts(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "runbooks", "ira-drill-checklist.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := strings.ReplaceAll(string(raw), "| | | |", "| 2026-10-30 | PASS | private evidence |")
+	doc = strings.Replace(doc, "Gate status: PENDING", "Gate status: PASS", 1)
+	doc += "\n| rehearsed-month | Retry failed | 2026-10-31 | FAIL | retained failure |\n" +
+		"| rehearsed-month | Retry passed | 2026-11-01 | PASS | retained success |\n"
+	if problems := iraChecklistProblems(doc); !strings.Contains(strings.Join(problems, "\n"), "owner-signoff predates rehearsed-month") {
+		t.Fatalf("sign-off predating retry escaped audit: %v", problems)
+	}
+	for _, date := range []string{"2026-11-01", "2026-11-02"} {
+		current := doc + "| owner-signoff | Signed latest evidence | " + date + " | PASS | owner signature |\n"
+		if problems := iraChecklistProblems(current); len(problems) != 0 {
+			t.Fatalf("current sign-off rejected: %v", problems)
+		}
+	}
+	if problems := iraChecklistProblems(strings.Replace(doc, "Gate status: PASS", "Gate status: PENDING", 1)); len(problems) != 0 {
+		t.Fatalf("pending gate must retain earlier sign-off: %v", problems)
 	}
 }

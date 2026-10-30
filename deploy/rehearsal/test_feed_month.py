@@ -29,6 +29,52 @@ MONTH = os.path.join(HERE, "..", "..", "cmd", "engine", "testdata", "momentum-mo
 
 
 class MonthStreamTest(unittest.TestCase):
+    def test_retry_after_publication_cleanup_crash_preserves_evidence(self):
+        # ADR 0027 retains published evidence even when publication cleanup is interrupted.
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            log, month = root / "synthetic.log", root / "month.jsonl"
+            log.write_text(json.dumps({"configuration_hash": "sha256:cfg", "strategy_version": "momentum/1"}) + "\n")
+            month.write_text(json.dumps({"id": "first", "type": "market.session.closed",
+                                        "event_time": "2025-01-31T21:00:00Z", "payload": {}}) + "\n")
+            target = root / "streams/synthetic/synthetic-month.jsonl"
+            with contextlib.redirect_stdout(io.StringIO()):
+                with mock.patch.object(ira_stream.os, "unlink", side_effect=KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        ira_stream.write_month(str(log), str(root / "streams"), str(month))
+                published = target.read_bytes()
+                month.write_text(month.read_text().replace('first', 'retry'))
+                with self.assertRaises(FileExistsError):
+                    ira_stream.write_month(str(log), str(root / "streams"), str(month))
+                self.assertEqual(target.read_bytes(), published)
+
+    def test_concurrent_attempt_cannot_modify_published_inode(self):
+        # ADR 0027 gives each attempt its own inode through publication and cleanup.
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            log, month = root / "synthetic.log", root / "month.jsonl"
+            log.write_text(json.dumps({"configuration_hash": "sha256:cfg", "strategy_version": "momentum/1"}) + "\n")
+            month.write_text(json.dumps({"id": "first", "type": "market.session.closed",
+                                        "event_time": "2025-01-31T21:00:00Z", "payload": {}}) + "\n")
+            target = root / "streams/synthetic/synthetic-month.jsonl"
+            link = os.link
+            attempts = []
+
+            def publish_and_race(source, destination):
+                attempts.append(source)
+                link(source, destination)
+                published = target.read_bytes()
+                month.write_text(month.read_text().replace('first', 'racer'))
+                with mock.patch.object(ira_stream.os, "link", side_effect=lambda src, dst: (attempts.append(src), link(src, dst))):
+                    with self.assertRaises(FileExistsError):
+                        ira_stream.write_month(str(log), str(root / "streams"), str(month))
+                self.assertEqual(target.read_bytes(), published)
+
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(ira_stream.os, "link", side_effect=publish_and_race):
+                ira_stream.write_month(str(log), str(root / "streams"), str(month))
+            self.assertEqual(len(set(attempts)), 2)
+            self.assertFalse(any(Path(attempt).exists() for attempt in attempts))
+
     def test_serialized_payload_bytes_match_their_hash(self):
         # ADR 0016 hashes the payload bytes consumed by the engine, including JSON spacing.
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:

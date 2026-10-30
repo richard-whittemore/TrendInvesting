@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 
 PRICES = {"IEF": 95.0, "SHY": 82.0, "SPY": 500.0}
 ROWS = [("R00", 60.0, "Information Technology"), ("R01", 45.0, "Health Care"), ("R02", 30.0, "Energy")]
@@ -88,18 +89,23 @@ def write_month(engine_log, streams, month):
     folder = os.path.join(streams, run)
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, "synthetic-month.jsonl")
-    with open(month, encoding="utf-8") as source, open(path + ".part", "w", encoding="utf-8") as out:
-        for n, raw in enumerate(source, 1):
-            row = json.loads(raw)
-            payload = json.dumps(row["payload"], separators=(",", ":"))
-            row.update(envelope_version=1, sequence=n, source="synthetic-ira-stream",
-                       recorded_at=row["event_time"], correlation_id=run,
-                       configuration_hash=header["configuration_hash"], strategy_version=header["strategy_version"],
-                       payload_hash=hashlib.sha256(payload.encode()).hexdigest())
-            out.write(json.dumps(row, separators=(",", ":")) + "\n")
-    # Publish only a complete stream without replacing prior evidence (AGENTS.md rule 6).
-    os.link(path + ".part", path)
-    os.unlink(path + ".part")
+    # Each attempt owns its temporary inode; retries cannot truncate published evidence (ADR 0027).
+    out = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="synthetic-month-",
+                                      suffix=".part", dir=folder, delete=False)
+    try:
+        with out, open(month, encoding="utf-8") as source:
+            for n, raw in enumerate(source, 1):
+                row = json.loads(raw)
+                payload = json.dumps(row["payload"], separators=(",", ":"))
+                row.update(envelope_version=1, sequence=n, source="synthetic-ira-stream",
+                           recorded_at=row["event_time"], correlation_id=run,
+                           configuration_hash=header["configuration_hash"], strategy_version=header["strategy_version"],
+                           payload_hash=hashlib.sha256(payload.encode()).hexdigest())
+                out.write(json.dumps(row, separators=(",", ":")) + "\n")
+        # Publish only a complete stream without replacing prior evidence (ADR 0027).
+        os.link(out.name, path)
+    finally:
+        os.unlink(out.name)
     print(path)
 
 

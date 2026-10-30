@@ -130,11 +130,26 @@ as evidence and never replayed. The installed configuration hash and strategy
 version must match the recording. It refuses a running or starting systemd
 engine unit, an unknown unit state, an existing live socket (even stale), and
 any configuration outside momentum dry-run. It starts no adapter and releases only `send=false` orders.
-Every run gets a new private socket, log and journal under `/tmp`; it never
+Every run gets a new private socket, log and journal under `TI_TEST_SOCKET_DIR`
+when set, otherwise `/tmp`; it never
 uses the original run's output folders or operator inbox. The byte-for-byte
 input copy, configuration, durable replay log, journal and engine output
 stay there on success or failure. Preserve the folder in private durable
 storage before `/tmp` is cleared. No command prints an IBKR identifier.
+
+The reader retains compact committed-input offsets and only the selected
+rebalance's decisions; payloads are streamed through the evidence copy and
+replay (lessons-2026-10.md L1).
+
+A reducer input refusal leaves this gate pending. The durable format stores
+input/decision groups but no original reply status or refusal message
+(`internal/journal/recorder.go`, `record`; ADR 0027). A refused input and a
+successful input that emitted no decisions can therefore have identical
+recorded groups. Replay cannot verify that a refusal reproduces the original
+outcome from this source alone, and reports that limitation. The fake-venue
+drill can check its specifically declared refusal; a historical replay has
+no such independent expectation. Verifying historical refusals requires
+persisted outcome evidence before this restriction can be lifted.
 
 A withheld attempt instead prints, for example:
 
@@ -143,10 +158,13 @@ A withheld attempt instead prints, for example:
 ```
 
 It exits nonzero, retains evidence, and leaves the gate pending. A decided
-month with withheld picks or refused orders also fails. The command compares
-the selected decision, all its plans and its releases field by field against
-the recording, ignoring envelope run identity, sequence and client order IDs
-(including their plan references). It prints the first difference and fails
+month with withheld picks or refused orders under that decision's rebalance tag also fails.
+A withheld recorded decision fails with `recorded run withheld: <reason>`
+before field comparison. The command compares the selected decision, all its
+plans and its releases/refusals field by field against the recording, ignoring
+envelope run identity and sequence. Client order IDs are normalized through
+a one-to-one mapping shared by plans, outcomes and references; missing IDs,
+collisions and broken references fail. It prints the first difference and fails
 if any field, order or count differs. PASS appears only after the child exits
 cleanly and the durable output passes comparison. This
 replay never repairs a missed real month and does not prove fractional

@@ -44,7 +44,7 @@ class SyntheticMonthTest(unittest.TestCase):
 class DrillFlowTest(unittest.TestCase):
     """Exercise both execution phases and restart reports (ADR 0026 points 2/5)."""
 
-    def run_drill(self, change=None):
+    def run_drill(self, change=None, inspect=None):
         import importlib.util
         import json
         import tempfile
@@ -53,11 +53,13 @@ class DrillFlowTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('drills_flow', HERE / 'ira-drills.py')
         drills = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(drills)
-        instances, actions = [], []
+        instances, actions, owners = [], [], {}
         tag = 'targets-decided:' + drills.ACCOUNT + ':'
 
         class Venue:
             def __init__(self, folder, engine, config, asof, approval):
+                if inspect:
+                    inspect(folder, config, owners)
                 self.role = ('first', 'restart', 'control')[len(instances)]
                 instances.append(self)
                 self.folder = folder
@@ -113,8 +115,9 @@ class DrillFlowTest(unittest.TestCase):
             base = Path(temporary) / 'evidence'
             base.mkdir()
             patches = [patch.object(drills.os, 'geteuid', return_value=0),
-                       patch.object(drills.os, 'chown'),
-                       patch.object(drills.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=0, pw_gid=0)),
+                       patch.object(drills.os, 'chown', side_effect=lambda path, uid, gid: owners.update({Path(path): uid})),
+                       patch.object(drills.os, 'fchown'),
+                       patch.object(drills.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=12345, pw_gid=12345)),
                        patch.object(drills.tempfile, 'mkdtemp', return_value=str(base)),
                        patch.object(drills, 'FakeVenue', Venue), patch.object(drills, 'operate', operate)]
             from contextlib import ExitStack, redirect_stdout
@@ -123,7 +126,22 @@ class DrillFlowTest(unittest.TestCase):
                 for p in patches:
                     stack.enter_context(p)
                 drills.drill()
+                self.assertEqual(drills.tempfile.mkdtemp.call_args.kwargs['dir'],
+                                 os.environ.get('TI_TEST_SOCKET_DIR') or '/tmp')
         return actions
+
+    def test_privileged_config_stays_in_root_controlled_folder(self):
+        def inspect(folder, config, owners):
+            self.assertIn(owners.get(config.parent, -1), (-1, 0),
+                          'config parent must remain root-owned')
+            self.assertNotIn(config, owners, 'never chown config through its path after writing')
+            self.assertEqual(config.stat().st_mode & 0o777, 0o640)
+        self.run_drill(inspect=inspect)
+
+    def test_drill_socket_folders_follow_override(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, TI_TEST_SOCKET_DIR='/tmp/synthetic-socket-root'):
+            self.run_drill()
 
     def test_reconnect_cancels_precede_clearance_and_both_phases_finish(self):
         actions = self.run_drill()
@@ -142,7 +160,13 @@ class DrillFlowTest(unittest.TestCase):
                 row['payload']['reason'] = 'insufficient-cash'
             return row
 
-        for name, change in [('quantity', change_quantity), ('missing', lambda row: None), ('refused', refuse)]:
+        def change_release_only(row):
+            if row['type'] == 'risk.order.released':
+                row['payload']['limit_price'] += 1
+            return row
+
+        for name, change in [('quantity', change_quantity), ('release-only', change_release_only),
+                             ('missing', lambda row: None), ('refused', refuse)]:
             with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, 'orders differ|both.*phases|refused'):
                 self.run_drill(change)
 
@@ -181,3 +205,38 @@ class ReconnectedReportsTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'expected.*refusal'):
                     venue.cancel_reports([order], '2025-01-31T22:00:30Z',
                                          expected_refusal='which this run never released')
+
+
+class PrivilegedOutputTest(unittest.TestCase):
+    def test_trader_output_symlink_cannot_overwrite_protected_file(self):
+        # ADR 0026 isolates the fake engine user; privileged evidence stays outside its write scope.
+        import importlib.util
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location('drills_outputs', HERE / 'ira-drills.py')
+        drills = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(drills)
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TI_TEST_SOCKET_DIR') or '/tmp') as temporary:
+            base = Path(temporary)
+            folder = base / 'restart'
+            folder.mkdir()
+            protected = base / 'protected'
+            protected.write_text('preserved')
+            (folder / 'run-output.txt').symlink_to(protected)
+            identity = SimpleNamespace(pw_uid=12345, pw_gid=12345)
+            opened = []
+
+            def stop_before_engine(*args, **kwargs):
+                opened.append(Path(kwargs['stdout'].name))
+                kwargs['stdout'].close()
+                raise RuntimeError('synthetic engine stop')
+
+            with patch.object(drills.pwd, 'getpwnam', return_value=identity), \
+                    patch.object(drills.os, 'chown'), \
+                    patch.object(drills.subprocess, 'Popen', side_effect=stop_before_engine):
+                with self.assertRaisesRegex(RuntimeError, 'synthetic engine stop'):
+                    drills.FakeVenue(folder, 'engine', base / 'config.json', 'synthetic', base / 'approval.json')
+            self.assertEqual(protected.read_text(), 'preserved')
+            self.assertNotEqual(opened[0].parent, folder)
+            self.assertEqual(opened[0].parent.stat().st_mode & 0o777, 0o700)

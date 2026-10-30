@@ -74,6 +74,9 @@ _Avoid_: sent (the log cannot show that an order reached the broker; acknowledge
 **Committed reply**:
 The one reply an input ever gets: built from the group the durable log committed for it, so it is byte-identical however often the adapter asks for it, before a restart or after one. The adapter asks by sending the input again under its ID; the input is never applied twice (ADR 0027, amendment "re-delivery on request").
 
+**IRA dry-run gate**:
+The owner-signed operational gate for each IRA installation: one real month-end decided cleanly in dry-run and one rehearsed month over recorded inputs, with every prerequisite and drill passing (docs/live-trading/plan.md §9, owner decision 2026-10-28; ADR 0026 points 1, 2 and 5; ADR 0027 restart model). The template and every installation copy of docs/runbooks/ira-drill-checklist.md retain all dated attempts. A step's latest attempt determines its status; malformed rows, missing evidence, a blank or a latest FAIL cannot pass. A PASS gate requires the owner's latest sign-off date to be on or after every other step's latest attempt. Earlier failures and sign-offs remain evidence. This gate does not authorize sending orders; paper remains a separate gate.
+
 **risk-free**:
 A held Unit whose current Protective Stop, after being raised by the Stop Ladder, sits at or above its own entry price — reachable only by raising, never by an initial stop, which must sit strictly below entry. Its contribution to a Campaign's aggregate open risk is exactly zero: `max(0, EntryPrice − ProtectiveStop)`, a per-share price distance, never a negative figure and never a validation failure — sizing.AggregateOpenRisk scales that distance by the Unit's Quantity and by DollarsPerPoint to reach the account-currency figure. A break-even or profit-protecting stop is a legitimate outcome of the Stop Ladder, not a corrupted one (The Turtle Rules p.23–24).
 _Avoid_: risk-free rate (the unrelated finance term).

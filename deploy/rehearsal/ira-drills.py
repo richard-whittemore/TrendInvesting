@@ -86,7 +86,11 @@ class FakeVenue:
         os.chmod(self.sockdir, 0o700)
         os.chown(self.sockdir, trader.pw_uid, trader.pw_gid)
         self.log = folder / ('fresh.log' if (folder / 'run.log').exists() else 'run.log')
-        self.output = (folder / (self.log.stem + '-output.txt')).open('w')
+        # Privileged output belongs outside the engine user's write scope (ADR 0026).
+        outputs = folder.parent / 'outputs'
+        outputs.mkdir(mode=0o700, exist_ok=True)
+        output_path = outputs / (folder.name + '-' + self.log.stem + '-output.txt')
+        self.output = output_path.open('x')
         self.process = subprocess.Popen([engine, '-mode', 'paper', '-config', str(config), '-as-of', asof,
                                          '-socket', str(self.sockdir / 'engine.sock'), '-log', str(self.log),
                                          '-out', str(self.log.with_suffix('.journal')), '-operator', str(self.inbox),
@@ -100,7 +104,7 @@ class FakeVenue:
                     self.output.flush()
                     # The engine's own words say why (the evidence folder is private to the container).
                     require(False, 'engine did not listen; inspect ' + str(folder) + '\n' +
-                            (folder / (self.log.stem + '-output.txt')).read_text()[-1500:])
+                            output_path.read_text()[-1500:])
                 time.sleep(0.05)
             self.header = json.loads(self.log.read_text().splitlines()[0])
             self.conn = socket.socket(socket.AF_UNIX)
@@ -200,24 +204,29 @@ def drill(interactive=False):
     operator = os.environ.get('TI_DRILL_OPERATOR', '/opt/trend-investing/bin/operator')
     fixture = Path(os.environ.get('TI_DRILL_MONTH', str(ROOT / 'cmd/engine/testdata/momentum-month.jsonl')))
     config_source = Path(os.environ.get('TI_DRILL_CONFIG', str(ROOT / 'cmd/engine/testdata/momentum-dry-run.json')))
-    base = Path(tempfile.mkdtemp(prefix='ira-drill-', dir='/tmp'))
+    base = Path(tempfile.mkdtemp(prefix='ira-drill-', dir=os.environ.get('TI_TEST_SOCKET_DIR') or '/tmp'))
     trader = pwd.getpwnam('ti-trader')
-    os.chown(base, trader.pw_uid, trader.pw_gid)
+    # Root owns the parent of every privileged write; the engine may traverse it (ADR 0026).
+    os.chown(base, -1, trader.pw_gid)
     os.chmod(base, 0o750)
     print('Evidence: ' + str(base), flush=True)
     cfg = json.loads(config_source.read_text())
     cfg['mode'], cfg['account_id'] = 'paper', ACCOUNT
     config = base / 'config.json'
-    config.write_text(json.dumps(cfg))
-    config.chmod(0o640)
-    os.chown(config, trader.pw_uid, trader.pw_gid)
+    with config.open('x') as output:
+        os.fchmod(output.fileno(), 0o640)
+        os.fchown(output.fileno(), -1, trader.pw_gid)
+        json.dump(cfg, output)
+    approvals = base / 'approvals'
+    approvals.mkdir(mode=0o750)
+    os.chown(approvals, trader.pw_uid, trader.pw_gid)
     jan, feb = month(fixture), month(fixture, 28)
     tag = 'targets-decided:' + ACCOUNT + ':2025-01-31T21:00:00Z'
     febtag = 'targets-decided:' + ACCOUNT + ':2025-02-28T21:00:00Z'
     folder = base / 'restart'
     folder.mkdir(mode=0o750)
     os.chown(folder, trader.pw_uid, trader.pw_gid)
-    first = base / 'first.json'
+    first = approvals / 'first.json'
     operate(operator, 'ti-trader', 'approve', '-first-run', '-strategy', 'momentum', '-account', ACCOUNT,
             '-by', 'owner', '-positions', HELD + '=' + str(HELD_QUANTITY), '-cash', '10000', '-currency', 'USD',
             '-at', '2025-01-02T13:00:00Z', '-out', first)
@@ -234,7 +243,7 @@ def drill(interactive=False):
     finally:
         venue.stop()
     print('STOPPED: sells working; buys not released', flush=True)
-    fresh = base / 'approval.json'
+    fresh = approvals / 'approval.json'
     text = operate(operator, 'ti-trader', 'approve', '-log', venue.log, '-account', ACCOUNT,
                    '-by', 'owner', '-out', fresh, '-at', '2025-01-31T22:00:00Z')
     require('ends mid-rebalance' in text and 'sells-working' in text, 'approval did not carry sells in progress')
@@ -274,7 +283,7 @@ def drill(interactive=False):
     finally:
         venue.stop()
     end = operate(operator, 'ti-trader', 'approve', '-log', venue.log, '-account', ACCOUNT,
-                  '-by', 'owner', '-out', base / 'end.json')
+                  '-by', 'owner', '-out', approvals / 'end.json')
     require('no rebalance in progress' in end, 'fake did not reach a terminal end state')
     control = FakeVenue(base / 'control', engine, config, '2025-02-28T21:00:00Z', first)
     try:
@@ -299,7 +308,7 @@ def drill(interactive=False):
     finally:
         control.stop()
     control_end = operate(operator, 'ti-trader', 'approve', '-log', control.log, '-account', ACCOUNT,
-                          '-by', 'owner', '-out', base / 'control-end.json')
+                          '-by', 'owner', '-out', approvals / 'control-end.json')
     require('no rebalance in progress' in control_end, 'control did not reach a terminal end state')
     print('RECOVERED: next month equals on-time targets and orders; no old buys\n'
           'FAKE ONLY: no adapter or broker connection', flush=True)

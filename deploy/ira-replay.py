@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import json
 import importlib.util
+from itertools import islice
 import re
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 CONFIGURATION = 'strategy.target-weight.configuration'
 APPROVAL = 'operator.run.approved'
-DECISIONS = {'strategy.targets.decided', 'strategy.order.planned', 'risk.order.released'}
+DECISIONS = {'strategy.targets.decided', 'strategy.order.planned', 'risk.order.released', 'risk.order.refused'}
 
 
 def log_reader():
@@ -36,28 +37,49 @@ def log_reader():
     return module
 
 
-def recording(path):
+def recording(path, close=None, verify_send=False):
     reader = log_reader()
+    decisions, tags = [], set()
+
+    def keep(group):
+        # Keep only input offsets and this rebalance (lessons-2026-10.md L1; ADR 0027).
+        for _, kind, env in group:
+            if kind != 'decision':
+                continue
+            payload = env['payload']
+            if verify_send and env['type'] == 'risk.order.released' and payload['send'] is not False:
+                raise ValueError('replay released a sendable order')
+            if env['type'] == 'strategy.targets.decided' and payload['session_period_end'] == close:
+                tags.add(env['id'])
+                decisions.append(env)
+            elif env['type'] in DECISIONS and payload.get('tag') in tags:
+                decisions.append(env)
+        n, kind, env = group[0]
+        return n, kind, env['type'], env['id']
+
     try:
-        log = reader.read(path)
+        log = reader.read(path, keep=keep)
     except reader.LogUnreadable as error:
         raise ValueError('invalid durable log at line ' + str(error.line) + '; inspect private evidence') from None
     if log.chain_break is not None:
         raise ValueError('durable log chain differs at record ' + str(log.chain_break))
-    # Keep payload bytes, including number spellings and whitespace (ADR 0016).
-    wanted = {n: (kind, env) for group in log.groups for n, kind, env in group}
-    rows, decisions = [], []
+    return log, recorded_inputs(path, log), decisions
+
+
+def recorded_inputs(path, log):
+    # A second streaming pass preserves exact payload bytes (ADR 0016); no payload list (lessons-2026-10.md L1).
+    reader = log_reader()
+    wanted = iter(log.groups)
+    item = next(wanted, None)
     with path.open('rb') as source:
         for n, raw in enumerate(source, 1):
-            if n not in wanted:
+            if item is None:
+                break
+            if n != item[0]:
                 continue
-            kind, env = wanted[n]
-            if kind == 'input':
-                record = json.loads(raw)['record']
-                rows.append((env, reader._payload(path, n, raw.rstrip(b'\n'), record).decode()))
-            else:
-                decisions.append(env)
-    return log, rows, decisions
+            record = json.loads(raw)['record']
+            yield record['envelope'], reader._payload(path, n, raw.rstrip(b'\n'), record).decode()
+            item = next(wanted, None)
 
 
 def inputs(path):
@@ -83,14 +105,12 @@ def redact(text, account=''):
     if account:
         text = text.replace(account, '<account>')
     text = re.sub(r'("account_id"\s*:\s*)"[^"]*"', r'\1"<account>"', text)
-    return re.sub(r'(?:DU[A-Za-z0-9]+|U[0-9]+)', '<account>', text)
+    return re.sub(r'\b(?:DU[0-9A-Z]{5,}|U[0-9]{5,})\b', '<account>', text)
 
 
 def first_difference(expected, actual, path='decision'):
     if isinstance(expected, dict) and isinstance(actual, dict):
         for key in sorted(set(expected) | set(actual)):
-            if key == 'client_order_id':
-                continue
             if key not in expected or key not in actual:
                 return path + '.' + key + ': missing field'
             difference = first_difference(expected[key], actual[key], path + '.' + key)
@@ -114,30 +134,68 @@ def month_decisions(decisions, close):
     if len(selected) != 1:
         raise ValueError('requested close did not produce exactly one decision')
     decision = selected[0]
-    tag = decision['id']
-    selected = []
-    for row in decisions:
-        if row is not decision and not (row['type'] in DECISIONS and row['payload'].get('tag') == tag):
+    return [row for row in decisions if row is decision or
+            (row['type'] in DECISIONS and row['payload'].get('tag') == decision['id'])]
+
+
+def normalize_orders(selected):
+    # Preserve one-to-one order identities and plan references across both phases (ADR 0026 point 2).
+    clients, references, seen, outcomes = {}, {}, set(), set()
+    prefixes = {'strategy.order.planned': 'order-planned:', 'risk.order.released': 'risk-order-released:',
+                'risk.order.refused': 'risk-order-refused:'}
+    for row in selected:
+        if row['type'] not in prefixes:
             continue
-        payload = dict(row['payload'])
-        # Release plan references contain the ignored client order ID (ADR 0026 point 2).
-        if 'client_order_id' in payload and payload.get('plan_id') == 'order-planned:' + payload['client_order_id']:
-            payload['plan_id'] = 'order-planned:<client-order-id>'
+        payload = row['payload']
+        client = payload.get('client_order_id')
+        if not isinstance(client, str) or not client:
+            raise ValueError('order identity: missing client_order_id')
+        ident = row.get('id')
+        if ident != prefixes[row['type']] + client or ident in seen:
+            raise ValueError('order identity: missing, inconsistent or duplicate envelope id')
+        seen.add(ident)
+        if row['type'] == 'strategy.order.planned':
+            if client in clients:
+                raise ValueError('order identity: client_order_id collision')
+            clients[client] = '<order-' + str(len(clients)) + '>'
+        elif client not in clients or payload.get('plan_id') != 'order-planned:' + client:
+            raise ValueError('order identity: inconsistent plan_id reference')
+        elif client in outcomes:
+            raise ValueError('order identity: duplicate release/refusal')
+        else:
+            outcomes.add(client)
+        references[ident] = prefixes[row['type']] + clients[client]
+
+    def reference(value):
+        if value in references:
+            return references[value]
+        if any(value.startswith(prefix) for prefix in prefixes.values()):
+            raise ValueError('order identity: unresolved reference')
+        return value
+
+    normalized = []
+    for row in selected:
         envelope = {k: v for k, v in row.items() if k not in
                     ('sequence', 'strategy_version', 'configuration_hash', 'payload_hash')}
-        client = payload.get('client_order_id')
-        if client:
-            for field in ('id', 'causation_id', 'correlation_id'):
-                for prefix in ('order-planned:', 'risk-order-released:'):
-                    if envelope.get(field) == prefix + client:
-                        envelope[field] = prefix + '<client-order-id>'
+        payload = dict(row['payload'])
+        if row['type'] in prefixes:
+            payload['client_order_id'] = clients[payload['client_order_id']]
+            if 'plan_id' in payload:
+                payload['plan_id'] = reference(payload['plan_id'])
+        for field in ('id', 'causation_id', 'correlation_id'):
+            if field in envelope:
+                envelope[field] = reference(envelope[field])
         envelope['payload'] = payload
-        selected.append(envelope)
-    return selected
+        normalized.append(envelope)
+    return normalized
 
 
 def compare_month(recorded, replayed, close):
-    difference = first_difference(month_decisions(recorded, close), month_decisions(replayed, close))
+    original = month_decisions(recorded, close)
+    outcome = next(d['payload'] for d in original if d['type'] == 'strategy.targets.decided')
+    if outcome['outcome'] != 'decided':
+        raise ValueError('recorded run withheld: ' + outcome.get('withheld_reason', outcome['outcome']))
+    difference = first_difference(normalize_orders(original), normalize_orders(month_decisions(replayed, close)))
     if difference:
         raise ValueError('replay first difference: ' + difference)
 
@@ -201,10 +259,15 @@ def approval_history(source, rows, folder):
 def check_close(rows, close):
     end = dt.datetime.strptime(close, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)
     day = end.astimezone(ZoneInfo('America/New_York')).date().isoformat()
-    sessions = sorted({s for r in rows if r['type'] == 'market.session.calendar' for s in r['payload']['sessions']})
-    following = next((s for s in sessions if s > day), None)
-    if not following or following[:7] == day[:7] or not any(
-            r['type'] == 'market.session.closed' and r['payload']['period_end'] == close for r in rows):
+    following, closed = None, False
+    for row in rows:
+        if row['type'] == 'market.session.calendar':
+            for session in row['payload']['sessions']:
+                if session > day and (following is None or session < following):
+                    following = session
+        elif row['type'] == 'market.session.closed' and row['payload']['period_end'] == close:
+            closed = True
+    if not following or following[:7] == day[:7] or not closed:
         raise ValueError('recorded stream does not prove the requested month-end close and following session')
     return end
 
@@ -230,20 +293,28 @@ def replay(instance, close, source):
     if cfg.get('mode') != 'dry-run' or cfg.get('strategy_id') != 'momentum':
         raise ValueError('only a momentum dry-run configuration may be replayed')
     # mkdtemp makes new private folders, never an existing run's folders (ADR 0027).
-    evidence = Path(tempfile.mkdtemp(prefix='ira-replay-', dir='/tmp'))
+    evidence = Path(tempfile.mkdtemp(prefix='ira-replay-', dir=os.environ.get('TI_TEST_SOCKET_DIR') or '/tmp'))
     print('Evidence: ' + str(evidence), flush=True)
     shutil.copyfile(source, evidence / 'recorded.jsonl')
     shutil.copyfile(config, evidence / 'config.json')
-    log, recorded_rows, recorded_decisions = recording(evidence / 'recorded.jsonl')
-    rows = [row for row, _ in recorded_rows]
-    check_close(rows, close)
-    if not rows or rows[0]['type'] != CONFIGURATION or sum(r['type'] == CONFIGURATION for r in rows) != 1:
+    source_copy = evidence / 'recorded.jsonl'
+    log, recorded_rows, recorded_decisions = recording(source_copy, close)
+    check_close((row for row, _ in recorded_rows), close)
+    startup_rows = []
+    configurations = 0
+    for index, (row, payload) in enumerate(recorded_inputs(source_copy, log)):
+        if index < 2:
+            startup_rows.append((row, payload))
+        configurations += row['type'] == CONFIGURATION
+        if row['type'] == APPROVAL and index != 1:
+            raise ValueError('approval must be the recorded second input')
+        if row['payload'].get('account_id', cfg['account_id']) != cfg['account_id']:
+            raise ValueError('recorded inputs name a different logical account')
+    if not startup_rows or startup_rows[0][0]['type'] != CONFIGURATION or configurations != 1:
         raise ValueError('recorded run must start with exactly one configuration')
-    if any(r['payload'].get('account_id', cfg['account_id']) != cfg['account_id'] for r in rows):
-        raise ValueError('recorded inputs name a different logical account')
     run = evidence / 'run'
     run.mkdir()
-    approval = approval_history(Path(source), recorded_rows, run)
+    approval = approval_history(Path(source), startup_rows, run)
     sockpath = evidence / 'engine.sock'
     engine = os.environ.get('TI_ENGINE_BIN', '/opt/trend-investing/bin/ti-engine')
     service_guard(instance)
@@ -255,7 +326,7 @@ def replay(instance, close, source):
         replay_log = run / ('replay-' + str(suffix) + '.log')
     command = [engine, '-mode', 'dry-run', '-config', str(evidence / 'config.json'),
                '-socket', str(sockpath), '-log', str(replay_log),
-               '-out', str(evidence / 'replay.journal'), '-as-of', rows[0]['event_time']]
+               '-out', str(evidence / 'replay.journal'), '-as-of', startup_rows[0][0]['event_time']]
     if approval:
         command.extend(['-approval', str(approval)])
     with (evidence / 'engine-output.txt').open('w') as output:
@@ -267,11 +338,12 @@ def replay(instance, close, source):
                     raise ValueError('engine did not listen; inspect engine-output.txt in evidence')
                 time.sleep(0.05)
             current, startup, _ = recording(replay_log)
+            startup = list(islice(startup, 3))
             check_identity(log.header, current.header)
             count = 2 if approval else 1
             if len(startup) != count:
                 raise ValueError('engine startup inputs differ from recorded configuration/approval')
-            for (original, _), (started, _) in zip(recorded_rows[:count], startup):
+            for (original, _), (started, _) in zip(startup_rows[:count], startup):
                 difference = first_difference(original['payload'], started['payload'], original['type'])
                 if difference:
                     raise ValueError('startup first difference: ' + redact(difference, cfg['account_id']))
@@ -282,19 +354,22 @@ def replay(instance, close, source):
                 with conn.makefile('r') as replies:
                     # No timestamp filter: a broker reading after close may arrive before the
                     # close-stamped snapshot; every recorded input matters (ADR 0026 account-snapshot amendment).
-                    for row, payload in recorded_rows[count:]:
+                    for row, payload in islice(recorded_inputs(source_copy, log), count, None):
                         conn.sendall((rewrite(row, payload, sequence, current.header) + '\n').encode())
                         frame = json.loads(replies.readline() or '{}')
                         reply = frame.get('envelope', {})
+                        if frame.get('error', {}).get('code') == 'decider_failed':
+                            # ADR 0027 persists no refusal outcome/text: identical empty groups prove neither.
+                            raise ValueError(redact('cannot verify refusal for recorded input ' + row['id'] +
+                                                    ': source log does not record refusal outcomes; gate remains pending',
+                                                    cfg['account_id']))
                         if reply.get('type') != 'engine.decisions':
                             raise ValueError(redact('engine refused recorded input ' + row['id'] + ': ' +
                                                     json.dumps(frame), cfg['account_id']))
                         sequence = reply['sequence'] + 1
         finally:
             finish(process)
-    _, _, decisions = recording(replay_log)
-    if any(d['type'] == 'risk.order.released' and d['payload']['send'] is not False for d in decisions):
-        raise ValueError('replay released a sendable order')
+    _, _, decisions = recording(replay_log, close, verify_send=True)
     selected = month_decisions(decisions, close)
     p = selected[0]['payload']
     print(redact(close + ' strategy.targets.decided ' + p['outcome'] +
@@ -304,7 +379,7 @@ def replay(instance, close, source):
         compare_month(recorded_decisions, decisions, close)
     except ValueError as error:
         compare_error = redact(str(error), cfg['account_id'])
-    refusals = [d['payload']['reason'] for d in decisions if d['type'] == 'risk.order.refused']
+    refusals = [d['payload']['reason'] for d in selected if d['type'] == 'risk.order.refused']
     for reason in refusals:
         print(redact('risk.order.refused ' + reason, cfg['account_id']), flush=True)
     if compare_error:
@@ -321,7 +396,7 @@ def main():
     try:
         replay(*sys.argv[1:])
     except (ValueError, OSError, KeyError) as error:
-        # Only our own errors are safe to print: input paths may contain identifying text (lesson L12).
+        # Only our own errors are safe to print: input paths may contain identifying text (lessons-2026-10.md L12).
         if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError):
             sys.exit('ira-replay: ' + redact(str(error)))
         sys.exit('ira-replay: cannot read or replay inputs; inspect the private evidence copy')

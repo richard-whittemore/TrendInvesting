@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 import time
+import tracemalloc
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / 'deploy/ira-replay.sh'
@@ -27,17 +28,17 @@ def durable_records(path):
 class IRAReplayTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        probe = Path(tempfile.mkdtemp(dir='/tmp')) / 'probe.sock'
+        probe = Path(tempfile.mkdtemp(dir=os.environ.get('TI_TEST_SOCKET_DIR') or '/tmp')) / 'probe.sock'
         try:
             with socket.socket(socket.AF_UNIX) as conn:
                 conn.bind(str(probe))
         except PermissionError:
-            raise unittest.SkipTest('sandbox denies Unix socket bind under /tmp; run in rehearsal container')
+            raise unittest.SkipTest('sandbox denies Unix socket bind in configured socket directory; run in rehearsal container')
         finally:
             if probe.exists():
                 probe.unlink()
             probe.parent.rmdir()
-        cls.temp = tempfile.TemporaryDirectory(dir='/tmp')
+        cls.temp = tempfile.TemporaryDirectory(dir=os.environ.get('TI_TEST_SOCKET_DIR') or '/tmp')
         cls.base = Path(cls.temp.name)
         cls.engine = os.environ.get('TI_DRILL_ENGINE', str(cls.base / 'ti-engine'))
         if 'TI_DRILL_ENGINE' not in os.environ:
@@ -50,7 +51,7 @@ class IRAReplayTest(unittest.TestCase):
         cls.temp.cleanup()
 
     def setUp(self):
-        work = tempfile.TemporaryDirectory(dir='/tmp')
+        work = tempfile.TemporaryDirectory(dir=os.environ.get('TI_TEST_SOCKET_DIR') or '/tmp')
         self.addCleanup(work.cleanup)
         self.work = Path(work.name)
         self.config = self.work / 'trad-ira.config'
@@ -268,9 +269,16 @@ class ReplayValidationTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('ira_replay', ROOT / 'deploy/ira-replay.py')
         self.replay = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.replay)
-        work = tempfile.TemporaryDirectory(dir='/tmp')
+        work = tempfile.TemporaryDirectory(dir=os.environ.get('TI_TEST_SOCKET_DIR') or '/tmp')
         self.addCleanup(work.cleanup)
         self.work = Path(work.name)
+
+    def test_socket_folders_honor_explicit_root(self):
+        with mock.patch.dict(os.environ, TI_TEST_SOCKET_DIR=str(self.work)):
+            with mock.patch.object(tempfile, 'mkdtemp', side_effect=RuntimeError('probe')) as mkdir:
+                with self.assertRaisesRegex(RuntimeError, 'probe'):
+                    IRAReplayTest.setUpClass()
+                self.assertEqual(mkdir.call_args.kwargs['dir'], str(self.work))
 
     def test_inaccessible_or_stale_live_path_fails_closed(self):
         stale = self.work / 'engine.sock'
@@ -391,12 +399,13 @@ class RecordedReplayTest(ReplayValidationTest):
 
     def test_decision_plan_and_release_first_difference_is_reported(self):
         close = '2025-01-31T21:00:00Z'
-        recorded = [dict(id='decision', type='strategy.targets.decided', payload=dict(session_period_end=close,
-                      outcome='decided', targets=[dict(instrument_id='SYNTH', weight=0.5)])),
-                    dict(type='strategy.order.planned', payload=dict(tag='decision', client_order_id='old', quantity=10)),
-                    dict(type='risk.order.released', payload=dict(tag='decision', client_order_id='old', quantity=10, send=False))]
+        recorded = self.order_decisions(close)
         changed = copy.deepcopy(recorded)
-        changed[1]['payload']['client_order_id'] = 'new'
+        for row in changed[1:]:
+            row['id'] = row['id'].replace(':old', ':new')
+            row['payload']['client_order_id'] = 'new'
+            if 'plan_id' in row['payload']:
+                row['payload']['plan_id'] = 'order-planned:new'
         self.replay.compare_month(recorded, changed, close)
         for index, key, value in ((0, 'outcome', 'withheld'), (1, 'quantity', 11), (2, 'send', True)):
             with self.subTest(index=index):
@@ -445,7 +454,7 @@ class RecordedReplayTest(ReplayValidationTest):
             with self.subTest(failure=failure):
                 self.exercise_replay(failure)
 
-    def exercise_replay(self, failure=None):
+    def exercise_replay(self, failure=None, other_refusal=False, input_refusal=False):
         cfg = dict(strategy_id='momentum', mode='dry-run', account_id='synthetic-ira')
         close = '2025-01-31T21:00:00Z'
         start = '2025-01-02T21:00:00Z'
@@ -458,20 +467,27 @@ class RecordedReplayTest(ReplayValidationTest):
                 self.envelope('market.session.closed', dict(period_end=close)),
                 self.envelope('operator.alert.acknowledged', dict(detail='seen'), '2025-02-01T12:00:00Z')]
         decision = self.envelope('strategy.targets.decided', dict(session_period_end=close, outcome='decided'))
-        self.write_log([[('input', row)] + ([('decision', decision)] if i == 5 else []) for i, row in enumerate(rows)])
+        groups = [[('input', row)] + ([('decision', decision)] if i == 5 else []) for i, row in enumerate(rows)]
+        if other_refusal:
+            groups[-1].append(('decision', self.envelope('risk.order.refused', dict(tag='another-month', reason='unrelated'))))
+        self.write_log(groups)
         source_bytes = self.path.read_bytes()
         config = self.work / 'config.json'; config.write_text(json.dumps(cfg))
         output = io.StringIO()
         process = mock.Mock(); process.poll.return_value = None; process.wait.return_value = 0
         sent = []
-        replies = io.StringIO(''.join(json.dumps(dict(envelope=dict(type='engine.decisions', sequence=i + 3))) + '\n'
-                                    for i in range(len(rows) - 2)))
+        frames = [dict(envelope=dict(type='engine.decisions', sequence=i + 3)) for i in range(len(rows) - 2)]
+        if input_refusal:
+            frames[-1] = dict(error=dict(code='decider_failed', causation_id=rows[-1]['id'], message='synthetic refusal'))
+        replies = io.StringIO(''.join(json.dumps(frame) + '\n' for frame in frames))
         conn = mock.MagicMock(); conn.__enter__.return_value = conn
         conn.makefile.return_value = replies
         conn.sendall.side_effect = lambda raw: sent.append(json.loads(raw))
         def launch(command, **kwargs):
             self.assertEqual(command[command.index('-as-of') + 1], start)
             self.assertEqual(json.loads(Path(command[command.index('-approval') + 1]).read_text()), approval)
+            if not other_refusal:
+                self.assertEqual(Path(command[command.index('-socket') + 1]).parents[1], self.work)
             Path(command[command.index('-socket') + 1]).touch()
             self.write_log([[('input', row)] for row in rows[:2]])
             Path(command[command.index('-log') + 1]).write_bytes(self.path.read_bytes())
@@ -488,29 +504,33 @@ class RecordedReplayTest(ReplayValidationTest):
                 return 0
             process.wait.side_effect = wait
             return process
-        with mock.patch.dict(os.environ, TI_IRA_CONFIG=str(config)), mock.patch.object(self.replay, 'service_guard'), \
+        with mock.patch.dict(os.environ, TI_IRA_CONFIG=str(config), TI_TEST_SOCKET_DIR=str(self.work)), mock.patch.object(self.replay, 'service_guard'), \
                 mock.patch.object(self.replay.subprocess, 'Popen', side_effect=launch), \
                 mock.patch.object(self.replay.socket, 'socket', return_value=conn), contextlib.redirect_stdout(output), \
-                (self.assertRaisesRegex(ValueError, 'stop|exited') if failure else contextlib.nullcontext()):
+                (self.assertRaisesRegex(ValueError, 'stop|exited' if failure else 'source log does not record refusal outcomes')
+                 if failure or input_refusal else contextlib.nullcontext()):
             self.replay.replay('trad-ira', close, self.path)
         self.assertEqual([r['type'] for r in sent], [r['type'] for r in rows[2:]])
         for old, new in zip(rows[2:], sent):
             for key in old.keys() - {'sequence', 'strategy_version', 'configuration_hash', 'payload_hash'}:
                 self.assertEqual(new[key], old[key])
-        if failure:
+        if failure or input_refusal:
             self.assertNotIn('Replay gate: PASS', output.getvalue())
         else:
             self.assertIn('Replay gate: PASS', output.getvalue())
+        if other_refusal:
+            self.assertNotIn('unrelated', output.getvalue())
 
     def test_plan_reference_normalizes_only_its_client_order_identity(self):
         close = '2025-01-31T21:00:00Z'
-        original = [dict(id='decision', type='strategy.targets.decided', payload=dict(session_period_end=close)),
-                    dict(type='risk.order.released', payload=dict(tag='decision', client_order_id='old',
-                                                                 plan_id='order-planned:old', quantity=10))]
+        original = self.order_decisions(close)
         replayed = copy.deepcopy(original)
-        replayed[1]['payload'].update(client_order_id='new', plan_id='order-planned:new')
+        for row in replayed[1:]:
+            row['id'] = row['id'].replace(':old', ':new')
+            row['payload']['client_order_id'] = 'new'
+        replayed[2]['payload']['plan_id'] = 'order-planned:new'
         self.replay.compare_month(original, replayed, close)
-        replayed[1]['payload']['plan_id'] = 'wrong-plan'
+        replayed[2]['payload']['plan_id'] = 'wrong-plan'
         with self.assertRaisesRegex(ValueError, 'plan_id'):
             self.replay.compare_month(original, replayed, close)
 
@@ -532,7 +552,7 @@ class RecordedReplayTest(ReplayValidationTest):
         self.assertLess((target / older.name).stat().st_mtime, (target / previous.name).stat().st_mtime)
 
     def test_diagnostics_mask_embedded_and_structured_accounts(self):
-        text = self.replay.redact('prefixDUSYNTHETIC and {"account_id": "synthetic-other"}')
+        text = self.replay.redact('prefix:DUSYNTHETIC and {"account_id": "synthetic-other"}')
         self.assertNotIn('DUSYNTHETIC', text)
         self.assertNotIn('synthetic-other', text)
 
@@ -544,3 +564,71 @@ class RecordedReplayTest(ReplayValidationTest):
             replayed[0][field] = value
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
                 self.replay.compare_month(original, replayed, close)
+
+    @staticmethod
+    def order_decisions(close):
+        return [dict(id='decision', type='strategy.targets.decided', payload=dict(session_period_end=close,
+                     outcome='decided', targets=[dict(instrument_id='SYNTH', weight=0.5)])),
+                dict(id='order-planned:old', type='strategy.order.planned',
+                     payload=dict(tag='decision', client_order_id='old', quantity=10)),
+                dict(id='risk-order-released:old', type='risk.order.released',
+                     payload=dict(tag='decision', client_order_id='old', plan_id='order-planned:old', quantity=10, send=False))]
+
+    def test_order_identity_collisions_missing_ids_and_broken_references_fail(self):
+        close = '2025-01-31T21:00:00Z'
+        original = self.order_decisions(close)
+        second = copy.deepcopy(original[1:])
+        for row in second:
+            row['id'] = row['id'].replace(':old', ':second')
+            row['payload']['client_order_id'] = 'second'
+            if 'plan_id' in row['payload']:
+                row['payload']['plan_id'] = 'order-planned:second'
+        original += second
+        for defect in ('collision', 'missing', 'wrong-release', 'wrong-causation'):
+            changed = copy.deepcopy(original)
+            if defect == 'collision':
+                changed[3:] = copy.deepcopy(changed[1:3])
+            elif defect == 'missing':
+                del changed[1]['payload']['client_order_id']
+            elif defect == 'wrong-release':
+                changed[2]['payload']['client_order_id'] = 'second'
+            else:
+                changed[2]['causation_id'] = 'order-planned:absent'
+            with self.subTest(defect=defect), self.assertRaisesRegex(ValueError, 'identity|client_order_id|plan_id|reference'):
+                self.replay.compare_month(original, changed, close)
+
+    def test_recorded_withheld_reason_precedes_other_field_differences(self):
+        close = '2025-01-31T21:00:00Z'
+        recorded = self.order_decisions(close)[:1]
+        recorded[0]['payload'].update(outcome='withheld', withheld_reason='histories-missing', extra='earlier key')
+        with self.assertRaisesRegex(ValueError, 'recorded run withheld: histories-missing'):
+            self.replay.compare_month(recorded, self.order_decisions(close), close)
+
+    def test_mask_keeps_symbols_words_and_embedded_text(self):
+        ordinary = 'DUK DUOL U12 EDUCATING prefixDUSYNTHETICsuffix'
+        self.assertEqual(self.replay.redact(ordinary), ordinary)
+        self.assertEqual(self.replay.redact('DUSYNTHETIC U1234567'), '<account> <account>')
+
+    def test_other_month_refusal_does_not_block_selected_gate(self):
+        self.exercise_replay(other_refusal=True)
+
+    def test_large_recording_is_streamed_with_bounded_peak(self):
+        # lessons-2026-10.md L1: daily universes must not accumulate in replay memory.
+        env = self.envelope('market.universe.snapshot', dict(synthetic='x' * 32768))
+        self.write_log(([('input', env)] for _ in range(400)))
+        self.assertGreater(self.path.stat().st_size, 10_000_000)
+        tracemalloc.start()
+        try:
+            log, rows, decisions = self.replay.recording(self.path)
+            self.assertLess(tracemalloc.get_traced_memory()[1], 4_000_000)
+            self.assertTrue(iter(rows) is rows, 'payloads must be consumed as an iterator')
+            self.assertEqual(sum(1 for _ in rows), 400)
+            self.assertEqual(decisions, [])
+            _, peak = tracemalloc.get_traced_memory()
+            self.assertLess(peak, 4_000_000)
+        finally:
+            tracemalloc.stop()
+
+    def test_input_refusal_reports_absent_recorded_outcome_and_keeps_gate_pending(self):
+        # ADR 0027 stores input/decision groups; it carries no original wire refusal text.
+        self.exercise_replay(input_refusal=True)
