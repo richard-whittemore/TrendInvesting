@@ -17,7 +17,8 @@ import (
 //     version rather than reading a figure it does not carry (ADR 0015).
 const AccountSnapshotPositionsVersion uint32 = 3
 
-// AccountPosition is one holding as the broker reports it, in raw shares.
+// AccountPosition is one holding in its enclosing payload's quantity units:
+// whole raw shares at scale zero, ten-thousandths at scale 10000 (ADR 0026, D7-F).
 type AccountPosition struct {
 	InstrumentID string `json:"instrument_id"`
 	Quantity     int64  `json:"quantity"`
@@ -27,8 +28,9 @@ type AccountPosition struct {
 // broker reports one account holds, and its net liquidation, at AsOf, a
 // whole second.
 type AccountPositionsSnapshotPayload struct {
-	AccountID string    `json:"account_id"`
-	AsOf      time.Time `json:"as_of"`
+	QuantityScale int64     `json:"quantity_scale,omitempty"`
+	AccountID     string    `json:"account_id"`
+	AsOf          time.Time `json:"as_of"`
 	// NetLiquidation is V in ADR 0026's planner, as of the previous close.
 	NetLiquidation float64 `json:"net_liquidation"`
 	Currency       string  `json:"currency"`
@@ -50,6 +52,9 @@ func (p AccountPositionsSnapshotPayload) Quantity(instrumentID string) int64 {
 
 // Validate checks the account, time, net liquidation, currency and positions.
 func (p AccountPositionsSnapshotPayload) Validate() error {
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	var errs []error
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
@@ -66,8 +71,8 @@ func (p AccountPositionsSnapshotPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("position %d: instrument id is required", i+1))
 			continue
 		}
-		if position.Quantity == 0 {
-			errs = append(errs, fmt.Errorf("position %s: quantity must not be zero; an empty holding is stated by absence", position.InstrumentID))
+		if position.Quantity == 0 || p.QuantityScale != 0 && position.Quantity < 0 {
+			errs = append(errs, fmt.Errorf("position %s: quantity must be positive under D7-F and nonzero for legacy; an empty holding is stated by absence", position.InstrumentID))
 		}
 		if i > 0 && position.InstrumentID <= p.Positions[i-1].InstrumentID {
 			errs = append(errs, fmt.Errorf("positions must be strictly ascending by instrument; %q follows %q", position.InstrumentID, p.Positions[i-1].InstrumentID))
@@ -256,4 +261,32 @@ func ascendingIDs(name string, ids []string) []error {
 		}
 	}
 	return errs
+}
+
+// AccountSnapshotFractionalPositionsVersion records positions in ten-thousandths
+// of a share, with an explicit scale (ADR 0015; ADR 0026, D7-F).
+const AccountSnapshotFractionalPositionsVersion uint32 = 5
+
+// SchemaVersion declares this snapshot's quantity units (ADR 0015).
+func (p AccountPositionsSnapshotPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return AccountSnapshotFractionalPositionsVersion
+	}
+	return AccountSnapshotPositionsVersion
+}
+
+// ValidateSchema refuses a quantity encoding outside the declared version (ADR 0015).
+func (p AccountPositionsSnapshotPayload) ValidateSchema(v uint32) error {
+	if v != AccountSnapshotPositionsVersion && v != AccountSnapshotFractionalPositionsVersion {
+		return fmt.Errorf("unsupported positions snapshot version %d", v)
+	}
+	if err := quantitySchema(p.QuantityScale, v, AccountSnapshotFractionalPositionsVersion); err != nil {
+		return err
+	}
+	return p.Validate()
+}
+
+// AccountPositionsSnapshotVersions lists every supported positions snapshot (ADR 0015).
+func AccountPositionsSnapshotVersions() []uint32 {
+	return []uint32{AccountSnapshotPositionsVersion, AccountSnapshotFractionalPositionsVersion}
 }

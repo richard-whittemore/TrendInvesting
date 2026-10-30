@@ -805,3 +805,32 @@ func TestABoostRetirementOfAnOrderTheCountDoesNotHoldIsReadByItsOwnRule(t *testi
 		t.Errorf("order %+v retired, though IBKR listed it, so it was sent", o)
 	}
 }
+
+func TestFractionalRetirementStopsPagingAndDisplaysShares(t *testing.T) {
+	r := &logRun{t: t}
+	o := releasedOrder("fractional", event.TradingModePaper)
+	o.Quantity, o.QuantityScale = 72500, 10000
+	r.session(0)
+	r.add(journal.KindDecision, event.OrderReleasedEventType, o.SchemaVersion(), "release", day(0), o)
+	orders, _, err := report.OrderLifecycles(r.out, event.TargetWeightStrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts := report.UnacknowledgedAlerts(orders, day(2), time.Minute, func(string) bool { return false })
+	if len(alerts) != 1 || !strings.Contains(alerts[0].Body, "buy 7.25 SPY") {
+		t.Errorf("unacknowledged alert %+v", alerts)
+	}
+	p := event.OrderRetiredPayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side, Quantity: o.Quantity, QuantityScale: o.QuantityScale, LimitPrice: o.LimitPrice, Reason: event.OrderRetiredSessionOver, Detail: "session ended", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(1)}
+	r.add(journal.KindInput, event.OrderRetiredEventType, p.SchemaVersion(), "retired", day(1), p)
+	orders, _, err = report.OrderLifecycles(r.out, event.TargetWeightStrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 || orders[0].State != report.LifecycleRetired {
+		t.Fatalf("retirement ignored: %+v", orders)
+	}
+	alerts = report.UnacknowledgedAlerts(orders, day(2), time.Minute, func(string) bool { return false })
+	if len(alerts) != 1 || alerts[0].Severity != report.Routine || alerts[0].Kind != report.KindRetired || !strings.Contains(alerts[0].Body, "buy 7.25 SPY") {
+		t.Fatalf("retirement alerts %+v", alerts)
+	}
+}

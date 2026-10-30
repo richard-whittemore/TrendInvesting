@@ -302,7 +302,10 @@ import (
 //     allocation in cash without degrading, and records its adapter failure
 //     evidence for an urgent page (ADR 0026, amendment of 2026-10-29).
 //     Decisions use payload version 10; market.mark.unavailable is an input.
-const RulesVersion = "1.29.0"
+//   - 1.30.0 adds D7-F exact four-place quantities, increment rounding,
+//     decimal capital checks, the per-execution rounding reserve and
+//     versioned quantity evidence (ADR 0026 D7-F).
+const RulesVersion = "1.30.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -649,7 +652,7 @@ func (h *Handler) applyConfiguration(in event.Envelope) error {
 	if h.configured {
 		return errors.New("targetweight: a run is configured once")
 	}
-	p, err := decodeInput[event.TargetWeightConfigurationPayload](in, event.TargetWeightConfigurationSchemaVersion)
+	p, err := decodeVersions[event.TargetWeightConfigurationPayload](in, event.TargetWeightConfigurationVersions())
 	if err != nil {
 		return err
 	}
@@ -1015,8 +1018,10 @@ func (h *Handler) applySnapshot(in event.Envelope) ([]event.Envelope, error) {
 	if h.snapshot != nil && !p.AsOf.After(h.snapshot.AsOf) {
 		return nil, fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, h.snapshot.AsOf)
 	}
+	if err := h.gate.ObserveAccount(p); err != nil {
+		return nil, err
+	}
 	h.snapshot = &p
-	h.gate.ObserveAccount(p)
 	return h.checkBook(in, reconcile.PositionsBook(in.ID, p), p.AsOf)
 }
 
@@ -1027,12 +1032,15 @@ func (h *Handler) applySnapshot(in event.Envelope) ([]event.Envelope, error) {
 // journal: a holding no fill explains is a difference (ADR 0019, amended
 // 2026-10-21).
 func (h *Handler) checkBook(in event.Envelope, book reconcile.Book, at time.Time) ([]event.Envelope, error) {
-	r, journal := h.gate.CheckBook(book)
+	r, journal, err := h.gate.CheckBook(book)
+	if err != nil {
+		return nil, err
+	}
 	if !journal {
 		return nil, nil
 	}
 	b := &emissions{h: h, in: in, at: at}
-	b.add(r.ResultID, event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, r.Result)
+	b.add(r.ResultID, event.ReconciliationResultEventType, r.Result.SchemaVersion(), r.Result)
 	if r.State != nil {
 		b.add(r.StateID, event.EngineStateEventType, r.StateSchemaVersion, *r.State)
 	}
@@ -1269,8 +1277,11 @@ func (h *Handler) applyFill(in event.Envelope) error {
 // the engine state when it moved. Its emissions are timed at the
 // observation.
 func (h *Handler) applyReconciliation(in event.Envelope) ([]event.Envelope, error) {
-	p, err := decodeInput[event.ReconciliationPayload](in, event.ReconciliationSchemaVersion)
+	p, err := decodeVersions[event.ReconciliationPayload](in, event.ReconciliationVersions())
 	if err != nil {
+		return nil, err
+	}
+	if err := h.normalizeReconciliation(&p); err != nil {
 		return nil, err
 	}
 	r, err := h.gate.Reconcile(in.ID, p)
@@ -1282,7 +1293,7 @@ func (h *Handler) applyReconciliation(in event.Envelope) ([]event.Envelope, erro
 	// before its own result, each with the state it moved (ADR 0019,
 	// amended 2026-10-21).
 	for _, settled := range append(r.Settled, r) {
-		b.add(settled.ResultID, event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, settled.Result)
+		b.add(settled.ResultID, event.ReconciliationResultEventType, settled.Result.SchemaVersion(), settled.Result)
 		if settled.State != nil {
 			b.add(settled.StateID, event.EngineStateEventType, settled.StateSchemaVersion, *settled.State)
 		}
@@ -1355,6 +1366,9 @@ func (h *Handler) applyAcknowledgement(in event.Envelope) error {
 func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, error) {
 	p, err := decodeVersions[event.BrokerSnapshotPayload](in, event.BrokerSnapshotVersions())
 	if err != nil {
+		return nil, err
+	}
+	if err := h.normalizeBroker(&p); err != nil {
 		return nil, err
 	}
 	if err := h.refuseSharedVenue(in, p.OpenOrders); err != nil {

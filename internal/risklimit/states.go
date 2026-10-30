@@ -37,7 +37,7 @@ func (g *Gate) riskReducing(p event.OrderPlannedPayload) bool {
 		return false
 	}
 	if holding, working, ok := g.brokerHolding(p.InstrumentID); ok {
-		return holding > 0 && p.Quantity <= holding-working
+		return holding > 0 && p.Quantity <= subtractPending(holding, working)
 	}
 	return p.Quantity <= p.HeldQuantity
 }
@@ -61,7 +61,7 @@ func (g *Gate) checkSale(o Order, f event.RiskFigures) Outcome {
 		return Outcome{Refused: g.refusal(o, f, event.RefusedSaleAttempted, fmt.Sprintf("sale %s was already attempted for %s and is never retried automatically", p.ClientOrderID, p.InstrumentID))}
 	}
 	delete(g.pending, p.ClientOrderID)
-	if !f.BrokerSet || p.Quantity > f.BrokerHolding-f.WorkingSells {
+	if !f.BrokerSet || p.Quantity > subtractPending(f.BrokerHolding, f.WorkingSells) {
 		return Outcome{Refused: g.refusal(o, f, event.RefusedBrokerHolding, fmt.Sprintf("sale of %d exceeds the latest broker holding %d net of %d working sells (snapshot %s)", p.Quantity, f.BrokerHolding, f.WorkingSells, g.brokerID))}
 	}
 	return g.release(o, f)
@@ -191,6 +191,9 @@ func (g *Gate) BrokerFires(id string, s event.BrokerSnapshotPayload) (urgent, re
 // checkBroker is every refusal of broker snapshot s with envelope ID id
 // that ObserveBroker makes before it changes anything.
 func (g *Gate) checkBroker(id string, s event.BrokerSnapshotPayload) error {
+	if err := g.checkQuantityScale(s.QuantityScale); err != nil {
+		return err
+	}
 	if err := s.Validate(); err != nil {
 		return fmt.Errorf("risklimit: %w", err)
 	}
@@ -604,7 +607,7 @@ type OwnSale struct {
 func (s OwnSale) Live() bool {
 	var filled int64
 	for _, f := range s.Fills {
-		filled += f.Quantity
+		filled = addPending(filled, f.Quantity)
 	}
 	return s.Ended.IsZero() && filled < s.Order.Quantity
 }

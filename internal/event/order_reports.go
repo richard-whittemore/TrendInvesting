@@ -14,7 +14,8 @@ var ErrNotReleased = errors.New("which this run never released")
 // OrderReports is the rule by which a run that reads fills (the momentum
 // run) reads the venue's reports on the orders it released. The engine
 // applies it, and the reporter reads the log by it, so a report the engine
-// refused is never taken as read (ADR 0022; ADR 0019, "Alerting").
+// refused is never taken as read (ADR 0022; ADR 0019, "Alerting"). Restart
+// recovery reads recorded facts by this same rule (ADR 0027).
 //
 // A report is read when it names a released order that is not yet terminal
 // and describes it: a lifecycle report its account, instrument, side,
@@ -22,6 +23,8 @@ var ErrNotReleased = errors.New("which this run never released")
 // account, instrument and side, taking the order no further than its
 // quantity in total, under a fill id no other execution has used, since a
 // fill id names one execution across the account (TargetWeightFillPayload).
+// A buy's debit, including commission, must fit the finite monetary range
+// (BuyCost; ADR 0026, "Worst-case cost") before any fill state changes.
 // The same execution delivered again (SameExecution) is a redelivery and
 // changes nothing. An order becomes terminal on a lifecycle report that is
 // terminal (cancelled or invalid; LimitOrderLifecyclePayload's Terminal), on
@@ -113,8 +116,8 @@ func (r *OrderReports) Lifecycle(p LimitOrderLifecyclePayload) (*ReportedOrder, 
 	}
 	if !p.Describes(o.Released) {
 		q := o.Released
-		return nil, fmt.Errorf("reports %s %s %d %s at %v, which describes no order %s as released (%s %s %d %s at %v)",
-			p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, q.ClientOrderID, q.AccountID, q.Side, q.Quantity, q.InstrumentID, q.LimitPrice)
+		return nil, fmt.Errorf("reports %s %s %s %s at %v, which describes no order %s as released (%s %s %s %s at %v)",
+			p.AccountID, p.Side, FormatQuantity(p.Quantity, p.QuantityScale), p.InstrumentID, p.LimitPrice, q.ClientOrderID, q.AccountID, q.Side, FormatQuantity(q.Quantity, q.QuantityScale), q.InstrumentID, q.LimitPrice)
 	}
 	o.Venue = true
 	if p.Terminal() {
@@ -163,12 +166,23 @@ func (r *OrderReports) Fill(p TargetWeightFillPayload) (o *ReportedOrder, redeli
 		return nil, false, err
 	}
 	q := o.Released
+	if p.QuantityScale != q.QuantityScale {
+		return nil, false, fmt.Errorf("quantity scale %d differs from released order %s scale %d", p.QuantityScale, q.ClientOrderID, q.QuantityScale)
+	}
+	if p.Quantity <= 0 {
+		return nil, false, errors.New("fill quantity must be positive")
+	}
 	if p.AccountID != q.AccountID || p.InstrumentID != q.InstrumentID || p.Side != q.Side {
 		return nil, false, fmt.Errorf("describes %s %s %s, but order %s is %s %s %s", p.AccountID, p.Side, p.InstrumentID, q.ClientOrderID, q.AccountID, q.Side, q.InstrumentID)
 	}
 	// Against what remains, not the sum: the sum can wrap past int64.
 	if p.Quantity > q.Quantity-o.Filled {
-		return nil, false, fmt.Errorf("takes order %s past its %d shares", q.ClientOrderID, q.Quantity)
+		return nil, false, fmt.Errorf("takes order %s past its %s shares", q.ClientOrderID, FormatQuantity(q.Quantity, q.QuantityScale))
+	}
+	if p.Side == OrderSideBuy {
+		if _, err := BuyCost(p.Quantity, p.QuantityScale, p.Price, p.Commission); err != nil {
+			return nil, false, err
+		}
 	}
 	r.fills[p.FillID] = p
 	o.Venue = true

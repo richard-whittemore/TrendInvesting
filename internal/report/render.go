@@ -55,7 +55,7 @@ func RenderText(s Summary) string {
 		b.WriteString("  none\n")
 	}
 	for _, o := range s.Orders {
-		fmt.Fprintf(&b, "  %s %s %d %s limit %.2f: %s", o.ClientOrderID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice, o.StatusText())
+		fmt.Fprintf(&b, "  %s %s %s %s limit %.2f: %s", o.ClientOrderID, o.Side, event.FormatQuantity(o.Quantity, o.QuantityScale), o.InstrumentID, o.LimitPrice, o.StatusText())
 		if o.Reason != "" {
 			fmt.Fprintf(&b, " (%s)", o.Reason)
 		}

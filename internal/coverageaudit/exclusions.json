@@ -999,6 +999,52 @@
       "statement": "return nil, fmt.Errorf(\"targetweight: retirement %s: %w\", in.ID, err)",
       "category": "unreachable-by-invariant",
       "reason": "The gate's end of a retired order, by a synthetic report the engine never journals, built from the very release the gate holds (its account, client order ID, instrument, side, quantity and limit) with a validated whole-second time, a message and no venue order ID: Validate, reportedOrder and the quantity and limit match all pass by construction, and an empty venue order ID is never held by another sell (venueHolder)."
+    },
+    {
+      "file": "internal/risklimit/reconcile.go",
+      "function": "(*Gate).CheckBook",
+      "statement": "err = bookErr",
+      "category": "unreachable-by-invariant",
+      "reason": "CheckBook validates the reconciled book's quantity scale before SetBook sees it, and SetBook refuses only a scale mismatch, so the deferred SetBook cannot fail for a book CheckBook accepted; the deferred check stays so a future SetBook refusal is never swallowed (ADR 0019, fail closed)."
+    },
+    {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "newMomentum",
+      "statement": "return nil, err",
+      "category": "unreachable-by-invariant",
+      "reason": "ExecutionConfiguration.QuantityScale returns only 0 or event.FractionalQuantityScale (10000). Immediately above, NewIRAGate constructs an IRA gate with no book, broker snapshot, orders, ledger snapshots or capital changes. SetQuantityScale accepts both supported scales on that fresh IRA gate, so none of its unsupported-scale, non-IRA or existing-capital-state refusals can occur."
+    },
+    {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "newMomentum",
+      "statement": "return nil, err",
+      "occurrence": 2,
+      "category": "unreachable-by-invariant",
+      "reason": "New validates the execution configuration before calling newMomentum, so fractional rounding slack is either the valid default 0.10 or an explicit value accepted by event.ValidRoundingSlack. NewIRAGate has already constructed an IRA gate, and SetQuantityScale preserves its IRA status. SetRoundingSlackPerOrder refuses only a non-IRA gate or invalid slack, neither of which can occur here (ADR 0026, Per-execution rounding reserve)."
+    },
+    {
+      "file": "internal/orderplan/ira.go",
+      "function": "scaleFractionalBuys",
+      "statement": "return nil, nil, 0",
+      "occurrence": 5,
+      "category": "unreachable-by-invariant",
+      "reason": "ADR 0026 Scaling never enlarges an order: preflight has accepted every original BuyReservation with positive increment-aligned quantity, finite positive price, finite nonnegative fees and valid slack. sizingCash is nonnegative and total is positive, and the initial ratio is capped at 1. fractionalOrdersAtScale floors quantity times that ratio to the same increment, so each retained quantity is positive and no greater than its original. The cent ceiling, unchanged fees and slack are monotone in quantity; a reservation already finite at the original quantity cannot become invalid or overflow at a smaller quantity. TestBuyCostAndFractionalScalingRefuseUnrepresentableDebits pins preflight refusal and the ordering helper's independent overflow refusal."
+    },
+    {
+      "file": "internal/orderplan/ira.go",
+      "function": "scaleFractionalBuys",
+      "statement": "return nil, nil, 0",
+      "occurrence": 6,
+      "category": "unreachable-by-invariant",
+      "reason": "ADR 0026 Scaling never enlarges an order: preflight has accepted every original BuyReservation, including its cent ceiling, fees and slack. fractionalFeeScale clamps remaining cash to nonnegative and caps its ratio at 1. fractionalOrdersAtScale floors each original increment-aligned quantity at that ratio, retaining only positive quantities no greater than the originals. With unchanged finite price, fees and valid slack, the reservation is monotone in quantity and cannot exceed the already finite original reservation. TestBuyCostAndFractionalScalingRefuseUnrepresentableDebits pins the earlier preflight refusal and directly tests the ordering helper's refusal."
+    },
+    {
+      "file": "internal/orderplan/ira.go",
+      "function": "scaleFractionalBuys",
+      "statement": "return nil, nil, 0",
+      "occurrence": 7,
+      "category": "unreachable-by-invariant",
+      "reason": "ADR 0026 Scaling never enlarges an order: preflight has accepted every original BuyReservation. The bisection starts with low 0 and high a nonnegative ratio capped at 1 by initial scaling or fractionalFeeScale; every midpoint and subsequent endpoint stays in [0,1]. fractionalOrdersAtScale floors each original increment-aligned quantity at that midpoint, retaining only positive quantities no greater than the originals. Its unchanged finite price, fees and valid slack give a monotone reservation bounded by the already finite original, so its error cannot occur. TestBuyCostAndFractionalScalingRefuseUnrepresentableDebits pins preflight refusal and independently reaches the ordering helper's error."
     }
   ]
 }

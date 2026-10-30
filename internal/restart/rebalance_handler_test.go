@@ -54,6 +54,11 @@ func newHandlerRunWith(t *testing.T, mode string, awaiting bool) (*handlerRun, e
 		t.Fatal(err)
 	}
 	cfg.Mode, cfg.AccountID = mode, iraLogAccount
+	return newConfiguredHandlerRun(t, cfg, awaiting), cfg
+}
+
+func newConfiguredHandlerRun(t *testing.T, cfg event.TargetWeightConfigurationPayload, awaiting bool) *handlerRun {
+	t.Helper()
 	asOf := time.Date(2025, time.January, 2, 21, 0, 0, 0, time.UTC)
 	h, err := targetweight.New("momentum/test", cfg, targetweight.Options{DecideFrom: asOf})
 	if err != nil {
@@ -63,8 +68,11 @@ func newHandlerRunWith(t *testing.T, mode string, awaiting bool) (*handlerRun, e
 		h.AwaitApproval()
 	}
 	r := &handlerRun{t: t, recorder: journal.NewRecorder(h), hash: h.ConfigurationHash(), errs: map[string]error{}}
-	r.apply("configuration:x", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, r.hash, asOf, cfg)
-	return r, cfg
+	r.apply("configuration:x", event.TargetWeightConfigurationEventType, cfg.SchemaVersion(), r.hash, asOf, cfg)
+	if err := r.errs["configuration:x"]; err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 func (r *handlerRun) apply(id, eventType string, version uint32, hash string, at time.Time, p any) {

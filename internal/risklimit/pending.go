@@ -3,6 +3,7 @@ package risklimit
 import (
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"time"
 
@@ -375,7 +376,7 @@ func (l *sellLedger) unshown(instrumentID string, v view) int64 {
 		toGo, _, _ := l.toGo(instrumentID, now)
 		return toGo
 	}
-	return max(l.held[v.by][instrumentID]-l.remains(instrumentID), 0)
+	return max(subtractPending(l.held[v.by][instrumentID], l.remains(instrumentID)), 0)
 }
 
 // remains is the most of instrumentID the facts show is sure to be held once
@@ -391,7 +392,7 @@ func (l *sellLedger) remains(instrumentID string) int64 {
 		if !ok {
 			continue
 		}
-		best = max(best, p.held[instrumentID]-toGo)
+		best = max(best, subtractPending(p.held[instrumentID], toGo))
 		if quiet && stop.IsZero() {
 			stop = p.at
 		}
@@ -409,7 +410,7 @@ func (l *sellLedger) toGo(instrumentID string, v view) (toGo int64, quiet, ok bo
 			continue
 		}
 		n := s.released - s.filledBy(v)
-		toGo += n
+		toGo = addPending(toGo, n)
 		quiet = quiet && (n == 0 || s.since >= v.by)
 	}
 	var latest view
@@ -432,7 +433,7 @@ func (l *sellLedger) toGo(instrumentID string, v view) (toGo int64, quiet, ok bo
 			if raised(listings[credited-1:]) {
 				return 0, false, false
 			}
-			toGo += listings[credited-1].quantity
+			toGo = addPending(toGo, listings[credited-1].quantity)
 			quiet = false
 		case credited < len(listings):
 			// Listed after v but not in the latest listing credited to v.
@@ -440,6 +441,26 @@ func (l *sellLedger) toGo(instrumentID string, v view) (toGo int64, quiet, ok bo
 		}
 	}
 	return toGo, quiet, true
+}
+
+// addPending adds nonnegative outstanding quantities, saturating the bound
+// when it cannot be represented (ADR 0026 D7-F). Over-counting sells fails
+// closed; a wrapped negative count could release shares already committed.
+func addPending(a, b int64) int64 {
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
+// subtractPending subtracts a nonnegative commitment from a signed holding,
+// saturating below the integer range (ADR 0026 D7-F). A short holding can
+// never wrap into a positive holding that permits another sell.
+func subtractPending(held, pending int64) int64 {
+	if held < math.MinInt64+pending {
+		return math.MinInt64
+	}
+	return held - pending
 }
 
 // raised reports whether an unknown sell's remaining rises from one of its
@@ -476,7 +497,7 @@ func (s *ledgerSell) filledBy(v view) int64 {
 		var n int64
 		for _, f := range s.fills {
 			if f.at.After(after) && f.at.Before(v.at) {
-				n += f.quantity
+				n = addPending(n, f.quantity)
 			}
 		}
 		return n
@@ -484,7 +505,7 @@ func (s *ledgerSell) filledBy(v view) int64 {
 	best := reported(time.Time{})
 	for _, x := range s.listings {
 		if v.credits(x.at, x.by) {
-			best = max(best, s.released-min(x.quantity, s.released)+reported(x.at))
+			best = max(best, addPending(s.released-min(x.quantity, s.released), reported(x.at)))
 		}
 	}
 	return min(best, s.released)
@@ -512,13 +533,17 @@ func (g *Gate) brokerHolding(instrumentID string) (holding, working int64, ok bo
 }
 
 // ObserveAccount records account snapshot p, the one PendingSells nets for,
-// and a reference.
-func (g *Gate) ObserveAccount(p event.AccountPositionsSnapshotPayload) {
+// and a reference. Its quantity units must match the account (ADR 0026 D7-F).
+func (g *Gate) ObserveAccount(p event.AccountPositionsSnapshotPayload) error {
+	if err := g.checkQuantityScale(p.QuantityScale); err != nil {
+		return err
+	}
 	held := map[string]int64{}
 	for _, position := range p.Positions {
 		held[position.InstrumentID] = position.Quantity
 	}
 	g.account = g.ledger.snapshot(p.AsOf, held, true)
+	return nil
 }
 
 // recordBroker records broker snapshot next, recorded after the latest one: its
@@ -570,6 +595,7 @@ func checkReport(account, client, instrument, side, gateAccount string, order *F
 type FillOrder struct {
 	AccountID, ClientOrderID, InstrumentID, Side string
 	Quantity, Reported                           int64
+	QuantityScale                                int64
 }
 
 // fillOrder is the order as the fill rule reads it; nil for none.
@@ -578,7 +604,7 @@ func (o *releasedOrder) fillOrder() *FillOrder {
 		return nil
 	}
 	return &FillOrder{AccountID: o.planned.AccountID, ClientOrderID: o.planned.ClientOrderID, InstrumentID: o.planned.InstrumentID,
-		Side: o.planned.Side, Quantity: o.planned.Quantity, Reported: o.reported}
+		Side: o.planned.Side, Quantity: o.planned.Quantity, Reported: o.reported, QuantityScale: o.planned.QuantityScale}
 }
 
 // CheckFill is the rule a recorded execution of a released order is applied
@@ -607,8 +633,11 @@ func CheckFill(p event.TargetWeightFillPayload, account string, order *FillOrder
 	if err := checkReport(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, account, order); err != nil {
 		return false, err
 	}
-	if order.Reported+p.Quantity > order.Quantity {
-		return false, fmt.Errorf("risklimit: fill %s takes order %s past its %d shares", p.FillID, p.ClientOrderID, order.Quantity)
+	if p.QuantityScale != order.QuantityScale {
+		return false, fmt.Errorf("risklimit: fill quantity scale %d differs from order scale %d", p.QuantityScale, order.QuantityScale)
+	}
+	if p.Quantity > order.Quantity-order.Reported {
+		return false, fmt.Errorf("risklimit: fill %s takes order %s past its %s shares", p.FillID, p.ClientOrderID, event.FormatQuantity(order.Quantity, order.QuantityScale))
 	}
 	return false, nil
 }
@@ -619,6 +648,9 @@ func CheckFill(p event.TargetWeightFillPayload, account string, order *FillOrder
 // changes nothing: a fill already applied can never be added again to erase
 // a difference (ADR 0019, "Explained means").
 func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
+	if err := g.checkQuantityScale(p.QuantityScale); err != nil {
+		return err
+	}
 	o := g.orders[p.ClientOrderID]
 	switch redelivery, err := CheckFill(p, g.accountID, o.fillOrder(), g.fills); {
 	case err != nil:
@@ -688,6 +720,9 @@ func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, fills []event.Targe
 // (event.SameLimitPrice), the rule the engine and the reporter read a report
 // by.
 func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
+	if err := g.checkQuantityScale(p.QuantityScale); err != nil {
+		return err
+	}
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("risklimit: %w", err)
 	}

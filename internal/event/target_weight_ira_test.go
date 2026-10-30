@@ -127,7 +127,7 @@ func TestMomentumConfigurationValidate(t *testing.T) {
 	expectInvalid(t, "no sector sources", v, func(p *P) { p.Momentum.SectorSources = nil }, "sector sources")
 	expectInvalid(t, "repeated sector source", v, func(p *P) { p.Momentum.SectorSources = []string{"a", "a"} }, "repeated")
 	expectInvalid(t, "cash rule", v, func(p *P) { p.Execution.CashRule = "borrowed" }, "cash rule")
-	expectInvalid(t, "share quantity", v, func(p *P) { p.Execution.ShareQuantity = "fractional" }, "share quantity")
+	expectInvalid(t, "share quantity", v, func(p *P) { p.Execution.ShareQuantity = "unknown" }, "share quantity")
 	expectInvalid(t, "fees", v, func(p *P) { p.Execution.MaxFeesPerOrder = -1 }, "fees")
 	expectInvalid(t, "no max snapshot age", v, func(p *P) { p.Execution.MaxSnapshotAge = 0 }, "max snapshot age")
 	expectInvalid(t, "negative max snapshot age", v, func(p *P) { p.Execution.MaxSnapshotAge = -1 }, "max snapshot age")
@@ -470,8 +470,8 @@ func TestTargetWeightConfigurationSchemaVersionDeclaresTheUnlabelledCeiling(t *t
 // shares, so none falls behind the version a writer records (ADR 0015).
 func TestLimitOrderLifecycleIsReadAtBothItsVersions(t *testing.T) {
 	got := event.LimitOrderLifecycleVersions()
-	if fmt.Sprint(got) != fmt.Sprint([]uint32{event.OrderLifecycleLimitVersion, event.OrderLifecycleSyntheticVersion}) {
-		t.Fatalf("versions = %v, want [2 3]", got)
+	if fmt.Sprint(got) != fmt.Sprint([]uint32{event.OrderLifecycleLimitVersion, event.OrderLifecycleSyntheticVersion, event.OrderLifecycleFractionalVersion, event.OrderLifecycleFractionalSyntheticVersion}) {
+		t.Fatalf("versions = %v, want [2 3 4 5]", got)
 	}
 	got[0] = 99
 	if event.LimitOrderLifecycleVersions()[0] != event.OrderLifecycleLimitVersion {

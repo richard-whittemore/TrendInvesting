@@ -1,0 +1,4 @@
+{"type":"risk.order.released","version":4,"instrument":"AAA","ticks":625531}
+{"type":"risk.order.released","version":4,"instrument":"CCC","ticks":1156747}
+{"type":"execution.order.lifecycle","version":5,"instrument":"AAA","ticks":625531}
+{"type":"execution.order.lifecycle","version":5,"instrument":"CCC","ticks":1156747}

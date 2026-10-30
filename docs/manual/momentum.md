@@ -154,6 +154,17 @@ section 5; ADR 0026, point 2):
    IRAs that never borrow, so unsettled sale proceeds count: plan decision
    D5, cash rule `total-cash`), plus what the sells raised net of
    commission, minus anything a newer account snapshot shows has gone.
+   For fractional buys, it also holds back explicit **rounding slack per
+   planned buy** (`execution.rounding_slack_per_order`, default **$0.10**,
+   bounds **$0.01–$1.00**). Each partial execution settles in cents; this
+   allowance covers one cent of per-execution rounding for each possible
+   fill up to the configured cap (ten fills at the default). The basket is
+   scaled against cash minus the total slack. Planned orders and risk
+   decisions record it as `rounding_slack`; the insufficient-cash check
+   includes the same allowance, held until the order is terminal.
+   This covers cent rounding within that cap. **#622's cash buffer, once
+   decided, is the structural reserve**; that owner decision is pending
+   (ADR 0026, "Per-execution rounding reserve").
 9. **Each buy is costed at its worst case**: its shares at the limit price
    (the previous close plus the 5% band) plus a **$2.00** fee allowance per
    order (`execution.max_fees_per_order`; $2.00 is the plan's value,
@@ -208,6 +219,18 @@ order's shape, account and mode, not these limits (`adapter/ibkr/sender.py`).
 
 ## One IRA month, end to end
 
+With D7-F (`execution.share_quantity: "fractional"`), the engine plans
+fractional quantities for both phases. It divides each trade value by the
+reference price and rounds down to `fractional_increment` (default
+`"0.0001"` share), then rounds to that increment again if cash scales the
+buys. A costly share does not cause the D7-L minimum-lot substitution.
+For example, an order for 7.25 shares filled by 3.5 leaves exactly 3.75
+outstanding. The journal records these as integer ten-thousandths with
+`quantity_scale: 10000`; the incomplete-sell page shows decimal shares.
+The engine supports these records; fractional adapter delivery and the
+summary/dashboard/probe rollout follow separately. The paper gate still
+controls sending. D7-L remains available and keeps its whole-share behavior.
+
 **Stops here today** marks the first step not on `main`.
 
 | # | When | What happens | Built? |
@@ -257,7 +280,7 @@ latest decision and any `missing-mark` refusal.
 | `<account>: <instrument> withheld this month (missing mark: <transient\|final> …)` (urgent, repeated until acknowledged) | Only this pick's buy is withheld. Its unbought weight stays in cash for the month; the account is not degraded by the missing mark, and other buys still face every limit | Check the exact lookup reason and the instrument at IBKR; acknowledge the page after checking it. There is no mid-month catch-up |
 | The Traditional IRA's engine will not start, saying `glide birth value must be YYYY-MM with a month 01-12` | The shipped `trad-ira.config` names the placeholder `YYYY-MM`, never your birth month, so the engine refuses rather than decide from a made-up age. Nothing is recorded | Name your birth year and month on the server ("Starting the Traditional IRA's engine in dry-run", step 2) |
 | `ira-exposure`. Alert: `<account>: order refused (ira-exposure)` (urgent), its text naming the exposure after the order and the limit; then `<account>: engine degraded (risk-limit-breached)`, which repeats until you acknowledge it | The risk gate refused a buy that would have left the account's holdings, valued at the previous close, above `max_exposure` (at most 1: an IRA never borrows). Nothing was sent for it. The account is Degraded on that instrument: no buy goes, and the instrument is frozen | Compare holdings, cash and net liquidation at IBKR with the refusal's figures (`journal-query refusals`). Follow `docs/runbooks/halted-account.md`; the way out is a fresh run you approve ([restart](restart.md)) |
-| `insufficient-cash`. Alert: `<account>: order refused (insufficient-cash)` (urgent), naming the buy's worst-case cost and the cash available; then `<account>: engine degraded (risk-limit-breached)`, repeating until acknowledged | The gate refused a buy whose worst-case cost (its shares at the limit price plus the fee allowance) exceeds the cash still available after the buys released before it. The planner already scales buys to fit the budget, so this means the cash changed between the plan and the check. Degraded on that instrument | Check cash at IBKR against the last account snapshot. Follow `docs/runbooks/halted-account.md` |
+| `insufficient-cash`. Alert: `<account>: order refused (insufficient-cash)` (urgent), naming the buy's worst-case cost and the cash available; then `<account>: engine degraded (risk-limit-breached)`, repeating until acknowledged | The gate refused a buy whose worst-case cost (its shares at the limit price rounded up to cents, plus the fee allowance and fractional execution rounding slack) exceeds the cash still available after the buys released before it. The planner already scales buys to fit the budget, so this means the cash changed between the plan and the check. Degraded on that instrument | Check cash at IBKR against the last account snapshot. Follow `docs/runbooks/halted-account.md` |
 | `no-eligible-names`. Alert: `<account>: decision withheld (no-eligible-names)` (routine) | The month is withheld: no stock in the ranked 500 could be picked (every one short of history, with a gap, or without volatility), and none was skipped as unaffordable. The book is kept; nothing is ordered | Check the month's data step: the universe snapshot and the ranked stocks' price histories ([momentum universe](momentum-universe.md), [market data](market-data.md)). The next month decides as usual |
 | `insufficient-trend-history`. Alert: `<account>: decision withheld (insufficient-trend-history)` (routine), saying SPY has fewer than 200 closes | The month is withheld: the risk-off test needs 200 SPY closes. The backtest treated this as risk-on; live trading refuses to guess (ADR 0026, point 5). The book is kept | Feed the run a stream that starts at least 200 sessions before its first decision. A run already started cannot gain history it was not given: start a fresh run with a longer history ([restart](restart.md)) |
 | Alert `<account>: decision withheld (missing-bars)` (urgent): a held or targeted instrument, or SPY in its 200-close window, has no bar, or the month's last session never closed | The month is withheld; nothing is ordered. Explained in [engine](engine.md), "What can go wrong" | Fix the feed. The next month decides as usual; there is no mid-month catch-up (`docs/runbooks/missed-rebalance.md`) |

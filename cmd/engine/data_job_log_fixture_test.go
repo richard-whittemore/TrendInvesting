@@ -39,13 +39,21 @@ func (*memoryLog) Sync() error { return nil }
 // record or commit layout, or to the configuration input, fails here; the
 // fixture is then regenerated with -update-data-job-log and the data job's
 // tests read the new one, so the Python reader is never checked only against
-// a log it fabricated itself.
+// a log it fabricated itself. The fixture keeps its historical strategy
+// identity (ADR 0016): changing an IRA rule must not rewrite this Boost
+// wire-format evidence. TestTheMakefileStampsTheBuildTheEngineRecords pins
+// the current production rules/build identity separately.
 func TestTheDataJobsEngineLogFixtureIsTheLogTheEngineWrites(t *testing.T) {
 	comp, err := compose(filepath.Join("..", "..", "deploy", "etc", "engines", "boost.config"), "fixture",
 		time.Date(2026, 3, 13, 21, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("compose: %v", err)
 	}
+	// Only identity metadata is historical; the current configuration hash,
+	// schema and payload must still match the fixture byte for byte.
+	const fixtureStrategyVersion = "boost/1.29.0+fixture"
+	comp.strategyVersion = fixtureStrategyVersion
+	comp.configEnvelope.StrategyVersion = fixtureStrategyVersion
 	out := &memoryLog{}
 	log, err := journal.CreateLog(out, logHeader(comp))
 	if err != nil {

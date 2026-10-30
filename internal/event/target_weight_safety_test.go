@@ -558,9 +558,9 @@ func TestOrderRecordsAreReadAtEveryVersionTheyWereWritten(t *testing.T) {
 		got    []uint32
 		latest uint32
 	}{
-		"planned":  {event.OrderPlannedVersions(), event.OrderPlannedSafetyVersion},
-		"released": {event.OrderReleasedVersions(), event.OrderReleasedSafetyVersion},
-		"refused":  {event.OrderRefusedVersions(), event.OrderRefusedPendingCashVersion},
+		"planned":  {event.OrderPlannedVersions(), event.OrderPlannedFractionalVersion},
+		"released": {event.OrderReleasedVersions(), event.OrderReleasedFractionalVersion},
+		"refused":  {event.OrderRefusedVersions(), event.OrderRefusedFractionalVersion},
 	} {
 		var want []uint32
 		for v := uint32(1); v <= c.latest; v++ {

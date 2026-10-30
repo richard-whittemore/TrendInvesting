@@ -86,11 +86,54 @@ var wireCovered = map[string]string{
 	"strategy.protective-stop.set":            "order_decisions_contract.go (test_orders.py IgnoredDecisionTests)",
 }
 
+// fractionalEventTypes pairs additional quantity schemas with their existing
+// event type (ADR 0015; ADR 0026, D7-F). These names do not declare new event
+// types. Discovery reads their numeric versions from source and classifies each
+// type@version separately, so a new version cannot inherit a legacy excuse.
+var fractionalEventTypes = map[string]string{
+	"AccountSnapshotFractionalPositionsVersion":  "account.snapshot",
+	"AccountSnapshotFractionalCashVersion":       "account.snapshot",
+	"FillTargetWeightFractionalVersion":          "execution.fill",
+	"OrderLifecycleFractionalVersion":            "execution.order.lifecycle",
+	"OrderLifecycleFractionalSyntheticVersion":   "execution.order.lifecycle",
+	"BrokerSnapshotFractionalVersion":            "account.broker.snapshot",
+	"OrderPlannedFractionalVersion":              "strategy.order.planned",
+	"OrderReleasedFractionalVersion":             "risk.order.released",
+	"OrderRefusedFractionalVersion":              "risk.order.refused",
+	"TargetsDecidedFractionalVersion":            "strategy.targets.decided",
+	"TargetWeightConfigurationFractionalVersion": "strategy.target-weight.configuration",
+	"OrderSkippedFractionalSchemaVersion":        "strategy.order.skipped",
+	"OrderRetiredFractionalVersion":              "execution.order.retired",
+	"ReconciliationFractionalVersion":            "account.reconciliation",
+	"ReconciliationResultFractionalVersion":      "risk.reconciliation.result",
+}
+
 // notYetCrossed is every event type internal/event defines that deliberately
 // does not cross the LEAN adapter boundary yet, with the reason a fixture
 // would be fiction rather than evidence. Each entry needs an adapter fixture,
 // moved out of this list, the day the cited work lands.
 var notYetCrossed = map[string]string{
+	// Fractional quantities belong to the IRA target-weight path (ADR 0026,
+	// D7-F), not LEAN's whole-share Turtle/Sublime path. publisher.py still
+	// sends snapshot v2, fill v4 and lifecycle v1. adapter/marketdata/kinds.py
+	// likewise lists only whole-share adapter inputs; no fractional schema
+	// is evidence of traffic across the LEAN boundary.
+	"account.snapshot@5":                     "IRA fractional holdings snapshot; LEAN publishes whole-share snapshot v2",
+	"account.snapshot@6":                     "IRA fractional holdings/cash snapshot; LEAN publishes whole-share snapshot v2",
+	"execution.fill@6":                       "IRA target-weight fractional fill; LEAN publishes whole-share fill v4",
+	"execution.order.lifecycle@4":            "IRA fractional lifecycle; LEAN publishes whole-share lifecycle v1",
+	"execution.order.lifecycle@5":            "IRA fractional synthetic lifecycle; LEAN publishes whole-share lifecycle v1",
+	"account.broker.snapshot@3":              "IRA fractional broker snapshot; only the IBKR path reads broker snapshots (ADR 0025)",
+	"strategy.order.planned@3":               "IRA fractional target-weight plan; LEAN never runs target-weight strategies",
+	"risk.order.released@4":                  "IRA fractional release for the IBKR path (ADR 0025); never acted on by LEAN",
+	"risk.order.refused@5":                   "IRA fractional target-weight refusal; LEAN never runs target-weight strategies",
+	"strategy.targets.decided@11":            "IRA fractional target-weight decision; LEAN never runs target-weight strategies",
+	"strategy.target-weight.configuration@8": "IRA fractional configuration composed by the target-weight engine; never sent by LEAN",
+	"strategy.order.skipped@2":               "IRA fractional below-increment skip; LEAN never runs target-weight strategies",
+	"execution.order.retired@2":              "IRA fractional retirement from the IBKR relay; never sent by LEAN",
+	"account.reconciliation@2":               "IRA fractional reconciliation observed by the IBKR path; never sent by LEAN",
+	"risk.reconciliation.result@2":           "IRA fractional reconciliation result from a target-weight engine; never received by LEAN",
+
 	// cmd/engine composes and delivers its own configuration input before the
 	// socket opens (cmd/engine/engine.go's configurationEnvelope); the
 	// adapter never sends or receives one.
@@ -204,7 +247,7 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	fmt.Printf("wire_coverage: %d event types, all covered or excused\n", len(discovered))
+	fmt.Printf("wire_coverage: %d event types/version entries, all covered or excused\n", len(discovered))
 }
 
 // discoverEventTypes parses every *.go file directly in dir, except
@@ -223,7 +266,9 @@ func main() {
 // something other than a literal (this package computes no event type or
 // schema version from an expression, as of this writing, so failing rather
 // than guessing is correct), an EventType has no matching SchemaVersion or
-// vice versa, or two constants claim the same event type string.
+// vice versa, or two constants claim the same event type string. Fractional versions use
+// fractionalEventTypes to pair with a type, and return separate type@version
+// keys; every such version needs its own coverage or excuse.
 func discoverEventTypes(dir string) (map[string]uint32, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -287,7 +332,14 @@ func collectEventDecls(path string, file *ast.File, types map[string]string, ver
 			}
 			for i, ident := range valueSpec.Names {
 				var prefix, kind string
+				fractionalType, fractional := fractionalEventTypes[ident.Name]
 				switch {
+				case strings.Contains(ident.Name, "Fractional") && strings.HasSuffix(ident.Name, "Version"):
+					if !fractional {
+						return fmt.Errorf("wire_coverage: %s: %s needs an event type in fractionalEventTypes and a fixture or version-specific excuse", path, ident.Name)
+					}
+					prefix, kind = ident.Name, "SchemaVersion"
+
 				case strings.HasSuffix(ident.Name, "EventType"):
 					prefix, kind = strings.TrimSuffix(ident.Name, "EventType"), "EventType"
 				case strings.HasSuffix(ident.Name, "SchemaVersion"):
@@ -328,6 +380,9 @@ func collectEventDecls(path string, file *ast.File, types map[string]string, ver
 						return fmt.Errorf("wire_coverage: %s: %sSchemaVersion %s: %w", path, prefix, lit.Value, err)
 					}
 					versions[prefix] = uint32(version)
+					if fractional {
+						types[prefix] = fmt.Sprintf("%s@%d", fractionalType, version)
+					}
 				}
 			}
 		}

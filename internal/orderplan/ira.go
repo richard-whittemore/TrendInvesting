@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
@@ -23,6 +26,9 @@ type IRAInput struct {
 	PriceBand       float64
 	RebalanceBand   float64
 	WorkingSells    map[string]int64
+	// QuantityScale is zero for D7-L or 10000 for D7-F ticks (ADR 0026).
+	QuantityScale       int64
+	FractionalIncrement string
 }
 
 // IRAPlan is a rebalance's two phases, each in ascending instrument ID. Buys
@@ -31,7 +37,7 @@ type IRAInput struct {
 // (ADR 0026, point 2, "IRA execution"); ScaleBuys budgets them.
 //
 // Skipped records each trade the plan sized but cannot order, because
-// rounding toward zero to whole shares leaves none, or a sell's holding is
+// rounding toward zero to the configured share increment leaves none, or a sell's holding is
 // all in working sells: no planned trade disappears silently.
 type IRAPlan struct {
 	Sells   []event.OrderPlannedPayload
@@ -44,15 +50,16 @@ type IRAPlan struct {
 // holdings q and raw previous closes p:
 //  1. the union of held and targeted instruments, in ascending instrument ID;
 //  2. held with no target (or a target of 0): sell the whole holding;
-//  3. not held, with a target T: buy T x V / p whole shares, rounded toward zero;
+//  3. not held, with a target T: buy T x V / p shares, rounded down to the configured increment;
 //  4. held with a target: trade only if |q x p / V - T| > band x T, strictly,
-//     then (T x V - q x p) / p shares, rounded toward zero;
+//     then (T x V - q x p) / p shares, rounded toward zero to the increment;
 //  5. no sell exceeds the holding minus the working and pending sells;
 //  6. sells first, then buys.
 //
 // A trade that rounds to no share, or a sell with nothing left after the
 // working sells, is recorded in Skipped with the shares the rule asked for.
 //
+// D7-F uses the configured fractional increment; D7-L rounds to whole shares.
 // Whole shares rounded toward zero are D7-L's rounding; D7-L's substitution of
 // a pick whose one share exceeds its target is the momentum rule's, not this.
 // A held pick the decision records kept one lot short
@@ -81,6 +88,18 @@ func PlanIRA(in IRAInput) (IRAPlan, error) {
 	case !(in.PriceBand > 0 && in.PriceBand < 1) || !(in.RebalanceBand > 0 && in.RebalanceBand < 1):
 		return IRAPlan{}, errors.New("orderplan: the price band and the rebalance band must lie strictly between 0 and 1")
 	}
+	if in.QuantityScale != 0 && in.QuantityScale != event.FractionalQuantityScale {
+		return IRAPlan{}, errors.New("orderplan: unsupported quantity scale")
+	}
+	if d.QuantityScale != in.QuantityScale {
+		return IRAPlan{}, errors.New("orderplan: decision and planner quantity scales differ")
+	}
+	if in.Snapshot.QuantityScale != in.QuantityScale {
+		return IRAPlan{}, errors.New("orderplan: snapshot and planner quantity scales differ")
+	}
+	if in.QuantityScale == 0 && in.FractionalIncrement != "" {
+		return IRAPlan{}, errors.New("orderplan: whole shares carry no fractional increment")
+	}
 	kept := map[string]bool{}
 	for _, n := range d.Momentum.Names {
 		if n.Status == event.MomentumStatusHeldOneLotShort {
@@ -105,6 +124,9 @@ func PlanIRA(in IRAInput) (IRAPlan, error) {
 		}
 	}
 	slices.Sort(union)
+	if in.QuantityScale != 0 {
+		return planFractionalIRA(in, targets, union)
+	}
 
 	v := in.Snapshot.NetLiquidation
 	var plan IRAPlan
@@ -169,18 +191,26 @@ func PlanIRA(in IRAInput) (IRAPlan, error) {
 	return plan, nil
 }
 
-// BuyCost is a buy's worst-case cost: its quantity at its limit price, the
-// band's edge, plus the configured maximum commission and fees (ADR 0026,
-// point 2, "Worst-case cost"). Buys worth $980 at the previous close cost
+// BuyCost is a buy's worst-case cost: quantity at the band's limit price,
+// rounded up to cents for fractional orders, plus maximum fees and the order's
+// explicit rounding slack (ADR 0026, "Per-execution rounding reserve").
+// Whole-share orders retain their original float arithmetic. Invalid costs
+// return +Inf so budget comparisons fail closed.
+// Buys worth $980 at the previous close cost
 // $1,029 at a 5% band before fees.
 func BuyCost(o event.OrderPlannedPayload, maxFees float64) float64 {
-	return float64(float64(o.Quantity)*o.LimitPrice) + maxFees
+	cost, err := event.BuyReservation(o.Quantity, o.QuantityScale, o.LimitPrice, maxFees, o.RoundingSlack)
+	if err != nil {
+		return math.Inf(1)
+	}
+	value, _ := cost.Float64()
+	return value
 }
 
 // ScaleBuys fits buys to budget (ADR 0026, point 2, "Scaling"): when their
 // worst-case total exceeds it, every buy's quantity is scaled by
-// budget / total and rounded down again, and a buy that rounds to no share is
-// dropped. It returns the buys kept, in their order, and the scale applied (1
+// budget / total and rounded down to its increment again; a buy with no increment is
+// recorded as skipped. It returns the buys kept, in their order, and the scale applied (1
 // when they fit).
 //
 // The fees do not scale with the quantity, so with a nonzero fee allowance
@@ -192,11 +222,18 @@ func BuyCost(o event.OrderPlannedPayload, maxFees float64) float64 {
 //
 // A buy scaled to no share is returned in skipped, with the shares it was
 // scaled to, so it is recorded rather than dropped silently.
+// Fractional buys carry the configured RoundingSlack before this call; the
+// entire original basket's slack is withheld before sizing its quantities.
 func ScaleBuys(buys []event.OrderPlannedPayload, budget, maxFees float64) (kept []event.OrderPlannedPayload, skipped []event.OrderSkippedPayload, scale float64) {
+	for _, b := range buys {
+		if b.QuantityScale != 0 {
+			return scaleFractionalBuys(buys, budget, maxFees)
+		}
+	}
 	total, atLimit := 0.0, 0.0
 	for _, b := range buys {
 		total += BuyCost(b, maxFees)
-		atLimit += float64(float64(b.Quantity) * b.LimitPrice)
+		atLimit += event.QuantityValue(b.Quantity, b.QuantityScale, b.LimitPrice)
 	}
 	if total <= budget {
 		return slices.Clone(buys), nil, 1
@@ -208,6 +245,7 @@ func ScaleBuys(buys []event.OrderPlannedPayload, budget, maxFees float64) (kept 
 		kept, _ = scaled(buys, scale, maxFees)
 	}
 	for _, b := range buys {
+
 		if shares := float64(b.Quantity) * scale; math.Floor(shares) < 1 {
 			skipped = append(skipped, event.OrderSkippedPayload{
 				AccountID: b.AccountID, Tag: b.Tag, ClientOrderID: b.ClientOrderID, InstrumentID: b.InstrumentID,
@@ -309,4 +347,268 @@ func (b *Budget) find(clientOrderID string) *committedBuy {
 		}
 	}
 	return nil
+}
+
+// planFractionalIRA applies ADR 0026 D7-F to exact decimal monetary inputs.
+// Quantities stay integer ticks; only monetary band comparisons are floats.
+func planFractionalIRA(in IRAInput, targets map[string]float64, union []string) (IRAPlan, error) {
+	if in.FractionalIncrement == "" {
+		in.FractionalIncrement = "0.0001"
+	}
+	increment, err := event.FractionalIncrementTicks(in.FractionalIncrement)
+	if err != nil {
+		return IRAPlan{}, fmt.Errorf("orderplan: %w", err)
+	}
+	var plan IRAPlan
+	for _, id := range union {
+		if in.WorkingSells[id] < 0 {
+			return IRAPlan{}, fmt.Errorf("orderplan: working sells of %s must not be negative", id)
+		}
+		price := in.ReferencePrices[id]
+		if !(price > 0) || math.IsInf(price, 0) {
+			return IRAPlan{}, fmt.Errorf("orderplan: %s has no finite, positive reference price", id)
+		}
+		held, target := in.Snapshot.Quantity(id), targets[id]
+		if target == 0 && held == 0 {
+			continue
+		}
+		if target > 0 && held > 0 {
+			value := event.QuantityValue(held, in.QuantityScale, price)
+			if !(math.Abs(value/in.Snapshot.NetLiquidation-target) > float64(in.RebalanceBand*target)) {
+				continue
+			}
+		}
+		value := new(big.Rat).Mul(moneyRat(target), moneyRat(in.Snapshot.NetLiquidation))
+		heldValue := new(big.Rat).Mul(new(big.Rat).SetFrac64(held, in.QuantityScale), moneyRat(price))
+		value.Sub(value, heldValue)
+		side := event.OrderSideBuy
+		if value.Sign() < 0 {
+			side = event.OrderSideSell
+			value.Neg(value)
+		}
+		ticks := new(big.Rat).Quo(value, moneyRat(price))
+		ticks.Mul(ticks, new(big.Rat).SetInt64(in.QuantityScale))
+		quantity, ok := floorIncrement(ticks, increment)
+		if !ok {
+			return IRAPlan{}, fmt.Errorf("orderplan: quantity of %s cannot be ordered", id)
+		}
+		reason := event.OrderSkippedBelowIncrement
+		if side == event.OrderSideSell {
+			available := max(held-in.WorkingSells[id], 0)
+			if quantity > 0 && available < increment && in.WorkingSells[id] > 0 {
+				reason = event.OrderSkippedHeldByWorkingSells
+			}
+			quantity = min(quantity, available/increment*increment)
+		}
+		order := event.OrderPlannedPayload{
+			AccountID: in.Decision.AccountID, Tag: in.Tag, ClientOrderID: ClientOrderID(in.Tag, id, side), InstrumentID: id,
+			Side: side, Phase: side, OrderType: event.OrderTypeLimit, Quantity: quantity, QuantityScale: in.QuantityScale,
+			FractionalIncrement: in.FractionalIncrement, LimitPrice: LimitPrice(side, price, in.PriceBand), TargetWeight: target,
+			NetLiquidation: in.Snapshot.NetLiquidation, HeldQuantity: held, ReferencePrice: price, PriceBand: in.PriceBand,
+		}
+		if quantity == 0 {
+			plan.Skipped = append(plan.Skipped, fractionalSkip(order, reason, value, 0))
+			continue
+		}
+		if side == event.OrderSideSell {
+			plan.Sells = append(plan.Sells, order)
+		} else {
+			plan.Buys = append(plan.Buys, order)
+		}
+	}
+	return plan, nil
+}
+
+// moneyRat interprets a validated monetary float's shortest decimal exactly
+// for ADR 0026 D7-F sizing; it never converts a quantity to floating point.
+func moneyRat(value float64) *big.Rat {
+	r, _ := new(big.Rat).SetString(strconv.FormatFloat(value, 'g', -1, 64))
+	return r
+}
+
+// floorIncrement rounds positive ticks down to the D7-F increment, refusing
+// an int64 overflow before a capital quantity can wrap (ADR 0026).
+func floorIncrement(ticks *big.Rat, increment int64) (int64, bool) {
+	units := new(big.Rat).Quo(ticks, new(big.Rat).SetInt64(increment))
+	n := new(big.Int).Quo(units.Num(), units.Denom())
+	n.Mul(n, big.NewInt(increment))
+	return n.Int64(), n.IsInt64()
+}
+
+// fractionalSkip records the monetary request that rounded below an
+// increment, with the fixed-point holding that constrained it (ADR 0026).
+func fractionalSkip(order event.OrderPlannedPayload, reason string, requested *big.Rat, scale float64) event.OrderSkippedPayload {
+	return event.OrderSkippedPayload{
+		AccountID: order.AccountID, Tag: order.Tag, ClientOrderID: order.ClientOrderID, InstrumentID: order.InstrumentID,
+		Side: order.Side, Phase: order.Phase, Reason: reason, QuantityScale: order.QuantityScale, FractionalIncrement: order.FractionalIncrement,
+		RequestedValue: finiteDecimal(requested), Scale: scale, TargetWeight: order.TargetWeight, NetLiquidation: order.NetLiquidation,
+		HeldQuantity: order.HeldQuantity, ReferencePrice: order.ReferencePrice,
+	}
+}
+
+// finiteDecimal writes exact requested monetary evidence for a skipped D7-F
+// order; every input denominator is a power of ten (ADR 0026, ADR 0015).
+func finiteDecimal(value *big.Rat) string {
+	denominator := new(big.Int).Set(value.Denom())
+	counts := [2]int{}
+	for i, factor := range []int64{2, 5} {
+		divisor := big.NewInt(factor)
+		for new(big.Int).Mod(denominator, divisor).Sign() == 0 {
+			denominator.Quo(denominator, divisor)
+			counts[i]++
+		}
+	}
+	text := value.FloatString(max(counts[0], counts[1]))
+	if strings.Contains(text, ".") {
+		text = strings.TrimRight(strings.TrimRight(text, "0"), ".")
+	}
+	return text
+}
+
+// scaleFractionalBuys applies ADR 0026's budget/total rule and fee correction
+// as exact decimal ratios before rounding quantities down to their increments.
+// Inputs must be validated fractional orders; mixed units fail closed.
+func scaleFractionalBuys(buys []event.OrderPlannedPayload, budget, maxFees float64) ([]event.OrderPlannedPayload, []event.OrderSkippedPayload, float64) {
+	if math.IsNaN(budget) || math.IsInf(budget, 0) || math.IsNaN(maxFees) || math.IsInf(maxFees, 0) || maxFees < 0 {
+		return nil, nil, 0
+	}
+	atLimit, slack := new(big.Rat), new(big.Rat)
+	increments := make([]int64, len(buys))
+	for i, b := range buys {
+		increment, err := event.FractionalIncrementTicks(b.FractionalIncrement)
+		if b.QuantityScale != event.FractionalQuantityScale || b.Quantity <= 0 || !(b.LimitPrice > 0) || math.IsInf(b.LimitPrice, 0) || err != nil || b.Quantity%increment != 0 {
+			return nil, nil, 0
+		}
+		increments[i] = increment
+		if b.RoundingSlack != 0 && !event.ValidRoundingSlack(b.RoundingSlack) {
+			return nil, nil, 0
+		}
+		slack.Add(slack, moneyRat(b.RoundingSlack))
+		cost, err := event.BuyReservation(b.Quantity, b.QuantityScale, b.LimitPrice, maxFees, b.RoundingSlack)
+		if err != nil {
+			return nil, nil, 0
+		}
+		cost.Sub(cost, moneyRat(maxFees))
+		cost.Sub(cost, moneyRat(b.RoundingSlack))
+		atLimit.Add(atLimit, cost)
+	}
+	fees := new(big.Rat).Mul(new(big.Rat).SetInt64(int64(len(buys))), moneyRat(maxFees))
+	total := new(big.Rat).Add(atLimit, fees)
+	ceiling := max(budget, 0)
+	cash := moneyRat(ceiling)
+	sizingCash := new(big.Rat).Sub(cash, slack)
+	if sizingCash.Sign() < 0 {
+		sizingCash.SetInt64(0)
+	}
+	ratio := new(big.Rat).Quo(sizingCash, total)
+	if ratio.Cmp(new(big.Rat).SetInt64(1)) > 0 {
+		ratio.SetInt64(1)
+	}
+	kept, cost, monetaryCost, err := fractionalOrdersAtScale(buys, increments, ratio, maxFees)
+	if err != nil {
+		return nil, nil, 0
+	}
+	if cost.Cmp(cash) > 0 {
+		ratio = fractionalFeeScale(sizingCash, fees, atLimit)
+		kept, cost, monetaryCost, err = fractionalOrdersAtScale(buys, increments, ratio, maxFees)
+		if err != nil {
+			return nil, nil, 0
+		}
+	}
+
+	// ADR 0026, "Scaling": cent ceilings and the gate's sequential float
+	// deductions must both fit. A bounded exact search crosses cent plateaus
+	// without walking adjacent floats or individual quantity ticks. With int64
+	// quantities, 128 bisections resolve even two distinct quantity breakpoints
+	// (their denominators are at most MaxInt64).
+	if cost.Cmp(cash) > 0 || monetaryCost > budget || !fractionalRunningCashFits(kept, budget, maxFees) {
+		low, high := new(big.Rat), new(big.Rat).Set(ratio)
+		kept = nil
+		for range 128 {
+			mid := new(big.Rat).Quo(new(big.Rat).Add(low, high), big.NewRat(2, 1))
+			candidate, exact, monetary, err := fractionalOrdersAtScale(buys, increments, mid, maxFees)
+			if err != nil {
+				return nil, nil, 0
+			}
+			if exact.Cmp(cash) <= 0 && monetary <= budget && fractionalRunningCashFits(candidate, budget, maxFees) {
+				low.Set(mid)
+				kept = candidate
+			} else {
+				high.Set(mid)
+			}
+		}
+		ratio = low
+	}
+
+	scale, _ := ratio.Float64()
+	if ratio.Cmp(new(big.Rat).SetInt64(1)) < 0 && scale == 1 {
+		scale = math.Nextafter(1, 0)
+	}
+	var skipped []event.OrderSkippedPayload
+	for i, b := range buys {
+		ticks := new(big.Rat).Mul(new(big.Rat).SetInt64(b.Quantity), ratio)
+		if quantity, _ := floorIncrement(ticks, increments[i]); quantity == 0 {
+			// RequestedValue is the monetary order before scaling; Scale states
+			// the applied ratio. Neither stores fractional shares in a float.
+			skipped = append(skipped, fractionalSkip(b, event.OrderSkippedScaledBelowIncrement, fractionalOrderValue(b), scale))
+		}
+	}
+	return kept, skipped, scale
+}
+
+// fractionalOrderValue is quantity times limit price as an exact decimal
+// monetary value under ADR 0026 D7-F.
+func fractionalOrderValue(order event.OrderPlannedPayload) *big.Rat {
+	return new(big.Rat).Mul(new(big.Rat).SetFrac64(order.Quantity, order.QuantityScale), moneyRat(order.LimitPrice))
+}
+
+// fractionalFeeScale reserves every original order's fee before sharing
+// the remaining budget, as ADR 0026 point 2 "Scaling" requires.
+func fractionalFeeScale(cash, fees, atLimit *big.Rat) *big.Rat {
+	remaining := new(big.Rat).Sub(cash, fees)
+	if remaining.Sign() < 0 {
+		remaining.SetInt64(0)
+	}
+	remaining.Quo(remaining, atLimit)
+	if remaining.Cmp(new(big.Rat).SetInt64(1)) > 0 {
+		remaining.SetInt64(1)
+	}
+	return remaining
+}
+
+// fractionalOrdersAtScale rounds each exact scaled quantity down and
+// values the kept basket in both the exact and account monetary domains
+// using the conservative cent debit (ADR 0026, "Worst-case cost").
+func fractionalOrdersAtScale(buys []event.OrderPlannedPayload, increments []int64, ratio *big.Rat, maxFees float64) ([]event.OrderPlannedPayload, *big.Rat, float64, error) {
+	var kept []event.OrderPlannedPayload
+	exactCost := new(big.Rat)
+	monetaryCost := 0.0
+	for i, b := range buys {
+		ticks := new(big.Rat).Mul(new(big.Rat).SetInt64(b.Quantity), ratio)
+		b.Quantity, _ = floorIncrement(ticks, increments[i])
+		if b.Quantity > 0 {
+			kept = append(kept, b)
+			cost, err := event.BuyReservation(b.Quantity, b.QuantityScale, b.LimitPrice, maxFees, b.RoundingSlack)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			exactCost.Add(exactCost, cost)
+			monetaryCost += BuyCost(b, maxFees)
+		}
+	}
+	return kept, exactCost, monetaryCost, nil
+}
+
+// fractionalRunningCashFits mirrors the risk gate's release-order cash
+// deductions (ADR 0026, point 2, "Scaling"). A summed float alone cannot
+// prove that every individual order passes the insufficient-cash check.
+func fractionalRunningCashFits(buys []event.OrderPlannedPayload, cash, fees float64) bool {
+	for _, buy := range buys {
+		cost := BuyCost(buy, fees)
+		if cost > cash {
+			return false
+		}
+		cash -= cost
+	}
+	return true
 }

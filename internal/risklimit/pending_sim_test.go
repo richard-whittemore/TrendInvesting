@@ -210,7 +210,9 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 			t.Fatal(err)
 		}
 		views = append(views, seen{g.brokerView, setup})
-		g.ObserveAccount(accountAt(0, setup))
+		if err := g.ObserveAccount(accountAt(0, setup)); err != nil {
+			t.Fatal(err)
+		}
 		views = append(views, seen{g.account, setup})
 		// placeOf is each snapshot's true place, by its identity in the gate.
 		placeOf := map[int]int{g.brokerView.by: 0, g.account.by: 0}
@@ -318,7 +320,9 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 					if rng.Intn(2) == 0 {
 						p := accountAt(sec, held)
 						facts = append(facts, simFact{seq: seq, stream: "account", held: held, record: func(g *Gate) (view, error) {
-							g.ObserveAccount(p)
+							if err := g.ObserveAccount(p); err != nil {
+								t.Fatal(err)
+							}
 							return g.account, nil
 						}})
 						continue
@@ -355,7 +359,9 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 			late.fills = append(late.fills, simFill{seq, late.size})
 			held, p := holding(), accountAt(9, holding())
 			facts = append(facts, simFact{seq: seq, stream: "account", held: held, record: func(g *Gate) (view, error) {
-				g.ObserveAccount(p)
+				if err := g.ObserveAccount(p); err != nil {
+					t.Fatal(err)
+				}
 				return g.account, nil
 			}})
 		}

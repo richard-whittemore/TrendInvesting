@@ -36,6 +36,7 @@ type DecisionLine struct {
 
 // OrderLine is one order of the day and what the gate did with it.
 type OrderLine struct {
+	QuantityScale int64 `json:",omitempty"`
 	ClientOrderID string
 	InstrumentID  string
 	Side          string
@@ -274,6 +275,27 @@ func SummarizeWithCash(history History, ledger CashLedger, envelopes []event.Env
 // from this run and the earlier ones, and the ledger's commissions, fees and
 // broker interest, totalled by Costs.
 func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
+	// Order lines preserve their quantity scale. Other summary surfaces
+	// still mean whole shares; refuse D7-F there until their migration
+	// (ADR 0015; ADR 0026 D7-F).
+	for _, e := range envelopes {
+		var units struct {
+			QuantityScale int64 `json:"quantity_scale"`
+		}
+		if json.Unmarshal(e.Payload, &units) == nil && units.QuantityScale != 0 &&
+			e.Type != event.OrderPlannedEventType && e.Type != event.OrderReleasedEventType && e.Type != event.OrderRefusedEventType {
+			return Summary{}, fmt.Errorf("report: fractional quantity summary requires the adapter and surfaces migration")
+		}
+		if e.Type == event.TargetWeightConfigurationEventType {
+			var cfg event.TargetWeightConfigurationPayload
+			if err := read(e, configurationVersions, &cfg); err != nil {
+				return Summary{}, err
+			}
+			if cfg.Execution.ShareQuantity == event.ShareQuantityFractional {
+				return Summary{}, fmt.Errorf("report: fractional quantity summary requires the adapter and surfaces migration")
+			}
+		}
+	}
 	earlier := history.Earlier
 	end, err := time.Parse(time.DateOnly, date)
 	if err != nil {
@@ -383,7 +405,7 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 			}
 			orders[p.ClientOrderID] = len(s.Orders)
 			s.Orders = append(s.Orders, OrderLine{ClientOrderID: p.ClientOrderID, InstrumentID: p.InstrumentID, Side: p.Side,
-				Quantity: p.Quantity, LimitPrice: p.LimitPrice, Status: OrderPlanned})
+				Quantity: p.Quantity, QuantityScale: p.QuantityScale, LimitPrice: p.LimitPrice, Status: OrderPlanned})
 		case event.OrderReleasedEventType:
 			if !today {
 				continue
@@ -392,7 +414,7 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 			if err := read(e, releasedVersions, &p); err != nil {
 				return Summary{}, err
 			}
-			line := s.order(orders, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)
+			line := s.order(orders, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.QuantityScale, p.LimitPrice)
 			line.Status, line.Send = OrderReleased, p.Send
 		case event.OrderRefusedEventType:
 			if !today {
@@ -402,7 +424,7 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 			if err := read(e, refusedVersions, &p); err != nil {
 				return Summary{}, err
 			}
-			line := s.order(orders, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)
+			line := s.order(orders, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.QuantityScale, p.LimitPrice)
 			line.Status, line.Reason = OrderRefused, p.Reason
 			s.Refusals++
 		case event.FillEventType:
@@ -613,12 +635,12 @@ func (s *Summary) snapshotFollows(p event.AccountPositionsSnapshotPayload) bool 
 
 // order returns the day's line for a client order ID, adding one when the
 // gate recorded an order the day's plans do not show.
-func (s *Summary) order(index map[string]int, id, instrument, side string, quantity int64, limit float64) *OrderLine {
+func (s *Summary) order(index map[string]int, id, instrument, side string, quantity, scale int64, limit float64) *OrderLine {
 	i, ok := index[id]
 	if !ok {
 		i = len(s.Orders)
 		index[id] = i
-		s.Orders = append(s.Orders, OrderLine{ClientOrderID: id, InstrumentID: instrument, Side: side, Quantity: quantity, LimitPrice: limit})
+		s.Orders = append(s.Orders, OrderLine{ClientOrderID: id, InstrumentID: instrument, Side: side, Quantity: quantity, QuantityScale: scale, LimitPrice: limit})
 	}
 	return &s.Orders[i]
 }

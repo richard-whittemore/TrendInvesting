@@ -498,3 +498,67 @@ func TestADamagedConfigurationIsNotReadAsAnotherStrategy(t *testing.T) {
 		}
 	}
 }
+
+// ADR 0026 D7-F and ADR 0015: recovery reads the same fractional venue
+// reports and synthetic cancellations as the engine; old whole-share reports
+// cannot complete an order whose quantities count ten-thousandths.
+func TestRecoveryReadsFractionalReportsAtTheirDeclaredVersions(t *testing.T) {
+	decision := decidedRecord(t, janDecision)
+	var decided event.TargetsDecidedPayload
+	if err := json.Unmarshal(decision.Envelope.Payload, &decided); err != nil {
+		t.Fatal(err)
+	}
+	decided.QuantityScale = 10000
+	decided.Momentum.MinimumLot = event.MinimumLotFigures{}
+	decision = recorded(t, journal.KindDecision, janDecision, event.TargetsDecidedEventType, decided.SchemaVersion(), decided)
+	for _, tc := range []struct {
+		name     string
+		kind     string
+		report   string
+		quantity int64
+		scale    int64
+		complete bool
+	}{
+		{"synthetic cancel", journal.KindDecision, "synthetic", 72500, 10000, true},
+		{"venue cancel", journal.KindInput, "lifecycle", 72500, 10000, true},
+		{"part fill", journal.KindInput, "fill", 35000, 10000, false},
+		{"full fill", journal.KindInput, "fill", 72500, 10000, true},
+		{"retirement", journal.KindInput, "retired", 72500, 10000, true},
+		{"whole-share lifecycle", journal.KindInput, "lifecycle", 72500, 0, false},
+		{"whole-share fill", journal.KindInput, "fill", 72500, 0, false},
+		{"whole-share retirement", journal.KindInput, "retired", 72500, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := event.OrderReleasedPayload{AccountID: iraLogAccount, PlanID: "plan", Tag: janDecision, ClientOrderID: "fractional", InstrumentID: "AAA", Side: event.OrderSideBuy, Quantity: 72500, QuantityScale: 10000, LimitPrice: 2, Mode: event.TradingModePaper, Send: true, Figures: event.RiskFigures{NetLiquidation: 10000, ReferencePrice: 2, OrdersInDecision: 1}}
+			if tc.report == "synthetic" {
+				o.Mode = event.TradingModeDryRun
+				o.Send = false
+			}
+			release := recorded(t, journal.KindDecision, "release", event.OrderReleasedEventType, o.SchemaVersion(), o)
+			var report journal.Entry
+			switch tc.report {
+			case "synthetic", "lifecycle":
+				p := event.LimitOrderLifecyclePayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side, Quantity: tc.quantity, QuantityScale: tc.scale, LimitPrice: o.LimitPrice, Status: event.OrderLifecycleStatusCanceled, OccurredAt: afterMonth, OrderID: "venue"}
+				if tc.report == "synthetic" {
+					p.Synthetic = true
+					p.OrderID = ""
+					p.Message = "dry-run: never sent"
+				}
+				report = recorded(t, tc.kind, "report", event.OrderLifecycleEventType, p.SchemaVersion(), p)
+			case "fill":
+				p := event.TargetWeightFillPayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side, Quantity: tc.quantity, QuantityScale: tc.scale, Price: 2, FillID: "execution", FilledAt: afterMonth}
+				report = recorded(t, tc.kind, "report", event.FillEventType, p.SchemaVersion(), p)
+			case "retired":
+				p := event.OrderRetiredPayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side, Quantity: tc.quantity, QuantityScale: tc.scale, LimitPrice: o.LimitPrice, Reason: event.OrderRetiredSessionOver, Detail: "synthetic fixture session ended", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: afterMonth}
+				report = recorded(t, tc.kind, "report", event.OrderRetiredEventType, p.SchemaVersion(), p)
+			}
+			got, err := restart.RebalanceAtEnd(recordedLog(t, decision, release, report), "fractional.log")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got == nil) != tc.complete {
+				t.Fatalf("rebalance %s, want complete %v", describeRebalance(got), tc.complete)
+			}
+		})
+	}
+}

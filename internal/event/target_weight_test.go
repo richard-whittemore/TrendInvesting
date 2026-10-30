@@ -1150,7 +1150,7 @@ func namedSaleOrder() *event.BoostRestoredSaleOrder {
 // as it was written, and refused if it carries a field of version 8; a
 // record written now states the sale's side and attempt (ADR 0015).
 func TestBoostRestoredSaleOrderAtVersion7(t *testing.T) {
-	if got, want := event.TargetsDecidedVersions(), []uint32{event.TargetsDecidedRetiredVersion, event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedEndedSaleVersion, event.TargetsDecidedSchemaVersion}; !slices.Equal(got, want) {
+	if got, want := event.TargetsDecidedVersions(), []uint32{event.TargetsDecidedRetiredVersion, event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedEndedSaleVersion, event.TargetsDecidedSchemaVersion, event.TargetsDecidedFractionalVersion}; !slices.Equal(got, want) {
 		t.Fatalf("decision versions read are %v, want %v", got, want)
 	}
 	if event.TargetsDecidedRetiredVersion != 7 || event.TargetsDecidedLiveSaleVersion != 8 || event.TargetsDecidedEndedSaleVersion != 9 || event.TargetsDecidedSchemaVersion != 10 {

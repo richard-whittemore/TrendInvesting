@@ -228,6 +228,9 @@ func (g *Gate) checkReleased(r RestoredOrder, st *recoveryStage) error {
 // restored filled in full, where a watched or working order filled in full
 // is recorded no more.
 func (g *Gate) checkRestored(r RestoredOrder, st *recoveryStage, filledInFull bool) error {
+	if err := g.checkQuantityScale(r.Order.QuantityScale); err != nil {
+		return err
+	}
 	o := r.Order
 	switch known := g.orders[o.ClientOrderID] != nil || st.orders[o.ClientOrderID]; {
 	case o.AccountID != g.accountID:
@@ -242,6 +245,9 @@ func (g *Gate) checkRestored(r RestoredOrder, st *recoveryStage, filledInFull bo
 	var filled int64
 	seen := map[string]bool{}
 	for _, f := range r.Fills {
+		if err := g.checkQuantityScale(f.QuantityScale); err != nil {
+			return err
+		}
 		switch err := f.Validate(); {
 		case err != nil:
 			return fmt.Errorf("risklimit: restored order %s: %w", o.ClientOrderID, err)
@@ -278,7 +284,7 @@ func (g *Gate) applyReleased(r RestoredOrder) {
 	g.orders[o.ClientOrderID] = &releasedOrder{
 		planned: event.OrderPlannedPayload{
 			AccountID: o.AccountID, Tag: o.Tag, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID,
-			Side: o.Side, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+			Side: o.Side, Quantity: o.Quantity, QuantityScale: o.QuantityScale, LimitPrice: o.LimitPrice,
 		},
 	}
 	if o.Side == event.OrderSideSell {

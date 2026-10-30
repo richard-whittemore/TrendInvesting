@@ -9,7 +9,8 @@ that discovered set disagrees with its own two hand-maintained lists -- what
 the adapter's fixtures cover, and what deliberately does not cross the LEAN
 boundary yet. This test only has to run it and check it is happy; the
 substance of the check lives in the Go file, in the same place as every other
-*_contract.go check in this directory.
+*_contract.go check in this directory. Fractional schemas are discovered as
+separate type@version entries, each requiring its own fixture or excuse.
 """
 import subprocess
 import unittest
@@ -19,6 +20,13 @@ REPO = Path(__file__).resolve().parents[3]
 
 
 class WireCoverageTests(unittest.TestCase):
+    def test_fractional_version_discovery_fails_closed(self):
+        result = subprocess.run(
+            ["go", "test", "./adapter/lean/tests/testdata/wire_coverage.go",
+             "./adapter/lean/tests/testdata/wire_coverage_test.go"],
+            cwd=REPO, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_every_go_event_type_is_covered_or_explicitly_excused(self):
         result = subprocess.run(
             ["go", "run", "./adapter/lean/tests/testdata/wire_coverage.go"],

@@ -101,7 +101,7 @@ const BrokerSnapshotReadAtVersion uint32 = 2
 
 // BrokerSnapshotVersions returns the versions a broker snapshot is read at.
 func BrokerSnapshotVersions() []uint32 {
-	return []uint32{BrokerSnapshotSchemaVersion, BrokerSnapshotReadAtVersion}
+	return []uint32{BrokerSnapshotSchemaVersion, BrokerSnapshotReadAtVersion, BrokerSnapshotFractionalVersion}
 }
 
 // The components of a broker snapshot that can be unreadable. An unreadable
@@ -146,8 +146,9 @@ type BrokerOrder struct {
 
 // BrokerSnapshotPayload is one IBKR account snapshot at AsOf, a whole second.
 type BrokerSnapshotPayload struct {
-	AccountID string    `json:"account_id"`
-	AsOf      time.Time `json:"as_of"`
+	QuantityScale int64     `json:"quantity_scale,omitempty"`
+	AccountID     string    `json:"account_id"`
+	AsOf          time.Time `json:"as_of"`
 	// MarketOpen is the producer's record that the market was open at AsOf;
 	// the alarm counts a missing reading as urgent only while it is. It must
 	// be stated (UnmarshalJSON).
@@ -257,6 +258,9 @@ func (p BrokerSnapshotPayload) Position(instrumentID string) (BrokerPosition, bo
 // Validate checks identity, each component's value against its readability,
 // the positions and the open orders.
 func (p BrokerSnapshotPayload) Validate() error {
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	var errs []error
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
@@ -305,7 +309,7 @@ func (p BrokerSnapshotPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("position %d: instrument id is required", i+1))
 			continue
 		}
-		if position.Quantity == 0 {
+		if position.Quantity == 0 || p.QuantityScale != 0 && position.Quantity < 0 {
 			errs = append(errs, fmt.Errorf("position %s: quantity must not be zero; an empty holding is stated by absence", position.InstrumentID))
 		}
 		switch {
@@ -364,6 +368,9 @@ func (p BrokerSnapshotPayload) Validate() error {
 // version 1 carries none of version 2's fields, and version 2 states its
 // read time (BrokerSnapshotReadAtVersion).
 func (p BrokerSnapshotPayload) ValidateSchema(version uint32) error {
+	if err := quantitySchema(p.QuantityScale, version, BrokerSnapshotFractionalVersion); err != nil {
+		return err
+	}
 	if err := p.Validate(); err != nil {
 		return err
 	}
@@ -372,7 +379,7 @@ func (p BrokerSnapshotPayload) ValidateSchema(version uint32) error {
 		if p.statesReadAt() {
 			return errors.New("invalid broker snapshot payload: version 1 carries no read time, close stamp, reason, net liquidation at the read, cash drift or unexplained cash; those are version 2's")
 		}
-	case BrokerSnapshotReadAtVersion:
+	case BrokerSnapshotReadAtVersion, BrokerSnapshotFractionalVersion:
 		if err := errors.Join(p.readAtErrors()...); err != nil {
 			return fmt.Errorf("invalid broker snapshot payload: %w", err)
 		}
@@ -777,4 +784,19 @@ func (p SaleWithheldPayload) Validate() error {
 		return fmt.Errorf("invalid sale withheld payload: %w", err)
 	}
 	return nil
+}
+
+// BrokerSnapshotFractionalVersion records positions and open orders in exact
+// ten-thousandths of a raw share (ADR 0015; ADR 0026, D7-F).
+const BrokerSnapshotFractionalVersion uint32 = 3
+
+// SchemaVersion states the broker snapshot's quantity representation (ADR 0015).
+func (p BrokerSnapshotPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return BrokerSnapshotFractionalVersion
+	}
+	if p.statesReadAt() {
+		return BrokerSnapshotReadAtVersion
+	}
+	return BrokerSnapshotSchemaVersion
 }

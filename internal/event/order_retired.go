@@ -46,6 +46,7 @@ const (
 // as it joins a venue's report (Describes), and says why, what refused it
 // or why the owner retired it, who retired it, and when.
 type OrderRetiredPayload struct {
+	QuantityScale int64   `json:"quantity_scale,omitempty"`
 	AccountID     string  `json:"account_id"`
 	ClientOrderID string  `json:"client_order_id"`
 	InstrumentID  string  `json:"instrument_id"`
@@ -71,7 +72,7 @@ type OrderRetiredPayload struct {
 // lifecycle report is read (LimitOrderLifecyclePayload's Describes).
 func (p OrderRetiredPayload) Describes(o OrderReleasedPayload) bool {
 	return p.ClientOrderID == o.ClientOrderID && p.AccountID == o.AccountID && p.InstrumentID == o.InstrumentID &&
-		p.Side == o.Side && p.Quantity == o.Quantity && SameLimitPrice(p.LimitPrice, o.LimitPrice)
+		p.Side == o.Side && p.QuantityScale == o.QuantityScale && p.Quantity == o.Quantity && SameLimitPrice(p.LimitPrice, o.LimitPrice)
 }
 
 // Validate checks the order's identity, side, quantity and limit, that the
@@ -79,6 +80,9 @@ func (p OrderRetiredPayload) Describes(o OrderReleasedPayload) bool {
 // session over, a named owner for the owner's retirement), that the detail
 // says why, and that the time is a whole second.
 func (p OrderRetiredPayload) Validate() error {
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	errs := orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)
 	switch p.Reason {
 	case OrderRetiredSessionOver:
@@ -105,4 +109,29 @@ func (p OrderRetiredPayload) Validate() error {
 		return fmt.Errorf("invalid order retired payload: %w", err)
 	}
 	return nil
+}
+
+// OrderRetiredFractionalVersion identifies an exact fractional release (ADR 0015; ADR 0026, D7-F).
+const OrderRetiredFractionalVersion uint32 = 2
+
+// OrderRetiredVersions preserves legacy retirement inputs (ADR 0015).
+func OrderRetiredVersions() []uint32 { return []uint32{1, 2} }
+
+// SchemaVersion states the release quantity units (ADR 0015).
+func (p OrderRetiredPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return OrderRetiredFractionalVersion
+	}
+	return OrderRetiredSchemaVersion
+}
+
+// ValidateSchema refuses quantity-unit mismatches (ADR 0015).
+func (p OrderRetiredPayload) ValidateSchema(v uint32) error {
+	if v < 1 || v > 2 {
+		return fmt.Errorf("unsupported retirement version %d", v)
+	}
+	if err := quantitySchema(p.QuantityScale, v, 2); err != nil {
+		return err
+	}
+	return p.Validate()
 }

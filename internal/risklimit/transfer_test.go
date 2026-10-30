@@ -58,9 +58,11 @@ func day(n int, cash float64) event.ReconciliationPayload {
 func rebook(g *risklimit.Gate, n int, cash float64) {
 	p := account(10, 0)
 	p.AsOf = p.AsOf.AddDate(0, 0, n).Add(6 * time.Hour) // 4 p.m. New York: the close
-	g.SetBook(reconcile.CashBook("snapshot:"+p.AsOf.Format(time.DateOnly), event.AccountCashSnapshotPayload{
+	if err := g.SetBook(reconcile.CashBook("snapshot:"+p.AsOf.Format(time.DateOnly), event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: p, SettledCash: cash, TotalCash: cash,
-	}))
+	})); err != nil {
+		panic(err) // a fixture book the gate refuses is a test-writing error
+	}
 }
 
 func TestAJournalledDepositExplainsTheCashAndNothingIsDegraded(t *testing.T) {
@@ -292,7 +294,9 @@ func TestAPendingDifferenceTheCalendarCannotCountFromIsDegraded(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	book := account(10, 0)
 	book.AsOf = time.Date(2030, time.December, 30, 15, 0, 0, 0, time.UTC)
-	g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: book, SettledCash: 1000, TotalCash: 1000}))
+	if err := g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: book, SettledCash: 1000, TotalCash: 1000})); err != nil {
+		t.Fatal(err)
+	}
 	flexAside(t, g, book.AsOf.Add(-time.Hour))
 	obs := morningOf(1500, 10)
 	obs.AsOf = book.AsOf.Add(time.Hour)
@@ -300,11 +304,13 @@ func TestAPendingDifferenceTheCalendarCannotCountFromIsDegraded(t *testing.T) {
 		t.Fatalf("got %s", r.Result.Classification)
 	}
 	obs.AsOf, obs.ReconciliationID = time.Date(2031, time.January, 2, 15, 0, 0, 0, time.UTC), "morning:2"
-	g.SetBook(reconcile.CashBook("snapshot:2", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: func() event.AccountPositionsSnapshotPayload {
+	if err := g.SetBook(reconcile.CashBook("snapshot:2", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: func() event.AccountPositionsSnapshotPayload {
 		b := book
 		b.AsOf = obs.AsOf.Add(-time.Hour)
 		return b
-	}(), SettledCash: 1500, TotalCash: 1500}))
+	}(), SettledCash: 1500, TotalCash: 1500})); err != nil {
+		t.Fatal(err)
+	}
 	next := reconcileWith(t, g, "reconciliation:2", obs)
 	if len(next.Settled) != 1 || !strings.Contains(next.Settled[0].Result.Detail, "cannot be counted") {
 		t.Fatalf("settled %+v", next.Settled)
@@ -315,7 +321,9 @@ func TestABookTheCalendarCannotPlaceIsNeverPending(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	book := account(10, 0)
 	book.AsOf = time.Date(2031, time.March, 4, 15, 0, 0, 0, time.UTC)
-	g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: book, SettledCash: 1000, TotalCash: 1000}))
+	if err := g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: book, SettledCash: 1000, TotalCash: 1000})); err != nil {
+		t.Fatal(err)
+	}
 	flexAside(t, g, book.AsOf.Add(-time.Hour))
 	obs := morningOf(1500, 10)
 	obs.AsOf = book.AsOf.Add(time.Hour)

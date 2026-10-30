@@ -114,7 +114,7 @@ func composeTargetWeight(path string, raw []byte, build string, asOf time.Time) 
 	envelope := event.Envelope{
 		ID:                "configuration:" + hash,
 		Type:              event.TargetWeightConfigurationEventType,
-		SchemaVersion:     event.TargetWeightConfigurationSchemaVersion,
+		SchemaVersion:     cfg.SchemaVersion(),
 		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		EventTime:         asOf,
 		RecordedAt:        asOf,

@@ -629,8 +629,8 @@ func refusalAlerts(account string, e event.Envelope, p event.OrderRefusedPayload
 	out := []Alert{{
 		Key: "refusal:" + e.ID, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order refused (%s)", account, p.Reason),
-		Body: fmt.Sprintf("Risk gate refused %s %d %s, limit %.2f, order %s: %s. %s",
-			p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, p.ClientOrderID, p.Reason, p.Detail),
+		Body: fmt.Sprintf("Risk gate refused %s %s %s, limit %.2f, order %s: %s. %s",
+			p.Side, event.FormatQuantity(p.Quantity, p.QuantityScale), p.InstrumentID, p.LimitPrice, p.ClientOrderID, p.Reason, p.Detail),
 	}}
 	if p.Reason == event.RefusedMissingMark {
 		out = append(out, Alert{

@@ -12,8 +12,8 @@ import (
 // ADR 0026's amendment of 2026-10-29 keeps a missing-mark pick's share in
 // cash and records its cause independently of a withheld whole rebalance.
 func TestWithheldPicksVersionAndValidation(t *testing.T) {
-	if got := event.TargetsDecidedVersions(); !slices.Equal(got, []uint32{7, 8, 9, 10}) {
-		t.Fatalf("decision versions = %v, want [7 8 9 10]", got)
+	if got := event.TargetsDecidedVersions(); !slices.Equal(got, []uint32{7, 8, 9, 10, 11}) {
+		t.Fatalf("decision versions = %v, want [7 8 9 10 11]", got)
 	}
 	valid := validMomentumWithheldPick
 	p := valid()

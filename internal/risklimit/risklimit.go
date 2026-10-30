@@ -59,8 +59,11 @@ type Outcome struct {
 // sells, cancel-pending ones included, the orders already planned at this
 // decision time in an earlier phase and how many of those are not
 // risk-reducing, and, for an IRA, the cash its buys may
-// still commit under D5, net of the buys already committed.
+// still commit under D5, net of the buys already committed. Holdings and
+// working sells use QuantityScale, which must match the account and every
+// order (ADR 0026 D7-F).
 type Book struct {
+	QuantityScale int64
 	Holdings      map[string]int64
 	Prices        map[string]float64
 	WorkingSells  map[string]int64
@@ -79,14 +82,16 @@ type Book struct {
 // and the margin-cushion alarm belong to a margin account only; an IRA never
 // borrows (plan.md section 5).
 type Gate struct {
-	accountID string
-	ira       bool
-	maxFees   float64
-	limits    event.MarginLimits
-	mode      string
-	decided   map[string]bool
-	state     string
-	scope     []string
+	quantityScale int64
+	accountID     string
+	ira           bool
+	maxFees       float64
+	roundingSlack float64
+	limits        event.MarginLimits
+	mode          string
+	decided       map[string]bool
+	state         string
+	scope         []string
 	// cashScope names the cash components a Degraded account's scope holds:
 	// a cash-only discrepancy names no instrument, so it blocks buys and
 	// freezes nothing (ADR 0019, amended 2026-09-24).
@@ -238,8 +243,9 @@ func NewGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 
 // NewIRAGate returns a Normal gate for an IRA: its exposure limit is at most
 // 1, since an IRA never uses margin, its limits set no margin cushion, and
-// every buy's worst-case cost, its quantity at its limit plus maxFees, must
-// fit the cash available (ADR 0026, point 3). maxSnapshotAge bounds the
+// every buy's worst-case cost, its quantity at its limit plus maxFees and
+// D7-F's rounding slack, must fit the cash available (ADR 0026, point 3 and
+// "Per-execution rounding reserve"). maxSnapshotAge bounds the
 // broker snapshot its broker-holding check reads, as for the margin account.
 func NewIRAGate(accountID string, limits event.MarginLimits, mode string, maxFees float64, maxSnapshotAge time.Duration) (*Gate, error) {
 	if limits.MaxExposure > 1 {
@@ -256,7 +262,19 @@ func NewIRAGate(accountID string, limits event.MarginLimits, mode string, maxFee
 		return nil, err
 	}
 	g.ira, g.maxFees = true, maxFees
+	g.roundingSlack = event.DefaultRoundingSlack
 	return g, nil
+}
+
+// SetRoundingSlackPerOrder configures D7-F's independent cash check from the
+// execution rule (ADR 0026, "Per-execution rounding reserve"). Configure it
+// before checking orders; whole-share orders do not consume this allowance.
+func (g *Gate) SetRoundingSlackPerOrder(slack float64) error {
+	if !g.ira || !event.ValidRoundingSlack(slack) {
+		return errors.New("risklimit: IRA rounding slack must be in [0.01, 1.00] dollars")
+	}
+	g.roundingSlack = slack
+	return nil
 }
 
 func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapshotAge time.Duration) (*Gate, error) {
@@ -282,6 +300,30 @@ func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 		corporateActions: make(map[string]event.CorporateActionPayload),
 		cashMovements:    make(map[string]event.CashMovementPayload),
 	}, nil
+}
+
+// SetQuantityScale declares the account's quantity units before any holdings or
+// orders arrive (ADR 0026 D7-F). Only an IRA may use four-place ticks; the
+// scale cannot change once capital state exists.
+func (g *Gate) SetQuantityScale(scale int64) error {
+	if scale != 0 && scale != event.FractionalQuantityScale {
+		return fmt.Errorf("risklimit: unsupported quantity scale %d", scale)
+	}
+	if scale != 0 && !g.ira {
+		return errors.New("risklimit: fractional quantities require an IRA")
+	}
+	if g.book != nil || g.broker != nil || len(g.orders) != 0 || g.ledger.snapshots != 0 || len(g.changes) != 0 {
+		return errors.New("risklimit: quantity scale is fixed before capital state arrives")
+	}
+	g.quantityScale = scale
+	return nil
+}
+
+func (g *Gate) checkQuantityScale(scale int64) error {
+	if scale != g.quantityScale {
+		return fmt.Errorf("risklimit: quantity scale %d differs from account scale %d", scale, g.quantityScale)
+	}
+	return nil
 }
 
 // RecordDecision records the ID of a journalled strategy.targets.decided
@@ -496,7 +538,13 @@ func union(a, b []string) []string {
 // the holding once; it is not also added to the working sells, which would
 // count it twice against what the next sell may take.
 func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
+	if err := g.checkQuantityScale(book.QuantityScale); err != nil {
+		return nil, err
+	}
 	for i, o := range plan {
+		if err := g.checkQuantityScale(o.Planned.QuantityScale); err != nil {
+			return nil, err
+		}
 		probe := o.Planned
 		if probe.Tag == "" {
 			probe.Tag = "untagged"
@@ -513,6 +561,9 @@ func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
 		if o.MarkSet && (!(o.Mark > 0) || math.IsInf(o.Mark, 0)) {
 			return nil, fmt.Errorf("risklimit: order %d: a recorded mark must be finite and positive", i+1)
 		}
+	}
+	if err := quantityBounds(book, plan); err != nil {
+		return nil, err
 	}
 	if book.At.IsZero() {
 		return nil, errors.New("risklimit: a check needs its orders' planned time, to bound the broker snapshot's age")
@@ -562,11 +613,55 @@ func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
 	return outcomes, nil
 }
 
+// quantityBounds refuses a plan before any release if any subset of its buys
+// or sells could overflow a position (ADR 0026 D7-F; fail closed). A refusal
+// can prevent an earlier trade from offsetting a later one, so the upper and
+// lower bounds deliberately do not net the two sides.
+func quantityBounds(book Book, plan []Order) error {
+	upper, lower := maps.Clone(book.Holdings), maps.Clone(book.Holdings)
+	if upper == nil {
+		upper = map[string]int64{}
+	}
+	if lower == nil {
+		lower = map[string]int64{}
+	}
+	for _, o := range plan {
+		p := o.Planned
+		if p.Side == event.OrderSideBuy {
+			if upper[p.InstrumentID] > math.MaxInt64-p.Quantity {
+				return fmt.Errorf("risklimit: projected quantity of %s exceeds the fixed-point integer range", p.InstrumentID)
+			}
+			upper[p.InstrumentID] += p.Quantity
+		} else {
+			if lower[p.InstrumentID] < math.MinInt64+p.Quantity {
+				return fmt.Errorf("risklimit: projected quantity of %s is below the fixed-point integer range", p.InstrumentID)
+			}
+			lower[p.InstrumentID] -= p.Quantity
+		}
+	}
+	return nil
+}
+
 // check decides one order of a plan of planSize orders at its decision time,
 // counted of which are not risk-reducing, against book.
 func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 	p := o.Planned
-	f, unvalued := g.figures(o, planSize, book)
+	buyCost := 0.0
+	var costErr error
+	if g.ira && p.Side == event.OrderSideBuy {
+		cost, err := event.BuyReservation(p.Quantity, p.QuantityScale, p.LimitPrice, g.maxFees, g.roundingSlack)
+		costErr = err
+		if costErr == nil {
+			buyCost, _ = cost.Float64()
+		}
+	}
+	// ADR 0026's cash check cannot certify an unrepresentable debit. Keep
+	// only finite input evidence until the engine-state refusals are checked.
+	f := event.RiskFigures{NetLiquidation: p.NetLiquidation, ReferencePrice: p.ReferencePrice, OrdersInDecision: planSize}
+	unvalued := ""
+	if costErr == nil {
+		f, unvalued = g.figures(o, planSize, book, buyCost)
+	}
 	if p.Sale != (event.SaleFigures{}) {
 		return g.checkSale(o, f)
 	}
@@ -597,6 +692,12 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 			out.Refused.Alert, pc.alerted = !pc.alerted, true
 			return out
 		}
+	}
+	if costErr != nil {
+		detail := "cannot establish a finite worst-case cash debit: " + costErr.Error()
+		out := Outcome{Refused: g.refusal(o, f, event.RefusedInsufficientCash, detail)}
+		g.degrade(&out, p.InstrumentID, detail, p.ClientOrderID)
+		return out
 	}
 	// After the engine-state and kill-switch refusals, so a stale snapshot
 	// never stops Boost's exit from firing the sale back to 98%.
@@ -655,7 +756,7 @@ func (g *Gate) release(o Order, f event.RiskFigures) Outcome {
 	}
 	return Outcome{Released: &event.OrderReleasedPayload{
 		AccountID: g.accountID, PlanID: o.PlanID, Tag: p.Tag, ClientOrderID: p.ClientOrderID,
-		InstrumentID: p.InstrumentID, Side: p.Side, Quantity: p.Quantity, LimitPrice: p.LimitPrice,
+		InstrumentID: p.InstrumentID, Side: p.Side, Quantity: p.Quantity, QuantityScale: p.QuantityScale, LimitPrice: p.LimitPrice,
 		Mode: g.mode, Send: g.mode != event.TradingModeDryRun, Figures: f,
 	}}
 }
@@ -708,13 +809,13 @@ func (g *Gate) move(state, cause string) string {
 func (g *Gate) breach(o Order, f event.RiskFigures, counted int, book *Book, unvalued string) (reason, detail string) {
 	p := o.Planned
 	increases := f.ExposureAfter > f.ExposureBefore
-	brokerHeld := f.BrokerHolding - f.WorkingSells
-	available := book.Holdings[p.InstrumentID] - book.WorkingSells[p.InstrumentID]
+	brokerHeld := subtractPending(f.BrokerHolding, f.WorkingSells)
+	available := subtractPending(book.Holdings[p.InstrumentID], book.WorkingSells[p.InstrumentID])
 	switch {
 	case p.Side == event.OrderSideSell && f.BrokerSet && p.Quantity > brokerHeld:
-		return event.RefusedBrokerHolding, fmt.Sprintf("sell of %d exceeds the broker's holding %d net of %d working sells (snapshot %s)", p.Quantity, f.BrokerHolding, f.WorkingSells, g.brokerID)
+		return event.RefusedBrokerHolding, fmt.Sprintf("sell of %s exceeds the broker's holding %s net of %s working sells (snapshot %s)", event.FormatQuantity(p.Quantity, p.QuantityScale), event.FormatQuantity(f.BrokerHolding, p.QuantityScale), event.FormatQuantity(f.WorkingSells, p.QuantityScale), g.brokerID)
 	case p.Side == event.OrderSideSell && p.Quantity > available:
-		return event.RefusedSellExceedsHolding, fmt.Sprintf("sell of %d %s exceeds the %d held net of working and pending sells", p.Quantity, p.InstrumentID, available)
+		return event.RefusedSellExceedsHolding, fmt.Sprintf("sell of %s %s exceeds the %s held net of working and pending sells", event.FormatQuantity(p.Quantity, p.QuantityScale), p.InstrumentID, event.FormatQuantity(available, p.QuantityScale))
 	case counted > g.limits.MaxOrdersPerDecision && p.Side == event.OrderSideBuy:
 		return event.RefusedOrderCount, fmt.Sprintf("%d orders that are not risk-reducing planned at one decision time; the limit is %d, so the plan's buys are refused", counted, g.limits.MaxOrdersPerDecision)
 	case g.riskReducing(p):
@@ -745,7 +846,7 @@ func (g *Gate) breach(o Order, f event.RiskFigures, counted int, book *Book, unv
 // holding and working sells when one is readable. It also returns the first
 // holding, by instrument, that has no reference price, or "" when every one
 // has.
-func (g *Gate) figures(o Order, planSize int, book *Book) (f event.RiskFigures, unvalued string) {
+func (g *Gate) figures(o Order, planSize int, book *Book, buyCost float64) (f event.RiskFigures, unvalued string) {
 	p := o.Planned
 	held := book.Holdings[p.InstrumentID]
 	after := held + p.Quantity
@@ -762,16 +863,16 @@ func (g *Gate) figures(o Order, planSize int, book *Book) (f event.RiskFigures, 
 				unvalued = id
 			}
 		default:
-			others += math.Abs(float64(float64(book.Holdings[id]) * price))
+			others += math.Abs(event.QuantityValue(book.Holdings[id], book.QuantityScale, price))
 		}
 	}
-	own := func(q int64) float64 { return math.Abs(float64(float64(q) * p.ReferencePrice)) }
+	own := func(q int64) float64 { return math.Abs(event.QuantityValue(q, p.QuantityScale, p.ReferencePrice)) }
 	f = event.RiskFigures{
 		NetLiquidation:   p.NetLiquidation,
 		ReferencePrice:   p.ReferencePrice,
 		ExposureBefore:   (others + own(held)) / p.NetLiquidation,
 		ExposureAfter:    (others + own(after)) / p.NetLiquidation,
-		OrderFraction:    float64(p.Quantity) * p.ReferencePrice / p.NetLiquidation,
+		OrderFraction:    event.QuantityValue(p.Quantity, p.QuantityScale, p.ReferencePrice) / p.NetLiquidation,
 		OrdersInDecision: planSize,
 	}
 	if o.MarkSet {
@@ -780,7 +881,10 @@ func (g *Gate) figures(o Order, planSize int, book *Book) (f event.RiskFigures, 
 	}
 	if g.ira && p.Side == event.OrderSideBuy {
 		f.CashChecked = true
-		f.BuyCost = float64(float64(p.Quantity)*p.LimitPrice) + g.maxFees
+		if p.QuantityScale == event.FractionalQuantityScale {
+			f.RoundingSlack = g.roundingSlack
+		}
+		f.BuyCost = buyCost
 		f.CashAvailable = book.CashAvailable
 	}
 	if holding, working, ok := g.brokerHolding(p.InstrumentID); ok {
@@ -797,7 +901,7 @@ func (g *Gate) refusal(o Order, f event.RiskFigures, reason, detail string) *eve
 	p := o.Planned
 	return &event.OrderRefusedPayload{
 		AccountID: g.accountID, PlanID: o.PlanID, Tag: p.Tag, ClientOrderID: p.ClientOrderID,
-		InstrumentID: p.InstrumentID, Side: p.Side, Quantity: p.Quantity, LimitPrice: p.LimitPrice,
+		InstrumentID: p.InstrumentID, Side: p.Side, Quantity: p.Quantity, QuantityScale: p.QuantityScale, LimitPrice: p.LimitPrice,
 		Reason: reason, Detail: detail, Figures: f,
 	}
 }
