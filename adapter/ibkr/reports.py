@@ -2,7 +2,9 @@
 
 ADR 0022 and ADR 0026 point 2: a venue's report on a released limit order is
 execution.order.lifecycle version 2 (LimitOrderLifecyclePayload) and an
-execution of it is execution.fill version 5 (TargetWeightFillPayload). The
+execution of it is execution.fill version 5 (TargetWeightFillPayload).
+D7-F uses versions 4 and 6 respectively, with integer ten-thousandths and
+quantity_scale 10000 (ADR 0026 D7-F; ADR 0015). The
 engine reads both by one rule (internal/event OrderReports): a report must
 describe the order as it was released, a fill must not take it past its
 quantity, and a fill ID names one execution. So each report describes the
@@ -19,7 +21,8 @@ the broker snapshot names it by (ADR 0026 point 2, "Order identity").
 IBKR's orderStatus carries no time, so a lifecycle report's occurred_at is
 the adapter's receipt time; a fill's is IBKR's execution time. Both are whole
 seconds. A report that cannot be stated in the engine's terms (no
-identity, fractional shares, a price that is not a finite positive number,
+identity, a quantity outside the account's share policy, a price that is
+not a finite positive number,
 a commission in another currency, not finite, negative, or not below the
 order's notional) raises UnreportableOrder: it is never journalled
 approximately (fail closed).
@@ -84,6 +87,7 @@ from decimal import Decimal
 
 from orders import CommissionReport, ExecutionReport, OpenOrderRecord, OrderStatusReport
 from snapshot import Record
+from quantities import INT64_MAX, shares, units, valid_scale
 
 LIFECYCLE_TYPE = "execution.order.lifecycle"
 LIFECYCLE_VERSION = 2
@@ -172,12 +176,6 @@ def _order_key(order_id):
     return int(parts[1]), int(parts[2])
 
 
-def _whole(value, what):
-    if value != value.to_integral_value():
-        raise UnreportableOrder("{} {} is not whole shares".format(what, value))
-    return int(value)
-
-
 class OrderReportJournal:
     """Turns OrderTracker records on this engine's orders into lifecycle and fill inputs passed to sink.
 
@@ -219,7 +217,7 @@ class OrderReportJournal:
     """
 
     def __init__(self, account_id, client_id, sink, now, commission_wait, held_path, owns_lock, ready,
-                 journalled=(), acknowledged=None, late_fills=None):
+                 journalled=(), acknowledged=None, late_fills=None, quantity_scale=0):
         if (isinstance(commission_wait, bool) or not isinstance(commission_wait, (int, float))
                 or not math.isfinite(commission_wait) or commission_wait <= 0):
             raise ValueError("commission_wait must be a positive number of seconds, not {!r}".format(
@@ -231,6 +229,9 @@ class OrderReportJournal:
         self._acknowledged = dict(acknowledged or {})
         check_late_fills(late_fills or {})
         self._late_fills = dict(late_fills or {})
+        if not valid_scale(quantity_scale):
+            raise ValueError("invalid quantity scale {!r}".format(quantity_scale))
+        self.quantity_scale = quantity_scale
         self.account_id = account_id
         self.client_id = client_id
         self._sink = sink
@@ -266,6 +267,22 @@ class OrderReportJournal:
         self._load_held()
         self._release_held()
 
+    def _quantity(self, value, what):
+        """Encode exact broker shares under the account policy (ADR 0026, D7-F); never round."""
+        try:
+            quantity = units(value, self.quantity_scale, what)
+            if quantity <= 0:
+                raise ValueError("{} must be positive".format(what))
+            return quantity
+        except ValueError as err:
+            raise UnreportableOrder(str(err)) from None
+
+    def _record(self, event_type, legacy_version, payload):
+        if self.quantity_scale:
+            payload["quantity_scale"] = self.quantity_scale
+            return Record(event_type, 6 if event_type == FILL_TYPE else 4, payload)
+        return Record(event_type, legacy_version, payload)
+
     def _require_lock(self):
         if not self._owns_lock():
             raise UnreportableOrder(
@@ -277,13 +294,32 @@ class OrderReportJournal:
         payload = record.payload
         if payload.get("account_id") != self.account_id:
             return
+        if record.event_type in (LIFECYCLE_TYPE, FILL_TYPE):
+            scale = payload.get("quantity_scale", 0)
+            expected = (4 if scale else LIFECYCLE_VERSION) if record.event_type == LIFECYCLE_TYPE else (
+                6 if scale else FILL_VERSION)
+            if not valid_scale(scale) or type(record.schema_version) is not int or record.schema_version != expected:
+                raise UnreportableOrder("journalled {} schema and quantity scale disagree".format(record.event_type))
         if record.event_type == LIFECYCLE_TYPE:
             key = _order_key(payload.get("order_id"))
             if key is not None:
+                try:
+                    quantity = shares(payload.get("quantity"), payload.get("quantity_scale", 0))
+                except ValueError as err:
+                    raise UnreportableOrder(str(err)) from None
+                if quantity <= 0:
+                    raise UnreportableOrder("journalled order quantity must be positive")
                 self._status[key] = payload.get("status")
                 self._described[key] = (payload.get("client_order_id"), payload.get("instrument_id"),
-                                        payload.get("side"), payload.get("quantity"), payload.get("limit_price"))
+                                        payload.get("side"), quantity,
+                                        payload.get("limit_price"))
         elif record.event_type == FILL_TYPE:
+            try:
+                quantity = shares(payload.get("quantity"), payload.get("quantity_scale", 0))
+            except ValueError as err:
+                raise UnreportableOrder(str(err)) from None
+            if quantity <= 0:
+                raise UnreportableOrder("journalled fill quantity must be positive")
             self._seen[_exec_base(payload["fill_id"])] = payload["fill_id"]
             self._fills.add(payload["fill_id"])
 
@@ -307,7 +343,7 @@ class OrderReportJournal:
                                         "against IBKR before starting (docs/manual/paper-trading.md)".format(
                                             self._held_path, n, "" if key is None else " (a second for its order)"))
             keys.add(key)
-            record = Record(LIFECYCLE_TYPE, LIFECYCLE_VERSION, entry["record"]["payload"])
+            record = Record(LIFECYCLE_TYPE, entry["record"]["schema_version"], entry["record"]["payload"])
             if self._status.get(key) != entry["status"]:
                 self._held[key] = (record, entry["status"], frozenset(entry["awaits"]))
 
@@ -320,16 +356,20 @@ class OrderReportJournal:
                 or not isinstance(awaits, list) or not awaits
                 or not all(isinstance(a, str) and a for a in awaits)
                 or not isinstance(record, dict) or tuple(sorted(record)) != RECORD_FIELDS
-                or record["event_type"] != LIFECYCLE_TYPE or record["schema_version"] != LIFECYCLE_VERSION
+                or record["event_type"] != LIFECYCLE_TYPE or type(record["schema_version"]) is not int
+                or record["schema_version"] != (4 if self.quantity_scale else LIFECYCLE_VERSION)
                 or not isinstance(record["payload"], dict)):
             return None
         key = (entry["client_id"], entry["order_id"])
         payload = record["payload"]
-        if (entry["client_id"] != self.client_id or tuple(sorted(payload)) != LIFECYCLE_FIELDS
+        fields = tuple(sorted(LIFECYCLE_FIELDS + (("quantity_scale",) if self.quantity_scale else ())))
+        if (entry["client_id"] != self.client_id or tuple(sorted(payload)) != fields
+                or not valid_scale(payload.get("quantity_scale", 0))
+                or payload.get("quantity_scale", 0) != self.quantity_scale
                 or payload["account_id"] != self.account_id or payload["status"] != entry["status"]
                 or _order_key(payload["order_id"]) != key or not _is_text(payload["client_order_id"])
                 or not _is_text(payload["instrument_id"]) or payload["side"] not in SIDES.values()
-                or not _is_id(payload["quantity"]) or payload["quantity"] == 0
+                or not _is_id(payload["quantity"]) or not 0 < payload["quantity"] <= INT64_MAX
                 or not _is_price(payload["limit_price"]) or not _is_stamp(payload["occurred_at"])
                 or not isinstance(payload["message"], str)):
             return None
@@ -479,19 +519,19 @@ class OrderReportJournal:
                                                                      report.lifecycle))
         if limit is None or limit <= 0 or action not in SIDES:
             raise UnreportableOrder("order {} is not a buy or sell limit order".format(client_order_id))
-        record = Record(LIFECYCLE_TYPE, LIFECYCLE_VERSION, {
+        record = self._record(LIFECYCLE_TYPE, LIFECYCLE_VERSION, {
             "account_id": self.account_id,
             "client_order_id": client_order_id,
             "order_id": "order:{}:{}".format(report.client_id, report.broker_order_id),
             "instrument_id": symbol,
             "side": SIDES[action],
             "status": report.lifecycle,
-            "quantity": _whole(quantity, "order quantity"),
+            "quantity": self._quantity(quantity, "order quantity"),
             "limit_price": float(limit),
             "occurred_at": _stamp(self._now(), "receipt time"),
             "message": report.reason or "",
         })
-        self._described[key] = (client_order_id, symbol, SIDES[action], _whole(quantity, "order quantity"),
+        self._described[key] = (client_order_id, symbol, SIDES[action], quantity,
                                 float(limit))
         if report.lifecycle in TERMINAL and self._waiting(key):
             awaits = frozenset(r.exec_id for r, _ in self._executions.values()
@@ -520,7 +560,7 @@ class OrderReportJournal:
             return
         if report.side not in EXECUTION_SIDES:
             raise UnreportableOrder("execution {} has side {!r}".format(report.exec_id, report.side))
-        _whole(report.shares, "execution {}".format(report.exec_id))
+        self._quantity(report.shares, "execution {}".format(report.exec_id))
         base = _exec_base(report.exec_id)
         first = self._seen.get(base)
         if first == report.exec_id:
@@ -610,13 +650,13 @@ class OrderReportJournal:
             raise UnreportableOrder("execution {} has commission {} {}; the engine reads a commission of at "
                                     "least zero and below the order's value, in {}".format(
                                         commission.exec_id, amount, commission.currency, BASE_CURRENCY))
-        self._sink(Record(FILL_TYPE, FILL_VERSION, {
+        self._sink(self._record(FILL_TYPE, FILL_VERSION, {
             "account_id": self.account_id,
             "client_order_id": report.client_order_id,
             "fill_id": report.exec_id,
             "instrument_id": report.symbol,
             "side": EXECUTION_SIDES[report.side],
-            "quantity": _whole(report.shares, "execution {}".format(report.exec_id)),
+            "quantity": self._quantity(report.shares, "execution {}".format(report.exec_id)),
             "price": float(report.price),
             "commission": float(commission.commission),
             "filled_at": _stamp(report.occurred_at, "execution time"),

@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from config import is_paper_account
+from quantities import quantity_scale, shares, units
 from connection import NotConnected
 from spelling import ibkr_symbol
 from values import to_decimal
@@ -28,7 +29,7 @@ from values import to_decimal
 ACTIONS = ("BUY", "SELL")
 PRICED_ORDER_TYPES = ("LMT",)
 UNPRICED_ORDER_TYPES = ("MKT",)
-# A released order is a whole-share limit order for the session (ADR 0026
+# A released order is a limit order for the session (ADR 0026
 # point 2, "Order type and price").
 RELEASE_ORDER_TYPE = "LMT"
 RELEASE_TIF = "DAY"
@@ -238,8 +239,10 @@ class PaperSender:
             raise UnsendableOrder("a released order is a limit order, not {!r}".format(request.order_type))
         if request.tif != RELEASE_TIF:
             raise ValueError("a released order is a {} order, not {!r}".format(RELEASE_TIF, request.tif))
-        if request.quantity != request.quantity.to_integral_value():
-            raise UnsendableOrder("quantity {} is not whole shares".format(request.quantity))
+        try:
+            units(request.quantity, quantity_scale(config), "order quantity")
+        except ValueError as err:
+            raise UnsendableOrder(str(err)) from None
         if not isinstance(request.con_id, int) or isinstance(request.con_id, bool) or request.con_id <= 0:
             raise UnsendableOrder("con_id must be IBKR's positive contract ID")
         return config
@@ -278,7 +281,7 @@ def release_to_request(order, mode, con_ids, session=None):
     Only a release marked send whose mode is the adapter's own is sent
     (ADR 0026 point 3, "Mode"). con_ids maps the engine's instrument ID to
     IBKR's contract ID; an instrument with none is refused, never looked up
-    by name. That refusal, and a quantity with a fraction of a share, raise
+    by name. That refusal, and a noninteger wire quantity, raise
     UnsendableOrder: the order can never be sent as it stands. session is the New York date of the input whose reply released
     the order; without one the order is refused.
     """
@@ -295,16 +298,17 @@ def release_to_request(order, mode, con_ids, session=None):
         raise UnsendableOrder("no IBKR contract ID is configured for {!r}".format(symbol))
     quantity = order.get("quantity")
     if _is_fraction(quantity):
-        raise UnsendableOrder("quantity {!r} is a fraction of a share; IBKR takes whole shares only".format(quantity))
+        raise UnsendableOrder("quantity {!r} is not integer units at its declared quantity_scale".format(quantity))
     if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
-        raise ValueError("quantity {!r} is not a positive whole number of shares".format(quantity))
+        raise ValueError("quantity {!r} is not a positive integer quantity".format(quantity))
+    quantity = shares(quantity, order.get("quantity_scale", 0))
     limit = to_decimal(order.get("limit_price"), "limit_price")
     if limit <= 0:
         raise ValueError("limit_price must be positive")
     if not _is_date(session):
         raise ValueError("order {} has no session it was released in".format(order.get("client_order_id")))
     return OrderRequest(client_order_id=order["client_order_id"], account_id=order["account_id"],
-                        con_id=con_ids[symbol], symbol=symbol, action=action, quantity=Decimal(quantity),
+                        con_id=con_ids[symbol], symbol=symbol, action=action, quantity=quantity,
                         order_type=RELEASE_ORDER_TYPE, limit_price=limit, tif=RELEASE_TIF,
                         session=session)
 

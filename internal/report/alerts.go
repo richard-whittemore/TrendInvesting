@@ -272,7 +272,7 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 				continue
 			}
 			notAtClose = [2]string{}
-			if e.SchemaVersion == event.BrokerSnapshotReadAtVersion && !p.AsOfClose {
+			if (e.SchemaVersion == event.BrokerSnapshotReadAtVersion || e.SchemaVersion == event.BrokerSnapshotFractionalVersion) && !p.AsOfClose {
 				notAtClose = [2]string{e.ID, p.NotAsOfClose}
 			}
 		case event.OperatorRunApprovedEventType:

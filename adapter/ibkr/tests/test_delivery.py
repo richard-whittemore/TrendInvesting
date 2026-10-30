@@ -1925,6 +1925,7 @@ class StreamFolderRuleTests(unittest.TestCase):
             (snapshot.BROKER_SNAPSHOT_TYPE, 1), (snapshot.BROKER_SNAPSHOT_TYPE, snapshot.BROKER_SNAPSHOT_VERSION),
             (snapshot.ACCOUNT_SNAPSHOT_TYPE, snapshot.ACCOUNT_SNAPSHOT_VERSION),
             (snapshot.ACCOUNT_SNAPSHOT_TYPE, snapshot.ACCOUNT_SNAPSHOT_CASH_VERSION),
+            (snapshot.ACCOUNT_SNAPSHOT_TYPE, 6), (snapshot.BROKER_SNAPSHOT_TYPE, 3),
             (snapshot.MARK_TYPE, snapshot.MARK_VERSION), (snapshot.MARK_TYPE, snapshot.MARK_CONTRACT_VERSION),
             ("market.mark.unavailable", 1)})
         self.assertIs(kinds.DELIVERED_KINDS, DELIVERED_KINDS)

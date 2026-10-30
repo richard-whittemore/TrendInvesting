@@ -326,7 +326,7 @@ func readFillCost(e event.Envelope) (fillCost, error) {
 		}
 		return fillCost{p.FillID, p.Commission, p.FilledAt}, nil
 	}
-	if e.SchemaVersion == event.FillTargetWeightVersion {
+	if e.SchemaVersion == event.FillTargetWeightVersion || e.SchemaVersion == event.FillTargetWeightFractionalVersion {
 		var p event.TargetWeightFillPayload
 		if err := read(e, targetWeightFillVersions, &p); err != nil {
 			return fillCost{}, err

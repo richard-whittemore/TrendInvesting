@@ -211,7 +211,8 @@ ACCOUNT_SNAPSHOT = ("account.snapshot", 3)      # internal/event AccountSnapshot
 # The account snapshots whose net liquidation the reader takes the equity before a transfer from: Boost's version 3
 # and an IRA's version 4 (AccountSnapshotCashVersion), version 3's fields with the cash beside them (ADR 0026 point 2).
 # Any other version is refused, never read as if absent (ADR 0015).
-ACCOUNT_SNAPSHOT_VERSIONS = (3, 4)
+# D7-F changes position units, not the equity or currency this reader uses (ADR 0026).
+ACCOUNT_SNAPSHOT_VERSIONS = (3, 4, 6)
 FIRST_RUN_APPROVAL_VERSIONS = (3, 4, 5, 6)      # the operator.run.approved versions that state the starting book
 # internal/event EquityBeforeNextSnapshotLessAmount and EquityBeforeSameDaySnapshotLessAmount.
 NEXT_SNAPSHOT_LESS_AMOUNT = "next-snapshot-less-amount"

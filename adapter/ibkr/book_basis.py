@@ -64,6 +64,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from relay import LOG_DECISION, LOG_INPUT, RUN_APPROVED, is_fill, run_chain
 from reports import FILL_TYPE
+from quantities import shares, units, SCALE
 from snapshot import ACCOUNT_SNAPSHOT_TYPE, BASE_CURRENCY, RECONCILIATION_TYPE
 
 RECONCILIATION_RESULT_TYPE = "risk.reconciliation.result"
@@ -73,7 +74,7 @@ EXPLAINED = ("matched", "explained")
 TOTAL_CASH_COMPONENT = "total-cash"
 CENT = Decimal("0.01")
 # The kept bases' file format (see the module).
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 log = logging.getLogger("ibkr")
 
@@ -95,7 +96,7 @@ def cash_change(fills):
     """The cash fills move: a buy's value and commission paid, a sell's value less commission received."""
     change = Decimal(0)
     for fill in fills:
-        value = cents(Decimal(str(fill["price"])) * fill["quantity"])
+        value = cents(Decimal(str(fill["price"])) * shares(fill["quantity"], fill.get("quantity_scale", 0)))
         commission = cents(Decimal(str(fill["commission"])))
         change += value - commission if fill["side"] == "sell" else -(value + commission)
     return change
@@ -105,8 +106,9 @@ def holdings_after(positions, fills):
     """positions with fills applied, share for share, an instrument at zero left out."""
     expected = dict(positions)
     for fill in fills:
-        shares = fill["quantity"] if fill["side"] == "buy" else -fill["quantity"]
-        expected[fill["instrument_id"]] = expected.get(fill["instrument_id"], 0) + shares
+        quantity = shares(fill["quantity"], fill.get("quantity_scale", 0))
+        expected[fill["instrument_id"]] = expected.get(fill["instrument_id"], 0) + (
+            quantity if fill["side"] == "buy" else -quantity)
     return {s: q for s, q in expected.items() if q != 0}
 
 
@@ -195,7 +197,8 @@ def _walk(runs, own):
                 cash = (Decimal(str(reading["total_cash"])) if reading is not None
                         and TOTAL_CASH_COMPONENT not in reading["unreadable"] else None)
                 as_of = _time(payload["as_of"])
-                daily = Basis({p["instrument_id"]: p["quantity"] for p in payload["positions"]}, cash,
+                daily = Basis({p["instrument_id"]: shares(p["quantity"], payload.get("quantity_scale", 0))
+                               for p in payload["positions"]}, cash,
                               fills_since(later, as_of),
                               "the previous close's account snapshot (as of {}) in {}".format(payload["as_of"], name),
                               mine, "", as_of)
@@ -230,7 +233,8 @@ def _key(path, approval):
 def _to_json(basis):
     if basis is None:
         return None
-    return {"positions": basis.positions, "cash": None if basis.cash is None else str(basis.cash),
+    return {"positions": {s: str(q) for s, q in basis.positions.items()},
+            "cash": None if basis.cash is None else str(basis.cash),
             "fills": basis.fills, "source": basis.source, "refused": basis.refused,
             "as_of": basis.as_of.isoformat()}
 
@@ -246,8 +250,13 @@ def _from_json(raw):
         raise ValueError("not a kept basis")
     positions = raw["positions"]
     if not isinstance(positions, dict) or not all(
-            isinstance(s, str) and s != "" and isinstance(q, int) and not isinstance(q, bool) for s, q in positions.items()):
+            isinstance(s, str) and s != "" and isinstance(q, str) for s, q in positions.items()):
         raise ValueError("positions")
+    positions = {s: Decimal(q) for s, q in positions.items()}
+    for q in positions.values():
+        # Legacy books can hold short positions; preserve their sign while
+        # validating exact four-place magnitude (ADR 0019; ADR 0026 D7-F).
+        units(abs(q), SCALE)
     # Each fill as the engine reads one (relay.is_fill), so fills_since and
     # cash_change never meet a field they cannot count.
     if not isinstance(raw["fills"], list) or not all(is_fill(fill) for fill in raw["fills"]):

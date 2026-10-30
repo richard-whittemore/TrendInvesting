@@ -15,6 +15,6 @@
   "max_connect_attempts": 10,
   "commission_wait": 60,
   "con_ids": {},
-  "account_snapshot_version": 4,
+  "account_snapshot_version": 6,
   "resolve_contracts": true
 }

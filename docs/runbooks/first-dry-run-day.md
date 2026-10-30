@@ -860,7 +860,7 @@ accounts/trad-ira.env    encrypted, unlocked
 1
 ira-adapter-unit-installed
   "client_id": 12,
-  "account_snapshot_version": 4,
+  "account_snapshot_version": 6,
   "resolve_contracts": true
 TI_ADAPTER_CLIENT_ID=12
 TI_ADAPTER_ACCOUNT_KEY=IBKR_ACCOUNT_TRAD_IRA
@@ -873,6 +873,17 @@ no quotes, no spaces). It goes there and nowhere else: never in the
 repository, a chat or a ticket (`docs/live-trading/lessons-2026-10.md` L12).
 
 ### I-1. Name the account and your birth month in the IRA's configuration
+
+Enable **fractional trading** on the IRA account in IBKR and keep **dividend
+reinvestment (DRIP) off**. The owner selected D7-F (ADR 0026):
+`execution.share_quantity` must be `"fractional"` and
+`execution.fractional_increment` must be `"0.0001"`. The shipped template
+sets both; the block below also updates an existing installed template
+and sets the adapter's `account_snapshot_version` to 6. Provisioning never
+overwrites an installed adapter configuration; if the preflight above
+shows 4, complete this update before starting the adapter.
+Holdings and fills may have up to four decimal places. A fifth decimal
+place is refused with its reason, never rounded by the adapter.
 
 The shipped `trad-ira.config` names the placeholder account `trad-ira` and the
 placeholder birth `YYYY-MM` (the glide path's age; the engine refuses to
@@ -900,6 +911,20 @@ elif [ "$current" != "$account" ]; then
   exit 1
 fi
 sed -i "s/\"birth\": \"YYYY-MM\"/\"birth\": \"$birth\"/" "$config"
+python3 - "$config" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+config = json.loads(path.read_text())
+config["execution"]["share_quantity"] = "fractional"
+config["execution"]["fractional_increment"] = "0.0001"
+path.write_text(json.dumps(config, indent=2) + "\n")
+adapter_path = Path("/etc/trend-investing/adapters/trad-ira.json")
+adapter = json.loads(adapter_path.read_text())
+adapter["account_snapshot_version"] = 6
+adapter_path.write_text(json.dumps(adapter, indent=2) + "\n")
+PY
 [ "$(sed -n 's/^ *"account_id": *"\([^"]*\)".*/\1/p' "$config")" = "$account" ] || { echo "STOP: the account was not named."; exit 1; }
 echo account-named
 grep -c '"birth": "YYYY-MM"' "$config" || true
@@ -915,6 +940,11 @@ account-named
 ```
 
 ### I-2. Approve the IRA's first run with its starting book
+
+The existing starting-book approval accepts whole shares only (ADR 0026,
+D7-F amendment). Begin with cash or whole-share holdings. If the IRA already
+holds a fraction, its approval needs the separate starting-book migration;
+do not round that holding to make the approval pass.
 
 In IBKR, read the IRA paper account's holdings and its total cash, and use
 them here exactly as in step 2 (`-positions ""` only when it holds nothing).
@@ -1065,7 +1095,7 @@ sudo grep -c '"state":"halted"' /var/lib/trend-investing/engines/trad-ira/"$run"
   "client_id": 12,
   "mode": "dry-run",
   "paper_sending_enabled": false,
-  "account_snapshot_version": 4,
+  "account_snapshot_version": 6,
   "resolve_contracts": true
 active
 ~ ibkr adapter starting mode=dry-run client_id=12 sending=off
@@ -1110,7 +1140,7 @@ invocation=$(systemctl show -p InvocationID --value ti-adapter@trad-ira)
 sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat >/tmp/ti-adapter-trad-ira.journal
 cd /opt/trend-investing/adapter
 sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr probe --journal /tmp/ti-adapter-trad-ira.journal \
-  --engine-log /var/lib/trend-investing/engines/trad-ira/"$run".log --client-id 12 --snapshot-version 4 --expect-batch
+  --engine-log /var/lib/trend-investing/engines/trad-ira/"$run".log --client-id 12 --snapshot-version 6 --expect-batch
 )
 ```
 
@@ -1121,7 +1151,8 @@ sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr 
 ~ probe: ok connected to IB Gateway as client_id=12
 ~ probe: ok reconciled client_id=12: positions=[0-9]+ open_orders=0 executions=0
 ~ probe: ok queued run=run-ira-2026-10-29 files=trad-ira-[0-9-]+\.jsonl inputs=[0-9]+ \(delivered: [0-9]+ answered, [0-9]+ already committed\)
-~ probe: ok account snapshot version 4 as of .*settled_cash .*total_cash
+~ probe: ok account snapshot version 6 as of .*settled_cash .*total_cash
+~ probe: ok holdings: .*
 ~ probe: ok reconciliation journalled
 ~ probe: ok [0-9]+ mark\(s\) at version 3
 probe: ok no order released to be sent and none refused for a missing mark

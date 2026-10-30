@@ -104,6 +104,144 @@
         "type": "int",
         "value": 8
       }
+    },
+    "fractional_fill": {
+      "contract": {
+        "conId": {
+          "type": "int",
+          "value": 900001
+        },
+        "currency": {
+          "type": "str",
+          "value": "USD"
+        },
+        "exchange": {
+          "type": "str",
+          "value": "SMART"
+        },
+        "localSymbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "primaryExchange": {
+          "type": "str",
+          "value": "NASDAQ"
+        },
+        "secType": {
+          "type": "str",
+          "value": "STK"
+        },
+        "symbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "tradingClass": {
+          "type": "str",
+          "value": "NMS"
+        }
+      },
+      "execution": {
+        "acctNumber": {
+          "type": "str",
+          "value": "synthetic"
+        },
+        "avgPrice": {
+          "type": "float",
+          "value": 10.0
+        },
+        "clientId": {
+          "type": "int",
+          "value": 12
+        },
+        "cumQty": {
+          "type": "Decimal",
+          "value": "3.5"
+        },
+        "execId": {
+          "type": "str",
+          "value": "synthetic.01.01"
+        },
+        "orderId": {
+          "type": "int",
+          "value": 17
+        },
+        "orderRef": {
+          "type": "str",
+          "value": "synthetic-order"
+        },
+        "permId": {
+          "type": "int",
+          "value": 900017
+        },
+        "price": {
+          "type": "float",
+          "value": 10.0
+        },
+        "shares": {
+          "type": "Decimal",
+          "value": "3.5"
+        },
+        "side": {
+          "type": "str",
+          "value": "SLD"
+        },
+        "time": {
+          "type": "str",
+          "value": "20261029 15:00:00 US/Eastern"
+        }
+      },
+      "reqId": {
+        "type": "int",
+        "value": 9
+      }
+    },
+    "fractional_position": {
+      "account": {
+        "type": "str",
+        "value": "synthetic"
+      },
+      "avgCost": {
+        "type": "float",
+        "value": 10.0
+      },
+      "contract": {
+        "conId": {
+          "type": "int",
+          "value": 900001
+        },
+        "currency": {
+          "type": "str",
+          "value": "USD"
+        },
+        "exchange": {
+          "type": "str",
+          "value": "SMART"
+        },
+        "localSymbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "primaryExchange": {
+          "type": "str",
+          "value": "NASDAQ"
+        },
+        "secType": {
+          "type": "str",
+          "value": "STK"
+        },
+        "symbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "tradingClass": {
+          "type": "str",
+          "value": "NMS"
+        }
+      },
+      "position": {
+        "type": "Decimal",
+        "value": "12.3456"
+      }
     }
   },
   "server_version": 205,
@@ -210,6 +348,144 @@
       "reqId": {
         "type": "int",
         "value": 8
+      }
+    },
+    "fractional_fill": {
+      "contract": {
+        "conId": {
+          "type": "int",
+          "value": 900001
+        },
+        "currency": {
+          "type": "str",
+          "value": "USD"
+        },
+        "exchange": {
+          "type": "str",
+          "value": "SMART"
+        },
+        "localSymbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "primaryExchange": {
+          "type": "str",
+          "value": ""
+        },
+        "secType": {
+          "type": "str",
+          "value": "STK"
+        },
+        "symbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "tradingClass": {
+          "type": "str",
+          "value": "NMS"
+        }
+      },
+      "execution": {
+        "acctNumber": {
+          "type": "str",
+          "value": "synthetic"
+        },
+        "avgPrice": {
+          "type": "float",
+          "value": 10.0
+        },
+        "clientId": {
+          "type": "int",
+          "value": 12
+        },
+        "cumQty": {
+          "type": "Decimal",
+          "value": "3.5"
+        },
+        "execId": {
+          "type": "str",
+          "value": "synthetic.01.01"
+        },
+        "orderId": {
+          "type": "int",
+          "value": 17
+        },
+        "orderRef": {
+          "type": "str",
+          "value": "synthetic-order"
+        },
+        "permId": {
+          "type": "int",
+          "value": 900017
+        },
+        "price": {
+          "type": "float",
+          "value": 10.0
+        },
+        "shares": {
+          "type": "Decimal",
+          "value": "3.5"
+        },
+        "side": {
+          "type": "str",
+          "value": "SLD"
+        },
+        "time": {
+          "type": "str",
+          "value": "20261029 15:00:00 US/Eastern"
+        }
+      },
+      "reqId": {
+        "type": "int",
+        "value": 9
+      }
+    },
+    "fractional_position": {
+      "account": {
+        "type": "str",
+        "value": "synthetic"
+      },
+      "avgCost": {
+        "type": "float",
+        "value": 10.0
+      },
+      "contract": {
+        "conId": {
+          "type": "int",
+          "value": 900001
+        },
+        "currency": {
+          "type": "str",
+          "value": "USD"
+        },
+        "exchange": {
+          "type": "str",
+          "value": "SMART"
+        },
+        "localSymbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "primaryExchange": {
+          "type": "str",
+          "value": ""
+        },
+        "secType": {
+          "type": "str",
+          "value": "STK"
+        },
+        "symbol": {
+          "type": "str",
+          "value": "AAA"
+        },
+        "tradingClass": {
+          "type": "str",
+          "value": "NMS"
+        }
+      },
+      "position": {
+        "type": "Decimal",
+        "value": "12.3456"
       }
     }
   },

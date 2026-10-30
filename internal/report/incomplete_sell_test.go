@@ -297,9 +297,8 @@ func TestFractionalIncompleteSell(t *testing.T) {
 	}
 }
 
-// TestFractionalSummaryFailsClosedUntilSurfaceMigration prevents a surface
-// still expressing whole shares from presenting D7-F ticks as shares (ADR 0015).
-func TestFractionalSummaryFailsClosedUntilSurfaceMigration(t *testing.T) {
+// D7-F configuration is readable once every quantity surface preserves its scale (ADR 0015).
+func TestFractionalSummaryAcceptsFractionalConfiguration(t *testing.T) {
 	s := newIRAStream(t)
 	var cfg event.TargetWeightConfigurationPayload
 	if err := json.Unmarshal(s.out[0].Payload, &cfg); err != nil {
@@ -313,8 +312,8 @@ func TestFractionalSummaryFailsClosedUntilSurfaceMigration(t *testing.T) {
 	s.out[0].Payload = raw
 	s.out[0].PayloadHash = event.HashPayload(raw)
 	s.out[0].SchemaVersion = cfg.SchemaVersion()
-	if _, err := report.Summarize(s.out, "2025-01-28", "SPY"); err == nil || !strings.Contains(err.Error(), "fractional") {
-		t.Fatalf("fractional summary must fail closed: %v", err)
+	if _, err := report.Summarize(s.out, "2025-01-28", "SPY"); err != nil {
+		t.Fatalf("fractional summary: %v", err)
 	}
 }
 

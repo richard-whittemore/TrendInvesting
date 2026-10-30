@@ -1,4 +1,4 @@
-"""Capture the shapes ibapi hands the adapter for a contract's details and an account value, from ibapi's own decoder.
+"""Capture contract, account, fractional-position and fractional-fill callbacks from ibapi's own decoder.
 
     PYTHONPATH=<ibapi's pythonclient> python3 capture_ibapi_shapes.py > testdata/ibapi_shapes.json
 
@@ -14,13 +14,15 @@ records each callback's arguments as
 ibapi passes them to EWrapper: every attribute the adapter reads, with its
 Python type and value. No IBKR source is copied: only the field names and
 types ibapi produces (ADR 0025, amendment of 2026-10-16). It needs ibapi
-and protobuf, so it is run by hand (as on 2026-10-29, from the pinned
-archive checked against TWSAPI_ARCHIVE_SHA256); the committed output is
-what adapter/ibkr/tests/fake_tws.py builds its contract details and
-account values from, and test_ira.py checks the two agree.
+and protobuf, so it is run by hand (fractional captures on 2026-10-30,
+from the pinned archive checked against TWSAPI_ARCHIVE_SHA256). The
+committed output supplies the synthetic callback formats checked by
+test_ira.py and reconstructed by test_account_shape.captured_fractional.
+Decimal values are serialized as strings to preserve their exact digits.
 """
 import json
 import sys
+from decimal import Decimal
 
 from ibapi import server_versions
 from ibapi.decoder import Decoder
@@ -28,11 +30,15 @@ from ibapi.protobuf.AccountValue_pb2 import AccountValue
 from ibapi.protobuf.ContractData_pb2 import ContractData
 from ibapi.protobuf.ContractDataEnd_pb2 import ContractDataEnd
 from ibapi.protobuf.ErrorMessage_pb2 import ErrorMessage
+from ibapi.protobuf.ExecutionDetails_pb2 import ExecutionDetails
+from ibapi.protobuf.Position_pb2 import Position
 from ibapi.wrapper import EWrapper
 
 # The attributes of a contract's details the adapter reads (snapshot.resolve_contracts).
 CONTRACT_FIELDS = ("conId", "symbol", "secType", "exchange", "primaryExchange", "currency", "localSymbol",
                    "tradingClass")
+EXECUTION_FIELDS = ("acctNumber", "execId", "clientId", "orderId", "permId", "orderRef", "side", "shares",
+                    "price", "cumQty", "avgPrice", "time")
 DETAILS_FIELDS = ("marketName", "minTick", "longName", "stockType", "validExchanges")
 # Synthetic values: an invented stock, contract ID and paper account.
 SYMBOL, CON_ID, ACCOUNT = "AAA", 900001, "DU0000001"
@@ -52,12 +58,18 @@ class Recorder(EWrapper):
     def updateAccountValue(self, key, val, currency, accountName):
         self.calls.append(("updateAccountValue", key, val, currency, accountName))
 
+    def position(self, account, contract, position, avgCost):
+        self.calls.append(("position", account, contract, position, avgCost))
+
+    def execDetails(self, reqId, contract, execution):
+        self.calls.append(("execDetails", reqId, contract, execution))
+
     def error(self, reqId, errorTime, errorCode, errorString, advancedOrderRejectJson=""):
         self.calls.append(("error", reqId, errorTime, errorCode, errorString))
 
 
 def typed(value):
-    return {"type": type(value).__name__, "value": value}
+    return {"type": type(value).__name__, "value": str(value) if isinstance(value, Decimal) else value}
 
 
 def details_shape(req_id, details):
@@ -90,6 +102,19 @@ def protobuf_calls():
     refused.errorMsg = "No security definition has been found for the request"
     refused.errorTime = 1800000000000
     decoder.processErrorMsgProtoBuf(refused.SerializeToString())
+    position = Position()
+    position.account, position.position, position.avgCost = "synthetic", "12.3456", 10.0
+    position.contract.CopyFrom(c)
+    decoder.processPositionMsgProtoBuf(position.SerializeToString())
+    fill = ExecutionDetails()
+    fill.reqId = 9
+    fill.contract.CopyFrom(c)
+    e = fill.execution
+    e.orderId, e.execId, e.time = 17, "synthetic.01.01", "20261029 15:00:00 US/Eastern"
+    e.acctNumber, e.exchange, e.side = "synthetic", "NASDAQ", "SLD"
+    e.shares, e.cumQty, e.price, e.avgPrice = "3.5", "3.5", 10.0, 10.0
+    e.permId, e.clientId, e.orderRef = 900017, 12, "synthetic-order"
+    decoder.processExecutionDataMsgProtoBuf(fill.SerializeToString())
     return wrapper.calls
 
 
@@ -130,6 +155,12 @@ def text_calls():
     decoder.interpret(b(2, "SettledCash", "10000.00", "USD", ACCOUNT), IN.ACCT_VALUE)
     decoder.interpret(b(8, 200, "No security definition has been found for the request", "", 1800000000000),
                       IN.ERR_MSG)
+    decoder.interpret(b(3, "synthetic", CON_ID, SYMBOL, "STK", "", 0, "", "", "SMART", "USD", SYMBOL,
+                        "NMS", "12.3456", 10.0), IN.POSITION_DATA)
+    decoder.interpret(b(9, 17, CON_ID, SYMBOL, "STK", "", 0, "", "", "SMART", "USD", SYMBOL, "NMS",
+                        "synthetic.01.01", "20261029 15:00:00 US/Eastern", "synthetic", "NASDAQ", "SLD",
+                        "3.5", 10.0, 900017, 12, 0, "3.5", 10.0, "synthetic-order", "", 0, "", 0, 0, ""),
+                      IN.EXECUTION_DATA)
     return wrapper.calls
 
 
@@ -142,6 +173,16 @@ def shapes(calls):
             out["contract_details_end"] = {"req_id": typed(call[1])}
         elif call[0] == "updateAccountValue":
             out["account_value"] = {k: typed(v) for k, v in zip(("key", "val", "currency", "accountName"), call[1:])}
+        elif call[0] == "position":
+            out["fractional_position"] = {
+                "account": typed(call[1]),
+                "contract": {name: typed(getattr(call[2], name)) for name in CONTRACT_FIELDS},
+                "position": typed(call[3]), "avgCost": typed(call[4])}
+        elif call[0] == "execDetails":
+            out["fractional_fill"] = {
+                "reqId": typed(call[1]),
+                "contract": {name: typed(getattr(call[2], name)) for name in CONTRACT_FIELDS},
+                "execution": {name: typed(getattr(call[3], name)) for name in EXECUTION_FIELDS}}
         elif call[0] == "error":
             out["error"] = {k: typed(v) for k, v in zip(("reqId", "errorTime", "errorCode", "errorString"), call[1:])}
     return out

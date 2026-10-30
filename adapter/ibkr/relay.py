@@ -160,6 +160,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sender import SessionOver, UnsendableOrder
+from quantities import shares, valid_scale
 
 _LOADED = {}
 
@@ -1024,7 +1025,7 @@ class PendingInput:
         if (not isinstance(entry, dict) or tuple(sorted(entry)) != NEVER_SENT_FIELDS
                 or not all(_is_text(entry[k]) for k in ("evidence", "input_id", "log", "run"))
                 or not isinstance(entry["retirement"], dict)
-                or tuple(sorted(entry["retirement"])) != NEVER_SENT_RETIREMENT_FIELDS
+                or not _quantity_fields(entry["retirement"], NEVER_SENT_RETIREMENT_FIELDS)
                 or not _is_text(entry["retirement"]["client_order_id"])):
             raise HandoverRecordInvalid("{} line {} is not a settlement as settle-ended-run writes one".format(
                 self.never_sent_path, n))
@@ -1095,7 +1096,7 @@ class PendingInput:
                     ended.add(cid)
                 elif (event_type == FILL_TYPE and _is_text(payload.get("fill_id"))
                       and _is_count(payload.get("quantity"))):
-                    fills[payload["fill_id"]] = (cid, payload["quantity"])
+                    fills[payload["fill_id"]] = (cid, shares(payload["quantity"], payload.get("quantity_scale", 0)))
         ended -= {cid for cid, mark in marks.items() if mark == AT_BROKER}
         return SettledOrders(frozenset(ended), fills)
 
@@ -1667,8 +1668,13 @@ def retire_order(pending, order, reason, detail, by, at, today, input_id, entry_
                "instrument_id": order.get("instrument_id"), "side": order.get("side"),
                "quantity": order.get("quantity"), "limit_price": order.get("limit_price"), "reason": reason,
                "detail": detail, "retired_by": by, "retired_at": stamp}
+    scale = order.get("quantity_scale", 0)
+    if not valid_scale(scale):
+        raise ValueError("invalid retirement quantity scale {!r}".format(scale))
+    if scale:
+        payload["quantity_scale"] = scale
     Outbox(pending.path + OUTBOX_SUFFIX).append_once({
-        "id": entry_id or RETIRED_ID + cid, "event_type": RETIRED_TYPE, "schema_version": RETIRED_VERSION,
+        "id": entry_id or RETIRED_ID + cid, "event_type": RETIRED_TYPE, "schema_version": 2 if scale else RETIRED_VERSION,
         "event_time": stamp, "payload": payload})
     pending.record_decision({"client_order_id": cid, "decision": DECIDE_RETIRED, "reason": detail,
                              "retired": reason, "retired_by": by, "at": stamp, "session_date": today.isoformat(),
@@ -1852,10 +1858,10 @@ def _is_queued_retirement(entry):
     """
     if tuple(sorted(entry)) != OUTBOX_FIELDS or entry["event_type"] != RETIRED_TYPE:
         return False
-    if type(entry["schema_version"]) is not int or entry["schema_version"] != RETIRED_VERSION:
+    if not _quantity_schema(entry["schema_version"], entry["payload"], RETIRED_VERSION, 2):
         return False
     p = entry["payload"]
-    if tuple(sorted(p)) != NEVER_SENT_RETIREMENT_FIELDS:
+    if not _quantity_fields(p, NEVER_SENT_RETIREMENT_FIELDS):
         return False
     cid = p["client_order_id"]
     if not isinstance(cid, str) or CLIENT_ORDER_ID_SHAPE.fullmatch(cid) is None:
@@ -2522,6 +2528,8 @@ def _settle_ended_run(pending, engine_log_path, by, reason, now):
                            "instrument_id": order.get("instrument_id"), "side": order.get("side"),
                            "quantity": order.get("quantity"), "limit_price": order.get("limit_price"),
                            "reason": RETIRED_BY_OWNER, "detail": reason, "retired_by": by, "retired_at": stamp}}
+        if order.get("quantity_scale", 0):
+            new[cid]["retirement"]["quantity_scale"] = order["quantity_scale"]
     still = set(settled) | set(kept)
     why_not = dict(refused)
     withdrawn = [(cid, why_not.get(cid, "its order is no longer one the ended run's records show never sent"))
@@ -2833,7 +2841,8 @@ def _order_ends(path, groups, ended, fills):
                 continue
             if envelope["type"] == FILL_TYPE:
                 fill_id = _fill_id(path, at, kind, envelope)
-                fills[fill_id] = (envelope["payload"]["client_order_id"], envelope["payload"]["quantity"])
+                fills[fill_id] = (envelope["payload"]["client_order_id"],
+                                  shares(envelope["payload"]["quantity"], envelope["payload"].get("quantity_scale", 0)))
             elif envelope["type"] == LIFECYCLE_TYPE:
                 client_order_id, status = _lifecycle(path, at, kind, envelope)
                 if status in LIFECYCLE_TERMINAL:
@@ -2862,7 +2871,9 @@ def _open_orders(groups, ended, fills):
                 continue
             cid = payload["client_order_id"]
             quantity = payload.get("quantity")
-            if cid in ended or (_is_count(quantity) and filled.get(cid, 0) >= quantity):
+            scale = payload.get("quantity_scale", 0)
+            if cid in ended or (_is_count(quantity) and valid_scale(scale)
+                                and quantity <= INT64_MAX and filled.get(cid, 0) >= shares(quantity, scale)):
                 continue
             still.add(cid)
     return still
@@ -2938,10 +2949,27 @@ _canonical_bytes = engine_log.canonical_bytes
 _utc = engine_log.utc
 
 
+def _quantity_fields(payload, fields):
+    """Exact legacy or fractional record fields (ADR 0015; ADR 0026, D7-F)."""
+    if not isinstance(payload, dict) or not valid_scale(payload.get("quantity_scale", 0)):
+        return False
+    expected = fields + (("quantity_scale",) if payload.get("quantity_scale", 0) else ())
+    return tuple(sorted(payload)) == tuple(sorted(expected))
+
+
+def _quantity_schema(version, payload, legacy, fractional):
+    """A schema and its quantity scale agree; an unknown scale never falls back to whole shares."""
+    if type(version) is not int or not isinstance(payload, dict):
+        return False
+    scale = payload.get("quantity_scale", 0)
+    return valid_scale(scale) and version == (fractional if scale else legacy)
+
+
 def _fill_id(path, n, kind, envelope):
     """The fill ID of a committed fill input exactly as the engine reads one, else ResolveRefused."""
     payload = envelope["payload"]
-    if kind != LOG_INPUT or envelope["schema_version"] != FILL_VERSION or not is_fill(payload):
+    if (kind != LOG_INPUT or not _quantity_schema(envelope["schema_version"], payload, FILL_VERSION, 6)
+            or not is_fill(payload)):
         raise _unreadable(path, n, "it is a fill but not an input {} version {} as the engine reads one".format(
             FILL_TYPE, FILL_VERSION))
     return payload["fill_id"]
@@ -2949,9 +2977,10 @@ def _fill_id(path, n, kind, envelope):
 
 def is_fill(payload):
     """Whether payload is a fill input's payload exactly as the engine reads one (internal/event TargetWeightFillPayload)."""
-    return (isinstance(payload, dict) and tuple(sorted(payload)) == FILL_FIELDS
+    return (isinstance(payload, dict) and _quantity_fields(payload, FILL_FIELDS)
             and all(_is_text(payload[k]) for k in ("account_id", "client_order_id", "fill_id", "instrument_id"))
             and payload["side"] in ("buy", "sell") and _is_count(payload["quantity"])
+            and payload["quantity"] <= INT64_MAX
             and _is_number(payload["price"]) and payload["price"] > 0
             and _is_number(payload["commission"]) and payload["commission"] >= 0
             and _is_time(payload["filled_at"], WHOLE_SECOND))
@@ -2960,7 +2989,8 @@ def is_fill(payload):
 def _lifecycle(path, n, kind, envelope):
     """(client order ID, status) of a committed lifecycle input as the IBKR adapter journals one, else ResolveRefused."""
     payload = envelope["payload"]
-    if (kind != LOG_INPUT or envelope["schema_version"] != LIFECYCLE_VERSION or not isinstance(payload, dict)
+    if (kind != LOG_INPUT or not _quantity_schema(envelope["schema_version"], payload, LIFECYCLE_VERSION, 4)
+            or not isinstance(payload, dict)
             or not _is_text(payload.get("client_order_id")) or not _is_text(payload.get("status"))):
         raise _unreadable(path, n, "it is a lifecycle report but not an input {} version {} as the adapter "
                                    "journals one".format(LIFECYCLE_TYPE, LIFECYCLE_VERSION))
@@ -2970,7 +3000,7 @@ def _lifecycle(path, n, kind, envelope):
 def _retired(path, n, envelope):
     """The client order ID a committed retirement input names, else ResolveRefused."""
     payload = envelope["payload"]
-    if (envelope["schema_version"] != RETIRED_VERSION or not isinstance(payload, dict)
+    if (not _quantity_schema(envelope["schema_version"], payload, RETIRED_VERSION, 2) or not isinstance(payload, dict)
             or not _is_text(payload.get("client_order_id"))):
         raise _unreadable(path, n, "it is a retirement but not an input {} version {} as the adapter journals "
                                    "one".format(RETIRED_TYPE, RETIRED_VERSION))
@@ -3159,7 +3189,7 @@ def _ends(envelope, client_order_id):
     if not isinstance(envelope, dict) or envelope.get("type") != LIFECYCLE_TYPE:
         return False
     payload = envelope.get("payload")
-    return (envelope.get("schema_version") == LIFECYCLE_VERSION and isinstance(payload, dict)
+    return (_quantity_schema(envelope.get("schema_version"), payload, LIFECYCLE_VERSION, 4) and isinstance(payload, dict)
             and payload.get("client_order_id") == client_order_id and payload.get("status") in LIFECYCLE_TERMINAL)
 
 

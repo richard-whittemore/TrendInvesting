@@ -7,7 +7,7 @@ same day with this check on the real server, against the real Gateway's
 answers (docs/manual/ibkr-adapter.md, "The same-day probe").
 
     journalctl _SYSTEMD_INVOCATION_ID=<the adapter's> -o cat > adapter.txt
-    python3 -m adapter.ibkr probe --journal adapter.txt --engine-log <run>.log --client-id 12 --snapshot-version 4
+    python3 -m adapter.ibkr probe --journal adapter.txt --engine-log <run>.log --client-id 12 --snapshot-version 6
 
 It reads two files and talks to nothing: the adapter's journal lines for one
 start (the messages as the adapter logs them, without journald's prefix) and
@@ -43,8 +43,8 @@ makes them true:
    --expect-batch says this start must deliver one, or when nothing says
    either way;
 5. for the latest batch, the engine journalled, among the inputs it delivered, an
-   account snapshot at the version the engine reads (4 for an IRA: settled
-   and total cash), a reconciliation, the batch's marks (version 3 with the
+   account snapshot at the version the engine reads (4 for a whole-share IRA,
+   6 for D7-F: settled and total cash), a reconciliation, the batch's marks (version 3 with the
    IBKR contract for an IRA) and its session closes, each with every field
    the engine reads, valid (a field that is not is named);
 6. no order released in reply to this start's inputs is marked to be sent
@@ -120,7 +120,9 @@ def _positions(payload):
     if not isinstance(rows, list):
         return "positions"
     for i, row in enumerate(rows):
-        if not isinstance(row, dict) or not _text(row.get("instrument_id")) or not _count(row.get("quantity")):
+        if (not isinstance(row, dict) or not _text(row.get("instrument_id")) or not _count(row.get("quantity"))
+                or not -(1 << 63) <= row["quantity"] < (1 << 63)
+                or row["quantity"] == 0 or (payload.get("quantity_scale") and row["quantity"] < 0)):
             return "positions[{}]".format(i)
     return ""
 
@@ -129,6 +131,8 @@ def snapshot_fault(payload, version):
     """The first field of an account snapshot the engine would not read as valid, or ""."""
     if not isinstance(payload, dict):
         return "payload"
+    if _scale_fault(payload, version == 6):
+        return "quantity_scale (account policy or schema mismatch)"
     for name, ok in (("account_id", _text(payload.get("account_id"))), ("as_of", _text(payload.get("as_of"))),
                      ("net_liquidation", _number(payload.get("net_liquidation")) and payload["net_liquidation"] > 0),
                      ("currency", payload.get("currency") == "USD")):
@@ -136,17 +140,20 @@ def snapshot_fault(payload, version):
             return name
     if _positions(payload):
         return _positions(payload)
-    if version == 4:
+    if version in (4, 6):
         for name in ("settled_cash", "total_cash"):
             if not _number(payload.get(name)):
                 return name
     return ""
 
 
-def reconciliation_fault(payload):
+def reconciliation_fault(payload, snapshot_version=None, version=None):
     """The first field of a reconciliation the engine would not read as valid, or ""."""
     if not isinstance(payload, dict):
         return "payload"
+    fractional = snapshot_version == 6 if snapshot_version is not None else payload.get("quantity_scale", 0) == 10000
+    if _scale_fault(payload, fractional) or (version is not None and version != (2 if fractional else 1)):
+        return "quantity_scale (account policy or schema mismatch)"
     unreadable = payload.get("unreadable")
     if not isinstance(unreadable, list):
         return "unreadable"
@@ -351,6 +358,12 @@ def check_engine_log(path, snapshot_version, mode, report, queued, answered, lat
     if queued:
         batch = set(latest)
         _check_batch([g[0][2] for g in own if g[0][2]["id"] in batch], snapshot_version, report)
+    for group in own:
+        envelope = group[0][2]
+        if envelope["type"] == "execution.fill":
+            fault = fill_fault(envelope["payload"], envelope["schema_version"], snapshot_version)
+            if fault:
+                report.fail("fill {} has no valid {}".format(envelope["id"], fault))
     sent = [e for e in decisions if e["type"] == RELEASED and e["payload"].get("send") is True]
     missing = [e["payload"].get("instrument_id") for e in decisions
                if e["type"] == ORDER_REFUSED and e["payload"].get("reason") == "missing-mark"]
@@ -393,12 +406,18 @@ def _check_batch(inputs, snapshot_version, report):
         elif faults:
             report.fail("account snapshot {} has no valid {}".format(*faults[0]))
         else:
-            cash = ("settled_cash", "total_cash") if snapshot_version == 4 else ()
+            cash = ("settled_cash", "total_cash") if snapshot_version in (4, 6) else ()
             report.ok("account snapshot version {} as of {}: {}".format(
                 snapshot_version, last.get("as_of"),
                 ", ".join("{} {}".format(k, last[k]) for k in ("net_liquidation",) + cash)))
+            if snapshot_version == 6:
+                from quantities import shares
+                holdings = ", ".join("{} {}".format(row["instrument_id"],
+                                      format(shares(row["quantity"], 10000).normalize(), "f"))
+                                     for row in last["positions"])
+                report.ok("holdings: " + (holdings or "none"))
     reconciliations = [e for e in inputs if e["type"] == RECONCILIATION]
-    faults = [(e["id"], reconciliation_fault(e["payload"])) for e in reconciliations]
+    faults = [(e["id"], reconciliation_fault(e["payload"], snapshot_version, e["schema_version"])) for e in reconciliations]
     faults = [(i, f) for i, f in faults if f]
     if not reconciliations:
         report.fail("the batch this start queued delivered no reconciliation")
@@ -408,7 +427,7 @@ def _check_batch(inputs, snapshot_version, report):
         report.ok("reconciliation journalled ({})".format(len(reconciliations)))
     marks = [e for e in inputs if e["type"] == MARK]
     closes = [e for e in inputs if e["type"] == CLOSED]
-    want = 3 if snapshot_version == 4 else 2
+    want = 3 if snapshot_version in (4, 6) else 2
     wrong = [e["id"] for e in marks if e["schema_version"] != want]
     close = closes[-1]["payload"].get("period_end") if closes else None
     faults = [(e["id"], mark_fault(e["payload"], e["schema_version"], close)) for e in marks]
@@ -447,3 +466,20 @@ def run(journal_path, engine_log_path, client_id, snapshot_version=4, mode="dry-
     else:
         report.lines.append("probe: passed")
     return [mask_accounts(line, account) for line in report.lines], 1 if report.failures else 0
+
+
+def _scale_fault(payload, fractional):
+    """Quantity units must agree with this account's schema (ADR 0026 D7; ADR 0015)."""
+    scale = payload.get("quantity_scale", 0)
+    return type(scale) is not int or scale != (10000 if fractional else 0)
+
+
+def fill_fault(payload, version, snapshot_version):
+    """A fill in the configured account's quantity units, never an unscaled fraction."""
+    from relay import is_fill
+    if not isinstance(payload, dict):
+        return "payload"
+    fractional = snapshot_version == 6
+    if _scale_fault(payload, fractional) or version != (6 if fractional else 5):
+        return "quantity_scale (account policy or schema mismatch)"
+    return "" if is_fill(payload) else "fill fields"

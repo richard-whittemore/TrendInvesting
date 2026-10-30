@@ -64,6 +64,7 @@ func (o OrderLine) StatusText() string {
 
 // FillLine is one execution.fill record.
 type FillLine struct {
+	QuantityScale int64 `json:",omitempty"`
 	At            time.Time
 	InstrumentID  string
 	Side          string
@@ -183,6 +184,8 @@ type EquityPoint struct {
 
 // Summary is one account's day.
 type Summary struct {
+	// QuantityScale applies to holdings; each order and fill carries its own (ADR 0026 D7-F).
+	QuantityScale  int64 `json:",omitempty"`
 	AccountID      string
 	StrategyID     string
 	Date           string
@@ -190,7 +193,7 @@ type Summary struct {
 	HaveSnapshot   bool
 	HoldingsAsOf   time.Time
 	NetLiquidation float64
-	// HaveCash identifies a version-4 IRA snapshot (ADR 0026 point 2).
+	// HaveCash identifies a version-4 or version-6 IRA cash snapshot (ADR 0026 point 2).
 	HaveCash      bool
 	SettledCash   float64
 	TotalCash     float64
@@ -275,25 +278,26 @@ func SummarizeWithCash(history History, ledger CashLedger, envelopes []event.Env
 // from this run and the earlier ones, and the ledger's commissions, fees and
 // broker interest, totalled by Costs.
 func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
-	// Order lines preserve their quantity scale. Other summary surfaces
-	// still mean whole shares; refuse D7-F there until their migration
-	// (ADR 0015; ADR 0026 D7-F).
+	// A fractional book is read only for a D7-F configuration. The versioned
+	// payload validators still reject an unknown or mismatched scale (ADR 0015;
+	// ADR 0026 D7-F).
+	fractional := false
 	for _, e := range envelopes {
-		var units struct {
-			QuantityScale int64 `json:"quantity_scale"`
-		}
-		if json.Unmarshal(e.Payload, &units) == nil && units.QuantityScale != 0 &&
-			e.Type != event.OrderPlannedEventType && e.Type != event.OrderReleasedEventType && e.Type != event.OrderRefusedEventType {
-			return Summary{}, fmt.Errorf("report: fractional quantity summary requires the adapter and surfaces migration")
-		}
 		if e.Type == event.TargetWeightConfigurationEventType {
 			var cfg event.TargetWeightConfigurationPayload
 			if err := read(e, configurationVersions, &cfg); err != nil {
 				return Summary{}, err
 			}
-			if cfg.Execution.ShareQuantity == event.ShareQuantityFractional {
-				return Summary{}, fmt.Errorf("report: fractional quantity summary requires the adapter and surfaces migration")
-			}
+			fractional = cfg.Execution.ShareQuantity == event.ShareQuantityFractional
+		}
+	}
+	for _, e := range envelopes {
+		var units struct {
+			QuantityScale int64 `json:"quantity_scale"`
+		}
+		if json.Unmarshal(e.Payload, &units) == nil && units.QuantityScale != 0 && !fractional &&
+			e.Type != event.OrderPlannedEventType && e.Type != event.OrderReleasedEventType && e.Type != event.OrderRefusedEventType {
+			return Summary{}, fmt.Errorf("report: fractional quantity record in a whole-share account")
 		}
 	}
 	earlier := history.Earlier
@@ -344,6 +348,7 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 				continue
 			}
 			s.HaveSnapshot, s.HoldingsAsOf, s.NetLiquidation, s.Holdings = true, p.AsOf, p.NetLiquidation, p.Positions
+			s.QuantityScale = p.QuantityScale
 			s.HaveCash, s.SettledCash, s.TotalCash = cash, p.SettledCash, p.TotalCash
 			netBy[dateOf(p.AsOf)] = p.NetLiquidation
 			closeNet[p.AsOf.UTC()] = p.NetLiquidation
@@ -353,8 +358,8 @@ func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, en
 				s.RejectedInputs++
 				continue
 			}
-			v2 := e.SchemaVersion == event.BrokerSnapshotReadAtVersion
-			s.CashChecked, s.CashUnchecked = v2 && p.AsOfClose, v2 && !p.AsOfClose
+			readAt := e.SchemaVersion == event.BrokerSnapshotReadAtVersion || e.SchemaVersion == event.BrokerSnapshotFractionalVersion
+			s.CashChecked, s.CashUnchecked = readAt && p.AsOfClose, readAt && !p.AsOfClose
 			s.CashDrift, s.UnexplainedCash = p.CashDrift, p.UnexplainedCash
 		case event.CompletedBarEventType:
 			p, bar, err := readBar(e)
@@ -583,16 +588,15 @@ func ForHistory(recovery journal.Recovery, benchmark string) journal.Recovery {
 	return kept
 }
 
-// readFill decodes a fill at either version this build reads: the Turtle
-// engine's (version 4) and the target-weight engines' (version 5, ADR 0026,
-// Consequences), each validated at its own version.
+// readFill decodes Turtle fills (version 4) and target-weight fills (versions
+// 5 and 6), each validated at its own version (ADR 0015; ADR 0026 D7-F).
 func readFill(e event.Envelope) (FillLine, error) {
-	if e.SchemaVersion == event.FillTargetWeightVersion {
+	if e.SchemaVersion == event.FillTargetWeightVersion || e.SchemaVersion == event.FillTargetWeightFractionalVersion {
 		var p event.TargetWeightFillPayload
 		if err := read(e, targetWeightFillVersions, &p); err != nil {
 			return FillLine{}, err
 		}
-		return FillLine{At: p.FilledAt, InstrumentID: p.InstrumentID, Side: p.Side, ClientOrderID: p.ClientOrderID, Quantity: p.Quantity, Price: p.Price}, nil
+		return FillLine{At: p.FilledAt, InstrumentID: p.InstrumentID, Side: p.Side, ClientOrderID: p.ClientOrderID, Quantity: p.Quantity, QuantityScale: p.QuantityScale, Price: p.Price}, nil
 	}
 	var p event.FillPayload
 	if err := read(e, fillVersions, &p); err != nil {

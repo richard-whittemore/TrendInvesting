@@ -33,8 +33,11 @@ MARK = ("market.mark.recorded", 2)                    # MarkRecordedEvidenceVers
 ACCOUNT_SNAPSHOT_CASH = ("account.snapshot", 4)       # AccountSnapshotCashVersion
 MARK_CONTRACT = ("market.mark.recorded", 3)           # MarkRecordedContractVersion
 MARK_UNAVAILABLE = ("market.mark.unavailable", 1)     # MarkUnavailableSchemaVersion
+# Fractional capital-path inputs remain delivered history (ADR 0015; ADR 0026 D7-F).
+ACCOUNT_SNAPSHOT_FRACTIONAL_CASH = ("account.snapshot", 6)
+BROKER_SNAPSHOT_FRACTIONAL = ("account.broker.snapshot", 3)
 ADAPTER_KINDS = (ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT, BROKER_SNAPSHOT_V1, MARK, ACCOUNT_SNAPSHOT_CASH, MARK_CONTRACT,
-                 MARK_UNAVAILABLE)
+                 MARK_UNAVAILABLE, ACCOUNT_SNAPSHOT_FRACTIONAL_CASH, BROKER_SNAPSHOT_FRACTIONAL)
 
 # The account snapshots that state an account's positions, which the data
 # job reads an IRA's holdings from (tidata.holdings): version 3, the one the

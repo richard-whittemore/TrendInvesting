@@ -168,8 +168,8 @@ def _parser():
     probe.add_argument("--engine-log", required=True, metavar="FILE", help="the engine's durable log")
     probe.add_argument("--client-id", required=True, type=int, metavar="N",
                        help="the instance's client ID (TI_ADAPTER_CLIENT_ID): 12 for trad-ira")
-    probe.add_argument("--snapshot-version", type=int, choices=(3, 4), default=4,
-                       help="the account snapshot version the engine reads: 4 for an IRA (the default), 3 for Boost")
+    probe.add_argument("--snapshot-version", type=int, choices=(3, 4, 6), default=4,
+                       help="the account snapshot version: 6 for D7-F IRA, 4 for whole-share IRA (default), 3 for Boost")
     probe.add_argument("--mode", choices=("dry-run", "paper", "live"), default="dry-run",
                        help="the mode the adapter must have started in (default dry-run)")
     probe.add_argument("--expect-batch", action="store_true",

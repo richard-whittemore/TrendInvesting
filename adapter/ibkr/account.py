@@ -35,15 +35,15 @@ SUMMARY_TAGS = (NET_LIQUIDATION, TOTAL_CASH, EXCESS_LIQUIDITY)
 # "Account Value Keys"; sent as a string in the account's base currency, as
 # every account value is, adapter/ibkr/tests/testdata/ibapi_shapes.json), what
 # an IRA's buys are budgeted from (ADR 0026 point 2, "Budget"). Read only
-# for a configuration whose engine reads account.snapshot version 4
+# for a configuration whose engine reads account.snapshot version 4 or 6
 # (config.account_snapshot_version): Boost's reading is unchanged.
 SETTLED_CASH = "SettledCash"
 CASH_TAGS = SUMMARY_TAGS + (SETTLED_CASH,)
 
 
 def account_tags(config):
-    """The balance keys a reading for config needs: SUMMARY_TAGS, and SettledCash for account.snapshot version 4."""
-    return CASH_TAGS if getattr(config, "account_snapshot_version", 3) == 4 else SUMMARY_TAGS
+    """The balance keys a reading for config needs: SUMMARY_TAGS, and SettledCash for account.snapshot versions 4 and 6."""
+    return CASH_TAGS if getattr(config, "account_snapshot_version", 3) in (4, 6) else SUMMARY_TAGS
 # What IBKR documents of these keys (TWS API, EWrapper::updateAccountValue
 # and "Account Updates"; ibapi 10.51.01): each is the account's total ("no
 # suffix"; the -S and -C keys are its security and commodity segments, and
