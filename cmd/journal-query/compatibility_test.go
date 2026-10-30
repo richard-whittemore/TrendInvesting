@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+var padding = regexp.MustCompile(` {2,}`)
 
 func TestWholeShareViewsMatchMainGolden(t *testing.T) {
 	var output strings.Builder
@@ -15,6 +18,9 @@ func TestWholeShareViewsMatchMainGolden(t *testing.T) {
 			for _, format := range []string{"text", "csv", "json"} {
 				out, err := query(t, view, "-format", format, path)
 				out = strings.ReplaceAll(out, path, filepath.Base(path))
+				// The text layout pads the journal column to the path's length, which the
+				// test's temporary directory decides; the pin is the values, not the padding.
+				out = padding.ReplaceAllString(out, " ")
 				fmt.Fprintf(&output, "=== %s %s %s ===\n%sERROR: %v\n", filepath.Base(path), view, format, out, strings.ReplaceAll(fmt.Sprint(err), path, filepath.Base(path)))
 			}
 		}
