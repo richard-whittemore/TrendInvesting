@@ -71,17 +71,23 @@ class FakeVenue:
         self.inbox = folder / 'operator'
         self.inbox.mkdir(mode=0o750, exist_ok=True)
         os.chown(self.inbox, operator.pw_uid, trader.pw_gid)
+        # The socket lives in its own 0700 directory, as the service's runtime directory does:
+        # the transport refuses any other mode, and the operator inbox needs the group to traverse.
+        self.sockdir = folder / 'sock'
+        self.sockdir.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(self.sockdir, 0o700)
+        os.chown(self.sockdir, trader.pw_uid, trader.pw_gid)
         self.log = folder / ('fresh.log' if (folder / 'run.log').exists() else 'run.log')
         self.output = (folder / (self.log.stem + '-output.txt')).open('w')
         self.process = subprocess.Popen([engine, '-mode', 'paper', '-config', str(config), '-as-of', asof,
-                                         '-socket', str(folder / 'engine.sock'), '-log', str(self.log),
+                                         '-socket', str(self.sockdir / 'engine.sock'), '-log', str(self.log),
                                          '-out', str(self.log.with_suffix('.journal')), '-operator', str(self.inbox),
                                          '-approval', str(approval)], stdout=self.output, stderr=self.output,
                                         user=trader.pw_uid, group=trader.pw_gid, extra_groups=[trader.pw_gid])
         self.conn = None
         try:
             deadline = time.monotonic() + 15
-            while not (folder / 'engine.sock').exists():
+            while not (self.sockdir / 'engine.sock').exists():
                 if self.process.poll() is not None or time.monotonic() >= deadline:
                     self.output.flush()
                     # The engine's own words say why (the evidence folder is private to the container).
@@ -91,7 +97,7 @@ class FakeVenue:
             self.header = json.loads(self.log.read_text().splitlines()[0])
             self.conn = socket.socket(socket.AF_UNIX)
             self.conn.settimeout(20)
-            self.conn.connect(str(folder / 'engine.sock'))
+            self.conn.connect(str(self.sockdir / 'engine.sock'))
             self.replies = self.conn.makefile('r')
             self.sequence = 3
             self.decisions = []
