@@ -50,7 +50,7 @@ Reports:
 | `orders` | orders planned, released and refused, trades skipped (sized but not ordered), and order lifecycle changes |
 | `fills` | each fill with quantity, price and commission |
 | `refusals` | refused orders, withheld sales back to 98% and engine-state changes (degraded, halted) |
-| `totals` | fills, shares bought and sold, and commission per instrument per year, plus a TOTAL row |
+| `totals` | fills, shares bought and sold, and commission per instrument per year, plus a TOTAL row (per account when the selection contains fractional records) |
 | `positions` | the holding after each fill, rebuilt from the fills; a recorded symbol change moves the holding to the new id |
 | `reconcile` | whether the fills agree with the account snapshots recorded in the journal; it fails, rather than report a clean result, when the log is empty or has a torn (uncommitted) tail, any journal compared nothing, or fills came after an account's last snapshot (`-allow-trailing-fills` accepts those). This is not the engine's morning reconciliation; the [glossary](glossary.md) ("Reconciled, reconciliation") tells the three apart |
 | `operator` | your own instructions the engine recorded: kill switches and rebalance clearances, with who recorded them and the detail they gave, and fresh-run approvals, with the approver, the latch and the incident cleared or carried. Alert acknowledgements are not listed ([operator](operator.md), "Seeing what was recorded") |
@@ -61,12 +61,7 @@ Flags, all optional: `-account A1`, `-instrument AAA`, `-from 2026-01-01`,
 `orders`, `fills`, `refusals`, `positions`, `reconcile` and `operator`
 reports show the source journal in the first column; `totals` combines all selected journals.
 
-On an account that trades fractional shares (the IRAs, plan decision D7-F), `orders`,
-`fills`, `refusals` and `operator` read the journal and print shares. `positions`,
-`totals` and `reconcile` still add whole shares only: on a fractional journal each
-refuses, by name, rather than add a figure it cannot represent, until the
-aggregation migration ships. The dashboard's reconcile section shows the same
-refusal. Nothing the engine does depends on these views.
+Every view reads both whole-share and fractional journals and prints shares.
 
 Name one file per run. A run resumed from a crash writes a new log that begins
 with every record of the log it resumed, and a second copy of a journal holds

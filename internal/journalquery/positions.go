@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
 // step is the position in one instrument after one fill.
@@ -35,7 +37,8 @@ func addQuantity(a, b int64) (int64, bool) {
 }
 
 // rebuild replays a journal's fills against its account snapshots, one book
-// per account.
+// per account, in integer units at that account's scale (ADR 0026 D7-F).
+// Items must have passed decodeAggregations before replay.
 //
 // An account's first snapshot is its baseline, taking the account's holdings
 // as the broker reported them, unless a fill came first, in which case the
@@ -47,12 +50,8 @@ func addQuantity(a, b int64) (int64, bool) {
 // A Turtle fill (version 4) names no account. It belongs to its journal's
 // single account; a journal naming several accounts has no way to say which
 // one such a fill hit, so rebuild refuses it rather than guess. A
-// target-weight fill (version 5) names its own account.
-func rebuild(j Journal) (steps []step, checks []check, trailing []step, err error) {
-	items, err := decodeWholeQuantities(j)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+// target-weight fill (versions 5 and 6) names its own account (ADR 0026 D7-F).
+func rebuild(j Journal, items []item) (steps []step, checks []check, trailing []step, err error) {
 	accounts := namedAccounts(items)
 	books := map[string]map[string]int64{}
 	started := map[string]bool{}
@@ -142,8 +141,12 @@ func Positions(journals []Journal, f Filter) (Table, error) {
 		return Table{}, err
 	}
 	t := Table{Columns: []string{"journal", "seq", "time", "account", "instrument", "kind", "change", "position"}}
-	for _, j := range journals {
-		steps, _, _, err := rebuild(j)
+	decoded, err := decodeAggregations(journals)
+	if err != nil {
+		return Table{}, err
+	}
+	for i, j := range journals {
+		steps, _, _, err := rebuild(j, decoded[i])
 		if err != nil {
 			return Table{}, err
 		}
@@ -153,7 +156,7 @@ func Positions(journals []Journal, f Filter) (Table, error) {
 			}
 			t.Rows = append(t.Rows, []string{
 				s.it.journal, strconv.FormatUint(s.it.seq, 10), s.it.at.UTC().Format("2006-01-02"), accountCell(s.it.account),
-				s.instrument, s.it.fill.Kind, strconv.FormatInt(s.change, 10), strconv.FormatInt(s.position, 10),
+				s.instrument, s.it.fill.Kind, event.FormatQuantity(s.change, s.it.fill.QuantityScale), event.FormatQuantity(s.position, s.it.fill.QuantityScale),
 			})
 		}
 	}
@@ -203,8 +206,12 @@ func Reconcile(journals []Journal, f Filter) (Table, error) {
 			return Table{}, fmt.Errorf("reconcile refused: %s", why)
 		}
 	}
-	for _, j := range journals {
-		_, checks, tail, err := rebuild(j)
+	decoded, err := decodeAggregations(journals)
+	if err != nil {
+		return Table{}, err
+	}
+	for i, j := range journals {
+		_, checks, tail, err := rebuild(j, decoded[i])
 		if err != nil {
 			return Table{}, err
 		}
@@ -221,7 +228,7 @@ func Reconcile(journals []Journal, f Filter) (Table, error) {
 			}
 			t.Rows = append(t.Rows, []string{
 				c.it.journal, strconv.FormatUint(c.it.seq, 10), c.it.at.UTC().Format("2006-01-02"), accountCell(c.it.account),
-				c.instrument, strconv.FormatInt(c.fills, 10), strconv.FormatInt(c.snapshot, 10), status,
+				c.instrument, event.FormatQuantity(c.fills, c.it.snapshot.QuantityScale), event.FormatQuantity(c.snapshot, c.it.snapshot.QuantityScale), status,
 			})
 		}
 		if compared == 0 {

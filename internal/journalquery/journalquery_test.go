@@ -1338,12 +1338,6 @@ func TestFractionalInputQueryShowsShares(t *testing.T) {
 			}
 		}
 	}
-	js := []journalquery.Journal{load(t, "fractional", build(t, snapRec, fillRec))}
-	for _, query := range []func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){journalquery.Totals, journalquery.Positions, journalquery.Reconcile} {
-		if _, err := query(js, journalquery.Filter{}); err == nil {
-			t.Fatal("whole-share aggregation accepted fractional units")
-		}
-	}
 }
 
 func TestMalformedFractionalUnitsCannotPassALegacySurface(t *testing.T) {

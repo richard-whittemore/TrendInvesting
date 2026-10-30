@@ -561,3 +561,30 @@ func TestFractionalFillsAndOrdersPrintShares(t *testing.T) {
 		}
 	}
 }
+
+func TestFractionalAggregationCommandsPrintShares(t *testing.T) {
+	d := day(2026, time.March, 2)
+	s := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
+		AccountID: "synthetic", AsOf: d, NetLiquidation: 100, Currency: "USD", QuantityScale: 10000,
+		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: 10, TotalCash: 10}
+	f := event.TargetWeightFillPayload{AccountID: s.AccountID, ClientOrderID: "synthetic-order", FillID: "synthetic-fill",
+		InstrumentID: "AAA", Side: "sell", Quantity: 12501, QuantityScale: 10000, Price: 2, FilledAt: d}
+	baseline := ev{journal.KindInput, event.AccountSnapshotEventType, s.SchemaVersion(), d, s}
+	s.Positions = []event.AccountPosition{{InstrumentID: "AAA", Quantity: 60000}}
+	path := writeJournal(t, "fractional", baseline, ev{journal.KindInput, event.FillEventType, f.SchemaVersion(), d, f}, ev{journal.KindInput, event.AccountSnapshotEventType, s.SchemaVersion(), d, s})
+	for _, format := range []string{"text", "csv", "json"} {
+		for view, want := range map[string]string{"positions": "5.9999", "totals": "1.2501", "reconcile": "5.9999"} {
+			out, err := query(t, view, "-format", format, path)
+			if view == "reconcile" {
+				if err == nil || !strings.Contains(out, "DISAGREES") {
+					t.Errorf("reconcile: %v: %s", err, out)
+				}
+			} else if err != nil {
+				t.Errorf("%s: %v", view, err)
+			}
+			if !strings.Contains(out, want) || strings.Contains(out, "12501") || strings.Contains(out, "59999") {
+				t.Errorf("%s %s shares missing: %s", view, format, out)
+			}
+		}
+	}
+}

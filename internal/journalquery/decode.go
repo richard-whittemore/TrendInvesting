@@ -337,25 +337,64 @@ func sameFill(x, y fill) bool {
 	return false
 }
 
-// decodeWholeQuantities preserves the fail-closed contract of aggregations
-// that still add whole shares (ADR 0015; ADR 0026 D7-F). Detail tables use
-// decode and format each record at its own scale.
-func decodeWholeQuantities(j Journal) ([]item, error) {
-	for _, record := range j.Records {
-		// Only an object can carry a scale; a record decode skips, such as an
-		// unrelated input whose payload is a scalar, is left to decode.
-		if trimmed := bytes.TrimLeft(record.Envelope.Payload, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
-			continue
+// decodeAggregations validates one scale per account across the selection
+// before any arithmetic or filtering (ADR 0026 D7-F; ADR 0015). Quantities
+// remain integer units at their recorded scale; accounts are never rescaled.
+func decodeAggregations(journals []Journal) ([][]item, error) {
+	decoded := make([][]item, 0, len(journals))
+	scales := map[string]int64{}
+	for _, j := range journals {
+		for _, record := range j.Records {
+			// Unknown inputs are skipped, but malformed quantity metadata is refused
+			// rather than interpreted as a whole-share declaration (ADR 0015).
+			if trimmed := bytes.TrimLeft(record.Envelope.Payload, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
+				continue
+			}
+			var units struct {
+				QuantityScale int64 `json:"quantity_scale"`
+			}
+			if err := json.Unmarshal(record.Envelope.Payload, &units); err != nil {
+				return nil, fmt.Errorf("%s: record %d: %w", j.Name, record.Sequence, err)
+			}
 		}
-		var units struct {
-			QuantityScale int64 `json:"quantity_scale"`
-		}
-		if err := json.Unmarshal(record.Envelope.Payload, &units); err != nil {
+		items, err := decode(j)
+		if err != nil {
 			return nil, err
 		}
-		if units.QuantityScale != 0 {
-			return nil, fmt.Errorf("%s: fractional quantities require the journal-query aggregation migration", record.Envelope.Type)
+		for _, it := range items {
+			scale, quantity := it.quantityScale()
+			if !quantity {
+				continue
+			}
+			if previous, seen := scales[it.account]; seen && previous != scale {
+				return nil, fmt.Errorf("%s: record %d: account %q has mixed quantity scales: %d and %d; one account must use one scale", j.Name, it.seq, accountCell(it.account), previous, scale)
+			}
+			scales[it.account] = scale
 		}
+		decoded = append(decoded, items)
 	}
-	return decode(j)
+	return decoded, nil
+}
+
+// quantityScale identifies records declaring share units (ADR 0026 D7-F).
+// Records without quantities do not declare a whole-share account.
+func (it item) quantityScale() (int64, bool) {
+	switch {
+	case it.fill != nil:
+		return it.fill.QuantityScale, true
+	case it.snapshot != nil:
+		return it.snapshot.QuantityScale, true
+	case it.planned != nil:
+		return it.planned.QuantityScale, true
+	case it.released != nil:
+		return it.released.QuantityScale, true
+	case it.refused != nil:
+		return it.refused.QuantityScale, true
+	case it.lifecycle != nil:
+		return it.lifecycle.QuantityScale, true
+	case it.skipped != nil:
+		return it.skipped.QuantityScale, true
+	default:
+		return 0, false
+	}
 }
