@@ -192,8 +192,8 @@ func TestDashboardFractionalAdapterRecords(t *testing.T) {
 	if err := ack.ValidateSchema(records[0].Version); err != nil {
 		t.Fatal(err)
 	}
-	close := time.Date(2026, time.October, 29, 21, 0, 0, 0, time.UTC)
-	releasedAt := close.Add(-24 * time.Hour)
+	sessionClose := time.Date(2026, time.October, 29, 21, 0, 0, 0, time.UTC)
+	releasedAt := sessionClose.Add(-24 * time.Hour)
 	entries := iraEntries(t, fill.AccountID)
 	var cfg event.TargetWeightConfigurationPayload
 	if err := json.Unmarshal(entries[0].Envelope.Payload, &cfg); err != nil {
@@ -218,7 +218,7 @@ func TestDashboardFractionalAdapterRecords(t *testing.T) {
 		t.Fatalf("adapter partial fill lifecycle = %+v", order)
 	}
 	snap := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
-		AccountID: fill.AccountID, AsOf: close, Currency: "USD", NetLiquidation: 4000, QuantityScale: event.FractionalQuantityScale,
+		AccountID: fill.AccountID, AsOf: sessionClose, Currency: "USD", NetLiquidation: 4000, QuantityScale: event.FractionalQuantityScale,
 		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 123456}}}, SettledCash: 100, TotalCash: 100}
 	entries = []journal.Entry{
 		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 1, event.TargetWeightConfigurationEventType, cfg.SchemaVersion(), "cfg", releasedAt.Add(-time.Hour), cfg)},
@@ -226,11 +226,11 @@ func TestDashboardFractionalAdapterRecords(t *testing.T) {
 		{Kind: journal.KindDecision, Envelope: iraEnvelope(t, 3, event.OrderReleasedEventType, sell.SchemaVersion(), "release", releasedAt, sell)},
 		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 4, records[0].Type, records[0].Version, "ack", ack.OccurredAt, records[0].Payload)},
 		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 5, records[1].Type, records[1].Version, "fill", ack.OccurredAt, records[1].Payload)},
-		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 6, event.AccountSnapshotEventType, snap.SchemaVersion(), "snapshot", close, snap)},
-		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 7, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s1", close, event.SessionClosedPayload{PeriodEnd: close, InstrumentIDs: []string{"SPY"}})},
+		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 6, event.AccountSnapshotEventType, snap.SchemaVersion(), "snapshot", sessionClose, snap)},
+		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 7, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s1", sessionClose, event.SessionClosedPayload{PeriodEnd: sessionClose, InstrumentIDs: []string{"SPY"}})},
 	}
 	var buf bytes.Buffer
-	if err := journal.Write(&buf, journal.NewHeader("h", "v", releasedAt.Add(-time.Hour), close), entries); err != nil {
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", releasedAt.Add(-time.Hour), sessionClose), entries); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "ira.journal")
