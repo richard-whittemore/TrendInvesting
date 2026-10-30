@@ -1173,14 +1173,6 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	if p.QuantityScale != r.exec.QuantityScale() {
 		return nil, fmt.Errorf("targetweight: report quantity scale %d does not match account scale %d", p.QuantityScale, r.exec.QuantityScale())
 	}
-	fillCost := 0.0
-	if p.Side == event.OrderSideBuy {
-		cost, err := event.BuyCost(p.Quantity, p.QuantityScale, p.Price, p.Commission)
-		if err != nil {
-			return nil, fmt.Errorf("targetweight: fill %s refused: %w", in.ID, err)
-		}
-		fillCost, _ = cost.Float64()
-	}
 	o, redelivery, err := r.orders.Fill(p)
 	if err != nil {
 		return nil, refusal(in, err)
@@ -1200,6 +1192,10 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 			reb.budget.AddProceeds(event.SaleProceeds(p.Quantity, p.QuantityScale, p.Price, p.Commission))
 		}
 	} else {
+		// OrderReports.Fill already accepted this debit under the shared
+		// live and recovery rule (ADR 0027); BuyCost cannot fail here.
+		cost, _ := event.BuyCost(p.Quantity, p.QuantityScale, p.Price, p.Commission)
+		fillCost, _ := cost.Float64()
 		reb.budget.Fill(p.ClientOrderID, fillCost)
 	}
 	if o.Terminal {

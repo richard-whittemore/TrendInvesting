@@ -14,7 +14,8 @@ var ErrNotReleased = errors.New("which this run never released")
 // OrderReports is the rule by which a run that reads fills (the momentum
 // run) reads the venue's reports on the orders it released. The engine
 // applies it, and the reporter reads the log by it, so a report the engine
-// refused is never taken as read (ADR 0022; ADR 0019, "Alerting").
+// refused is never taken as read (ADR 0022; ADR 0019, "Alerting"). Restart
+// recovery reads recorded facts by this same rule (ADR 0027).
 //
 // A report is read when it names a released order that is not yet terminal
 // and describes it: a lifecycle report its account, instrument, side,
@@ -22,6 +23,8 @@ var ErrNotReleased = errors.New("which this run never released")
 // account, instrument and side, taking the order no further than its
 // quantity in total, under a fill id no other execution has used, since a
 // fill id names one execution across the account (TargetWeightFillPayload).
+// A buy's debit, including commission, must fit the finite monetary range
+// (BuyCost; ADR 0026, "Worst-case cost") before any fill state changes.
 // The same execution delivered again (SameExecution) is a redelivery and
 // changes nothing. An order becomes terminal on a lifecycle report that is
 // terminal (cancelled or invalid; LimitOrderLifecyclePayload's Terminal), on
@@ -175,6 +178,11 @@ func (r *OrderReports) Fill(p TargetWeightFillPayload) (o *ReportedOrder, redeli
 	// Against what remains, not the sum: the sum can wrap past int64.
 	if p.Quantity > q.Quantity-o.Filled {
 		return nil, false, fmt.Errorf("takes order %s past its %d shares", q.ClientOrderID, q.Quantity)
+	}
+	if p.Side == OrderSideBuy {
+		if _, err := BuyCost(p.Quantity, p.QuantityScale, p.Price, p.Commission); err != nil {
+			return nil, false, err
+		}
 	}
 	r.fills[p.FillID] = p
 	o.Venue = true
