@@ -268,7 +268,7 @@ is never disconnected to check its clock.
 must be between **1 and 48 hours**. IBC restarts Gateway nightly at **23:45
 New York**, leaving the **06:07** morning reading within the interval; a
 Gateway that missed its nightly restart is stale by the next morning.
-Each reading journals its staleness verdict. An expired check uses the
+The staleness verdict is journalled when it changes (its verdict, reason or check time), not on every waiting step. An expired check uses the
 later of Gateway time and receipt time for executions and withholds the
 next post-close reading, naming Gateway's clock.
 
