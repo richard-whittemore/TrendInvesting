@@ -105,7 +105,9 @@ def redact(text, account=''):
     if account:
         text = text.replace(account, '<account>')
     text = re.sub(r'("account_id"\s*:\s*)"[^"]*"', r'\1"<account>"', text)
-    return re.sub(r'\b(?:DU[0-9A-Z]{5,}|U[0-9]{5,})\b', '<account>', text)
+    # Letters and digits are the only neighbours that make a longer token: an identifier
+    # embedded between underscores or punctuation is still masked (lesson L12).
+    return re.sub(r'(?<![A-Za-z0-9])(?:DU[0-9A-Z]{5,}|U[0-9]{5,})(?![A-Za-z0-9])', '<account>', text)
 
 
 def first_difference(expected, actual, path='decision'):

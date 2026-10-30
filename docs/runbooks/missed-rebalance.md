@@ -207,7 +207,7 @@ report (the buys are still waiting), then runs:
 ```bash
 sudo -u ti-trader /opt/trend-investing/bin/operator approve \
   -log <evidence>/restart/run.log -account <printed-synthetic-account> -by owner \
-  -out <evidence>/approval.json -at 2025-01-31T22:00:00Z
+  -out <evidence>/approvals/approval.json -at 2025-01-31T22:00:00Z
 ```
 
 Expect `ends mid-rebalance`, `sells-working` and the exact decision and open

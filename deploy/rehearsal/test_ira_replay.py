@@ -422,6 +422,12 @@ class RecordedReplayTest(ReplayValidationTest):
                 with self.assertRaisesRegex(ValueError, 'unit'):
                     self.replay.service_guard('trad-ira')
 
+    def test_diagnostics_mask_identifiers_between_underscores(self):
+        text = self.replay.redact('refused input broker_U1234567_snapshot and DUABCDE12_x', 'trad-ira')
+        self.assertNotIn('U1234567', text)
+        self.assertNotIn('DUABCDE12', text)
+        self.assertIn('DUK', self.replay.redact('symbol DUK differs', 'trad-ira'))
+
     def test_diagnostics_mask_identifiers_in_input_id_and_frame(self):
         text = self.replay.redact('input:DUSYNTHETIC:bad account_id=trad-ira U1234567', 'trad-ira')
         self.assertNotIn('DUSYNTHETIC', text)
