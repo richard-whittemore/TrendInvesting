@@ -98,16 +98,16 @@ func TestDifferentAccountScalesAggregateSeparately(t *testing.T) {
 						t.Fatalf("per-account groups and totals: %+v", tab)
 					}
 					for i, row := range tab.Rows {
-						account := cell(tab, i, "account")
-						if account == "fractional" {
+						switch cell(tab, i, "account") {
+						case "fractional":
 							if cell(tab, i, "sold") != "1.25" || cell(tab, i, "bought") != "0" {
 								t.Fatal(row)
 							}
-						} else if account == "whole" {
+						case "whole":
 							if cell(tab, i, "bought") != "2" || cell(tab, i, "sold") != "0" {
 								t.Fatal(row)
 							}
-						} else {
+						default:
 							t.Fatalf("missing account: %+v", tab)
 						}
 					}
