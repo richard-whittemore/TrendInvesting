@@ -962,4 +962,10 @@ pass "ti-release refuses without gh, installs a fake release with --unverified i
 for f in $(find / -xdev -type f -print0 2>/dev/null | xargs -0 grep -lF -- "$marker" 2>/dev/null || true); do
   fail "the migrated secret is on disk at the end: $f"
 done
+# plan.md section 9: the private as-of replay and missed-rebalance recovery,
+# with the real engine/operator and a fake venue, never a broker connection.
+TI_DRILL_ENGINE=/opt/trend-investing/bin/ti-engine TI_DRILL_OPERATOR=/opt/trend-investing/bin/operator \
+  TI_DRILL_MONTH=/dist/momentum-month.jsonl TI_DRILL_CONFIG=/dist/momentum-dry-run.json \
+  TMPDIR=/tmp python3 -m unittest discover -s /root/deploy/rehearsal -p 'test_ira*.py'
+
 echo "REHEARSAL COMPLETE"

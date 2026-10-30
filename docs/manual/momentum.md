@@ -219,6 +219,16 @@ order's shape, account and mode, not these limits (`adapter/ibkr/sender.py`).
 
 ## One IRA month, end to end
 
+Before IRA paper trading, [plan.md §9 Phase 3](../live-trading/plan.md#9-phases)
+requires one real month-end decided cleanly plus one rehearsed month replayed
+through the server with the engine's `-as-of` option (2026-10-28 owner decision).
+Follow [Rehearsing a month](../runbooks/missed-rebalance.md#rehearsing-a-month)
+and record both halves in the [IRA drill checklist](../runbooks/ira-drill-checklist.md).
+The paper account must be free for the IRA: Boost live or paused (2026-10-29).
+The real IRA is No Borrow Margin with fractional trading enabled; the shipped
+minimum-lot dry-run configuration remains a rehearsal configuration until the
+fractional adapter and reporting surfaces are ready (ADR 0026, D7-F amendment).
+
 With D7-F (`execution.share_quantity: "fractional"`), the engine plans
 fractional quantities for both phases. It divides each trade value by the
 reference price and rounds down to `fractional_increment` (default

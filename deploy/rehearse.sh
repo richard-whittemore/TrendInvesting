@@ -55,6 +55,7 @@ cp "$repo/adapter/marketdata/tests/testdata/boost-fixture.log" "$dist/boost-fixt
 # The synthetic month the IRA engine replays (cmd/engine/testdata; invented
 # prices only), as the server's demonstration replays it.
 cp "$repo/cmd/engine/testdata/momentum-month.jsonl" "$dist/momentum-month.jsonl"
+cp "$repo/cmd/engine/testdata/momentum-dry-run.json" "$dist/momentum-dry-run.json"
 (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
   -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=rehearsal" \
   -o "$dist/ti-engine" ./cmd/engine)

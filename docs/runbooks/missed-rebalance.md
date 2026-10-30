@@ -78,3 +78,158 @@ restart mid-rebalance sends nothing for that decision time until you clear it
 Better still, when you can choose the moment, stop an IRA's engine only once
 every order of the rebalance has finished: then the approval states none in
 progress and nothing is held.
+
+## Rehearsing a month
+
+The [Phase 3 gate](../live-trading/plan.md#9-phases) is **one real
+month-end decided cleanly plus one rehearsed month replayed through the
+server with `-as-of`** (2026-10-28 owner decision). Record both halves in
+[the checklist](ira-drill-checklist.md); a withheld decision is a failed
+attempt, never a quiet pass (lesson L11). Richard signs the gate.
+
+Use the installed, stamped engine and the same dry-run configuration/build
+as the recorded month. The recorded stream must include the calendar with
+the following session, warm-up bars/histories, universe, account snapshots
+and marks. Use the engine's **durable `.log`**, which has all these inputs;
+the market-data job's stream alone lacks the account and marks. Operator
+instructions require the separate recovery drill below. A `.journal`
+without durable input records is not a replay source.
+
+In the commands below, replace the example close with the recorded month's
+actual NYSE close (UTC, including early closes) and `recorded.log` with its
+path. Set `ira=roth-ira` for the Roth. Run in a shell with `set -euo pipefail`.
+Stop the adapter first and the engine second, then freeze the input by
+copying it. Leave their logs, inbox, notes and `run.env` intact:
+
+```bash
+ira=trad-ira
+sudo systemctl stop "ti-adapter@$ira.service" "ti-data@$ira.timer"
+sudo systemctl stop "ti-engine@$ira.service"
+sudo -u ti-trader /usr/local/libexec/trend-investing/ira-replay.sh \
+  "$ira" 2025-01-31T21:00:00Z "/var/lib/trend-investing/engines/$ira/recorded.log"
+```
+
+Expected lines (evidence suffix is unique for every attempt):
+
+```text
+Evidence: /tmp/ira-replay-<unique>
+2025-01-31T21:00:00Z strategy.targets.decided decided
+Replay gate: PASS (owner must still sign the real-month half)
+```
+
+The script passes `-as-of` equal to that close, replays earlier inputs as
+warm-up, and waits synchronously for each engine reply. It refuses an
+existing live socket, even a stale one, and any configuration outside
+momentum dry-run. It starts no adapter and releases only `send=false` orders.
+Every run gets a new private socket, log and journal under `/tmp`; it never
+uses the original run's output folders or operator inbox. The byte-for-byte
+input copy, configuration, durable replay log, journal and engine output
+stay there on success or failure. Preserve the folder in private durable
+storage before `/tmp` is cleared. No command prints an IBKR identifier.
+
+A withheld attempt instead prints, for example:
+
+```text
+2025-01-31T21:00:00Z strategy.targets.decided withheld insufficient-trend-history
+```
+
+It exits nonzero, retains evidence, and leaves the gate pending. A decided
+month with withheld picks or refused orders also fails. Read the decision payload and the
+original dry-run's decision: with identical inputs, configuration and build,
+intended targets, planned orders and `send=false` releases must agree. This
+replay never repairs a missed real month and does not prove fractional
+adapter/reporting readiness (M6b). Return the production instance via a
+**fresh approval** and the restart procedure in [durable-log.md](durable-log.md#restarting-an-engine),
+then start its data timer and adapter; never reuse the old `run.env` after a
+deliberate stop. Run the same-day IRA probe before leaving (lesson L10).
+
+## Restart and missed-rebalance drill with a fake venue
+
+A normal dry-run completes its sells and buys at the same close using
+synthetic cancellations (ADR 0026 point 2); stopping it cannot leave sells
+working. Use the isolated fake below to exercise the real paper-mode engine
+and operator CLI **without an adapter or broker connection**. Do this before
+any IRA paper order; keep the production IRA units stopped as above. Do not
+change their mode or start a paper adapter. The real account remains No
+Borrow Margin and needs fractional trading enabled before M6b/paper.
+
+From the installed repository checkout containing the synthetic fixture,
+run this exact command on the server. The driver requires root only to run
+the engine as `ti-trader` and the operator as `ti-operator`, preserving the
+inbox's security boundary. It creates entirely private state under `/tmp`.
+
+```bash
+sudo python3 deploy/rehearsal/ira-drills.py --interactive
+```
+
+Expected lines, in order:
+
+```text
+Evidence: /tmp/ira-drill-<unique>
+STOPPED: sells working; buys not released
+```
+
+The driver uses a synthetic paper-only identity (the required DU prefix plus
+a word, never a real account number). The fake feeds the synthetic January month with FFF held, stops its engine
+with SIGTERM after sells are released and before it gives any sell terminal
+report (the buys are still waiting), then runs:
+
+```bash
+sudo -u ti-trader /opt/trend-investing/bin/operator approve \
+  -log <evidence>/restart/run.log -account <printed-synthetic-account> -by owner \
+  -out <evidence>/approval.json -at 2025-01-31T22:00:00Z
+```
+
+Expect `ends mid-rebalance`, `sells-working` and the exact decision and open
+client order IDs. It starts a **fresh** engine with `-approval` naming that
+file (never `-resume` for a deliberate stop), replays January and checks:
+
+```text
+HELD: rebalance-in-progress; no orders released
+```
+
+The fake then confirms its sells cancelled, with FFF=10 and cash=10000
+unchanged. In a second owner shell, run **the complete command printed by
+the driver**, with its actual evidence path and exact order list. Its form is:
+
+```bash
+sudo -u ti-operator /opt/trend-investing/bin/operator rebalance-cleared \
+  -inbox <evidence>/restart/operator -account <printed-synthetic-account> \
+  -decision <printed-exact-decision> \
+  -orders <printed-exact-order-list> -by owner \
+  -detail 'fake venue confirms cancelled; no broker connection' \
+  -at 2025-01-31T22:01:00Z
+```
+
+Only Richard records this server-drill clearance. Return to the first shell
+and press Enter. The driver resumes the **fake feed**, checks the clearance
+was journalled and has no `.refused` note, feeds February, and compares its
+targets and orders against an on-time run over identical inputs. The fake
+cancels every released order; nothing fills or changes holdings/cash. Expected:
+
+```text
+CLEARED: operator.rebalance.cleared recorded
+RECOVERED: next month equals on-time targets and orders; no old buys
+FAKE ONLY: no adapter or broker connection
+```
+
+Both runs must end with `operator approve` reporting `no rebalance in
+progress`. Clearance abandons January's remaining buys; it does **not**
+catch up January. February decides afresh. For a missed real month caused
+by missing inputs, follow "A withheld month" above: fix the feed and wait
+for the next decision time, or trade by hand after reconciling at IBKR.
+Never backdate a production feed or insert synthetic facts into it.
+
+The container runs the same driver without `--interactive`, against only
+its fake, with these focused tests (no real account or market data):
+
+```bash
+TMPDIR=/tmp python3 -m unittest discover -s deploy/rehearsal -p 'test_ira*.py'
+```
+
+The replay test uses `ira-stream.py --month-fixture` to stamp the existing
+synthetic month; the default `ira-stream.py` mode remains the non-decision
+warm-up. Preserve the evidence, record dated PASS/FAIL rows, restore the
+production instance by fresh approval, and perform the same-day probe.
+Gateway restart, logged-out pages, withheld-rebalance pages and real
+month-end observations remain Richard's server checks (lessons L4/L10/L11).

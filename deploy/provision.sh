@@ -637,6 +637,7 @@ step_services() {
   log "directories and config"
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/
+  install -m 0755 "$here"/ira-replay.sh "$here"/ira-replay.py /usr/local/libexec/trend-investing/
   install -m 0755 "$here/memory.py" /usr/local/libexec/trend-investing/
   install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/memory
   install_engine_settings "$here/etc/engines" "$etc/engines"
