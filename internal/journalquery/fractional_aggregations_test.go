@@ -408,13 +408,14 @@ func TestFractionalSkippedOrderDeclaresTheAccountScale(t *testing.T) {
 		js := []journalquery.Journal{load(t, "skipped", build(t, scaledSnapshot("synthetic", 1, scale, d), r, scaledSnapshot("synthetic", 1, scale, d)))}
 		for name, fn := range aggregationViews {
 			tab, err := fn(js, journalquery.Filter{})
-			if scale == 0 {
+			switch {
+			case scale == 0:
 				if err == nil || !strings.Contains(err.Error(), "mixed quantity scales") {
 					t.Errorf("%s accepted conflicting skip: %v", name, err)
 				}
-			} else if err != nil {
+			case err != nil:
 				t.Errorf("%s refused fractional skip: %+v: %v", name, tab, err)
-			} else if name == "totals" && (len(tab.Rows) != 1 || strings.Join(tab.Rows[0], " ") != "synthetic TOTAL all 0 0 0 0.00") {
+			case name == "totals" && (len(tab.Rows) != 1 || strings.Join(tab.Rows[0], " ") != "synthetic TOTAL all 0 0 0 0.00"):
 				t.Errorf("missing zero TOTAL for skipped order: %+v", tab)
 			}
 		}
