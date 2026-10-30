@@ -197,7 +197,12 @@ def drill(interactive=False):
     try:
         venue.feed(jan)
         released = [d['payload'] for d in venue.decisions if d['type'] == 'risk.order.released']
-        require(released and all(o['side'] == 'sell' for o in released), 'expected only the sell phase before stop')
+        decided = [d['payload'] for d in venue.decisions if d['type'] == 'strategy.targets.decided']
+        require(released and all(o['side'] == 'sell' for o in released),
+                'expected only the sell phase before stop; decisions: ' +
+                str([(p.get('session_period_end'), p.get('outcome'), p.get('withheld_reason'), p.get('withheld_detail'))
+                     for p in decided]) + '; released sides: ' + str([o['side'] + ' ' + o['instrument_id'] for o in released]) +
+                '; other decision types: ' + str(sorted({d['type'] for d in venue.decisions})))
     finally:
         venue.stop()
     print('STOPPED: sells working; buys not released', flush=True)
