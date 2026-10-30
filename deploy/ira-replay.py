@@ -100,10 +100,14 @@ def replay(instance, close, source):
                                         strategy_version=header['strategy_version'], configuration_hash=header['configuration_hash'],
                                         recorded_at=row['event_time'], payload_hash=hashlib.sha256(raw.encode()).hexdigest())
                         envelope.pop('correlation_id', None)
-                        conn.sendall((json.dumps(envelope) + '\n').encode())
-                        reply = json.loads(replies.readline() or '{}').get('envelope', {})
+                        # Compact, as hashed: the engine rejects a payload whose bytes differ from its hash (ADR 0016).
+                        conn.sendall((json.dumps(envelope, separators=(',', ':')) + '\n').encode())
+                        frame = json.loads(replies.readline() or '{}')
+                        reply = frame.get('envelope', {})
                         if reply.get('type') != 'engine.decisions':
-                            raise ValueError('engine refused recorded input; inspect evidence log')
+                            # The frame names the input and the engine's reason, never the account (lesson L12).
+                            raise ValueError('engine refused recorded input ' + row['id'] + ': ' +
+                                             json.dumps(frame).replace(instance, '<account>'))
                         sequence = reply['sequence'] + 1
                         for decision in reply['payload'].get('decisions') or []:
                             if decision['type'] == 'risk.order.released' and decision['payload']['send'] is not False:

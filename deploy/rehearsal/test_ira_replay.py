@@ -17,6 +17,11 @@ SCRIPT = ROOT / 'deploy/ira-replay.sh'
 MONTH = ROOT / 'cmd/engine/testdata/momentum-month.jsonl'
 
 
+
+def durable_records(path):
+    """The records of a durable log, skipping its header and the commit line that follows each record."""
+    return [json.loads(x)['record'] for x in path.read_text().splitlines()[1:] if '"record"' in x]
+
 class IRAReplayTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -72,7 +77,7 @@ class IRAReplayTest(unittest.TestCase):
         evidence = Path(result.stdout.split('Evidence: ')[1].splitlines()[0])
         self.assertEqual((evidence / 'recorded.jsonl').read_bytes(), before)
         self.assertEqual(self.stream.read_bytes(), before)
-        records = [json.loads(x)['record'] for x in (evidence / 'replay.log').read_text().splitlines()[1:]]
+        records = durable_records(evidence / 'replay.log')
         released = [x['envelope']['payload'] for x in records if x['envelope']['type'] == 'risk.order.released']
         self.assertTrue(released)
         self.assertTrue(all(x['send'] is False for x in released))
@@ -96,7 +101,7 @@ class IRAReplayTest(unittest.TestCase):
             if proc.poll() is None:
                 proc.terminate()
             proc.wait(timeout=15)
-        ontime = [json.loads(x)['record'] for x in (control / 'run.log').read_text().splitlines()[1:]]
+        ontime = durable_records(control / 'run.log')
         decision_types = {'strategy.targets.decided', 'strategy.order.planned', 'risk.order.released'}
         def decisions(entries):
             return [x['envelope']['payload'] for x in entries if x['envelope']['type'] in decision_types]
