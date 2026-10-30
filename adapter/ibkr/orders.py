@@ -174,10 +174,12 @@ def new_york_instants(local):
 
 def gateway_clock_trusted(conn):
     """Whether conn's link has IB Gateway's clock shown to be New York's (Connection.gateway_clock_offset, set at its
-    reconcile by loop.gateway_clock_problem) and New York is still at the UTC offset it was at when that link connected:
-    a clock checked before the clocks change says nothing of it after (ADR 0019, amended 2026-10-28)."""
+    clock check by loop._check_gateway_clock) and New York is still at the UTC offset it was at when that link connected:
+    a clock checked before the clocks change or beyond the configured interval is unchecked
+    (ADR 0019, amended 2026-10-28)."""
     offset = conn.gateway_clock_offset
-    return offset is not None and conn.now_utc().astimezone(NEW_YORK).utcoffset() == offset
+    return (offset is not None and conn.gateway_clock_fresh()
+            and conn.now_utc().astimezone(NEW_YORK).utcoffset() == offset)
 
 
 def unverified_receipt(conn):

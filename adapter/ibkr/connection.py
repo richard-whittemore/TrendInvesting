@@ -169,9 +169,10 @@ class Connection:
         # keeps its handshake (loop.gateway_clock_problem; ADR 0019, amended
         # 2026-10-28).
         self.connected_at = None
+        self._connected_monotonic = None
         # New York's UTC offset when the current link connected, set by its
-        # reconcile once IB Gateway's clock is shown to be New York's, None
-        # until then (orders.gateway_clock_trusted; ADR 0019, amended
+        # clock check once IB Gateway's clock is shown to be New York's,
+        # None until then (orders.gateway_clock_trusted; ADR 0019, amended
         # 2026-10-28).
         self.gateway_clock_offset = None
         # The reason the link was last reported down (disconnected, or
@@ -271,6 +272,19 @@ class Connection:
     def now_utc(self):
         """The adapter's own wall-clock time, for receipt stamps; never IBKR's."""
         return self._wall_clock()
+
+    def gateway_clock_fresh(self):
+        """Whether this handshake is within the configured clock-check interval (ADR 0019).
+
+        Reading ibapi's cached connection time again never renews it. Use
+        elapsed monotonic time too, so a wall-clock rollback cannot prolong
+        trust; a wall clock earlier than the handshake is unchecked.
+        """
+        if not self.connected or self.connected_at is None or self._connected_monotonic is None:
+            return False
+        interval = self.config.gateway_clock_check_interval
+        return (0 <= (self.now_utc() - self.connected_at).total_seconds() <= interval
+                and 0 <= self._monotonic() - self._connected_monotonic <= interval)
 
     def request_server_time(self):
         """Ask IBKR for its server time; return the ticket its answer will carry.
@@ -595,6 +609,7 @@ class Connection:
         self.inbox = Inbox()
         self._pending.clear()
         self.connected_at = None
+        self._connected_monotonic = None
         self.gateway_clock_offset = None
         self.managed_accounts = frozenset()
         self._probe_sent_at = None
@@ -629,6 +644,7 @@ class Connection:
                 raise ConnectFailed("no handshake within connect_timeout")
             if event.name == "next_valid_id":
                 self.connected_at = self._wall_clock()
+                self._connected_monotonic = self._monotonic()
                 self.next_order_id = event.args[0]
                 self._take_volunteered_list()
                 self.connected = True
@@ -765,6 +781,7 @@ class Connection:
 
     def _abandon(self):
         self.connected = False
+        self.gateway_clock_offset = None
         self._lost_at = None
         self._drop_when_restored = None
         try:

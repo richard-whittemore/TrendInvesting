@@ -604,6 +604,111 @@ class MorningTests(unittest.TestCase):
             loop.step()
         self.assert_withheld("journal", "0001f4e8.twoback.01.01")
 
+    def test_clock_recheck_detects_an_hour_jump_before_the_next_morning_reading(self):
+        self.at(ny(FRIDAY_MORNING, 7))
+        loop = self.loop()
+        loop.start()
+        self.assertEqual(loop._gateway_zone, "")
+        self.at(ny(FRIDAY_MORNING, 8, 5))
+        # The Gateway now runs an hour slow; its next handshake carries that clock.
+        self.fake.connect_hook = lambda: setattr(self.fake, "tws_connection_time", "20270115 07:05:00 EST")
+        self.proof(FRIDAY_MORNING)
+        with self.assertLogs("ibkr", "INFO") as logs:
+            self.deliver(THURSDAY, loop)
+        self.assert_withheld("IB Gateway's connection time", "60 minutes behind")
+        self.assertIsNone(loop.conn.gateway_clock_offset)
+        connects = [c for c in self.fake.calls if c[0] == "connect"]
+        self.assertEqual([c[-1] for c in connects], [11, 11])
+        observations = [line for line in logs.output if "ibkr gateway clock recheck" in line]
+        self.assertEqual(len(observations), 1, observations)
+        self.assertIn("offset_seconds=-3600", observations[0])
+        self.assertIn("verdict=unchecked", observations[0])
+
+    def test_clock_recheck_within_tolerance_keeps_the_reading_at_the_close(self):
+        self.at(ny(FRIDAY_MORNING, 7))
+        loop = self.loop()
+        loop.start()
+        self.at(ny(FRIDAY_MORNING, 8, 5))
+        self.fake.connect_hook = lambda: setattr(self.fake, "tws_connection_time", "20270115 08:03:00 EST")
+        self.proof(FRIDAY_MORNING)
+        with self.assertLogs("ibkr", "INFO") as logs:
+            self.deliver(THURSDAY, loop)
+        self.assert_as_of_close(THURSDAY)
+        self.assertIsNone(loop.tracker._unverified_receipt())
+        self.assertEqual(len([c for c in self.fake.calls if c[0] == "connect"]), 2)
+        observations = [line for line in logs.output if "ibkr gateway clock recheck" in line]
+        self.assertEqual(len(observations), 1, observations)
+        self.assertIn("offset_seconds=-120", observations[0])
+        self.assertIn("verdict=checked", observations[0])
+        self.assertFalse(any(c[0] == "place_order" for c in self.fake.calls))
+
+    def test_clock_recheck_expiry_stamps_executions_at_receipt_before_any_reading(self):
+        from orders import collect_broker_orders
+        self.at(ny(THURSDAY, 15))
+        loop = self.loop()
+        loop.start()
+        self.at(ny(THURSDAY, 16, 30))
+        self.assertEqual(loop.tracker._unverified_receipt(), self.now)
+        self.fake.executions = [(contract(), execution(time="20270114 15:30:00 EST"))]
+        self.assertEqual(collect_broker_orders(loop.conn).executions[0].occurred_at, self.now)
+        self.assertIn("stale", loop._gateway_problem())
+
+    def test_clock_recheck_does_not_extend_a_cached_handshakes_lifetime(self):
+        from datetime import timedelta
+        self.at(ny(FRIDAY_MORNING, 7))
+        loop = self.loop()
+        loop.start()
+        first = loop.conn.connected_at
+        self.at(ny(FRIDAY_MORNING, 7, 59))
+        loop.reconcile()
+        self.assertEqual(loop.conn.connected_at, first)
+        self.assertIsNone(loop.tracker._unverified_receipt())
+        self.at(ny(FRIDAY_MORNING, 8, 1))
+        self.assertEqual(loop.tracker._unverified_receipt(), self.now)
+        loop.reconcile()
+        self.assertEqual(loop.conn.connected_at, first + timedelta(minutes=61))
+        self.assertIsNone(loop.tracker._unverified_receipt())
+
+    def test_clock_recheck_uses_the_configured_interval_and_includes_its_boundary(self):
+        self.at(ny(FRIDAY_MORNING, 7))
+        loop = self.loop()
+        loop.config = loop.config._replace(gateway_clock_check_interval=120)
+        loop.start()
+        self.at(ny(FRIDAY_MORNING, 7, 2))
+        loop.reconcile()
+        self.assertIsNone(loop.tracker._unverified_receipt())
+        self.assertEqual(len([c for c in self.fake.calls if c[0] == "connect"]), 1)
+        self.at(ny(FRIDAY_MORNING, 7, 3))
+        loop.reconcile()
+        self.assertIsNone(loop.tracker._unverified_receipt())
+        self.assertEqual(len([c for c in self.fake.calls if c[0] == "connect"]), 2)
+
+    def test_clock_recheck_monotonic_expiry_cannot_be_extended_by_wall_clock_rollback(self):
+        self.at(ny(FRIDAY_MORNING, 7))
+        loop = self.loop()
+        loop.start()
+        self.clock.now += 3601
+        # The wall clock still reads 07:00; elapsed monotonic time expires the check anyway.
+        self.assertEqual(loop.tracker._unverified_receipt(), self.now)
+        loop.reconcile()
+        self.assertIsNone(loop.tracker._unverified_receipt())
+        self.assertEqual(len([c for c in self.fake.calls if c[0] == "connect"]), 2)
+
+    def test_clock_recheck_failed_reconnect_logs_unchecked_and_sends_nothing(self):
+        from connection import ConnectFailed
+        self.at(ny(FRIDAY_MORNING, 7))
+        loop = self.loop()
+        loop.start()
+        self.at(ny(FRIDAY_MORNING, 8, 5))
+        self.proof(FRIDAY_MORNING)
+        self.fake.connect_behaviours = ["socket-error"] * loop.config.max_connect_attempts
+        with self.assertLogs("ibkr", "INFO") as logs, self.assertRaises(ConnectFailed):
+            loop._post_close_reading(nyse_calendar.session_close(THURSDAY), {"SPY": OFFICIAL})
+        self.assertIsNone(loop.conn.gateway_clock_offset)
+        self.assertEqual(loop.tracker._unverified_receipt(), self.now)
+        self.assertTrue(any("clock recheck" in line and "verdict=unchecked" in line for line in logs.output))
+        self.assertEqual(self.sent(ACCOUNT_SNAPSHOT), [])
+
     # -- IB Gateway's zone: where IBKR's own list starts -------------------------
     def test_a_gateway_in_another_zone_withholds_with_no_execution_listed(self):
         self.proof(FRIDAY_MORNING)
@@ -663,13 +768,13 @@ class MorningTests(unittest.TestCase):
         self.assert_withheld("IB Gateway's connection time '20270115 05:05:00 EST'", "180 minutes behind")
 
     def test_the_clock_is_compared_at_the_handshake_not_at_a_later_reconcile(self):
-        # A link restored by IB Gateway (1101/1102) is reconciled again with no new handshake: its connection time is
-        # the first one's, so it is compared with the adapter's clock when that link connected.
+        # Within the check interval a link restored by IB Gateway (1101/1102) keeps its handshake:
+        # compare its connection time with the adapter's clock when that link connected.
         self.at(datetime(2026, 10, 28, 13, 49, 22, tzinfo=timezone.utc))
         self.fake.tws_connection_time = "20261028 09:49:19 EST"
         loop = self.loop()
         loop.start()
-        self.at(datetime(2026, 10, 28, 15, 49, 22, tzinfo=timezone.utc))
+        self.at(datetime(2026, 10, 28, 14, 19, 22, tzinfo=timezone.utc))
         loop.reconcile()
         self.assertEqual(loop._gateway_zone, "")
 
@@ -711,8 +816,10 @@ class MorningTests(unittest.TestCase):
         problem = loop._gateway_problem()
         for text in ("New York's clocks changed", "UTC-05:00", "UTC-04:00", "connects again"):
             self.assertIn(text, problem)
+        # The expired link now reconnects; fixed EST is an hour slow in the new handshake too.
+        self.fake.connect_hook = lambda: setattr(self.fake, "tws_connection_time", "20270315 07:05:00 EST")
         loop.reconcile()
-        self.assertIn("New York's clocks changed", loop._gateway_zone)
+        self.assertIn("60 minutes behind", loop._gateway_zone)
         self.assertIsNone(loop.conn.gateway_clock_offset)
 
     def test_a_morning_reading_on_a_link_whose_clock_check_failed_withholds_on_the_connection_time(self):

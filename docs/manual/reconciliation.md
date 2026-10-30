@@ -684,11 +684,32 @@ is an hour off in summer, and one in another zone is hours off; either
 withholds the morning reading, and the message says how far off it was and
 which way (for example `60 minutes 3 seconds behind`). In the hour repeated
 when the clocks go back, the reading that matches the adapter's clock is
-taken. The check holds only until New York's clocks next change: a link
-that stays up (or that the Gateway restores without reconnecting) across a
-change is not trusted after it, and withholds the morning reading until it
-connects again (the Gateway's nightly restart does that). Every
-execution's time must be in one of the same zones (the clocks are not
+taken. Before every post-close reading (including the morning delivery) and
+every reconcile, the adapter re-checks this evidence. The check expires after
+`gateway_clock_check_interval` seconds, **3600 seconds (60 minutes) by
+default**, configured in the adapter's JSON. Once it is older, the adapter
+disconnects and reconnects with the **same client ID** to obtain a fresh
+handshake, then reconciles before delivering anything. Within the interval,
+reading the cached handshake again does not renew its age. IBKR's
+`reqCurrentTime` is server time, not the Gateway's local clock, and cannot
+replace this handshake check. A clock jump within the interval can remain
+undetected until the next fresh handshake; this is a periodic check, not
+continuous clock monitoring.
+
+A failed or expired check makes the link **unchecked** immediately, including
+for executions received before the next reading. A morning reading on it
+withholds and names the Gateway's clock as the cause. An unreadable handshake
+fails the check too; a failed reconnect follows the normal bounded retries
+and stops without delivering a reading if they are exhausted. New York's
+clocks changing also invalidates the check until a fresh handshake passes.
+Each re-check writes an observation to the adapter's system journal:
+`ibkr gateway clock recheck at=... checked_at=... offset_seconds=... verdict=checked|unchecked reason=...`.
+`checked_at` is the handshake time; the signed offset is Gateway minus
+adapter, in seconds (`unknown` if unavailable). A failed reconnect logs an
+unchecked verdict with no handshake time. These observations add no engine
+input or order. The post-install probe prints the last re-check line it finds.
+
+Every execution's time must be in one of the same zones (the clocks are not
 compared: an execution can be hours old). While the link's check holds it
 is read on New York's clock whatever its label; until then, the adapter
 records it at the time it heard of it (or the Gateway's time, if later),

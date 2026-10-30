@@ -12,6 +12,13 @@ from config import AdapterConfig, ConfigError
 
 
 class ConfigTests(unittest.TestCase):
+    def test_clock_recheck_interval_defaults_to_sixty_minutes_and_is_configurable(self):
+        self.assertEqual(config().gateway_clock_check_interval, 3600)
+        self.assertEqual(config(gateway_clock_check_interval=120).gateway_clock_check_interval, 120)
+        for bad in (0, -1, True, "3600", float("nan"), float("inf")):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                config(gateway_clock_check_interval=bad)
+
     def test_valid_configuration(self):
         c = config()
         self.assertEqual((c.host, c.port, c.client_id, c.mode), ("127.0.0.1", 4002, 11, "dry-run"))
