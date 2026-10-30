@@ -441,6 +441,7 @@ class EasternLabelTests(unittest.TestCase):
         received = {"at": utc(2027, 1, 14, 21, 30, 2)}
         reports = []
         t = Tracked(lambda report: None)  # the harness's own tracker; the one under test follows
+        t.h.conn._wall_clock = lambda: received["at"]
         t.tracker = OrderTracker(ACCOUNT, 11, reports.append, unverified_receipt=lambda: received["at"])
         t.h.conn.subscribe(t.tracker.on_event)
         t.cb.exec_details(-1, contract(), execution(exec_id="x.01", time="20270114 15:30:00 EST"))

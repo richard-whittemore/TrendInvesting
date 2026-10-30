@@ -13,7 +13,7 @@ two published signatures are reduced to one here.
 import queue
 from collections import namedtuple
 
-Event = namedtuple("Event", "name args")
+Event = namedtuple("Event", "name args received_at", defaults=(None,))
 
 
 class TWSApi:
@@ -120,7 +120,7 @@ class TWSApi:
 
 def _recorder(name):
     def record(self, *args):
-        self._queue.put(Event(name, args))
+        self._queue.put(Event(name, args, self._wall_clock()))
     record.__name__ = name
     return record
 
@@ -156,8 +156,11 @@ class Inbox:
         "contract_details_end",  # (req_id)
     )
 
-    def __init__(self):
+    def __init__(self, wall_clock=lambda: None):
         self._queue = queue.Queue()
+        # Capture arrival on the reader thread, so queue delays cannot look
+        # like Gateway clock drift (docs/manual/reconciliation.md).
+        self._wall_clock = wall_clock
 
     def note(self, name, *args):
         """Queue the adapter's own note name (with args) behind every callback already received.

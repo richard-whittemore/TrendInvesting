@@ -67,6 +67,7 @@ from relay import LOG_DECISION, LOG_INPUT, ResolveRefused, _committed_groups
 STARTED = re.compile(r"ibkr adapter starting mode=(\S+) client_id=(\d+) sending=(on|off) ibapi=(\S+)")
 CONNECTED = re.compile(r"ibkr link state=connected reason=(\S*) client_id=(\d+)")
 SERVER_VERSION = re.compile(r"ibkr gateway server_version=(\S+) contract_data=(\S+)")
+CLOCK_RECHECK = re.compile(r"ibkr gateway clock (recheck|staleness|cross-check) (.*)$")
 RECONCILED = re.compile(r"ibkr reconciled client_id=(\d+) positions=(\d+) open_orders=(\d+) executions=(\d+)")
 QUEUED = re.compile(r"ibkr stream queued run=(\S+) files=(\S+) inputs=(\d+)( resumed=1)?")
 ANSWERED = re.compile(r"ibkr input=(\S+) type=(\S+) answered with (\d+) decisions")
@@ -250,6 +251,10 @@ def check_journal(lines, client_id, mode, report, expect_batch=False):
     if versions:
         report.note("Gateway server version {} (contract details read from IBKR's {} messages)".format(
             versions[-1].group(1), versions[-1].group(2)))
+    clock_checks = [m for m in (CLOCK_RECHECK.search(line) for line in text) if m]
+    if clock_checks:
+        # ADR 0019: clock evidence is an observation, not a new probe gate or engine input.
+        report.note("Gateway clock " + clock_checks[-1].group(1) + " " + clock_checks[-1].group(2))
     connected = [m for m in (CONNECTED.search(line) for line in text) if m]
     reconciled = [m for m in (RECONCILED.search(line) for line in text) if m]
     for found, what, ids in ((connected, "connected to IB Gateway", {int(m.group(2)) for m in connected}),

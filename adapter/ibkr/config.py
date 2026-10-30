@@ -15,7 +15,7 @@ _FIELDS = (
     "heartbeat_interval", "heartbeat_timeout", "restore_timeout",
     "backoff_initial", "backoff_max", "max_connect_attempts", "commission_wait",
     "con_ids", "paper_sending_enabled", "mark_timeout",
-    "account_snapshot_version", "resolve_contracts",
+    "account_snapshot_version", "resolve_contracts", "gateway_clock_check_interval",
 )
 # The recommended mark_timeout, as the deployed example sets it: IBKR ends a
 # market-data snapshot only at the end of its 11-second snapshot window (TWS
@@ -29,7 +29,8 @@ MARK_TIMEOUT = 15
 # account_snapshot_version and resolve_contracts are the momentum engine's
 # inputs (ADR 0026 points 2 and 3): left out, they are Boost's, so a Boost
 # configuration written before them reads exactly as it did.
-_OPTIONAL = {"paper_sending_enabled": False, "account_snapshot_version": 3, "resolve_contracts": False}
+_OPTIONAL = {"paper_sending_enabled": False, "account_snapshot_version": 3, "resolve_contracts": False,
+             "gateway_clock_check_interval": 43200}
 # The account.snapshot versions the adapter writes: 3, positions and net
 # liquidation, which Boost reads (internal/event AccountSnapshotPositionsVersion),
 # and 4, with IBKR's settled and total cash, which the momentum engine reads
@@ -49,8 +50,8 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     """Where one engine's adapter connects, and its fail-closed timing bounds.
 
     One engine per account, each with its own client ID to one IB Gateway
-    (ADR 0026 point 8, decided 2026-10-16). Every timing value is
-    required: ADR 0019 makes them versioned operational configuration with
+    (ADR 0026 point 8, decided 2026-10-16). Except gateway_clock_check_interval
+    (43200 seconds, 12 hours), every timing value is required: ADR 0019 makes them versioned operational configuration with
     no permissive defaults. restore_timeout is how long Gateway may stay cut
     off from IBKR's servers (codes 1100/2110) before the adapter gives up
     waiting for Gateway's own restoration and reconnects. commission_wait
@@ -77,6 +78,9 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     newly picked has a contract and a mark before any order is planned (ADR
     0026 point 3); a name that does not resolve to one contract gets no mark.
     Both are optional, Boost's values when left out, and strictly typed.
+    gateway_clock_check_interval bounds the age of the handshake clock check:
+    an older link is unchecked until a natural handshake (ADR 0019).
+    The supported interval is 1 to 48 hours; see docs/manual/reconciliation.md.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -129,11 +133,13 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
                               "account".format(self.account_id, PAPER_ACCOUNT_PREFIX))
         for name in ("connect_timeout", "request_timeout", "heartbeat_interval",
                      "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max",
-                     "commission_wait", "mark_timeout"):
+                     "commission_wait", "mark_timeout", "gateway_clock_check_interval"):
             value = getattr(self, name)
             # NaN and infinity pass "> 0" but would switch a deadline off.
             if not _is_number(value) or not math.isfinite(value) or value <= 0:
                 raise ConfigError("{} must be a positive number of seconds".format(name))
+        if not 3600 <= self.gateway_clock_check_interval <= 172800:
+            raise ConfigError("gateway_clock_check_interval must be between 3600 and 172800 seconds (1 to 48 hours)")
         if self.backoff_max < self.backoff_initial:
             raise ConfigError("backoff_max must be at least backoff_initial")
         if not _is_int(self.max_connect_attempts) or self.max_connect_attempts < 1:

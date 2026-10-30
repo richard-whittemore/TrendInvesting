@@ -628,12 +628,199 @@ class PostCloseTests(unittest.TestCase):
         self.assertEqual(len(self.sent(ACCOUNT_SNAPSHOT)), 1, "and delivers nothing again")
         self.assertEqual(len({e["payload"]["reconciliation_id"] for e in reconciliations}), 3)
 
+    def test_a_stale_clock_before_the_pending_start_reconciliation_records_it_once(self):
+        # ADR 0025 point 5: a fresh handshake must be reconciled before delivery.
+        # Like the paper rehearsal, advance the day after start(), before its
+        # reconciliation is recorded, then drop the link and restart the adapter.
+        released = json.loads((tests_dir / "testdata" / "paper_released.json").read_text())
+        self.engine.decisions = {"marketdata:session-closed:{}".format(FRIDAY): [{"type": RELEASED,
+                                                                               "payload": released}]}
+        self.fake.on_place = self.fake.accept
+
+        def start():
+            loop = self.loop()
+            loop._now = lambda: datetime.fromtimestamp(self.fake.server_time, timezone.utc)
+            loop.start()
+            return loop
+
+        self.fake.server_time = EVENING - 86400
+        write_stream(self.folder, THURSDAY, session_envelopes([THURSDAY]))
+        warm = start()
+        for _ in range(40):
+            warm.step()
+        self.assertEqual(len(self.sent(RECONCILIATION)), 1)
+        warm.close()
+
+        loop = start()
+        self.assertTrue(loop._reconciliation_due)
+        self.fake.server_time = EVENING
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        with self.assertLogs("ibkr", "INFO") as logs:
+            for _ in range(40):
+                loop.step()
+        self.assertEqual(len(self.sent(RECONCILIATION)), 3,
+                         "warm-up, the pending start on the same link, and the day's batch")
+        observations = [line for line in logs.output if "ibkr gateway clock staleness" in line]
+        self.assertGreaterEqual(len(observations), 1, observations)
+        self.assertIn("verdict=unchecked", observations[0])
+        self.assertEqual(len(self.fake.called("connect")), 2)
+        self.assertEqual(len(self.fake.placed), 1)
+
+        self.fake.drop()
+        for _ in range(40):
+            loop.step()
+        self.assertEqual(len(self.sent(RECONCILIATION)), 4, "the reconnect reconciles once")
+        loop.close()
+        again = start()
+        for _ in range(40):
+            again.step()
+        self.assertEqual(len(self.sent(RECONCILIATION)), 5, "the restart reconciles once")
+        self.assertEqual(len(self.fake.called("connect")), 4)
+        self.assertEqual(len(self.fake.placed), 1, "the released order is never sent twice")
+        self.assertEqual(len(self.sent(ACCOUNT_SNAPSHOT)), 2, "the streams are never delivered twice")
+        ids = [e["id"] for e in self.engine.inputs()]
+        self.assertEqual(len(ids), len(set(ids)))
+
     def test_a_fresh_start_with_no_book_sends_no_reconciliation_until_its_first_batch(self):
         loop = self.loop()
         loop.start()
         for _ in range(10):
             loop.step()
         self.assertEqual(self.engine.inputs(), [])
+
+    def test_queued_fills_preserve_their_times_and_the_next_days_crash_resume(self):
+        # The paper rehearsal's approval already counts one share of the
+        # order IBKR later replays. Clock observations must not move that
+        # fill past approval and change the book inherited by a crash resume.
+        approval = run_approval(ACCOUNT, starting_book=STARTING_BOOK)
+        approval["approved_at"] = "2027-01-13T22:00:00Z"
+        self.restart_engine(approval)
+        released = json.loads((tests_dir / "testdata" / "paper_released.json").read_text())
+        self.engine.decisions = {"marketdata:session-closed:{}".format(THURSDAY): [
+            {"type": RELEASED, "payload": released}]}
+        self.fake.on_place = self.fake.accept
+
+        def start():
+            loop = self.loop()
+            loop._now = lambda: datetime.fromtimestamp(self.fake.server_time, timezone.utc)
+            loop._today = lambda: loop._now().date()
+            loop.start()
+            return loop
+
+        self.fake.server_time = EVENING - 86400
+        write_stream(self.folder, THURSDAY, session_envelopes([THURSDAY]))
+        loop = start()
+        for _ in range(40):
+            loop.step()
+        self.assertEqual(len(self.fake.placed), 1)
+
+        original_exec = self.fake.callbacks.exec_details
+        self.fake.callbacks.exec_details = lambda _, con, ex: original_exec(123, con, ex)
+        self.fake.fill(7, shares="1", price=400, exec_id="0001.resume.00.01", cum_qty="1",
+                       commission="0.50", time="20270113 10:00:00 US/Eastern")
+        self.fake.callbacks.exec_details = original_exec
+        for _ in range(10):
+            loop.step()
+        self.fake.server_time = EVENING - 3600
+        # The session's replay list contains only this day's executions.
+        self.fake.executions = []
+        self.fake.drop()
+        loop.step()
+        self.fake.server_time = int(datetime(2027, 1, 14, 21, 30, 1, tzinfo=timezone.utc).timestamp())
+        self.fake.fill(7, shares="8", price=400, exec_id="0001.resume.01.01", cum_qty="9",
+                       commission="1.00", time="20270114 16:30:01 US/Eastern")
+        self.fake.server_time = EVENING
+        self.fake.positions = [(ACCOUNT, contract(), Decimal("155"), 312.5)]
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        with self.assertLogs("ibkr", "INFO") as logs:
+            for _ in range(40):
+                loop.step()
+        observations = [line for line in logs.output if "ibkr gateway clock staleness" in line]
+        self.assertGreaterEqual(len(observations), 1)
+        self.assertIn("verdict=checked", observations[0])
+        fills = self.sent(FILL_TYPE)
+        late = self.sent(BROKER_SNAPSHOT_TYPE)[-1]["payload"]
+        self.assertFalse(late["as_of_close"], "the second fill really is after this close")
+        loop.close()
+
+        resumed_path = Path(self.dir.name) / (RUN + "-resumed.log")
+        resumed_path.write_bytes(Path(self.engine_log).read_bytes())
+        self.engine_log = str(resumed_path)
+        self.engine = LoggedEngine(self.engine_log)
+        next_day = date(2027, 1, 15)
+        self.fake.server_time = EVENING + 86400
+        self.fake.executions = []  # Gateway only replays executions since this midnight.
+        write_stream(self.folder, next_day, session_envelopes([next_day]))
+        with self.assertLogs("ibkr", "INFO") as logs:
+            resumed = start()
+            for _ in range(40):
+                resumed.step()
+        observations = [line for line in logs.output if "ibkr gateway clock staleness" in line]
+        self.assertGreaterEqual(len(observations), 1)
+        self.assertIn("verdict=checked", observations[0])
+        sent = self.engine.received
+        self.assertEqual([e["type"] for e in sent],
+                         [RECONCILIATION, RECONCILIATION, ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE, BAR, MARK, CLOSED],
+                         "one startup reconciliation, then one batch with its own reconciliation")
+        self.assertEqual(resumed.delivery.run, RUN)
+        self.assertEqual(sorted(p.name for p in self.streams.iterdir()), [RUN])
+        broker = sent[3]["payload"]
+        self.assertEqual((sent[2]["payload"]["as_of"], broker["as_of"], broker["as_of_close"]),
+                         ("2027-01-15T21:00:00Z", "2027-01-15T21:00:00Z", True))
+        self.assertGreater(broker["read_at"], broker["as_of"])
+        self.assertEqual((broker["cash_drift"], broker["unexplained_cash"]), (0, 3201),
+                         "only the eight shares and commission since the approval count as unexplained cash")
+        self.assertEqual([f["payload"]["filled_at"] for f in fills],
+                         ["2027-01-13T15:00:00Z", "2027-01-14T21:30:01Z"])
+        self.assertEqual(len({e["id"] for e in sent}), len(sent))
+        self.assertEqual(len(self.fake.placed), 1)
+
+    def test_a_stale_clock_keeps_a_queued_cancellation_that_will_not_be_replayed(self):
+        released = json.loads((tests_dir / "testdata" / "paper_released.json").read_text())
+        self.engine.decisions = {"marketdata:session-closed:{}".format(FRIDAY): [
+            {"type": RELEASED, "payload": released}]}
+        self.fake.on_place = self.fake.accept
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop._now = lambda: datetime.fromtimestamp(self.fake.server_time, timezone.utc)
+        loop.start()
+        for _ in range(40):
+            loop.step()
+        self.assertEqual(len(self.fake.placed), 1)
+        self.fake.server_time += 43201
+        self.fake.status(7, "Cancelled", filled="0", remaining="9")
+        self.fake.open_orders = []
+        for _ in range(40):
+            loop.step()
+        statuses = [e["payload"]["status"] for e in self.sent("execution.order.lifecycle")]
+        self.assertEqual(statuses, ["submitted", "canceled"])
+        self.assertEqual(len(self.fake.called("connect")), 1)
+        self.assertEqual(len(self.fake.placed), 1)
+
+    def test_a_passive_clock_fault_keeps_queued_fills_unchecked(self):
+        released = json.loads((tests_dir / "testdata" / "paper_released.json").read_text())
+        self.engine.decisions = {"marketdata:session-closed:{}".format(FRIDAY): [
+            {"type": RELEASED, "payload": released}]}
+        self.fake.on_place = self.fake.accept
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop._now = lambda: datetime.fromtimestamp(self.fake.server_time, timezone.utc)
+        loop.start()
+        for _ in range(40):
+            loop.step()
+        self.fake.server_time += 3601
+        received = loop._now()
+        self.fake.fill(7, shares="9", price=400, exec_id="0001.unchecked.01.01", cum_qty="9",
+                       time="20270114 15:30:00 US/Eastern")
+        self.fake.positions = [(ACCOUNT, contract(), Decimal("156"), 312.5)]
+        self.fake.server_time += 60  # Queue consumption is later than callback receipt.
+        for _ in range(40):
+            loop.step()
+        self.assertIsNone(loop.conn.gateway_clock_offset)
+        self.assertIn("Gateway's clock cross-check", loop._gateway_problem())
+        fills = self.sent(FILL_TYPE)
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0]["payload"]["filled_at"], received.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     def test_every_later_batch_reconciles_the_reading_before_its_snapshot_replaces_the_book(self):
         # The engine classifies the reading against the book it holds and

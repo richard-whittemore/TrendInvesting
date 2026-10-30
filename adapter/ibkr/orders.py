@@ -174,16 +174,21 @@ def new_york_instants(local):
 
 def gateway_clock_trusted(conn):
     """Whether conn's link has IB Gateway's clock shown to be New York's (Connection.gateway_clock_offset, set at its
-    reconcile by loop.gateway_clock_problem) and New York is still at the UTC offset it was at when that link connected:
-    a clock checked before the clocks change says nothing of it after (ADR 0019, amended 2026-10-28)."""
+    clock check by loop._check_gateway_clock) and New York is still at the UTC offset it was at when that link connected:
+    a clock checked before the clocks change or beyond the configured interval is unchecked
+    (ADR 0019, amended 2026-10-28)."""
     offset = conn.gateway_clock_offset
-    return offset is not None and conn.now_utc().astimezone(NEW_YORK).utcoffset() == offset
+    return (offset is not None and conn.gateway_clock_fresh()
+            and conn.now_utc().astimezone(NEW_YORK).utcoffset() == offset)
 
 
-def unverified_receipt(conn):
-    """conn's receipt time (Connection.now_utc) while its Gateway's clock is not shown to be New York's
-    (gateway_clock_trusted), for execution_report to stamp an execution with; None while it is."""
-    return None if gateway_clock_trusted(conn) else conn.now_utc()
+def unverified_receipt(conn, received_at=None):
+    """The callback receipt time while Gateway is unchecked; None while trusted (ADR 0019).
+
+    Callers without arrival metadata fall back to Connection.now_utc.
+    execution_report takes the later of this receipt and Gateway's stamp.
+    """
+    return None if gateway_clock_trusted(conn) else (received_at or conn.now_utc())
 
 
 def parse_execution_time(text):
@@ -303,6 +308,9 @@ class OrderTracker:
         return key in self._client_ids or key in self._last or key in self._held
 
     def on_event(self, event):
+        if event.name == "exec_details":
+            self._on_exec_details(*event.args, received_at=event.received_at)
+            return
         handler = getattr(self, "_on_" + event.name, None)
         if handler is not None:
             handler(*event.args)
@@ -401,10 +409,11 @@ class OrderTracker:
         self._sink(report)
         self._last[key] = report
 
-    def _on_exec_details(self, req_id, contract, execution):
+    def _on_exec_details(self, req_id, contract, execution, received_at=None):
         if execution.acctNumber != self.account_id or execution.execId in self._executions:
             return
-        report = execution_report(contract, execution, self._unverified_receipt())
+        unchecked = self._unverified_receipt()
+        report = execution_report(contract, execution, (received_at or unchecked) if unchecked is not None else None)
         self._sink(report)
         self._executions.add(execution.execId)
 
@@ -452,7 +461,7 @@ def collect_broker_orders(conn):
                 key = order_key(record.client_id, record.broker_order_id, record.perm_id)
                 open_orders[key] = record
         elif name == "exec_details" and args[0] == exec_req:
-            report = execution_report(args[1], args[2], unverified_receipt(conn))
+            report = execution_report(args[1], args[2], unverified_receipt(conn, event.received_at))
             if report.account_id == account:
                 executions[report.exec_id] = report
         elif name == "exec_details_end" and args[0] == exec_req:

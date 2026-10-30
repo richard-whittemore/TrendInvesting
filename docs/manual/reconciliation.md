@@ -688,12 +688,74 @@ is an hour off in summer, and one in another zone is hours off; either
 withholds the morning reading, and the message says how far off it was and
 which way (for example `60 minutes 3 seconds behind`). In the hour repeated
 when the clocks go back, the reading that matches the adapter's clock is
-taken. The check holds only until New York's clocks next change: a link
-that stays up (or that the Gateway restores without reconnecting) across a
-change is not trusted after it, and withholds the morning reading until it
-connects again (the Gateway's nightly restart does that). Every
-execution's time must be in one of the same zones (the clocks are not
-compared: an execution can be hours old). While the link's check holds it
+taken. Only a **natural handshake** refreshes this check: at startup or
+when the link itself reconnects. The adapter never disconnects a healthy
+link to check its clock. Re-reading ibapi's cached connection time cannot
+renew it, and `reqCurrentTime` measures IBKR's server time, not Gateway's
+local clock.
+
+The check is valid for `gateway_clock_check_interval` seconds, **43200
+seconds (12 hours) by default**, configurable from **3600 to 172800 seconds
+(1 to 48 hours)**. IBC restarts Gateway nightly at **23:45 New York**, so
+the morning reading at **06:07** uses a check within the default interval.
+A Gateway that missed that nightly restart is stale by the next morning.
+When the interval expires, the link is **unchecked**: executions take the
+later of Gateway time and receipt time, and the next post-close reading
+withholds, saying `IB Gateway's clock check passed at <checked_at> but is
+older than the interval (<N> hours); only a new handshake (the Gateway's
+nightly restart or a reconnect) renews it`. If no check passed on this link,
+it says `IB Gateway's clock check has not passed on this link; only a new
+handshake (the Gateway's nightly restart or a reconnect) renews it`. Expiry
+causes no reconnect, queue drain, or delay in journalling reports. New York's
+clocks changing also invalidates the check until a fresh handshake passes.
+
+There is also a **passive cross-check** on a first live execution for an
+order this run actually sent in paper mode (or live mode once its sending
+gate is enabled). The account, client ID, broker order ID and client order
+ID must match that send. Requested execution replays, however identified,
+unsolicited redeliveries of executions already seen, and reports for orders
+this run did not send supply no evidence of current clock drift and are
+never cross-checked. They remain subject to reconciliation (ADR 0019) and
+the later-of stamping rule on an unchecked link. There is no historical-age
+allowance, request-window bookkeeping or calendar-day calculation.
+
+On a checked link, an absolute difference **greater than 5 minutes** between
+a qualifying report's Gateway timestamp and callback receipt marks the link
+unchecked immediately, before the report is stamped. Receipt is captured
+when the callback enters the inbox, so time spent queued does not count as
+clock drift. The fault journals both times and the next post-close reading
+withholds, naming Gateway's clock. IBKR's `orderStatus` callback carries
+**no Gateway timestamp** and therefore supplies no passive clock evidence;
+its lifecycle time remains the adapter's receipt time. A fault stays
+unchecked until a natural new handshake passes.
+A late first delivery (the first report after Gateway restores its link to
+IBKR's servers, or an IBKR correction carrying the original time) can fault
+a correct clock; the adapter then withholds the reading rather than risk
+accepting an unsafe one, and the fault clears at the next passing handshake.
+
+In **dry-run**, no orders are sent and the passive check never fires; the
+**12-hour validity interval** is the only ongoing clock rule there (or the
+configured interval). Drift within tolerance is not rejected, even at a
+handshake. A natural handshake measures and logs the current offset and
+rejects it only if it exceeds tolerance. Between handshakes, only a
+qualifying live report whose offset exceeds tolerance can expose drift;
+without one, the validity interval still expires normally.
+
+Each handshake logs `ibkr gateway clock recheck at=... checked_at=...
+offset_seconds=... verdict=checked|unchecked reason=...`. Each post-close
+reading and reconciliation checks staleness, logging only when the verdict,
+reason or handshake time changes: `ibkr gateway clock staleness at=...
+checked_at=... interval_seconds=... verdict=checked|unchecked reason=...`.
+The passive check logs `ibkr gateway clock cross-check gateway_at=...
+received_at=... verdict=checked|unchecked reason=...`,
+including both times on a fault. These are observations in the adapter's
+system journal, never engine inputs or orders. The post-install probe
+prints the last clock observation, including a staleness or cross-check
+verdict.
+
+Every execution's time must be in one of the same zones; the passive
+comparison uses only first live executions for orders this run sent, never
+requested executions. While the link's check holds it
 is read on New York's clock whatever its label; until then, the adapter
 records it at the time it heard of it (or the Gateway's time, if later),
 so a fill after the close is never recorded as one before it, even by a

@@ -897,6 +897,21 @@ class ProbeEvidenceTests(ProbeTests):
         self.assertEqual(status, 1, out)
         self.assertTrue(any("this start" in line and line.startswith("probe: FAIL") for line in out), out)
 
+    def test_probe_prints_the_last_staleness_or_cross_check_verdict_as_an_observation(self):
+        journal = self.start()
+        self.assertIn("ibkr gateway clock recheck", journal.read_text())
+        for observation in (
+                "staleness at=2027-01-14T23:06:00Z verdict=unchecked reason=stale",
+                "cross-check gateway_at=2027-01-14T22:06:00Z received_at=2027-01-14T23:06:00Z "
+                "verdict=unchecked reason=Gateway clock is behind"):
+            with self.subTest(observation=observation):
+                with journal.open("a") as out:
+                    out.write("ibkr gateway clock " + observation + "\n")
+                status, lines = self.probe(journal)
+                self.assertEqual(status, 0, lines)
+                checks = [line for line in lines if line.startswith("probe: Gateway clock")]
+                self.assertEqual(checks, ["probe: Gateway clock " + observation])
+
     def test_a_release_marked_to_be_sent_fails_a_dry_run_probe(self):
         from test_delivery import commit
         self.engine.decisions["sending"] = [{"type": "risk.order.released", "schema_version": 1, "payload": {

@@ -84,8 +84,8 @@ from config import is_paper_account  # noqa: E402
 from fake_tws import FakeTWS, contract as fake_contract  # noqa: E402
 from ibapi_pin import _archive_pin, read_pin  # noqa: E402
 from marketdata import nyse_calendar, tidata  # noqa: E402
-from relay import RELEASED  # noqa: E402
-from reports import FILL_TYPE, LIFECYCLE_TYPE  # noqa: E402
+from relay import OUTBOX_SUFFIX, RELEASED, Outbox  # noqa: E402
+from reports import FILL_TYPE, FILL_VERSION, LIFECYCLE_TYPE  # noqa: E402
 from snapshot import ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, MARK_TYPE, RECONCILIATION_TYPE  # noqa: E402
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -451,6 +451,8 @@ def rehearse(work, account):
             matched["connects"] = len(gateway.called("connect"))
             gateway.drop()
 
+        # Start the new day on its natural handshake; clock expiry never reconnects.
+        evening(session)
         run(Phase([
             (lambda: True, the_day, "the day's stream"),
             (lambda: LIFECYCLE_TYPE in types(run_log), drop, "the order's acceptance to reach the engine"),
@@ -526,16 +528,28 @@ def rehearse(work, account):
         stamp_day = second.strftime("%Y%m%d")
         second_close = "marketdata:session-closed:{}".format(second)
 
+        # The approval's historical share was already checked and journalled
+        # before this start. Seed that durable outbox state, as a stopped
+        # adapter leaves it; Gateway cannot replay it after its day's midnight.
+        # This preserves the approval cutoff through crash resume without
+        # inventing a live callback several days older than its receipt.
+        historical_at = stamp(datetime.combine(eve, dt.time(10), NEW_YORK))
+        Outbox(str(pending) + OUTBOX_SUFFIX).append({
+            "id": "rehearsal-approval-fill", "event_type": FILL_TYPE, "schema_version": FILL_VERSION,
+            "event_time": historical_at, "payload": {
+                "account_id": account, "client_order_id": released["client_order_id"],
+                "fill_id": "0001f4e8.rehearsal.00.01", "instrument_id": "SPY", "side": "buy",
+                "quantity": BEFORE_APPROVAL, "price": fill_price, "commission": 0.50,
+                "filled_at": historical_at}})
+        gateway.fill(7, shares=str(BEFORE_APPROVAL), price=fill_price, exec_id="0001f4e8.rehearsal.00.01",
+                     cum_qty=str(BEFORE_APPROVAL), commission="0.50",
+                     time="{} 10:00:00 US/Eastern".format(eve.strftime("%Y%m%d")))
+        gateway.executions = []
+        calendar["day"] = second
+        gateway.server_time = int(datetime.combine(second, dt.time(16, 30, 4), NEW_YORK).timestamp())
+
         def late_fills():
-            evening(second)
-            # One share was struck before the owner stated the book, which
-            # already holds it: IBKR replays it among the day's executions,
-            # and it is not counted again (ADR 0019: a book and the
-            # movements that explain it share one cutoff).
             first = (quantity - BEFORE_APPROVAL) // 2
-            gateway.fill(7, shares=str(BEFORE_APPROVAL), price=fill_price, exec_id="0001f4e8.rehearsal.00.01",
-                         cum_qty=str(BEFORE_APPROVAL), commission="0.50",
-                         time="{} 10:00:00 US/Eastern".format(eve.strftime("%Y%m%d")))
             gateway.fill(7, shares=str(first), price=fill_price, exec_id="0001f4e8.rehearsal.01.01",
                          cum_qty=str(BEFORE_APPROVAL + first), commission="1.00",
                          time="{} 16:30:01 US/Eastern".format(stamp_day))
@@ -543,6 +557,7 @@ def rehearse(work, account):
                          exec_id="0001f4e8.rehearsal.02.01", cum_qty=str(quantity), commission="0.35",
                          time="{} 16:30:04 US/Eastern".format(stamp_day))
             gateway.positions = [(account, fake_contract(), Decimal(HELD + quantity - BEFORE_APPROVAL), 395.0)]
+            evening(second)
             written["second"] = data_job(work, config, run_log, settled(second))
 
         run(Phase([
@@ -573,6 +588,7 @@ def rehearse(work, account):
         resumed_log = engine.start(RUN + "-resumed", "-resume", str(run_log))
         third_close = "marketdata:session-closed:{}".format(third)
         evening(third)
+        gateway.executions = []  # Only executions since the new day's midnight are replayed.
         nxt = data_job(work, config, resumed_log, settled(third))
         copied = len(inputs(resumed_log))
         run(Phase([(lambda: third_close in [i["id"] for i in inputs(resumed_log)], None,
