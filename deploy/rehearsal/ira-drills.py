@@ -44,8 +44,12 @@ def shifted(value, days):
     return value
 
 
+HELD, HELD_QUANTITY = 'SHY', 10
+
+
 def month(path, days=0):
     rows = []
+    held_close = None  # the last SHY close seen: bars precede the session's snapshot
     for raw in path.read_text().splitlines():
         row = shifted(json.loads(raw), days)
         row['id'] += ':drill:' + str(days)
@@ -53,11 +57,15 @@ def month(path, days=0):
             continue
         if row['type'] == 'market.bar.completed':
             row['payload']['adjusted_base'] = '2025-01-02'
+            if row['payload'].get('instrument_id') == HELD:
+                held_close = row['payload']['close']
         if row['type'] == 'account.snapshot':
             row['payload']['account_id'] = ACCOUNT
-            row['payload']['positions'] = [{'instrument_id': 'FFF', 'quantity': 10}]
-            # Invented extra holding to force a sell; no fills occur in this fake.
-            row['payload']['net_liquidation'] = 10200
+            # An extra holding the rule never picks (an ETF, not a common stock, and not the trend or
+            # risk-off instrument) forces a sell; it has bars every session, so the decision is not
+            # withheld for missing bars. No fills occur in this fake.
+            row['payload']['positions'] = [{'instrument_id': HELD, 'quantity': HELD_QUANTITY}]
+            row['payload']['net_liquidation'] = round(10000 + HELD_QUANTITY * (held_close or 0), 2)
         rows.append(row)
     return rows
 
@@ -191,7 +199,7 @@ def drill(interactive=False):
     os.chown(folder, trader.pw_uid, trader.pw_gid)
     first = base / 'first.json'
     operate(operator, 'ti-trader', 'approve', '-first-run', '-strategy', 'momentum', '-account', ACCOUNT,
-            '-by', 'owner', '-positions', 'FFF=10', '-cash', '10000', '-currency', 'USD',
+            '-by', 'owner', '-positions', HELD + '=' + str(HELD_QUANTITY), '-cash', '10000', '-currency', 'USD',
             '-at', '2025-01-02T13:00:00Z', '-out', first)
     venue = FakeVenue(folder, engine, config, '2025-01-02T21:00:00Z', first)
     try:
@@ -223,7 +231,7 @@ def drill(interactive=False):
                    '-by', 'owner', '-detail', 'fake venue confirms cancelled; no broker connection',
                    '-at', '2025-01-31T22:01:00Z']
         if interactive:
-            print('The fake confirms every sell cancelled, holdings FFF=10 and cash=10000 unchanged.\n'
+            print('The fake confirms every sell cancelled, holdings ' + HELD + '=' + str(HELD_QUANTITY) + ' and cash=10000 unchanged.\n'
                   'In a second owner shell run exactly:\nsudo -u ti-operator ' + shlex.join(command), flush=True)
             input('After recording the clearance, press Enter to resume the fake feed: ')
         else:

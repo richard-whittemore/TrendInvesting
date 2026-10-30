@@ -170,7 +170,7 @@ STOPPED: sells working; buys not released
 ```
 
 The driver uses a synthetic paper-only identity (the required DU prefix plus
-a word, never a real account number). The fake feeds the synthetic January month with FFF held, stops its engine
+a word, never a real account number). The fake feeds the synthetic January month with SHY held (a bond ETF the rule never picks, so it is sold), stops its engine
 with SIGTERM after sells are released and before it gives any sell terminal
 report (the buys are still waiting), then runs:
 
@@ -188,7 +188,7 @@ file (never `-resume` for a deliberate stop), replays January and checks:
 HELD: rebalance-in-progress; no orders released
 ```
 
-The fake then confirms its sells cancelled, with FFF=10 and cash=10000
+The fake then confirms its sells cancelled, with SHY=10 and cash=10000
 unchanged. In a second owner shell, run **the complete command printed by
 the driver**, with its actual evidence path and exact order list. Its form is:
 
