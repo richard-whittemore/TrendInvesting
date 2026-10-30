@@ -274,6 +274,26 @@ func SummarizeWithCash(history History, ledger CashLedger, envelopes []event.Env
 // from this run and the earlier ones, and the ledger's commissions, fees and
 // broker interest, totalled by Costs.
 func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
+	// The summary's quantity fields still mean whole shares. Until their
+	// surface migration, refuse D7-F instead of displaying ticks as shares
+	// (ADR 0015; ADR 0026 D7-F).
+	for _, e := range envelopes {
+		var units struct {
+			QuantityScale int64 `json:"quantity_scale"`
+		}
+		if json.Unmarshal(e.Payload, &units) == nil && units.QuantityScale != 0 {
+			return Summary{}, fmt.Errorf("report: fractional quantity summary requires the adapter and surfaces migration")
+		}
+		if e.Type == event.TargetWeightConfigurationEventType {
+			var cfg event.TargetWeightConfigurationPayload
+			if err := read(e, configurationVersions, &cfg); err != nil {
+				return Summary{}, err
+			}
+			if cfg.Execution.ShareQuantity == event.ShareQuantityFractional {
+				return Summary{}, fmt.Errorf("report: fractional quantity summary requires the adapter and surfaces migration")
+			}
+		}
+	}
 	earlier := history.Earlier
 	end, err := time.Parse(time.DateOnly, date)
 	if err != nil {

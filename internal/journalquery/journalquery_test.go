@@ -855,12 +855,12 @@ func TestRiskRecordsOfTheEarlierVersionStillRead(t *testing.T) {
 func TestTheNextVersionOfEveryReadRecordIsRefused(t *testing.T) {
 	d := at(time.March, 2)
 	for _, r := range []rec{
-		{journal.KindInput, event.FillEventType, event.FillTargetWeightVersion + 1, d, map[string]any{}},
-		{journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleSyntheticVersion + 1, d, map[string]any{}},
-		{journal.KindDecision, event.OrderPlannedEventType, event.OrderPlannedSafetyVersion + 1, d, map[string]any{}},
-		{journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSafetyVersion + 1, d, map[string]any{}},
-		{journal.KindDecision, event.OrderRefusedEventType, event.OrderRefusedPendingCashVersion + 1, d, map[string]any{}},
-		{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion + 1, d, map[string]any{}},
+		{journal.KindInput, event.FillEventType, event.FillTargetWeightFractionalVersion + 1, d, map[string]any{}},
+		{journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleFractionalSyntheticVersion + 1, d, map[string]any{}},
+		{journal.KindDecision, event.OrderPlannedEventType, event.OrderPlannedFractionalVersion + 1, d, map[string]any{}},
+		{journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedFractionalVersion + 1, d, map[string]any{}},
+		{journal.KindDecision, event.OrderRefusedEventType, event.OrderRefusedFractionalVersion + 1, d, map[string]any{}},
+		{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotFractionalCashVersion + 1, d, map[string]any{}},
 	} {
 		js := []journalquery.Journal{load(t, "j", build(t, rec{journal.KindInput, "other.thing", 1, d, 1}, r))}
 		if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "does not read") {
@@ -1262,5 +1262,26 @@ func TestReconcileNamesTrailingFillsBesideDisagreements(t *testing.T) {
 	var dis *journalquery.DisagreementError
 	if !errors.As(err, &dis) || dis.Trailing != 1 || !strings.Contains(err.Error(), "1 fills not yet covered by a snapshot") {
 		t.Fatalf("want the disagreement naming the trailing fill, got %v", err)
+	}
+}
+
+// TestFractionalQueryFailsClosedUntilSurfaceMigration refuses to label
+// fixed-point ticks as whole shares (ADR 0015; ADR 0026 D7-F).
+func TestFractionalQueryFailsClosedUntilSurfaceMigration(t *testing.T) {
+	p := plannedPayload("AAA", "buy")
+	p.QuantityScale, p.Quantity, p.FractionalIncrement = 10000, 72500, "0.0001"
+	data := build(t, snap(at(time.March, 1)), dec(event.OrderPlannedEventType, p.SchemaVersion(), at(time.March, 2), p))
+	js := []journalquery.Journal{load(t, "fractional", data)}
+	if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "fractional") {
+		t.Fatalf("fractional query must fail closed: %v", err)
+	}
+}
+
+func TestMalformedFractionalUnitsCannotPassALegacySurface(t *testing.T) {
+	d := at(time.March, 2)
+	p := map[string]any{"instrument_id": "AAA", "order_id": "synthetic", "tag": "stop", "status": "submitted", "quantity": 7, "stop_price": 1.5, "occurred_at": d, "quantity_scale": "invalid"}
+	js := []journalquery.Journal{load(t, "malformed-scale", build(t, snap(d), rec{journal.KindInput, event.OrderLifecycleEventType, 1, d, p}))}
+	if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil {
+		t.Fatal("accepted malformed fractional unit metadata")
 	}
 }

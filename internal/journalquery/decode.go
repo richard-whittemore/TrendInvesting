@@ -221,6 +221,18 @@ func read(env event.Envelope, schemas []uint32, into any) error {
 	if err := json.Unmarshal(env.Payload, into); err != nil {
 		return fmt.Errorf("decode %s: %w", env.Type, err)
 	}
+	// These tables still label integer quantities as shares. Refuse D7-F
+	// until the surface migration rather than display ticks as shares
+	// (ADR 0015; ADR 0026 D7-F).
+	var units struct {
+		QuantityScale int64 `json:"quantity_scale"`
+	}
+	if err := json.Unmarshal(env.Payload, &units); err != nil {
+		return err
+	}
+	if units.QuantityScale != 0 {
+		return fmt.Errorf("%s: fractional quantities require the journal-query surface migration", env.Type)
+	}
 	// Chain verification does not check payload values, and a journal keeps
 	// rejected inputs, so a record is validated before it can move a figure.
 	// A payload whose fields depend on its version is checked against the

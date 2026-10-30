@@ -125,7 +125,7 @@ const TargetsDecidedEndedSaleVersion uint32 = 9
 // a decision at: versions 7, 8 and 9, which earlier builds wrote, and the
 // current one.
 func TargetsDecidedVersions() []uint32 {
-	return []uint32{TargetsDecidedRetiredVersion, TargetsDecidedLiveSaleVersion, TargetsDecidedEndedSaleVersion, TargetsDecidedSchemaVersion}
+	return []uint32{TargetsDecidedRetiredVersion, TargetsDecidedLiveSaleVersion, TargetsDecidedEndedSaleVersion, TargetsDecidedSchemaVersion, TargetsDecidedFractionalVersion}
 }
 
 // The two outcomes of a target decision (ADR 0026, point 1).
@@ -694,8 +694,9 @@ func (r BoostReplan) validate() []error {
 // a restart recovers it from the last decision of either outcome (ADR 0026,
 // point 5).
 type TargetsDecidedPayload struct {
-	AccountID  string `json:"account_id"`
-	StrategyID string `json:"strategy_id"`
+	QuantityScale int64  `json:"quantity_scale,omitempty"`
+	AccountID     string `json:"account_id"`
+	StrategyID    string `json:"strategy_id"`
 	// DecisionTime is when the decision was taken; SessionPeriodEnd is the
 	// session whose closes it used. A decision never precedes its session.
 	DecisionTime     time.Time `json:"decision_time"`
@@ -822,6 +823,18 @@ type MomentumName struct {
 // Validate checks the identity, the outcome and its reason, the targets and
 // the Boost figures.
 func (p TargetsDecidedPayload) Validate() error {
+	// ADR 0026: minimum-lot substitutions belong only to D7-L; interpreting
+	// their whole-share holding evidence as fractional ticks changes its value.
+	if p.QuantityScale == FractionalQuantityScale && (p.Momentum.MinimumLot != (MinimumLotFigures{}) || p.WithheldReason == WithheldAllUnaffordable) {
+		return errors.New("fractional decisions carry no D7-L minimum-lot evidence")
+	}
+
+	if p.QuantityScale != 0 && p.StrategyID != TargetWeightStrategyMomentum {
+		return errors.New("fractional quantity decisions require momentum")
+	}
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	errs := p.withheldPickErrors()
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
@@ -1100,6 +1113,12 @@ func (p TargetsDecidedPayload) ValidateWritten() error {
 // point 2, "Order identity"). A version above the current one, or none, is
 // refused.
 func (p TargetsDecidedPayload) ValidateSchema(version uint32) error {
+	if err := quantitySchema(p.QuantityScale, version, TargetsDecidedFractionalVersion); err != nil {
+		return err
+	}
+	if version == TargetsDecidedFractionalVersion {
+		return p.Validate()
+	}
 	if version < TargetsDecidedSchemaVersion && len(p.WithheldPicks) > 0 {
 		return fmt.Errorf("a version %d decision records withheld picks, which only version 10 and later record", version)
 	}
@@ -1576,7 +1595,9 @@ const OrderTypeLimit = "limit"
 // net liquidation V, the holding q and the raw reference close p, all as of
 // the previous close (ADR 0026, point 2, "Valuation basis").
 type OrderPlannedPayload struct {
-	AccountID string `json:"account_id"`
+	FractionalIncrement string `json:"fractional_increment,omitzero"`
+	QuantityScale       int64  `json:"quantity_scale,omitempty"`
+	AccountID           string `json:"account_id"`
 	// Tag is the ID of the strategy.targets.decided envelope this order
 	// serves; ClientOrderID derives from it, the instrument and the phase.
 	Tag           string `json:"tag"`
@@ -1585,7 +1606,8 @@ type OrderPlannedPayload struct {
 	Side          string `json:"side"`
 	Phase         string `json:"phase"`
 	OrderType     string `json:"order_type"`
-	// Quantity is in whole raw shares, always positive; Side gives the sign.
+	// Quantity is positive in QuantityScale units; Side gives the sign
+	// (ADR 0026, D7-F). HeldQuantity uses the same units.
 	Quantity       int64   `json:"quantity"`
 	LimitPrice     float64 `json:"limit_price"`
 	TargetWeight   float64 `json:"target_weight"`
@@ -1601,6 +1623,9 @@ type OrderPlannedPayload struct {
 
 // SchemaVersion returns the lowest schema version that holds p.
 func (p OrderPlannedPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return OrderPlannedFractionalVersion
+	}
 	if p.Sale.set() {
 		return OrderPlannedSafetyVersion
 	}
@@ -1609,6 +1634,12 @@ func (p OrderPlannedPayload) SchemaVersion() uint32 {
 
 // ValidateSchema checks that p is one schemaVersion holds, then validates it.
 func (p OrderPlannedPayload) ValidateSchema(schemaVersion uint32) error {
+	if err := quantitySchema(p.QuantityScale, schemaVersion, OrderPlannedFractionalVersion); err != nil {
+		return err
+	}
+	if schemaVersion == OrderPlannedFractionalVersion {
+		return p.Validate()
+	}
 	if err := checkSafetyVersion(OrderPlannedEventType, schemaVersion, p.SchemaVersion(), OrderPlannedSafetyVersion); err != nil {
 		return err
 	}
@@ -1621,18 +1652,18 @@ func (p OrderPlannedPayload) ValidateSchema(schemaVersion uint32) error {
 // of the log reads by these lists, so none falls behind the version the
 // planner or the gate writes (ADR 0015). Each call returns a new slice.
 func OrderPlannedVersions() []uint32 {
-	return []uint32{OrderPlannedSchemaVersion, OrderPlannedSafetyVersion}
+	return []uint32{OrderPlannedSchemaVersion, OrderPlannedSafetyVersion, OrderPlannedFractionalVersion}
 }
 
 // OrderReleasedVersions: see OrderPlannedVersions. Version 1 checked the
 // order's own instrument's exposure, and is read as it was written.
 func OrderReleasedVersions() []uint32 {
-	return []uint32{1, OrderReleasedSchemaVersion, OrderReleasedSafetyVersion}
+	return []uint32{1, OrderReleasedSchemaVersion, OrderReleasedSafetyVersion, OrderReleasedFractionalVersion}
 }
 
 // OrderRefusedVersions: see OrderPlannedVersions.
 func OrderRefusedVersions() []uint32 {
-	return []uint32{1, OrderRefusedSchemaVersion, OrderRefusedSafetyVersion, OrderRefusedPendingCashVersion}
+	return []uint32{1, OrderRefusedSchemaVersion, OrderRefusedSafetyVersion, OrderRefusedPendingCashVersion, OrderRefusedFractionalVersion}
 }
 
 // checkSafetyVersion refuses a schema version outside 1 to latest, and one
@@ -1652,6 +1683,21 @@ func checkSafetyVersion(eventType string, schemaVersion, need, latest uint32) er
 // buy's limit at or above it, a sell's at or below. A sale back to 98% also
 // checks its sizing figures.
 func (p OrderPlannedPayload) Validate() error {
+	if p.QuantityScale == FractionalQuantityScale && p.Sale.set() {
+		return errors.New("fractional IRA orders carry no margin-account sale figures")
+	}
+	if p.QuantityScale != 0 {
+		if step, err := FractionalIncrementTicks(p.FractionalIncrement); err != nil {
+			return err
+		} else if p.Quantity%step != 0 {
+			return errors.New("planned quantity must be a multiple of the fractional increment")
+		}
+	} else if p.FractionalIncrement != "" {
+		return errors.New("fractional increment requires fractional quantities")
+	}
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	var errs []error
 	errs = append(errs, orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)...)
 	if p.Tag == "" {
@@ -1918,6 +1964,7 @@ func (f RiskFigures) validate(side string) []error {
 // OrderReleasedPayload is a planned order the gate passed. Send is false in
 // dry-run: the order is journalled and never sent (ADR 0026, point 3, "Mode").
 type OrderReleasedPayload struct {
+	QuantityScale int64       `json:"quantity_scale,omitempty"`
 	AccountID     string      `json:"account_id"`
 	PlanID        string      `json:"plan_id"`
 	Tag           string      `json:"tag"`
@@ -1946,11 +1993,20 @@ func (f RiskFigures) need() uint32 {
 
 // SchemaVersion returns the version a writer journals p at.
 func (p OrderReleasedPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return OrderReleasedFractionalVersion
+	}
 	return max(p.Figures.need(), OrderReleasedSchemaVersion)
 }
 
 // ValidateSchema checks that p is one schemaVersion holds, then validates it.
 func (p OrderReleasedPayload) ValidateSchema(schemaVersion uint32) error {
+	if err := quantitySchema(p.QuantityScale, schemaVersion, OrderReleasedFractionalVersion); err != nil {
+		return err
+	}
+	if schemaVersion == OrderReleasedFractionalVersion {
+		return p.Validate()
+	}
 	if err := checkSafetyVersion(OrderReleasedEventType, schemaVersion, p.Figures.need(), OrderReleasedSafetyVersion); err != nil {
 		return err
 	}
@@ -1959,6 +2015,12 @@ func (p OrderReleasedPayload) ValidateSchema(schemaVersion uint32) error {
 
 // Validate checks identity, mode, the dry-run rule and the figures.
 func (p OrderReleasedPayload) Validate() error {
+	if p.QuantityScale == FractionalQuantityScale && p.Figures.BrokerHolding < 0 {
+		return errors.New("fractional broker holding must not be negative")
+	}
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	var errs []error
 	errs = append(errs, orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)...)
 	if p.PlanID == "" {
@@ -1984,6 +2046,7 @@ func (p OrderReleasedPayload) Validate() error {
 // from the closed set and the figures behind it. Tag may be empty: an
 // untagged order is exactly what RefusedUndecidedOrder refuses.
 type OrderRefusedPayload struct {
+	QuantityScale int64       `json:"quantity_scale,omitempty"`
 	AccountID     string      `json:"account_id"`
 	PlanID        string      `json:"plan_id"`
 	Tag           string      `json:"tag"`
@@ -2023,11 +2086,20 @@ func (p OrderRefusedPayload) need() uint32 {
 
 // SchemaVersion returns the version a writer journals p at.
 func (p OrderRefusedPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return OrderRefusedFractionalVersion
+	}
 	return max(p.need(), OrderRefusedSchemaVersion)
 }
 
 // ValidateSchema checks that p is one schemaVersion holds, then validates it.
 func (p OrderRefusedPayload) ValidateSchema(schemaVersion uint32) error {
+	if err := quantitySchema(p.QuantityScale, schemaVersion, OrderRefusedFractionalVersion); err != nil {
+		return err
+	}
+	if schemaVersion == OrderRefusedFractionalVersion {
+		return p.Validate()
+	}
 	if err := checkSafetyVersion(OrderRefusedEventType, schemaVersion, p.need(), OrderRefusedPendingCashVersion); err != nil {
 		return err
 	}
@@ -2036,6 +2108,12 @@ func (p OrderRefusedPayload) ValidateSchema(schemaVersion uint32) error {
 
 // Validate checks identity, the reason, the detail and the figures.
 func (p OrderRefusedPayload) Validate() error {
+	if p.QuantityScale == FractionalQuantityScale && p.Figures.BrokerHolding < 0 {
+		return errors.New("fractional broker holding must not be negative")
+	}
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	var errs []error
 	errs = append(errs, orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)...)
 	if p.PlanID == "" {
@@ -2061,4 +2139,21 @@ func (p OrderRefusedPayload) Validate() error {
 		return fmt.Errorf("invalid order refused payload: %w", err)
 	}
 	return nil
+}
+
+// Fractional decision versions give every quantity figure an explicit fixed
+// scale, leaving whole-share decision bytes intact (ADR 0015; ADR 0026, D7-F).
+const (
+	OrderPlannedFractionalVersion   uint32 = 3
+	OrderReleasedFractionalVersion  uint32 = 4
+	OrderRefusedFractionalVersion   uint32 = 5
+	TargetsDecidedFractionalVersion uint32 = 11
+)
+
+// SchemaVersion states the target decision's quantity units (ADR 0015).
+func (p TargetsDecidedPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return TargetsDecidedFractionalVersion
+	}
+	return TargetsDecidedSchemaVersion
 }

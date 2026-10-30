@@ -20,9 +20,11 @@ import (
 func booked(t *testing.T) *risklimit.Gate {
 	t.Helper()
 	g := gate(t, limits(), event.TradingModeDryRun)
-	g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
+	if err := g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: account(10, 0), SettledCash: 1000, TotalCash: 1000,
-	}))
+	})); err != nil {
+		t.Fatal(err)
+	}
 	return g
 }
 
@@ -169,9 +171,11 @@ func TestJournalledEventsSinceTheBookExplainIt(t *testing.T) {
 		t.Fatalf("got %s: %s", r.Result.Classification, r.Result.Detail)
 	}
 	// A book taken later replaces the anchor; the fill is then in it.
-	g.SetBook(reconcile.CashBook("snapshot:2", event.AccountCashSnapshotPayload{
+	if err := g.SetBook(reconcile.CashBook("snapshot:2", event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: account(6, 30), SettledCash: 1004.7, TotalCash: 1004.7,
-	}))
+	})); err != nil {
+		t.Fatal(err)
+	}
 	if r := reconcileWith(t, g, "reconciliation:2", morningOf(1004.7, 6)); r.Result.Classification != event.ReconciliationMatched || r.Result.AnchorID != "snapshot:2" {
 		t.Errorf("against the later book: %s from %s", r.Result.Classification, r.Result.AnchorID)
 	}

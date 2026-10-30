@@ -23,32 +23,37 @@ import (
 
 // Book is the journal's book a reconciliation starts from: the latest
 // account snapshot the engine read, the book its decisions rest on (ADR 0026,
-// point 2). Cash is in whole cents and set only when the snapshot states it.
+// point 2). Positions count whole shares at scale 0 or ten-thousandths at
+// scale 10000 (ADR 0026 D7-F). Cash is in whole cents and set only when the
+// snapshot states it.
 type Book struct {
-	AnchorID  string
-	AsOf      time.Time
-	Positions map[string]int64
-	CashSet   bool
-	Cash      int64
-	Currency  string
+	QuantityScale int64
+	AnchorID      string
+	AsOf          time.Time
+	Positions     map[string]int64
+	CashSet       bool
+	Cash          int64
+	Currency      string
 	// Fault, when set, is why the book's cash is no cent count: Classify
 	// cannot compare against it and reports the book unverifiable.
 	Fault string
 }
 
 // PositionsBook is the book of account.snapshot version 3, envelope id: its
-// holdings, and no cash, which that version does not carry.
+// holdings, and no cash, which that version does not carry. Version 5
+// carries the same fields with fixed-point quantities (ADR 0015).
 func PositionsBook(id string, p event.AccountPositionsSnapshotPayload) Book {
 	positions := make(map[string]int64, len(p.Positions))
 	for _, position := range p.Positions {
 		positions[position.InstrumentID] = position.Quantity
 	}
-	return Book{AnchorID: id, AsOf: p.AsOf, Positions: positions, Currency: p.Currency}
+	return Book{QuantityScale: p.QuantityScale, AnchorID: id, AsOf: p.AsOf, Positions: positions, Currency: p.Currency}
 }
 
 // CashBook is the book of account.snapshot version 4, envelope id: its
 // holdings and its total cash, which includes unsettled proceeds and so is
-// the balance IBKR's TotalCashValue reports.
+// the balance IBKR's TotalCashValue reports. Version 6 carries the same
+// fields with fixed-point quantities (ADRs 0015 and 0026 D7-F).
 func CashBook(id string, p event.AccountCashSnapshotPayload) Book {
 	b := PositionsBook(id, p.AccountPositionsSnapshotPayload)
 	b.CashSet = true
@@ -74,20 +79,22 @@ const (
 // order, a dividend's posted cash, or a split (ADR 0019, "Explained means":
 // "a typed, validated event recorded before this reconciliation input"). ID
 // is its stable identity, a fill's fill ID or a corporate action's envelope
-// ID. Shares is a fill's signed change in raw shares; Cash its signed effect
+// ID. Shares is a fill's signed change in the book's quantity units, declared
+// by QuantityScale (ADR 0026 D7-F); Cash is its signed effect
 // in whole cents, and Commission the part of Cash that is a fill's
 // commission, in whole cents, a cost already inside Cash (so Cash+Commission
 // is the fill's signed value: negative for a buy's cost, positive for a
 // sale's proceeds). Any other corporate action is recorded with its own kind, which no
 // book can apply.
 type Change struct {
-	ID           string
-	Kind         string
-	InstrumentID string
-	At           time.Time
-	Shares       int64
-	Cash         int64
-	Commission   int64
+	QuantityScale int64
+	ID            string
+	Kind          string
+	InstrumentID  string
+	At            time.Time
+	Shares        int64
+	Cash          int64
+	Commission    int64
 	// Currency is the currency of a corporate action's cash, empty for a
 	// fill, which is in the account's own.
 	Currency             string
@@ -110,9 +117,9 @@ type Change struct {
 // quantity and the decimal price, and the commission are each rounded to the
 // cent, half away from zero, as IBKR books them.
 func FillChange(p event.TargetWeightFillPayload) Change {
-	value, valueErr := roundCents(new(big.Rat).Mul(decimal(p.Price), new(big.Rat).SetInt64(p.Quantity)))
+	value, valueErr := roundCents(new(big.Rat).Mul(decimal(p.Price), new(big.Rat).SetFrac64(p.Quantity, event.QuantityUnits(p.QuantityScale))))
 	commission, commissionErr := Cents(p.Commission)
-	c := Change{ID: p.FillID, Kind: ChangeFill, InstrumentID: p.InstrumentID, At: p.FilledAt, Shares: p.Quantity, Commission: commission}
+	c := Change{QuantityScale: p.QuantityScale, ID: p.FillID, Kind: ChangeFill, InstrumentID: p.InstrumentID, At: p.FilledAt, Shares: p.Quantity, Commission: commission}
 	var sumErr error
 	if p.Side == event.OrderSideSell {
 		c.Shares = -p.Quantity
@@ -246,7 +253,11 @@ func sharesAfter(held int64, c Change) (int64, error) {
 		return 0, fmt.Errorf("a split of %d new for %d old shares is no split", c.NewShares, c.OldShares)
 	}
 	scaled := new(big.Int).Mul(big.NewInt(held), big.NewInt(c.NewShares))
-	scaled.Quo(scaled, big.NewInt(c.OldShares))
+	remainder := new(big.Int)
+	scaled.QuoRem(scaled, big.NewInt(c.OldShares), remainder)
+	if c.QuantityScale != 0 && remainder.Sign() != 0 {
+		return 0, errors.New("split produces more than four decimal places; no fractional tick may be discarded")
+	}
 	if !scaled.IsInt64() {
 		return 0, fmt.Errorf("%d shares split %d for %d is more shares than a book can count", held, c.NewShares, c.OldShares)
 	}
@@ -336,7 +347,8 @@ func Reconcile(book *Book, changes []Change, inputID string, obs event.Reconcili
 // when the book states none.
 func classify(book *Book, changes []Change, inputID string, obs event.ReconciliationPayload, uncompared string) (event.ReconciliationResultPayload, bool) {
 	r := event.ReconciliationResultPayload{
-		AccountID: obs.AccountID, ReconciliationID: obs.ReconciliationID, InputID: inputID, Components: []event.ReconciliationComponent{},
+		QuantityScale: obs.QuantityScale,
+		AccountID:     obs.AccountID, ReconciliationID: obs.ReconciliationID, InputID: inputID, Components: []event.ReconciliationComponent{},
 	}
 	var reasons []string
 	positionsRead := obs.Readable(event.ReconciliationComponentPositions)
@@ -348,6 +360,10 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 		return finish(r, reasons, "", nil, uncompared), false
 	}
 	r.AnchorID = book.AnchorID
+	if book.QuantityScale != obs.QuantityScale {
+		reasons = append(reasons, "observation and book have different quantity scales")
+		return finish(r, reasons, "", nil, uncompared), false
+	}
 	if obs.AsOf.Before(book.AsOf) {
 		reasons = append(reasons, fmt.Sprintf("the observation as of %s precedes the book as of %s", stamp(obs.AsOf), stamp(book.AsOf)))
 	}
@@ -425,6 +441,13 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			applied = append(applied, c)
 			cashExplained = append(cashExplained, c.ID)
 			continue
+		}
+		if c.Kind == ChangeFill && c.QuantityScale != book.QuantityScale {
+			reasons = append(reasons, fmt.Sprintf("fill %s has quantity scale %d; book scale is %d", c.ID, c.QuantityScale, book.QuantityScale))
+			continue
+		}
+		if c.Kind == ChangeSplit {
+			c.QuantityScale = book.QuantityScale
 		}
 		nextShares, err := sharesAfter(expected[c.InstrumentID], c)
 		if err != nil {

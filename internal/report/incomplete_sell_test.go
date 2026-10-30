@@ -1,6 +1,7 @@
 package report_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -276,5 +277,52 @@ func TestIncompleteSellWithUnknownInstanceOmitsUnitCommands(t *testing.T) {
 				t.Errorf("unknown instance contains %q", forbidden)
 			}
 		}
+	}
+}
+
+// TestFractionalIncompleteSell keeps ADR 0026 D7-F's partial-fill difference
+// exact all the way to the actionable incomplete-sell page.
+func TestFractionalIncompleteSell(t *testing.T) {
+	run := &logRun{t: t}
+	sell := iraSell("fractional-sale")
+	sell.Quantity, sell.QuantityScale = 72500, 10000
+	run.session(0)
+	run.add(journal.KindDecision, event.OrderReleasedEventType, sell.SchemaVersion(), "release:fractional", day(0), sell)
+	fill := event.TargetWeightFillPayload{AccountID: sell.AccountID, ClientOrderID: sell.ClientOrderID, FillID: "fractional-fill", InstrumentID: sell.InstrumentID, Side: sell.Side, Quantity: 35000, QuantityScale: 10000, Price: 100, FilledAt: day(1).Add(-time.Hour)}
+	run.add(journal.KindInput, event.FillEventType, 6, "fractional-fill", fill.FilledAt, fill)
+	run.session(1)
+	got := report.IncompleteSellAlerts(iraInstance, run.out, event.TargetWeightStrategyMomentum)
+	if len(got) != 1 || !strings.Contains(got[0].Title, "3.75 shares outstanding") || !strings.Contains(got[0].Body, "3.75 of its 7.25 shares") {
+		t.Fatalf("fractional outstanding page: %+v", got)
+	}
+}
+
+// TestFractionalSummaryFailsClosedUntilSurfaceMigration prevents a surface
+// still expressing whole shares from presenting D7-F ticks as shares (ADR 0015).
+func TestFractionalSummaryFailsClosedUntilSurfaceMigration(t *testing.T) {
+	s := newIRAStream(t)
+	var cfg event.TargetWeightConfigurationPayload
+	if err := json.Unmarshal(s.out[0].Payload, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Execution.ShareQuantity = event.ShareQuantityFractional
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.out[0].Payload = raw
+	s.out[0].PayloadHash = event.HashPayload(raw)
+	s.out[0].SchemaVersion = cfg.SchemaVersion()
+	if _, err := report.Summarize(s.out, "2025-01-28", "SPY"); err == nil || !strings.Contains(err.Error(), "fractional") {
+		t.Fatalf("fractional summary must fail closed: %v", err)
+	}
+}
+
+func TestWholeShareSummaryRejectsFractionalRecord(t *testing.T) {
+	s := newIRAStream(t)
+	p := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: iraInstance, QuantityScale: 10000, AsOf: day(0), NetLiquidation: 1000, Currency: "USD", Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: 100, TotalCash: 100}
+	s.add(event.AccountSnapshotEventType, p.SchemaVersion(), "fractional-snapshot", day(0), p)
+	if _, err := report.Summarize(s.out, "2025-01-28", "SPY"); err == nil || !strings.Contains(err.Error(), "fractional") {
+		t.Fatalf("fractional record in whole-share run must be refused: %v", err)
 	}
 }

@@ -48,7 +48,8 @@ func Holdings(accountID string, book *Book, changes []Change, next Book) event.R
 		positions = append(positions, event.AccountPosition{InstrumentID: id, Quantity: next.Positions[id]})
 	}
 	obs := event.ReconciliationPayload{
-		AccountID: accountID, ReconciliationID: CloseSnapshotPrefix + next.AnchorID, Trigger: event.ReconciliationTriggerMorning,
+		QuantityScale: next.QuantityScale,
+		AccountID:     accountID, ReconciliationID: CloseSnapshotPrefix + next.AnchorID, Trigger: event.ReconciliationTriggerMorning,
 		AsOf: next.AsOf, Unreadable: []string{}, Positions: positions,
 	}
 	var positionsOnly *Book

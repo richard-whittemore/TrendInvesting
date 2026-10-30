@@ -3,6 +3,7 @@ package targetweight
 import (
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -197,6 +198,9 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %w", err)
 	}
+	if err := gate.SetQuantityScale(cfg.Execution.QuantityScale()); err != nil {
+		return nil, err
+	}
 	h := &Handler{
 		strategyVersion: strategyVersion,
 		hash:            event.TargetWeightConfigurationHash(cfg),
@@ -363,8 +367,11 @@ func (r *momentumRun) applyUniverse(in event.Envelope) error {
 }
 
 func (r *momentumRun) applySnapshot(in event.Envelope) ([]event.Envelope, error) {
-	p, err := decodeInput[event.AccountCashSnapshotPayload](in, event.AccountSnapshotCashVersion)
+	p, err := decodeVersions[event.AccountCashSnapshotPayload](in, []uint32{event.AccountSnapshotCashVersion, event.AccountSnapshotFractionalCashVersion})
 	if err != nil {
+		return nil, err
+	}
+	if err := r.h.normalizePositions(&p.AccountPositionsSnapshotPayload); err != nil {
 		return nil, err
 	}
 	if p.AccountID != r.h.cfg.AccountID {
@@ -506,7 +513,7 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 // alone (point 5).
 func (r *momentumRun) withheldAt(b *emissions, id, session string, end time.Time, at int, reason, detail string) error {
 	p := event.TargetsDecidedPayload{
-		AccountID: r.h.cfg.AccountID, StrategyID: r.h.cfg.StrategyID,
+		QuantityScale: r.exec.QuantityScale(), AccountID: r.h.cfg.AccountID, StrategyID: r.h.cfg.StrategyID,
 		DecisionTime: b.at, SessionPeriodEnd: end,
 		Outcome: event.TargetsOutcomeWithheld, WithheldReason: reason, Detail: detail,
 		Momentum: event.MomentumFigures{CloseSession: session, TrendInstrument: r.rule.TrendInstrument},
@@ -516,7 +523,7 @@ func (r *momentumRun) withheldAt(b *emissions, id, session string, end time.Time
 		return fmt.Errorf("targetweight: decision for %s: %w", session, err)
 	}
 	r.applyGlide(&p, momentum.Decision{}, figures)
-	b.add(id, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
+	b.add(id, event.TargetsDecidedEventType, p.SchemaVersion(), p)
 	return nil
 }
 
@@ -589,6 +596,7 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 	d, err := momentum.Decide(r.rule, input)
 	b.fail(err)
 	p := r.payload(d, end)
+	p.QuantityScale = r.exec.QuantityScale()
 	if lotSet && (d.Outcome == momentum.OutcomeDecided || d.Reason == momentum.ReasonAllUnaffordable) {
 		// The figures are recorded exactly when D7-L valued the picks: a
 		// book the rule decided under it, or one it withheld as
@@ -607,6 +615,7 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 		if reason == "" {
 			plan, err = orderplan.PlanIRA(orderplan.IRAInput{
 				Tag: decisionID(h.cfg.AccountID, end), Decision: p, Snapshot: r.snapshot.AccountPositionsSnapshotPayload,
+				QuantityScale: r.exec.QuantityScale(), FractionalIncrement: r.exec.FractionalIncrement,
 				ReferencePrices: r.raw, PriceBand: h.cfg.Limits.PriceBand, RebalanceBand: r.cfg.RebalanceBand,
 			})
 			b.fail(err)
@@ -622,7 +631,7 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 		}
 	}
 	id := decisionID(h.cfg.AccountID, end)
-	b.add(id, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
+	b.add(id, event.TargetsDecidedEventType, p.SchemaVersion(), p)
 	if p.Outcome != event.TargetsOutcomeDecided || b.err != nil {
 		return b.result()
 	}
@@ -702,7 +711,7 @@ func (r *momentumRun) endUnsent(b *emissions, released []string) {
 		q := o.Released
 		p := event.LimitOrderLifecyclePayload{
 			AccountID: q.AccountID, ClientOrderID: id, InstrumentID: q.InstrumentID, Side: q.Side,
-			Status: event.OrderLifecycleStatusCanceled, Quantity: q.Quantity, LimitPrice: q.LimitPrice,
+			Status: event.OrderLifecycleStatusCanceled, Quantity: q.Quantity, QuantityScale: q.QuantityScale, LimitPrice: q.LimitPrice,
 			OccurredAt: b.at, Synthetic: true,
 			Message: "dry-run: journalled with send false and never sent; synthetic terminal report, nothing executed",
 		}
@@ -748,7 +757,7 @@ func (r *momentumRun) minimumLot(end time.Time, b float64) (momentum.MinimumLot,
 // skipped records each trade the planner sized but could not order.
 func (r *momentumRun) skipped(b *emissions, skipped []event.OrderSkippedPayload) {
 	for _, s := range skipped {
-		b.add("order-skipped:"+s.ClientOrderID, event.OrderSkippedEventType, event.OrderSkippedSchemaVersion, s)
+		b.add("order-skipped:"+s.ClientOrderID, event.OrderSkippedEventType, s.SchemaVersion(), s)
 	}
 }
 
@@ -974,7 +983,7 @@ func (r *momentumRun) unexplainedCashDrop(reb *rebalance) float64 {
 			o, _ := r.orders.Order(id)
 			for _, fillID := range slices.Sorted(maps.Keys(o.Fills)) {
 				if f := o.Fills[fillID]; !f.FilledAt.After(latest.AsOf) {
-					expected += float64(float64(f.Quantity)*f.Price) - f.Commission
+					expected += event.QuantityValue(f.Quantity, f.QuantityScale, f.Price) - f.Commission
 				}
 			}
 		}
@@ -1008,13 +1017,13 @@ func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPl
 		slices.SortFunc(p.WithheldPicks, func(a, b event.WithheldPick) int {
 			return strings.Compare(a.InstrumentID, b.InstrumentID)
 		})
-		b.add(reb.decisionID+":withheld-picks", event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
+		b.add(reb.decisionID+":withheld-picks", event.TargetsDecidedEventType, p.SchemaVersion(), p)
 	}
 	holdings := holdings(reb.snapshot.Positions)
 	for id, sold := range reb.sold {
 		holdings[id] -= sold
 	}
-	book := risklimit.Book{Holdings: holdings, Prices: reb.prices, PriorOrders: prior, CashAvailable: reb.budget.Remaining(), At: b.at}
+	book := risklimit.Book{QuantityScale: r.exec.QuantityScale(), Holdings: holdings, Prices: reb.prices, PriorOrders: prior, CashAvailable: reb.budget.Remaining(), At: b.at}
 	plan := make([]risklimit.Order, len(orders))
 	for i, o := range orders {
 		plan[i] = risklimit.Order{PlanID: "order-planned:" + o.ClientOrderID, Planned: o}
@@ -1062,12 +1071,15 @@ func (r *momentumRun) forAccount(in event.Envelope, account string) error {
 }
 
 func (r *momentumRun) applyLifecycle(in event.Envelope) ([]event.Envelope, error) {
-	p, err := decodeInput[event.LimitOrderLifecyclePayload](in, event.OrderLifecycleLimitVersion)
+	p, err := decodeVersions[event.LimitOrderLifecyclePayload](in, []uint32{event.OrderLifecycleLimitVersion, event.OrderLifecycleFractionalVersion})
 	if err != nil {
 		return nil, err
 	}
 	if err := r.forAccount(in, p.AccountID); err != nil {
 		return nil, err
+	}
+	if p.QuantityScale != r.exec.QuantityScale() {
+		return nil, fmt.Errorf("targetweight: report quantity scale %d does not match account scale %d", p.QuantityScale, r.exec.QuantityScale())
 	}
 	o, err := r.orders.Lifecycle(p)
 	if err != nil {
@@ -1098,7 +1110,7 @@ func (r *momentumRun) applyLifecycle(in event.Envelope) ([]event.Envelope, error
 // decision decides afresh (ADR 0026, point 5, amended 2026-10-22). A dry-run sends
 // nothing and ends each order itself, so it refuses every retirement.
 func (r *momentumRun) applyRetired(in event.Envelope) ([]event.Envelope, error) {
-	p, err := decodeInput[event.OrderRetiredPayload](in, event.OrderRetiredSchemaVersion)
+	p, err := decodeVersions[event.OrderRetiredPayload](in, event.OrderRetiredVersions())
 	if err != nil {
 		return nil, err
 	}
@@ -1107,6 +1119,9 @@ func (r *momentumRun) applyRetired(in event.Envelope) ([]event.Envelope, error) 
 	}
 	if err := r.forAccount(in, p.AccountID); err != nil {
 		return nil, err
+	}
+	if p.QuantityScale != r.exec.QuantityScale() {
+		return nil, fmt.Errorf("targetweight: report quantity scale %d does not match account scale %d", p.QuantityScale, r.exec.QuantityScale())
 	}
 	o, err := r.orders.Retire(p)
 	if err != nil {
@@ -1118,7 +1133,7 @@ func (r *momentumRun) applyRetired(in event.Envelope) ([]event.Envelope, error) 
 	q := o.Released
 	end := event.LimitOrderLifecyclePayload{
 		AccountID: q.AccountID, ClientOrderID: q.ClientOrderID, InstrumentID: q.InstrumentID, Side: q.Side,
-		Status: event.OrderLifecycleStatusCanceled, Quantity: q.Quantity, LimitPrice: q.LimitPrice,
+		Status: event.OrderLifecycleStatusCanceled, Quantity: q.Quantity, QuantityScale: q.QuantityScale, LimitPrice: q.LimitPrice,
 		OccurredAt: p.RetiredAt, Synthetic: true, Message: "retired unsent: " + p.Reason,
 	}
 	if err := r.h.gate.ObserveLifecycle(end); err != nil {
@@ -1131,12 +1146,15 @@ func (r *momentumRun) applyRetired(in event.Envelope) ([]event.Envelope, error) 
 }
 
 func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
-	p, err := decodeInput[event.TargetWeightFillPayload](in, event.FillTargetWeightVersion)
+	p, err := decodeVersions[event.TargetWeightFillPayload](in, []uint32{event.FillTargetWeightVersion, event.FillTargetWeightFractionalVersion})
 	if err != nil {
 		return nil, err
 	}
 	if err := r.forAccount(in, p.AccountID); err != nil {
 		return nil, err
+	}
+	if p.QuantityScale != r.exec.QuantityScale() {
+		return nil, fmt.Errorf("targetweight: report quantity scale %d does not match account scale %d", p.QuantityScale, r.exec.QuantityScale())
 	}
 	o, redelivery, err := r.orders.Fill(p)
 	if err != nil {
@@ -1150,7 +1168,7 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	if err := r.h.gate.ObserveFill(p); err != nil {
 		return nil, fmt.Errorf("targetweight: fill %s: %w", in.ID, err)
 	}
-	value, reb := float64(float64(p.Quantity)*p.Price), r.rebalance
+	value, reb := event.QuantityValue(p.Quantity, p.QuantityScale, p.Price), r.rebalance
 	if p.Side == event.OrderSideSell {
 		reb.sold[p.InstrumentID] += p.Quantity
 		if r.exec.CashRule == event.CashRuleTotal {
@@ -1190,7 +1208,7 @@ func (r *momentumRun) terminal(in event.Envelope, o *event.ReportedOrder, at tim
 // payload maps a momentum decision to strategy.targets.decided.
 func (r *momentumRun) payload(d momentum.Decision, end time.Time) event.TargetsDecidedPayload {
 	p := event.TargetsDecidedPayload{
-		AccountID: r.h.cfg.AccountID, StrategyID: r.h.cfg.StrategyID,
+		QuantityScale: r.exec.QuantityScale(), AccountID: r.h.cfg.AccountID, StrategyID: r.h.cfg.StrategyID,
 		DecisionTime: end, SessionPeriodEnd: end, Outcome: string(d.Outcome),
 		Momentum: event.MomentumFigures{
 			CloseSession: d.CloseSession, TrendInstrument: r.rule.TrendInstrument,
@@ -1246,4 +1264,54 @@ func rows(in []event.UniverseRow) []momentum.Row {
 		}
 	}
 	return out
+}
+
+// normalizeQuantities upcasts legacy whole-share inputs to D7-F's exact ticks
+// (ADR 0015; ADR 0026 D7-F). A whole-share account refuses fractional schemas;
+// overflow or a negative fractional holding refuses the entire conversion.
+func (h *Handler) normalizeQuantities(scale *int64, quantities ...*int64) error {
+	target := h.cfg.Execution.QuantityScale()
+	if *scale == target {
+		return nil
+	}
+	if target != event.FractionalQuantityScale || *scale != 0 {
+		return fmt.Errorf("targetweight: quantity scale %d does not match account quantity scale %d", *scale, target)
+	}
+	for _, q := range quantities {
+		if *q < 0 || *q > math.MaxInt64/event.FractionalQuantityScale {
+			return fmt.Errorf("targetweight: whole-share quantity %d cannot be represented as nonnegative four-place shares", *q)
+		}
+	}
+	for _, q := range quantities {
+		*q *= event.FractionalQuantityScale
+	}
+	*scale = target
+	return nil
+}
+
+func (h *Handler) normalizePositions(p *event.AccountPositionsSnapshotPayload) error {
+	qs := make([]*int64, len(p.Positions))
+	for i := range p.Positions {
+		qs[i] = &p.Positions[i].Quantity
+	}
+	return h.normalizeQuantities(&p.QuantityScale, qs...)
+}
+
+func (h *Handler) normalizeBroker(p *event.BrokerSnapshotPayload) error {
+	qs := make([]*int64, 0, len(p.Positions)+len(p.OpenOrders))
+	for i := range p.Positions {
+		qs = append(qs, &p.Positions[i].Quantity)
+	}
+	for i := range p.OpenOrders {
+		qs = append(qs, &p.OpenOrders[i].RemainingQuantity)
+	}
+	return h.normalizeQuantities(&p.QuantityScale, qs...)
+}
+
+func (h *Handler) normalizeReconciliation(p *event.ReconciliationPayload) error {
+	qs := make([]*int64, len(p.Positions))
+	for i := range p.Positions {
+		qs[i] = &p.Positions[i].Quantity
+	}
+	return h.normalizeQuantities(&p.QuantityScale, qs...)
 }

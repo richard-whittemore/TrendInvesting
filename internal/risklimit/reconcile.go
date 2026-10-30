@@ -33,10 +33,14 @@ type Reconciliation struct {
 // SetBook records the journal's book that later reconciliations start from:
 // the latest account snapshot, which the planner sizes from (ADR 0026, point
 // 2). The changes journalled since stay recorded; the classifier applies
-// those after the book's time. It checks nothing: the engine sets its book
-// through CheckBook.
-func (g *Gate) SetBook(b reconcile.Book) {
+// those after the book's time. Quantity units must match the account;
+// holdings are checked separately through CheckBook.
+func (g *Gate) SetBook(b reconcile.Book) error {
+	if err := g.checkQuantityScale(b.QuantityScale); err != nil {
+		return err
+	}
 	g.book, g.classified, g.latestReadAsOf, g.reported, g.reportedAsOf = &b, nil, time.Time{}, nil, nil
+	return nil
 }
 
 // CheckBook checks b, an account snapshot about to become the book, against
@@ -69,34 +73,50 @@ func (g *Gate) SetBook(b reconcile.Book) {
 //     is a new difference and is reported (ADR 0019, amended 2026-10-21,
 //     point 6: one difference, one report).
 //
+// A book with incompatible quantity units is refused with an error and
+// halts the account; the previous book remains in force.
 // An unverifiable snapshot halts and is journalled, unless the account is
 // already Halted on every one of its reasons (alreadyHaltedOn) and every
 // unexplained holding it carries was already reported (alreadyReported): a
 // Halt is suppressed only when both hold, so a Halt for a new change or a new
 // unexplained holding is always journalled. Neither the classified-holdings
 // case nor the reported-difference case alone suppresses a Halt.
-func (g *Gate) CheckBook(b reconcile.Book) (Reconciliation, bool) {
-	defer g.SetBook(b)
+func (g *Gate) CheckBook(b reconcile.Book) (out Reconciliation, journal bool, err error) {
+	if err := g.checkQuantityScale(b.QuantityScale); err != nil {
+		reason := err.Error()
+		r := event.ReconciliationResultPayload{
+			QuantityScale: g.quantityScale, AccountID: g.accountID,
+			ReconciliationID: reconcile.CloseSnapshotPrefix + b.AnchorID, InputID: b.AnchorID,
+			Classification: event.ReconciliationUnverifiable, Action: event.ReconciliationActionHalt,
+			Components: []event.ReconciliationComponent{}, Unverifiable: []string{reason}, Detail: "unverifiable: " + reason,
+		}
+		return g.consequence(b.AnchorID, r), true, err
+	}
+	defer func() {
+		if bookErr := g.SetBook(b); bookErr != nil {
+			err = bookErr
+		}
+	}()
 	if g.book == nil {
-		return Reconciliation{}, false
+		return Reconciliation{}, false, nil
 	}
 	r := reconcile.Holdings(g.accountID, g.book, g.changes, b)
 	switch {
 	case r.Action == event.ReconciliationActionContinue:
-		return Reconciliation{}, false
+		return Reconciliation{}, false, nil
 	case r.Action == event.ReconciliationActionHalt:
 		// A Halt is suppressed only when the account is already Halted on
 		// every one of its reasons AND every unexplained holding it carries
 		// was already reported: nothing new. Otherwise it is journalled.
 		if g.alreadyHaltedOn(r) && g.alreadyReported(r) {
-			return Reconciliation{}, false
+			return Reconciliation{}, false, nil
 		}
 	case g.classifiedStandsFor(b) || g.alreadyReported(r):
-		return Reconciliation{}, false
+		return Reconciliation{}, false, nil
 	}
 	// The book is reset as CheckBook returns, so what this result reports is
 	// not recorded: the next check starts from b.
-	return g.consequence(b.AnchorID, r), true
+	return g.consequence(b.AnchorID, r), true, nil
 }
 
 // classifiedStandsFor reports whether the latest reconciliation's verdict
@@ -222,6 +242,9 @@ func sameCorporateAction(a, b event.CorporateActionPayload) bool {
 // it states the whole scope; Halted is never loosened. The first record out
 // of Normal is the incident.
 func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliation, error) {
+	if err := g.checkQuantityScale(p.QuantityScale); err != nil {
+		return Reconciliation{}, err
+	}
 	if err := p.Validate(); err != nil {
 		return Reconciliation{}, fmt.Errorf("risklimit: %w", err)
 	}

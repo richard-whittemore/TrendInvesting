@@ -26,7 +26,10 @@ func closeSnapshot(spy int64, minutes int) reconcile.Book {
 
 func checkBookWith(t *testing.T, g *risklimit.Gate, b reconcile.Book) (risklimit.Reconciliation, bool) {
 	t.Helper()
-	r, journal := g.CheckBook(b)
+	r, journal, err := g.CheckBook(b)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !journal {
 		return r, false
 	}

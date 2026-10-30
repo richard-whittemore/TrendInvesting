@@ -138,13 +138,15 @@ rejected in a row stop its buys, never a sell, until the owner starts a
 fresh run (see
 "Amendment (2026-10-18, owner decision, #487 and #488)").
 
-**D7, whole shares, open: both options specified.** The choice is
-configuration (point 6):
+**D7, share quantities.** The choice is configuration (point 6). The owner
+selected D7-F for the IRAs on 2026-10-29; its engine implementation is stated
+in the 2026-10-30 amendment below:
 - **D7-F, fractional:** quantity = value / pᵢ, rounded down to IBKR's
   fractional increment, itself configuration. Quantities become exact
-  decimals, not `int64`. That needs the decimal quantity on the parallel
-  execution-report versions (`execution.fill` v5 and
-  `execution.order.lifecycle` v2, Consequences and the 2026-10-17 amendment).
+  decimals, rather than whole-share counts. The engine uses fixed-point
+  integer ten-thousandths with an explicit scale, in `execution.fill` v6 and
+  venue `execution.order.lifecycle` v4 (synthetic v5). Earlier v5 fills and
+  v2 lifecycle reports retain their whole-share meaning (ADR 0015).
 - **D7-L, minimum lot:** whole shares. Before weighting, a pick whose one
   share at pᵢ exceeds its target value is skipped and the next eligible
   ranked name, within the sector cap, takes its place (`plan.md` lines
@@ -411,7 +413,7 @@ the module's own rules version and decision corpus (ADR 0016;
 | Open | Enters as |
 | --- | --- |
 | D5: IRA cash basis, Lite, day-trading regime (`plan.md` 445-457) | execution configuration values; no code path changes |
-| D7: fractional shares or minimum lot (`plan.md` 491-492) | configuration choosing D7-F or D7-L; both are built and tested |
+| D7: fractional shares or minimum lot (`plan.md` 491-492) | D7-L built; D7-F engine built by the 2026-10-30 amendment below; adapter and surfaces follow separately |
 | Sector-label source (`plan.md` 280-290; `docs/research/sector-labels-2026-10.md`) | a field of `market.universe.snapshot` rows, with the source named in configuration |
 | Live universe data source (`plan.md` 247-253) | the producer of `market.universe.snapshot`; the module sees only the input |
 | A Degraded joint account whose named instrument is SPY while boosted | **decided 2026-10-16:** the one sale back to 98% applies, by ADR 0019's 2026-10-16 amendment (point 4) |
@@ -1630,3 +1632,60 @@ owner for review with this implementation:
   acknowledged like the withheld-rebalance page. No recorded reason means
   `unknown`. Acknowledgement stops reminders, not the withholding. A decided
   month with no withheld picks has no per-pick page.
+
+
+## Amendment (2026-10-30): D7-F engine implementation reading for the owner
+
+The owner chose fractional IRA shares on 2026-10-29. This records the
+orchestrator's implementation reading put to the owner: D7-L was built;
+D7-F was specified, despite the earlier D7 table saying both were built.
+Target-weight rules version 1.30.0 builds the D7-F engine capital path.
+The broker adapter and the general reporting surfaces remain a separate
+slice; this amendment does not enable sending orders or change the paper gate.
+
+`execution.share_quantity: "fractional"` selects D7-F.
+`fractional_increment` is a decimal string, defaults to `"0.0001"`, has at
+most four decimal places, is positive and no greater than one share, and
+must divide one share exactly. The choice and effective increment enter
+the configuration hash (ADR 0016). D7-L and Boost retain their previous
+configuration encodings and hashes.
+
+Quantities use integer ten-thousandths of a share with an explicit
+`quantity_scale: 10000` in new event schema versions (ADR 0015). Thus
+`quantity: 72500` is exactly 7.25 shares. Consumers decode ticks as exact
+integers, never floating-point numbers. Legacy records omit the scale and
+continue to mean whole shares; they are explicitly upcast before a
+fractional account consumes them, with overflow checked. A whole-share
+account refuses fractional schemas. A fractional count cannot contain a
+fifth decimal place: the integer encoding has no smaller unit, and decimal
+input parsing rejects excess precision instead of rounding it. New
+fractional observations refuse negative positions. Legacy short-position
+observations retain their historical interpretation.
+
+The planner divides the monetary delta by the raw reference price using
+exact decimal rational arithmetic, then rounds down to the configured
+increment. It applies the same increment after budget scaling. D7-L's
+minimum-lot pick substitution does not apply. The two execution phases,
+sector cap, rebalance band, fees, and withheld-pick allocation are unchanged.
+Book, lifecycle, outstanding sells and reconciliation compare integer ticks;
+valuation multiplies exact quantity by decimal price before converting the
+monetary result to the existing monetary representation. A split producing
+less than one tick is unverifiable rather than truncated.
+
+Schema versions introduced here are configuration 8, positions snapshot 5,
+cash snapshot 6, fill 6, venue lifecycle 4, synthetic lifecycle 5, planned
+order 3, released order 4, refused order 5, broker snapshot 3, reconciliation
+input/result 2, skipped order 2, retirement 2 and target decision 11.
+Earlier supported schemas remain readable under their original meanings.
+The incomplete-sell page renders decimal outstanding quantities. General
+summary and journal-query surfaces refuse fractional records until their
+separate migration, so fixed-point counts cannot be presented as shares.
+
+
+The existing operator approval's `StartingBook` remains a whole-share
+surface. Its strict decoder refuses fractional starting holdings; its
+schema and operator/adapter comparison need migration before a fractional
+paper account can be approved. This stays fail closed with the adapter and
+surfaces slice. Venue fills, lifecycle reports and retirements must use the
+same quantity scale as their released order; historical whole-share reports
+are not silently reinterpreted against fractional releases.

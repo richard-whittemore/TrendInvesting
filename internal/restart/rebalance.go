@@ -174,7 +174,7 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 				}
 			case event.OrderLifecycleEventType:
 				// A dry-run's synthetic report on an order it never sent.
-				p, err := readRecord[event.LimitOrderLifecyclePayload](env, []uint32{event.OrderLifecycleSyntheticVersion}, logName)
+				p, err := readRecord[event.LimitOrderLifecyclePayload](env, []uint32{event.OrderLifecycleSyntheticVersion, event.OrderLifecycleFractionalSyntheticVersion}, logName)
 				if err != nil {
 					return nil, "", err
 				}
@@ -200,17 +200,17 @@ func rebalanceOfAccount(entries []journal.Entry, logName string) (*event.Rebalan
 		switch env.Type {
 		case event.OrderLifecycleEventType:
 			var p event.LimitOrderLifecyclePayload
-			if json.Unmarshal(env.Payload, &p) == nil && env.SchemaVersion == event.OrderLifecycleLimitVersion && p.ValidateSchema(env.SchemaVersion) == nil && p.AccountID == accountID {
+			if json.Unmarshal(env.Payload, &p) == nil && slices.Contains(event.LimitOrderLifecycleInputVersions(), env.SchemaVersion) && p.ValidateSchema(env.SchemaVersion) == nil && p.AccountID == accountID {
 				_, _ = reports.Lifecycle(p)
 			}
 		case event.FillEventType:
 			var p event.TargetWeightFillPayload
-			if json.Unmarshal(env.Payload, &p) == nil && env.SchemaVersion == event.FillTargetWeightVersion && p.Validate() == nil && p.AccountID == accountID {
+			if json.Unmarshal(env.Payload, &p) == nil && slices.Contains(event.TargetWeightFillVersions(), env.SchemaVersion) && p.ValidateSchema(env.SchemaVersion) == nil && p.AccountID == accountID {
 				_, _, _ = reports.Fill(p)
 			}
 		case event.OrderRetiredEventType:
 			var p event.OrderRetiredPayload
-			if json.Unmarshal(env.Payload, &p) == nil && env.SchemaVersion == event.OrderRetiredSchemaVersion && p.Validate() == nil && p.AccountID == accountID {
+			if json.Unmarshal(env.Payload, &p) == nil && slices.Contains(event.OrderRetiredVersions(), env.SchemaVersion) && p.ValidateSchema(env.SchemaVersion) == nil && p.AccountID == accountID {
 				_, _ = reports.Retire(p)
 			}
 		case event.RebalanceClearedEventType:

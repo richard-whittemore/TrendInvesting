@@ -75,14 +75,17 @@ const (
 	CashRuleTotal = "total-cash"
 )
 
-// ShareQuantityMinimumLot is D7-L, the share quantity rule the owner chose
-// for the IRAs on 2026-10-16, since IBKR does not take fractional orders
-// through the TWS API (ADR 0026, point 2, "D7"; plan.md section 5, "whole
-// shares"): whole shares, rounded toward zero, and a pick whose one share at
-// the previous raw close exceeds its target value is skipped for the next
-// eligible ranked name within the sector cap (plan.md lines 380-383). D7-F,
-// fractional shares, is not built.
+// ShareQuantityMinimumLot is D7-L: whole shares rounded toward zero, with
+// an unaffordable pick replaced by the next eligible ranked name within the
+// sector cap (ADR 0026, point 2, "D7-L"; plan.md lines 380-383). Its held-name
+// exception is stated in ADR 0026's amendment of 2026-10-18. D7-F is separate.
 const ShareQuantityMinimumLot = "minimum-lot"
+
+// ShareQuantityFractional selects exact four-place quantities (ADR 0026, D7-F).
+const ShareQuantityFractional = "fractional"
+
+// TargetWeightConfigurationFractionalVersion adds D7-F and its increment (ADR 0015).
+const TargetWeightConfigurationFractionalVersion uint32 = 8
 
 // The shapes of a momentum run's universe input (owner decision of
 // 2026-10-16 on the momentum input shape; ADR 0026, point 1).
@@ -235,8 +238,10 @@ type ExecutionConfiguration struct {
 	// configuration's bytes or hash, and the joint account's execution
 	// section encodes only what it sets.
 	CashRule string `json:"cash_rule,omitzero"`
-	// ShareQuantity is ShareQuantityMinimumLot (D7).
-	ShareQuantity string `json:"share_quantity,omitzero"`
+	// ShareQuantity selects D7-L or D7-F; FractionalIncrement is D7-F
+	// only and defaults to 0.0001 (ADR 0026, point 2).
+	ShareQuantity       string `json:"share_quantity,omitzero"`
+	FractionalIncrement string `json:"fractional_increment,omitzero"`
 	// MaxFeesPerOrder is the most commission and fees one order can cost,
 	// added to every buy's worst-case cost (ADR 0026, point 2, "Worst-case
 	// cost").
@@ -542,8 +547,15 @@ func (c ExecutionConfiguration) validate() []error {
 	if c.CashRule != CashRuleSettled && c.CashRule != CashRuleTotal {
 		errs = append(errs, fmt.Errorf("execution cash rule %q is not %q or %q", c.CashRule, CashRuleSettled, CashRuleTotal))
 	}
-	if c.ShareQuantity != ShareQuantityMinimumLot {
-		errs = append(errs, fmt.Errorf("execution share quantity %q is not %q, the only rule built", c.ShareQuantity, ShareQuantityMinimumLot))
+	if c.ShareQuantity != ShareQuantityMinimumLot && c.ShareQuantity != ShareQuantityFractional {
+		errs = append(errs, fmt.Errorf("execution share quantity %q is not %q, or fractional", c.ShareQuantity, ShareQuantityMinimumLot))
+	}
+	if c.ShareQuantity == ShareQuantityFractional {
+		if _, err := FractionalIncrementTicks(c.FractionalIncrement); err != nil {
+			errs = append(errs, err)
+		}
+	} else if c.FractionalIncrement != "" {
+		errs = append(errs, errors.New("fractional increment requires fractional share quantities"))
 	}
 	if !isFinite(c.MaxFeesPerOrder) || c.MaxFeesPerOrder < 0 {
 		errs = append(errs, errors.New("execution max fees per order must be finite and not negative"))
@@ -629,7 +641,65 @@ func validTradingMode(mode string) bool {
 // prefixed "sha256:". The prefix differs from ConfigurationHash's, so a
 // Turtle configuration and a target-weight one can never share a hash.
 func TargetWeightConfigurationHash(payload TargetWeightConfigurationPayload) string {
-	prefix := fmt.Sprintf("target-weight-configuration/v%d\n", TargetWeightConfigurationSchemaVersion)
-	sum := sha256.Sum256(append([]byte(prefix), canonicalJSON(payload)...))
+	if payload.Execution.ShareQuantity == ShareQuantityFractional && payload.Execution.FractionalIncrement == "" {
+		payload.Execution.FractionalIncrement = "0.0001"
+	}
+	prefix := fmt.Sprintf("target-weight-configuration/v%d\n", payload.SchemaVersion())
+	var canonical []byte
+	if payload.Execution.ShareQuantity == ShareQuantityFractional {
+		canonical = canonicalJSON(payload)
+	} else {
+		// ADR 0016: preserve version 7's canonical shape; its encoder includes
+		// zero fields, so adding an omitted JSON field still changes that hash.
+		canonical = canonicalJSON(map[string]any{
+			"strategy_id": payload.StrategyID, "account_id": payload.AccountID,
+			"mode": payload.Mode, "adapter": payload.Adapter, "boost": payload.Boost,
+			"momentum": payload.Momentum, "glide": payload.Glide, "limits": payload.Limits,
+			"execution": map[string]any{"cash_rule": payload.Execution.CashRule,
+				"share_quantity":           payload.Execution.ShareQuantity,
+				"max_fees_per_order":       payload.Execution.MaxFeesPerOrder,
+				"max_snapshot_age_minutes": payload.Execution.MaxSnapshotAge},
+		})
+	}
+	sum := sha256.Sum256(append([]byte(prefix), canonical...))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// SchemaVersion preserves D7-L and Boost configuration bytes while declaring
+// the D7-F configuration shape separately (ADR 0015 and ADR 0016).
+func (p TargetWeightConfigurationPayload) SchemaVersion() uint32 {
+	if p.Execution.ShareQuantity == ShareQuantityFractional {
+		return TargetWeightConfigurationFractionalVersion
+	}
+	return TargetWeightConfigurationSchemaVersion
+}
+
+// QuantityScale states the integer units in this execution rule (ADR 0026, D7).
+func (c ExecutionConfiguration) QuantityScale() int64 {
+	if c.ShareQuantity == ShareQuantityFractional {
+		return FractionalQuantityScale
+	}
+	return 0
+}
+
+// IncrementTicks returns the execution rule's increment in its quantity units
+// (ADR 0026, D7); callers validate the configuration before using it.
+func (c ExecutionConfiguration) IncrementTicks() (int64, error) {
+	if c.ShareQuantity == ShareQuantityFractional {
+		return FractionalIncrementTicks(c.FractionalIncrement)
+	}
+	return 1, nil
+}
+
+// TargetWeightConfigurationVersions lists supported execution configurations (ADR 0015).
+func TargetWeightConfigurationVersions() []uint32 {
+	return []uint32{TargetWeightConfigurationSchemaVersion, TargetWeightConfigurationFractionalVersion}
+}
+
+// ValidateSchema refuses D7-F in a whole-share schema (ADR 0015).
+func (p TargetWeightConfigurationPayload) ValidateSchema(v uint32) error {
+	if v != p.SchemaVersion() {
+		return fmt.Errorf("configuration version %d does not describe execution rule %q", v, p.Execution.ShareQuantity)
+	}
+	return p.Validate()
 }

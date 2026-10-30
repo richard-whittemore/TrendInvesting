@@ -60,12 +60,12 @@ func read(e event.Envelope, versions []uint32, into interface{ Validate() error 
 
 // Schema versions this build reads, per record type.
 var (
-	configurationVersions = []uint32{event.TargetWeightConfigurationSchemaVersion}
+	configurationVersions = event.TargetWeightConfigurationVersions()
 	sessionVersions       = []uint32{event.SessionClosedSchemaVersion}
 	// A bar is read at version 1, which the Turtle engine writes, and at
 	// version 2, which the target-weight engines write (ADR 0026).
 	barVersions         = []uint32{event.CompletedBarSchemaVersion, event.CompletedBarAdjustedVersion}
-	snapshotVersions    = []uint32{event.AccountSnapshotPositionsVersion, event.AccountSnapshotCashVersion}
+	snapshotVersions    = []uint32{event.AccountSnapshotPositionsVersion, event.AccountSnapshotCashVersion, event.AccountSnapshotFractionalPositionsVersion, event.AccountSnapshotFractionalCashVersion}
 	fillVersions        = []uint32{event.FillSchemaVersion}
 	engineStateVersions = []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}
 	// A decision is read at version 7, which earlier builds wrote, and at
@@ -81,7 +81,7 @@ var (
 	saleWithheldVersions = []uint32{event.SaleWithheldSchemaVersion}
 	// A trade the order planner sized but could not order (ADR 0026,
 	// point 8).
-	skippedVersions = []uint32{event.OrderSkippedSchemaVersion}
+	skippedVersions = event.OrderSkippedVersions()
 	// The margin-cushion alarm's level changes (plan.md section 5).
 	marginAlarmVersions = []uint32{event.MarginAlarmSchemaVersion}
 	// The IBKR adapter's broker snapshot, read for the reason a reading
@@ -89,20 +89,20 @@ var (
 	brokerSnapshotVersions = event.BrokerSnapshotVersions()
 	// A target-weight account's orders are limit orders, reported at
 	// lifecycle version 2 and fill version 5 (ADR 0026, Consequences).
-	lifecycleVersions = []uint32{event.OrderLifecycleLimitVersion}
+	lifecycleVersions = event.LimitOrderLifecycleInputVersions()
 	// syntheticVersions: a dry-run engine's own report, a decision, never
 	// the venue's input (event.LimitOrderLifecycleVersions).
-	syntheticVersions        = []uint32{event.OrderLifecycleSyntheticVersion}
-	targetWeightFillVersions = []uint32{event.FillTargetWeightVersion}
+	syntheticVersions        = []uint32{event.OrderLifecycleSyntheticVersion, event.OrderLifecycleFractionalSyntheticVersion}
+	targetWeightFillVersions = event.TargetWeightFillVersions()
 	// The owner's clearance of a momentum run's rebalance in progress (ADR
 	// 0026, point 5).
 	clearedVersions = []uint32{event.RebalanceClearedSchemaVersion}
 	// The adapter's or the owner's retirement of an order never sent.
-	retiredVersions = []uint32{event.OrderRetiredSchemaVersion}
+	retiredVersions = event.OrderRetiredVersions()
 	// The reconciliation's result and the owner's acknowledgement (ADR 0019).
-	reconciliationVersions = []uint32{event.ReconciliationResultSchemaVersion}
+	reconciliationVersions = event.ReconciliationResultVersions()
 	// A reconciliation input, for the day a pending cash read names.
-	reconciliationInputVersions = []uint32{event.ReconciliationSchemaVersion}
+	reconciliationInputVersions = event.ReconciliationVersions()
 	acknowledgedVersions        = []uint32{event.AlertAcknowledgedSchemaVersion}
 	// A fresh run's approval, for the incident it carries in force: version
 	// 1, which could not state a cash scope, each later one, and the current
@@ -117,14 +117,14 @@ var (
 func readSnapshot(e event.Envelope, strategy string) (event.AccountCashSnapshotPayload, bool, error) {
 	if isMomentum(strategy) {
 		var p event.AccountCashSnapshotPayload
-		if e.SchemaVersion != event.AccountSnapshotCashVersion {
+		if e.SchemaVersion != event.AccountSnapshotCashVersion && e.SchemaVersion != event.AccountSnapshotFractionalCashVersion {
 			return p, false, fmt.Errorf("report: momentum snapshot must be version %d", event.AccountSnapshotCashVersion)
 		}
 		err := read(e, snapshotVersions, &p)
 		return p, true, err
 	}
 	var p event.AccountPositionsSnapshotPayload
-	err := read(e, []uint32{event.AccountSnapshotPositionsVersion}, &p)
+	err := read(e, event.AccountPositionsSnapshotVersions(), &p)
 	return event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: p}, false, err
 }
 

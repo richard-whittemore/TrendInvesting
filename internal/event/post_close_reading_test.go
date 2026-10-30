@@ -84,8 +84,8 @@ func TestBrokerSnapshotVersion2StatesItsReadTime(t *testing.T) {
 	if err := v1.ValidateSchema(event.BrokerSnapshotReadAtVersion); err == nil || !strings.Contains(err.Error(), "read at is required") {
 		t.Errorf("version 1 payload read at version 2: err = %v, want its read time required", err)
 	}
-	if got := event.BrokerSnapshotVersions(); len(got) != 2 || got[0] != 1 || got[1] != 2 {
-		t.Errorf("BrokerSnapshotVersions = %v, want [1 2]", got)
+	if got := event.BrokerSnapshotVersions(); len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Errorf("BrokerSnapshotVersions = %v, want [1 2 3]", got)
 	}
 }
 

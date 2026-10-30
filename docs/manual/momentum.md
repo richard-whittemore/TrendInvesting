@@ -208,6 +208,18 @@ order's shape, account and mode, not these limits (`adapter/ibkr/sender.py`).
 
 ## One IRA month, end to end
 
+With D7-F (`execution.share_quantity: "fractional"`), the engine plans
+fractional quantities for both phases. It divides each trade value by the
+reference price and rounds down to `fractional_increment` (default
+`"0.0001"` share), then rounds to that increment again if cash scales the
+buys. A costly share does not cause the D7-L minimum-lot substitution.
+For example, an order for 7.25 shares filled by 3.5 leaves exactly 3.75
+outstanding. The journal records these as integer ten-thousandths with
+`quantity_scale: 10000`; the incomplete-sell page shows decimal shares.
+The engine supports these records; fractional adapter delivery and the
+summary/dashboard/probe rollout follow separately. The paper gate still
+controls sending. D7-L remains available and keeps its whole-share behavior.
+
 **Stops here today** marks the first step not on `main`.
 
 | # | When | What happens | Built? |

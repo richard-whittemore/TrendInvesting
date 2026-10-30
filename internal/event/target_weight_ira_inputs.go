@@ -171,7 +171,7 @@ const OrderLifecycleSyntheticVersion uint32 = 3
 // engine reading the venue's reports as inputs reads version 2 alone. Each
 // call returns a new slice.
 func LimitOrderLifecycleVersions() []uint32 {
-	return []uint32{OrderLifecycleLimitVersion, OrderLifecycleSyntheticVersion}
+	return []uint32{OrderLifecycleLimitVersion, OrderLifecycleSyntheticVersion, OrderLifecycleFractionalVersion, OrderLifecycleFractionalSyntheticVersion}
 }
 
 // LimitOrderLifecyclePayload records one state change of one released limit
@@ -179,6 +179,7 @@ func LimitOrderLifecycleVersions() []uint32 {
 // constants except updated: a planned order is never amended. An execution is
 // a TargetWeightFillPayload, never a lifecycle change.
 type LimitOrderLifecyclePayload struct {
+	QuantityScale int64  `json:"quantity_scale,omitempty"`
 	AccountID     string `json:"account_id"`
 	ClientOrderID string `json:"client_order_id"`
 	// OrderID is the venue's own identifier, which arrives only in lifecycle
@@ -220,7 +221,7 @@ func SameLimitPrice(a, b float64) bool {
 // one, so the two read a report alike.
 func (p LimitOrderLifecyclePayload) Describes(o OrderReleasedPayload) bool {
 	return p.ClientOrderID == o.ClientOrderID && p.AccountID == o.AccountID && p.InstrumentID == o.InstrumentID &&
-		p.Side == o.Side && p.Quantity == o.Quantity && SameLimitPrice(p.LimitPrice, o.LimitPrice)
+		p.Side == o.Side && p.QuantityScale == o.QuantityScale && p.Quantity == o.Quantity && SameLimitPrice(p.LimitPrice, o.LimitPrice)
 }
 
 // Terminal reports whether the order can no longer execute: canceled or invalid.
@@ -231,6 +232,12 @@ func (p LimitOrderLifecyclePayload) Terminal() bool {
 // SchemaVersion returns the version a writer journals p at: 3 for a
 // synthetic report, otherwise 2.
 func (p LimitOrderLifecyclePayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		if p.Synthetic {
+			return OrderLifecycleFractionalSyntheticVersion
+		}
+		return OrderLifecycleFractionalVersion
+	}
 	if p.Synthetic {
 		return OrderLifecycleSyntheticVersion
 	}
@@ -241,13 +248,20 @@ func (p LimitOrderLifecyclePayload) SchemaVersion() uint32 {
 // it: version 2 is a venue's report and version 3 a synthetic one, so a
 // synthetic report can never pass for a venue's (ADR 0015).
 func (p LimitOrderLifecyclePayload) ValidateSchema(schemaVersion uint32) error {
-	switch {
-	case schemaVersion != OrderLifecycleLimitVersion && schemaVersion != OrderLifecycleSyntheticVersion:
-		return fmt.Errorf("%s: schema version %d is not recognised for a limit order", OrderLifecycleEventType, schemaVersion)
-	case p.Synthetic && schemaVersion != OrderLifecycleSyntheticVersion:
-		return fmt.Errorf("%s: a synthetic report is version 3; version %d is a venue's", OrderLifecycleEventType, schemaVersion)
-	case !p.Synthetic && schemaVersion == OrderLifecycleSyntheticVersion:
-		return fmt.Errorf("%s: version 3 holds only a synthetic report", OrderLifecycleEventType)
+	if schemaVersion < OrderLifecycleLimitVersion || schemaVersion > OrderLifecycleFractionalSyntheticVersion {
+		return fmt.Errorf("lifecycle schema version %d is not recognised", schemaVersion)
+	}
+	if p.QuantityScale == 0 && schemaVersion >= OrderLifecycleFractionalVersion {
+		return fmt.Errorf("lifecycle schema version %d is not recognised for legacy quantities", schemaVersion)
+	}
+	if p.QuantityScale != 0 && schemaVersion < OrderLifecycleFractionalVersion {
+		return fmt.Errorf("fractional lifecycle requires version 4 or 5, got %d", schemaVersion)
+	}
+	if p.Synthetic && schemaVersion != p.SchemaVersion() {
+		return fmt.Errorf("a synthetic lifecycle requires version %d", p.SchemaVersion())
+	}
+	if !p.Synthetic && (schemaVersion == OrderLifecycleSyntheticVersion || schemaVersion == OrderLifecycleFractionalSyntheticVersion) {
+		return fmt.Errorf("lifecycle version %d holds only a synthetic report", schemaVersion)
 	}
 	return p.Validate()
 }
@@ -255,6 +269,9 @@ func (p LimitOrderLifecyclePayload) ValidateSchema(schemaVersion uint32) error {
 // Validate checks identity, side, status, quantity, limit and time, and that
 // a synthetic report is canceled, names no venue order and says why.
 func (p LimitOrderLifecyclePayload) Validate() error {
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	errs := orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)
 	switch {
 	case p.Synthetic && p.OrderID != "":
@@ -287,9 +304,11 @@ func (p LimitOrderLifecyclePayload) Validate() error {
 //     version.
 const FillTargetWeightVersion uint32 = 5
 
-// TargetWeightFillPayload records one execution: Quantity whole shares at
+// TargetWeightFillPayload records one execution: Quantity integer units at
+// QuantityScale (ADR 0026, D7-F), filled at
 // Price, with the Commission charged for it. FillID is unique per execution.
 type TargetWeightFillPayload struct {
+	QuantityScale int64     `json:"quantity_scale,omitempty"`
 	AccountID     string    `json:"account_id"`
 	ClientOrderID string    `json:"client_order_id"`
 	FillID        string    `json:"fill_id"`
@@ -312,6 +331,9 @@ func (p TargetWeightFillPayload) SameExecution(q TargetWeightFillPayload) bool {
 
 // Validate checks identity, side, quantity, price, commission and time.
 func (p TargetWeightFillPayload) Validate() error {
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	errs := orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, 1)
 	if !isFinite(p.Price) || p.Price <= 0 {
 		errs = append(errs, errors.New("price must be finite and positive"))
@@ -327,4 +349,66 @@ func (p TargetWeightFillPayload) Validate() error {
 		return fmt.Errorf("invalid target-weight fill payload: %w", err)
 	}
 	return nil
+}
+
+// The fractional versions change quantity units, preserving all legacy readers
+// and their original encoding (ADR 0015; ADR 0026, D7-F).
+const (
+	AccountSnapshotFractionalCashVersion     uint32 = 6
+	FillTargetWeightFractionalVersion        uint32 = 6
+	OrderLifecycleFractionalVersion          uint32 = 4
+	OrderLifecycleFractionalSyntheticVersion uint32 = 5
+)
+
+// SchemaVersion declares the cash snapshot's quantity encoding (ADR 0015).
+func (p AccountCashSnapshotPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return AccountSnapshotFractionalCashVersion
+	}
+	return AccountSnapshotCashVersion
+}
+
+// ValidateSchema checks cash snapshot quantity units (ADR 0015).
+func (p AccountCashSnapshotPayload) ValidateSchema(v uint32) error {
+	if v != AccountSnapshotCashVersion && v != AccountSnapshotFractionalCashVersion {
+		return fmt.Errorf("unsupported cash snapshot version %d", v)
+	}
+	if err := quantitySchema(p.QuantityScale, v, AccountSnapshotFractionalCashVersion); err != nil {
+		return err
+	}
+	return p.Validate()
+}
+
+// AccountCashSnapshotVersions lists old and fixed-point cash snapshots (ADR 0015).
+func AccountCashSnapshotVersions() []uint32 {
+	return []uint32{AccountSnapshotCashVersion, AccountSnapshotFractionalCashVersion}
+}
+
+// SchemaVersion declares a fill's quantity encoding (ADR 0015).
+func (p TargetWeightFillPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return FillTargetWeightFractionalVersion
+	}
+	return FillTargetWeightVersion
+}
+
+// ValidateSchema checks a fill's quantity units (ADR 0015).
+func (p TargetWeightFillPayload) ValidateSchema(v uint32) error {
+	if v != FillTargetWeightVersion && v != FillTargetWeightFractionalVersion {
+		return fmt.Errorf("unsupported target-weight fill version %d", v)
+	}
+	if err := quantitySchema(p.QuantityScale, v, FillTargetWeightFractionalVersion); err != nil {
+		return err
+	}
+	return p.Validate()
+}
+
+// TargetWeightFillVersions lists legacy and fixed-point fills (ADR 0015).
+func TargetWeightFillVersions() []uint32 {
+	return []uint32{FillTargetWeightVersion, FillTargetWeightFractionalVersion}
+}
+
+// LimitOrderLifecycleInputVersions excludes synthetic reports from venue inputs (ADR 0015).
+func LimitOrderLifecycleInputVersions() []uint32 {
+	return []uint32{OrderLifecycleLimitVersion, OrderLifecycleFractionalVersion}
 }

@@ -42,6 +42,7 @@ const (
 
 // ReconciliationPayload is IBKR's view of one account at AsOf, a whole second.
 type ReconciliationPayload struct {
+	QuantityScale    int64     `json:"quantity_scale,omitempty"`
 	AccountID        string    `json:"account_id"`
 	ReconciliationID string    `json:"reconciliation_id"`
 	Trigger          string    `json:"trigger"`
@@ -86,6 +87,9 @@ func (p ReconciliationPayload) Readable(component string) bool {
 // Validate checks identity, each component against its readability, and the
 // positions.
 func (p ReconciliationPayload) Validate() error {
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	var errs []error
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
@@ -116,7 +120,7 @@ func (p ReconciliationPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("position %d: instrument id is required", i+1))
 			continue
 		}
-		if position.Quantity == 0 {
+		if position.Quantity == 0 || p.QuantityScale != 0 && position.Quantity < 0 {
 			errs = append(errs, fmt.Errorf("position %s: quantity must not be zero; an empty holding is stated by absence", position.InstrumentID))
 		}
 		if i > 0 && position.InstrumentID <= p.Positions[i-1].InstrumentID {
@@ -210,6 +214,7 @@ type ReconciliationComponent struct {
 
 // ReconciliationResultPayload is one reconciliation's classification.
 type ReconciliationResultPayload struct {
+	QuantityScale    int64  `json:"quantity_scale,omitempty"`
 	AccountID        string `json:"account_id"`
 	ReconciliationID string `json:"reconciliation_id"`
 	// InputID is the account.reconciliation envelope classified, or the
@@ -245,6 +250,9 @@ type ReconciliationResultPayload struct {
 // Validate checks identity, the classification against its action, reasons
 // and scope, and each component.
 func (p ReconciliationResultPayload) Validate() error {
+	if err := quantityScaleError(p.QuantityScale); err != nil {
+		return err
+	}
 	var errs []error
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
@@ -399,4 +407,53 @@ func (p AlertAcknowledgedPayload) Validate() error {
 		return fmt.Errorf("invalid alert acknowledged payload: %w", err)
 	}
 	return nil
+}
+
+// Fractional reconciliation versions state units for position figures; cash
+// components remain integer cents (ADR 0015; ADR 0026, D7-F).
+const ReconciliationFractionalVersion uint32 = 2
+const ReconciliationResultFractionalVersion uint32 = 2
+
+// SchemaVersion declares the observation's quantity units (ADR 0015).
+func (p ReconciliationPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return ReconciliationFractionalVersion
+	}
+	return ReconciliationSchemaVersion
+}
+
+// SchemaVersion declares the result's position units (ADR 0015).
+func (p ReconciliationResultPayload) SchemaVersion() uint32 {
+	if p.QuantityScale != 0 {
+		return ReconciliationResultFractionalVersion
+	}
+	return ReconciliationResultSchemaVersion
+}
+
+// ReconciliationVersions includes every prior observation encoding (ADR 0015).
+func ReconciliationVersions() []uint32 { return []uint32{1, 2} }
+
+// ReconciliationResultVersions includes every prior result encoding (ADR 0015).
+func ReconciliationResultVersions() []uint32 { return []uint32{1, 2} }
+
+// ValidateSchema checks the observation's declared quantity units (ADR 0015).
+func (p ReconciliationPayload) ValidateSchema(v uint32) error {
+	if v < 1 || v > 2 {
+		return fmt.Errorf("unsupported reconciliation version %d", v)
+	}
+	if err := quantitySchema(p.QuantityScale, v, 2); err != nil {
+		return err
+	}
+	return p.Validate()
+}
+
+// ValidateSchema checks the result's declared position units (ADR 0015).
+func (p ReconciliationResultPayload) ValidateSchema(v uint32) error {
+	if v < 1 || v > 2 {
+		return fmt.Errorf("unsupported reconciliation result version %d", v)
+	}
+	if err := quantitySchema(p.QuantityScale, v, 2); err != nil {
+		return err
+	}
+	return p.Validate()
 }

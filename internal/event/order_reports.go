@@ -163,6 +163,12 @@ func (r *OrderReports) Fill(p TargetWeightFillPayload) (o *ReportedOrder, redeli
 		return nil, false, err
 	}
 	q := o.Released
+	if p.QuantityScale != q.QuantityScale {
+		return nil, false, fmt.Errorf("quantity scale %d differs from released order %s scale %d", p.QuantityScale, q.ClientOrderID, q.QuantityScale)
+	}
+	if p.Quantity <= 0 {
+		return nil, false, errors.New("fill quantity must be positive")
+	}
 	if p.AccountID != q.AccountID || p.InstrumentID != q.InstrumentID || p.Side != q.Side {
 		return nil, false, fmt.Errorf("describes %s %s %s, but order %s is %s %s %s", p.AccountID, p.Side, p.InstrumentID, q.ClientOrderID, q.AccountID, q.Side, q.InstrumentID)
 	}
