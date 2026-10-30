@@ -1,36 +1,67 @@
 # Trend Investing
 
-Trend Investing is a stock-first research and trading platform for evaluating:
+A stock-first research and trading platform for one owner's three IBKR
+accounts. It backtests declared strategies, and it runs the two that
+survived the research as automated engines on one small server, where every
+decision is written down before anything is sent. It is not a claim that any
+strategy will be profitable.
 
-1. a source-verified Turtle Trading control adapted to stocks;
-2. a rules-based Sublime Trading control; and
-3. predeclared hybrid experiments.
+## What it trades
 
-The project prioritizes research correctness, deterministic replay, and safe paper trading. It is not a claim that any strategy will be profitable.
+| Account | Rule | Where it stands |
+| --- | --- | --- |
+| Joint taxable account, on margin | **Boost**: SPY held at 98%, raised to 147% for a few days after a sharp drop in an uptrend | In dry run on the server since late October 2026; the paper gate is three cleanly decided sessions in a row (owner decision of 2026-10-24) |
+| Traditional IRA and Roth IRA | **Momentum**: each month, 25 large US stocks that rose most over the past year, with a bond sleeve that grows with the owner's age, in fractional shares (plan decision D7-F) | The Traditional IRA engine decides month-ends in dry run; no IRA order is sent before its own paper gate |
 
-## Architecture direction
+The research lines that produced them are still here and still run as
+backtests: a source-verified **Turtle** control adapted to stocks, a
+rules-based **Sublime** control, predeclared **hybrid** experiments, and
+the momentum and boost edge searches under `research/`. The two controls
+stay separate configurations and are never blended (a non-negotiable in
+`AGENTS.md`).
 
-- **Go** owns strategy rules, portfolio risk, state transitions, replay, persistence interfaces, and telemetry.
-- **LEAN** owns market-data delivery, brokerage integration, orders, fills, calendars, and corporate actions.
-- A deliberately thin **Python adapter** will translate between LEAN and versioned messages understood by Go.
-- Every consequential input and output is recorded as an ordered, versioned event.
-- PostgreSQL will store durable events and rebuildable operational projections.
+The owner's manual, `docs/manual/README.md`, says in plain language what
+each piece does, which decision backs it, and what can go wrong. Its table
+"Built today and not built yet" is the one list of what is finished.
 
-The first deployment is a modular monolith on one host. Microservices and Kubernetes are deferred until measured operational needs justify them.
+## How it is built
 
-## Repository status
+- **Go** owns strategy rules, portfolio risk, state transitions, deterministic
+  replay and the durable log (`internal/`, pure; `cmd/` is composition only).
+- **LEAN** owns market data for backtests. The **IBKR adapter**
+  (`adapter/ibkr/`, Python) owns live market data and brokerage through IB
+  Gateway (ADR 0025); a data job fetches daily prices from Massive.
+- Every consequential input and output is an ordered, versioned event. Each
+  engine streams its inputs to a hash-chained durable log before answering,
+  and a crash resumes from that log (ADR 0027). Projections are rebuilt
+  from it; there is no database.
+- One **engine** per account decides; a separate **adapter** carries orders
+  to IBKR and answers back; a **reporter** and a **dashboard** say what
+  happened; an **operator** command records the owner's approvals and
+  clearances. All of it runs on one Lightsail server under systemd
+  (`deploy/`), with a rehearsal container that replays a first day and a
+  month before any change ships.
 
-This initial foundation contains the event contract, deterministic replay sequencing, tests, CI, and architectural documentation. Strategy semantics are implemented ticket by ticket from the specification (#4) and the ADRs in `docs/adr/`, never ahead of them; the ledger (#51) records what has landed.
+`docs/architecture.md` draws the boundaries, `docs/adr/` records every
+decision, `docs/live-trading/plan.md` is the owner's plan and its gates, and
+`docs/runbooks/` are the step-by-step procedures (first dry-run day, first
+paper order, missed rebalance, Gateway login, halted account).
 
 ## Quick start
 
-Requirements: Go 1.27.3 or newer (see `.go-version`; `GOTOOLCHAIN=local` means no other version is fetched automatically).
+Requirements: Go 1.27.3 or newer (see `.go-version`; `GOTOOLCHAIN=local`
+means no other version is fetched automatically), Python 3 for the
+adapters, Docker for the rehearsal.
 
 ```sh
-make check
+make check          # format, vet, staticcheck, race tests, coverage, govulncheck, build, adapter suites
+deploy/rehearse.sh  # the server's first day and an IRA month, in a container
 ```
 
-This runs the same formatting, analysis, race-enabled tests, coverage, vulnerability, dependency, and build gates used by CI. See [docs/architecture.md](docs/architecture.md), [docs/development.md](docs/development.md), and [docs/dependency-policy.md](docs/dependency-policy.md) before adding production behavior.
+`docs/running-a-backtest.md` runs a fixture end to end and verifies the
+journal it writes. `docs/development.md` holds the engineering rules,
+including the source-comment standard and strict test-first development.
+`CONTRIBUTING.md` covers the toolchain.
 
 ## Declared Variants
 
@@ -39,8 +70,12 @@ The declared wider-cap Variants are
 [`total-long-cap-36`](cmd/backtest/testdata/variants/total-long-cap-36/README.md).
 They change only the total-long cap; the Baseline stays at 12 Units (ADR 0008).
 Every run's [research report](docs/running-a-backtest.md#regime-reports-and-held-out-evaluations)
-now carries peak sector concentration and the count of independent Campaigns.
+carries peak sector concentration and the count of independent Campaigns.
 
 ## Safety
 
-This software is under active development. It must not be used to place live orders until the paper-trading and limited-live readiness gates are explicitly satisfied.
+This software is under active development. It must not be used to place
+live orders until the paper-trading and limited-live readiness gates in the
+plan are explicitly satisfied. Nothing in this repository holds an account
+id, a credential, or real market data: fixtures are synthetic, and the
+server's secrets live only on the server.
