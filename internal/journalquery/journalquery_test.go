@@ -1265,15 +1265,84 @@ func TestReconcileNamesTrailingFillsBesideDisagreements(t *testing.T) {
 	}
 }
 
-// TestFractionalQueryFailsClosedUntilSurfaceMigration refuses to label
-// fixed-point ticks as whole shares (ADR 0015; ADR 0026 D7-F).
-func TestFractionalQueryFailsClosedUntilSurfaceMigration(t *testing.T) {
+// ADR 0026 D7-F: owner tables print shares while records retain exact units.
+func TestFractionalQueryShowsShares(t *testing.T) {
 	p := plannedPayload("AAA", "buy")
 	p.QuantityScale, p.Quantity, p.FractionalIncrement = 10000, 72500, "0.0001"
-	data := build(t, snap(at(time.March, 1)), dec(event.OrderPlannedEventType, p.SchemaVersion(), at(time.March, 2), p))
-	js := []journalquery.Journal{load(t, "fractional", data)}
-	if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "fractional") {
-		t.Fatalf("fractional query must fail closed: %v", err)
+	r := event.OrderReleasedPayload{AccountID: p.AccountID, ClientOrderID: p.ClientOrderID, PlanID: "plan", Tag: p.Tag,
+		InstrumentID: p.InstrumentID, Side: p.Side, Quantity: p.Quantity, QuantityScale: p.QuantityScale, LimitPrice: p.LimitPrice,
+		Mode: "paper", Send: true, Figures: cashFigures}
+	refused := event.OrderRefusedPayload{AccountID: p.AccountID, ClientOrderID: p.ClientOrderID, PlanID: "plan", Tag: p.Tag,
+		InstrumentID: p.InstrumentID, Side: p.Side, Quantity: p.Quantity, QuantityScale: p.QuantityScale, LimitPrice: p.LimitPrice,
+		Reason: event.RefusedInsufficientCash, Detail: "synthetic cash shortfall", Figures: cashFigures}
+	for _, decision := range []rec{
+		dec(event.OrderPlannedEventType, p.SchemaVersion(), at(time.March, 2), p),
+		dec(event.OrderReleasedEventType, r.SchemaVersion(), at(time.March, 2), r),
+		dec(event.OrderRefusedEventType, refused.SchemaVersion(), at(time.March, 2), refused),
+	} {
+		data := build(t, snap(at(time.March, 1)), decision)
+		js := []journalquery.Journal{load(t, "fractional", data)}
+		got, err := journalquery.Orders(js, journalquery.Filter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cell(got, 0, "quantity") != "7.25" {
+			t.Fatalf("units shown as shares: %+v", got)
+		}
+	}
+}
+
+func TestFractionalInputQueryShowsShares(t *testing.T) {
+	d := at(time.March, 2)
+	snapRec := cashSnap(d, event.AccountPosition{InstrumentID: "AAA", Quantity: 72500})
+	s := snapRec.payload.(event.AccountCashSnapshotPayload)
+	s.QuantityScale = 10000
+	snapRec.payload, snapRec.schema = s, s.SchemaVersion()
+	fillRec := limitFill("synthetic", "sell", 12500, 0.25, d)
+	f := fillRec.payload.(event.TargetWeightFillPayload)
+	f.QuantityScale = 10000
+	fillRec.payload, fillRec.schema = f, f.SchemaVersion()
+	lifeRec := limitLifecycle(d)
+	l := lifeRec.payload.(event.LimitOrderLifecyclePayload)
+	l.QuantityScale, l.Quantity = 10000, 72500
+	lifeRec.payload, lifeRec.schema = l, l.SchemaVersion()
+	for name, input := range map[string]rec{"snapshot": snapRec, "fill": fillRec, "lifecycle": lifeRec} {
+		t.Run(name, func(t *testing.T) {
+			js := []journalquery.Journal{load(t, name, build(t, input))}
+			fills, err := journalquery.Fills(js, journalquery.Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "fill" && cell(fills, 0, "quantity") != "-1.25" {
+				t.Fatalf("fill units: %+v", fills)
+			}
+			orders, err := journalquery.Orders(js, journalquery.Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "lifecycle" && cell(orders, 0, "quantity") != "7.25" {
+				t.Fatalf("order units: %+v", orders)
+			}
+		})
+	}
+	for _, scale := range []int64{0, 1} {
+		for _, input := range []rec{snapRec, fillRec, lifeRec} {
+			raw, _ := json.Marshal(input.payload)
+			var fields map[string]any
+			_ = json.Unmarshal(raw, &fields)
+			fields["quantity_scale"] = scale
+			input.payload = fields
+			js := []journalquery.Journal{load(t, "bad-scale", build(t, input))}
+			if _, err := journalquery.Fills(js, journalquery.Filter{}); err == nil {
+				t.Fatal("accepted fractional version at wrong scale")
+			}
+		}
+	}
+	js := []journalquery.Journal{load(t, "fractional", build(t, snapRec, fillRec))}
+	for _, query := range []func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){journalquery.Totals, journalquery.Positions, journalquery.Reconcile} {
+		if _, err := query(js, journalquery.Filter{}); err == nil {
+			t.Fatal("whole-share aggregation accepted fractional units")
+		}
 	}
 }
 
@@ -1283,5 +1352,59 @@ func TestMalformedFractionalUnitsCannotPassALegacySurface(t *testing.T) {
 	js := []journalquery.Journal{load(t, "malformed-scale", build(t, snap(d), rec{journal.KindInput, event.OrderLifecycleEventType, 1, d, p}))}
 	if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil {
 		t.Fatal("accepted malformed fractional unit metadata")
+	}
+}
+
+func TestQuantityScaleOnAnUnversionedPayloadIsRefused(t *testing.T) {
+	// A payload whose fields do not depend on its version carries no quantity
+	// scale; one that claims a scale is refused rather than read as whole shares.
+	d := at(time.March, 2)
+	r := rec{journal.KindInput, event.KillSwitchEventType, event.KillSwitchSchemaVersion, d,
+		map[string]any{"account_id": "A", "as_of": d, "engaged": true, "operator": "owner", "detail": "news",
+			"quantity_scale": 10000}}
+	js := []journalquery.Journal{load(t, "j", build(t, r))}
+	_, err := journalquery.Orders(js, journalquery.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "quantity_scale is not supported at this version") {
+		t.Fatalf("scale on an unversioned payload accepted or unnamed: %v", err)
+	}
+}
+
+func TestAFractionalSkippedTradeIsListedWithTheOrders(t *testing.T) {
+	// A fractional rebalance records a skip at the fractional version (ADR 0026, D7-F);
+	// the orders view lists it rather than refusing the journal.
+	d := at(time.March, 2)
+	skipped := event.OrderSkippedPayload{AccountID: "A", Tag: "t", ClientOrderID: "c-1", InstrumentID: "AAA", Side: event.OrderSideBuy,
+		Phase: event.OrderSideBuy, Reason: event.OrderSkippedBelowIncrement, TargetWeight: 0.5, NetLiquidation: 1, ReferencePrice: 3,
+		QuantityScale: event.FractionalQuantityScale, RequestedValue: "0.0010", FractionalIncrement: "0.0001"}
+	input := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, input, dec(event.OrderSkippedEventType, skipped.SchemaVersion(), d, skipped)))}
+	o, err := journalquery.Orders(js, journalquery.Filter{})
+	if err != nil || len(o.Rows) != 1 {
+		t.Fatalf("orders: %v %+v", err, o)
+	}
+}
+
+func TestAggregationsSkipUnrelatedScalarInputsBesideWholeShareRecords(t *testing.T) {
+	// An unrelated input whose payload is not an object is skipped by every
+	// aggregation, as before the fractional scale check (ADR 0015).
+	d := at(time.March, 2)
+	other := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, other, fillInput(validFill("f-1", 4, d))))}
+	for name, fn := range map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+		"totals": journalquery.Totals, "positions": journalquery.Positions,
+	} {
+		if _, err := fn(js, journalquery.Filter{}); err != nil {
+			t.Errorf("%s refused a journal with an unrelated scalar input: %v", name, err)
+		}
+	}
+}
+
+func TestAMalformedScaleOnAnyRecordIsRefusedByAggregations(t *testing.T) {
+	// A record whose scale is not a number cannot be trusted to add whole shares (ADR 0015).
+	d := at(time.March, 2)
+	bad := rec{journal.KindInput, "other.thing", 1, d, map[string]any{"quantity_scale": "ten"}}
+	js := []journalquery.Journal{load(t, "j", build(t, bad, fillInput(validFill("f-1", 4, d))))}
+	if _, err := journalquery.Totals(js, journalquery.Filter{}); err == nil {
+		t.Fatal("a non-numeric quantity_scale was accepted by totals")
 	}
 }

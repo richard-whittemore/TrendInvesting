@@ -65,6 +65,7 @@ func beforeLast(e report.Equity) report.EquityPoint { return e.Points[len(e.Poin
 var page = template.Must(template.New("page").Funcs(template.FuncMap{
 	"weight":       func(v float64) string { return fmt.Sprintf("%.0f%%", v*100) },
 	"shares":       event.FormatSkippedShares,
+	"quantity":     event.FormatQuantity,
 	"pct":          func(v float64) string { return fmt.Sprintf("%+.2f%%", v*100) },
 	"money":        func(v float64) string { return fmt.Sprintf("%.2f", v) },
 	"share":        func(v float64) string { return fmt.Sprintf("%.2f%%", v*100) },

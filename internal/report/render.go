@@ -35,7 +35,7 @@ func RenderText(s Summary) string {
 		b.WriteString(" none")
 	}
 	for _, h := range s.Holdings {
-		fmt.Fprintf(&b, " %s %d", h.InstrumentID, h.Quantity)
+		fmt.Fprintf(&b, " %s %s", h.InstrumentID, event.FormatQuantity(h.Quantity, s.QuantityScale))
 	}
 	b.WriteString("\nTargets:\n")
 	if len(s.Decisions) == 0 {
@@ -69,7 +69,7 @@ func RenderText(s Summary) string {
 		if f.Side != "" {
 			fmt.Fprintf(&b, " %s", f.Side)
 		}
-		fmt.Fprintf(&b, " %s %d @ %.2f", f.InstrumentID, f.Quantity, f.Price)
+		fmt.Fprintf(&b, " %s %s @ %.2f", f.InstrumentID, event.FormatQuantity(f.Quantity, f.QuantityScale), f.Price)
 	}
 	b.WriteString("\n")
 	if len(s.SalesWithheld) > 0 {

@@ -1,0 +1,52 @@
+[
+  {
+    "event_type": "execution.order.lifecycle",
+    "schema_version": 4,
+    "payload": {
+      "account_id": "synthetic",
+      "client_order_id": "synthetic-order",
+      "instrument_id": "AAA",
+      "side": "sell",
+      "quantity_scale": 10000,
+      "order_id": "order:12:17",
+      "status": "submitted",
+      "quantity": 72500,
+      "limit_price": 10.0,
+      "occurred_at": "2026-10-29T19:01:00Z",
+      "message": ""
+    }
+  },
+  {
+    "event_type": "execution.fill",
+    "schema_version": 6,
+    "payload": {
+      "account_id": "synthetic",
+      "client_order_id": "synthetic-order",
+      "instrument_id": "AAA",
+      "side": "sell",
+      "quantity_scale": 10000,
+      "fill_id": "synthetic.01.01",
+      "quantity": 35000,
+      "price": 10.0,
+      "commission": 0.25,
+      "filled_at": "2026-10-29T19:00:00Z"
+    }
+  },
+  {
+    "event_type": "execution.order.lifecycle",
+    "schema_version": 4,
+    "payload": {
+      "account_id": "synthetic",
+      "client_order_id": "synthetic-order",
+      "instrument_id": "AAA",
+      "side": "sell",
+      "quantity_scale": 10000,
+      "order_id": "order:12:17",
+      "status": "canceled",
+      "quantity": 72500,
+      "limit_price": 10.0,
+      "occurred_at": "2026-10-29T19:01:00Z",
+      "message": ""
+    }
+  }
+]

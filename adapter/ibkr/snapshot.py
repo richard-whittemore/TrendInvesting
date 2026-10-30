@@ -21,8 +21,8 @@ The owner's decision of 2026-10-18 (ADR 0019, ADR 0025 point 5 and ADR
 0026 point 1, amended): one reading taken after a session's close and
 before the next open, with no order working or pending at IBKR for the
 account and no execution since the close, is the account as of that close.
-From that one reading come the engine's account.snapshot (version 3,
-account_snapshot_record) and the broker snapshot (version 2,
+From that one reading come the engine's account.snapshot (version 3, or cash versions 4/6,
+account_snapshot_record) and the broker snapshot (version 2, or fractional version 3,
 broker_snapshot_record), both stamped as of the close, the broker snapshot
 stating the true read time beside it as evidence; when the reading cannot
 stand for the close (the adapter checks the condition, loop.py), both are
@@ -64,6 +64,7 @@ from orders import FINISHED, UnrecognisedOrderReport, open_order_record, order_k
 from sender import CURRENCY, EXCHANGE, SEC_TYPE
 from spelling import ibkr_symbol
 from values import to_decimal
+from quantities import quantity_scale, units, shares
 
 log = logging.getLogger("ibkr")
 
@@ -138,8 +139,8 @@ Record = namedtuple("Record", "event_type schema_version payload")
 """One recorded input: its event type, schema version and JSON-ready payload."""
 
 AccountReading = namedtuple("AccountReading", (
-    "account_id positions balances open_orders unread as_of unended summary"), defaults=(frozenset(), ""))
-"""One read of the account. positions maps symbol to whole shares, balances
+    "account_id positions balances open_orders unread as_of unended summary quantity_scale"), defaults=(frozenset(), "", 0))
+"""One read of the account. positions maps symbol to exact Decimal shares (legacy whole shares stay ints), balances
 tag to Money, open_orders lists open-order payload rows; unread holds the
 components that could not be read; as_of is a whole-second UTC datetime.
 unended names the components whose answers carry no request ID (positions,
@@ -186,6 +187,8 @@ def read_account(conn):
     needed = tuple((tag, MARKERS[tag]) for tag in account_tags(conn.config))
     balance_markers = {component for _, component in needed}
     unread = set()
+    reasons = []
+    scale = quantity_scale(conn.config)
     positions, balances, orders = {}, {}, {}
     received = conn.now_utc()
     done = {"positions": False, "summary": False, "orders": False}
@@ -214,7 +217,7 @@ def read_account(conn):
             for event in conn.events(conn.config.request_timeout):
                 if not conn.connected:
                     break
-                _take(event, account, summary, positions, orders, unread, done, conn.open_order_list(ticket))
+                _take(event, account, summary, positions, orders, unread, done, conn.open_order_list(ticket), scale, reasons)
                 done["orders"] = conn.open_order_list(ticket) == LIST_ENDED
                 if all(done.values()):
                     break
@@ -260,6 +263,7 @@ def read_account(conn):
         if summary is not None and not summary.ended:
             unended.add(ACCOUNT_VALUES)
     return AccountReading(
+        quantity_scale=scale,
         unended=frozenset(unended),
         account_id=account,
         positions={} if POSITIONS in unread else positions,
@@ -269,7 +273,7 @@ def read_account(conn):
         as_of=as_of.replace(microsecond=0),
         summary=("the link to IB Gateway was lost or dropped during the read, so none of it stands"
                  if link_changed else _summary_outcome(conn, summary, balances, invalid) if summary is not None else
-                 "not asked: the link to IB Gateway was down"))
+                 "not asked: the link to IB Gateway was down") + ("; " + "; ".join(reasons) if reasons else ""))
 
 
 def _summary_outcome(conn, summary, balances, invalid):
@@ -312,40 +316,44 @@ def _log_summary(conn, summary, balances, invalid):
     log.log(level, "ibkr account values %s", outcome)
 
 
-def _take(event, account, summary, positions, orders, unread, done, open_order_list):
+def _take(event, account, summary, positions, orders, unread, done, open_order_list, scale=0, reasons=None):
     """Apply one callback to the read; an open order counts only while the read's own list is answered."""
     name, args = event.name, event.args
     if name == "position":
-        _take_position(positions, account, unread, *args)
+        _take_position(positions, account, unread, *args, scale=scale, reasons=reasons)
     elif name == "position_end":
         done["positions"] = True
     elif summary.take(event):
         done["summary"] = summary.answered
     elif name == "open_order" and open_order_list == LIST_READING:
-        _take_order(orders, account, unread, *args)
+        _take_order(orders, account, unread, *args, scale=scale, reasons=reasons)
 
 
-def _take_position(positions, account, unread, row_account, contract, quantity, avg_cost):
-    """One position row as the engine names it: whole shares of a US-dollar stock, by symbol."""
+def _take_position(positions, account, unread, row_account, contract, quantity, avg_cost, scale=0, reasons=None):
+    """One stock position under the configured D7 policy (ADR 0026), never rounded."""
     if row_account != account:
         return
     rows = {}
     try:
         _add_position(rows, account, row_account, contract, quantity, avg_cost)
-    except SnapshotInvalid:
-        unread.add(POSITIONS)
+    except SnapshotInvalid as err:
+        _quantity_refused(unread, POSITIONS, str(err), reasons)
         return
     row = rows[contract.conId]
-    if row.quantity == 0:
+    try:
+        count = units(row.quantity, scale, "position " + row.symbol)
+    except ValueError as err:
+        _quantity_refused(unread, POSITIONS, str(err), reasons)
+        return
+    if count == 0:
         return  # an empty holding is stated by absence
-    if (row.sec_type != "STK" or row.currency != BASE_CURRENCY or row.quantity != row.quantity.to_integral_value()
-            or row.symbol in positions):
+    if (row.sec_type != "STK" or row.currency != BASE_CURRENCY or row.symbol in positions):
         unread.add(POSITIONS)
         return
-    positions[row.symbol] = int(row.quantity)
+    positions[row.symbol] = shares(count, scale) if scale else count
 
 
-def _take_order(orders, account, unread, order_id, contract, order, order_state):
+def _take_order(orders, account, unread, order_id, contract, order, order_state, scale=0, reasons=None):
     """One open order as the payload lists it, keyed by its identity across the login."""
     if order.account != account:
         return
@@ -359,8 +367,12 @@ def _take_order(orders, account, unread, order_id, contract, order, order_state)
         unread.add(OPEN_ORDERS)
         return
     side = {"BUY": "buy", "SELL": "sell"}.get(record.action)
-    if (status not in OPEN_STATUS or side is None or record.quantity <= 0
-            or record.quantity != record.quantity.to_integral_value()):
+    try:
+        count = units(record.quantity, scale, "open order " + record.symbol)
+    except ValueError as err:
+        _quantity_refused(unread, OPEN_ORDERS, str(err), reasons)
+        return
+    if status not in OPEN_STATUS or side is None or count <= 0:
         unread.add(OPEN_ORDERS)
         return
     orders[key] = {
@@ -372,7 +384,7 @@ def _take_order(orders, account, unread, order_id, contract, order, order_state)
         # IBKR's openOrder carries the order's total, not what is left; the
         # total is never less than the remainder, so a sale sized net of it
         # can only be smaller, never sell a share not held.
-        "remaining_quantity": int(record.quantity),
+        "remaining_quantity": count,
     }
 
 
@@ -677,10 +689,10 @@ def broker_snapshot_record(reading, market_open, marks=None, close=None, why="",
     for symbol in sorted(reading.positions):
         mark = marks.get(symbol)
         positions.append({
-            "instrument_id": symbol, "quantity": reading.positions[symbol],
+            "instrument_id": symbol, "quantity": units(reading.positions[symbol], reading.quantity_scale),
             "mark": 0 if mark is None else float(to_decimal(mark, "mark")), "mark_set": mark is not None,
         })
-    return Record(BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION, {
+    return _scaled_record(BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION, 3, reading, {
         "account_id": reading.account_id,
         "as_of": _stamp(as_of),
         "market_open": market_open,
@@ -699,37 +711,44 @@ def broker_snapshot_record(reading, market_open, marks=None, close=None, why="",
 
 
 def account_snapshot_record(reading, as_of, net_liquidation=None, version=ACCOUNT_SNAPSHOT_VERSION):
-    """The engine's account.snapshot of reading, as of as_of: version 3, its positions and net liquidation, or 4.
+    """The engine's account.snapshot of reading, as of as_of: version 3 positions, version 4 cash, or D7-F version 6.
 
-    Both must have been read in full: an unavailable balance is not zero
+    Positions and net liquidation must have been read in full: an unavailable balance is not zero
     (ADR 0019), so a reading without them gives no snapshot (ValueError).
     net_liquidation, for a reading as of the close, is its valuation at the
     close (close_valuation; ADR 0019, amended 2026-10-18); without it the
     snapshot states IBKR's own at the read. Version 4 (an IRA's momentum
     engine, ADR 0026 point 2) adds IBKR's settled cash and total cash from
     the same reading, and needs both: a reading missing either gives no
-    snapshot at all, never one with a zero or with only one of them.
+    snapshot at all, never one with a zero or with only one of them. Version 6
+    uses the same cash fields with integer ten-thousandths and quantity_scale
+    10000 (ADR 0015; ADR 0026 D7-F).
     """
-    if version not in (ACCOUNT_SNAPSHOT_VERSION, ACCOUNT_SNAPSHOT_CASH_VERSION):
+    if version not in (ACCOUNT_SNAPSHOT_VERSION, ACCOUNT_SNAPSHOT_CASH_VERSION, 6):
         raise ValueError("account.snapshot version {} is not one the adapter writes".format(version))
-    needed = {POSITIONS, NET} | ({CASH, SETTLED} if version == ACCOUNT_SNAPSHOT_CASH_VERSION else set())
+    if (version == 6) != (reading.quantity_scale == 10000):
+        raise ValueError("account snapshot version and reading quantity scale policy disagree")
+    needed = {POSITIONS, NET} | ({CASH, SETTLED} if version in (ACCOUNT_SNAPSHOT_CASH_VERSION, 6) else set())
     if reading.unread & needed:
         raise ValueError("an account snapshot at version {} needs {}, and {} could not be read".format(
             version, ", ".join(sorted(needed)), ", ".join(sorted(reading.unread & needed))))
-    if version == ACCOUNT_SNAPSHOT_CASH_VERSION and not {TOTAL_CASH, SETTLED_CASH} <= set(reading.balances):
-        raise ValueError("an account snapshot at version 4 needs IBKR's settled and total cash, and the reading "
-                         "holds {}".format(", ".join(sorted(reading.balances)) or "no balance"))
+    if version in (ACCOUNT_SNAPSHOT_CASH_VERSION, 6) and not {TOTAL_CASH, SETTLED_CASH} <= set(reading.balances):
+        raise ValueError("an account snapshot at version {} needs IBKR's settled and total cash, and the reading "
+                         "holds {}".format(version, ", ".join(sorted(reading.balances)) or "no balance"))
     balance = reading.balances[NET_LIQUIDATION]
     payload = {
         "account_id": reading.account_id,
         "as_of": _stamp(as_of),
         "net_liquidation": float(balance.amount if net_liquidation is None else net_liquidation),
         "currency": balance.currency,
-        "positions": [{"instrument_id": s, "quantity": reading.positions[s]} for s in sorted(reading.positions)],
+        "positions": [{"instrument_id": s, "quantity": units(reading.positions[s], reading.quantity_scale)}
+                      for s in sorted(reading.positions)],
     }
-    if version == ACCOUNT_SNAPSHOT_CASH_VERSION:
+    if version in (ACCOUNT_SNAPSHOT_CASH_VERSION, 6):
         payload["settled_cash"] = float(reading.balances[SETTLED_CASH].amount)
         payload["total_cash"] = float(reading.balances[TOTAL_CASH].amount)
+    if reading.quantity_scale:
+        payload["quantity_scale"] = reading.quantity_scale
     return Record(ACCOUNT_SNAPSHOT_TYPE, version, payload)
 
 
@@ -787,13 +806,29 @@ def reconciliation_record(reading, reconciliation_id, trigger=MORNING):
     if not reconciliation_id:
         raise ValueError("a reconciliation names its id")
     cash_read = CASH not in reading.unread
-    return Record(RECONCILIATION_TYPE, RECONCILIATION_VERSION, {
+    return _scaled_record(RECONCILIATION_TYPE, RECONCILIATION_VERSION, 2, reading, {
         "account_id": reading.account_id,
         "reconciliation_id": reconciliation_id,
         "trigger": trigger,
         "as_of": _stamp(reading.as_of),
         "unreadable": sorted(reading.unread & {POSITIONS, CASH}),
-        "positions": [{"instrument_id": s, "quantity": reading.positions[s]} for s in sorted(reading.positions)],
+        "positions": [{"instrument_id": s, "quantity": units(reading.positions[s], reading.quantity_scale)}
+                      for s in sorted(reading.positions)],
         "total_cash": float(reading.balances[TOTAL_CASH].amount) if cash_read else 0,
         "currency": reading.balances[TOTAL_CASH].currency if cash_read else "",
     })
+
+
+def _quantity_refused(unread, component, reason, reasons):
+    """Retain why broker quantities cannot be represented (ADR 0019; ADR 0026 D7)."""
+    unread.add(component)
+    log.warning("ibkr %s unreadable: %s", component, reason)
+    if reasons is not None:
+        reasons.append(component + ": " + reason)
+
+
+def _scaled_record(kind, legacy, fractional, reading, payload):
+    """Select the engine's explicit quantity schema (ADR 0015; ADR 0026 D7-F)."""
+    if reading.quantity_scale:
+        payload["quantity_scale"] = reading.quantity_scale
+    return Record(kind, fractional if reading.quantity_scale else legacy, payload)

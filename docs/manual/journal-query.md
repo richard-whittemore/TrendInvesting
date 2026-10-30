@@ -61,6 +61,13 @@ Flags, all optional: `-account A1`, `-instrument AAA`, `-from 2026-01-01`,
 `orders`, `fills`, `refusals`, `positions`, `reconcile` and `operator`
 reports show the source journal in the first column; `totals` combines all selected journals.
 
+On an account that trades fractional shares (the IRAs, plan decision D7-F), `orders`,
+`fills`, `refusals` and `operator` read the journal and print shares. `positions`,
+`totals` and `reconcile` still add whole shares only: on a fractional journal each
+refuses, by name, rather than add a figure it cannot represent, until the
+aggregation migration ships. The dashboard's reconcile section shows the same
+refusal. Nothing the engine does depends on these views.
+
 Name one file per run. A run resumed from a crash writes a new log that begins
 with every record of the log it resumed, and a second copy of a journal holds
 all of its records again, so naming either pair would count that history twice.

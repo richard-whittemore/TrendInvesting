@@ -34,8 +34,8 @@ _OPTIONAL = {"paper_sending_enabled": False, "account_snapshot_version": 3, "res
 # The account.snapshot versions the adapter writes: 3, positions and net
 # liquidation, which Boost reads (internal/event AccountSnapshotPositionsVersion),
 # and 4, with IBKR's settled and total cash, which the momentum engine reads
-# (AccountSnapshotCashVersion). Each engine refuses the other's (ADR 0015).
-ACCOUNT_SNAPSHOT_VERSIONS = (3, 4)
+# (AccountSnapshotCashVersion); 6 is its D7-F fixed-point form (ADR 0026).
+ACCOUNT_SNAPSHOT_VERSIONS = (3, 4, 6)
 
 # Any key containing one of these is refused outright. The adapter never
 # handles the IBKR password: IBC holds it on the server (ADR 0025 point 6).
@@ -70,8 +70,9 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     snapshot only at the end of its 11-second window, so MARK_TIMEOUT (15
     seconds) is the recommended value; a value at or under 11 seconds can give no mark for a price IBKR did send.
     account_snapshot_version is the account.snapshot version the engine
-    reads (ACCOUNT_SNAPSHOT_VERSIONS): 3 for Boost, 4 for an IRA's momentum
-    engine, which then needs IBKR's SettledCash as well as its TotalCashValue
+    reads (ACCOUNT_SNAPSHOT_VERSIONS): 3 for Boost, 4 for a whole-share IRA,
+    6 for a D7-F IRA (exact ten-thousandths; ADR 0026). The IRA momentum
+    engine needs IBKR's SettledCash as well as its TotalCashValue
     in every reading (snapshot.read_account). resolve_contracts, for an IRA,
     resolves each instrument the batch marks to its IBKR contract by name
     (snapshot.resolve_contracts) and states it with the mark, so a stock

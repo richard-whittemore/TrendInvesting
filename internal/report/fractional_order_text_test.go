@@ -2,6 +2,7 @@ package report_test
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -97,5 +98,99 @@ Counted: SPY price return only: dividends not counted; deposits and withdrawals 
 	const wantOrder = `{"ClientOrderID":"tw-b","InstrumentID":"SPY","Side":"buy","Quantity":10,"LimitPrice":101,"Status":"refused","Reason":"order-size","Send":false}`
 	if string(raw) != wantOrder {
 		t.Fatalf("Boost order JSON changed: %s", raw)
+	}
+}
+
+// ADR 0026 D7-F: adapter records retain exact units; owner surfaces show shares.
+func TestFractionalAdapterRecordsInSummary(t *testing.T) {
+	s, _ := iraDay(t)
+	for i := range s.out {
+		e := &s.out[i]
+		switch e.Type {
+		case event.TargetWeightConfigurationEventType:
+			var p event.TargetWeightConfigurationPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			p.Execution.ShareQuantity = event.ShareQuantityFractional
+			p.Execution.FractionalIncrement = "0.0001"
+			e.SchemaVersion = p.SchemaVersion()
+			e.Payload, _ = json.Marshal(p)
+		case event.AccountSnapshotEventType:
+			var p event.AccountCashSnapshotPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			p.QuantityScale = event.FractionalQuantityScale
+			p.Positions = []event.AccountPosition{{InstrumentID: "AAA", Quantity: 123456}}
+			e.SchemaVersion = p.SchemaVersion()
+			e.Payload, _ = json.Marshal(p)
+		case event.FillEventType:
+			var p event.TargetWeightFillPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			p.QuantityScale, p.Quantity, p.Commission = event.FractionalQuantityScale, 35000, 0.25
+			e.SchemaVersion = p.SchemaVersion()
+			e.Payload, _ = json.Marshal(p)
+		}
+	}
+	s.add(event.BrokerSnapshotEventType, event.BrokerSnapshotFractionalVersion, "broker", day(0).Add(time.Hour), event.BrokerSnapshotPayload{
+		AccountID: "trad-ira", AsOf: day(0).Add(time.Hour), ReadAt: day(0).Add(time.Hour), NotAsOfClose: "synthetic open order after close",
+		QuantityScale: event.FractionalQuantityScale, NetLiquidation: 100000, ReadNetLiquidation: 100000, ExcessLiquidity: 100000,
+		Positions: []event.BrokerPosition{}, OpenOrders: []event.BrokerOrder{},
+	})
+	summary, err := report.Summarize(s.out, "2024-01-02", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !summary.CashUnchecked || summary.CashChecked {
+		t.Fatal("fractional broker read lost its unchecked cash status")
+	}
+	text := report.RenderText(summary)
+	for _, want := range []string{"Holdings: AAA 12.3456", "Fills: buy AAA 3.5 @ 10.00", "commissions 0.25"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("summary lacks %q:\n%s", want, text)
+		}
+	}
+	if summary.RejectedInputs != 0 || summary.Costs.FillsNotRead != 0 {
+		t.Fatalf("inputs dropped: %+v", summary)
+	}
+}
+
+func TestShippedIRAUsesFractionalShares(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/etc/engines/trad-ira.config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg event.TargetWeightConfigurationPayload
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Execution.ShareQuantity != event.ShareQuantityFractional || cfg.Execution.FractionalIncrement != "0.0001" {
+		t.Fatalf("IRA execution = %+v; want D7-F with increment 0.0001", cfg.Execution)
+	}
+}
+
+// ADR 0019: a fractional broker reading still says why it cannot stand for the close.
+func TestFractionalBrokerSnapshotExplainsWithheldClose(t *testing.T) {
+	s := newStream(t)
+	const why = "synthetic open order after close"
+	s.broker(0, why, false)
+	i := len(s.out) - 1
+	var p event.BrokerSnapshotPayload
+	if err := json.Unmarshal(s.out[i].Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.QuantityScale = event.FractionalQuantityScale
+	s.rewrite(i, p)
+	s.out[i].SchemaVersion = p.SchemaVersion()
+	s.withheld(0, event.WithheldStaleAccountSnapshot)
+	got, err := report.Alerts(s.out, "boost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !strings.Contains(got[0].Body, why) {
+		t.Fatalf("fractional broker reason absent: %+v", got)
 	}
 }

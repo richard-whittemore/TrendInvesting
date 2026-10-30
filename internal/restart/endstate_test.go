@@ -415,3 +415,49 @@ func TestProposeApprovalStatesAHandSaleAsAttempted(t *testing.T) {
 		}
 	}
 }
+
+// ADR 0026 D7-F: only a venue report at its declared scale names an order.
+func TestFractionalLifecyclePreventsRetirement(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		version          uint32
+		scale            int64
+		synthetic, named bool
+	}{
+		{"venue", 4, 10000, false, true}, {"wrong scale", 4, 0, false, false},
+		{"legacy version with fractional scale", 2, 10000, false, false},
+		{"synthetic", 5, 10000, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := saleReleased(t, "joint-sale-1")
+			var r event.OrderReleasedPayload
+			if err := json.Unmarshal(release.Envelope.Payload, &r); err != nil {
+				t.Fatal(err)
+			}
+			r.Quantity, r.QuantityScale = 72500, 10000
+			release = recorded(t, journal.KindDecision, "release", event.OrderReleasedEventType, r.SchemaVersion(), r)
+			life := saleReported(t, r.ClientOrderID)
+			var l event.LimitOrderLifecyclePayload
+			if err := json.Unmarshal(life.Envelope.Payload, &l); err != nil {
+				t.Fatal(err)
+			}
+			l.Quantity, l.QuantityScale, l.Synthetic = r.Quantity, tc.scale, tc.synthetic
+			life = recorded(t, journal.KindInput, "life", event.OrderLifecycleEventType, tc.version, l)
+			retired := retiredEntry(t, r.ClientOrderID)
+			var p event.OrderRetiredPayload
+			if err := json.Unmarshal(retired.Envelope.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			p.Quantity, p.QuantityScale = r.Quantity, r.QuantityScale
+			retired = recorded(t, journal.KindInput, "retired", event.OrderRetiredEventType, p.SchemaVersion(), p)
+			halted := engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "synthetic"})
+			got, err := restart.ReadEndState([]journal.Entry{halted, incidentSale(t, incidentID), release, life, retired}, r.AccountID, "synthetic.log")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.SaleAttempted != tc.named {
+				t.Fatalf("venue named=%v, end state=%+v", tc.named, got)
+			}
+		})
+	}
+}

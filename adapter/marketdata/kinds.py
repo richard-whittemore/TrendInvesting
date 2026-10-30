@@ -33,19 +33,20 @@ MARK = ("market.mark.recorded", 2)                    # MarkRecordedEvidenceVers
 ACCOUNT_SNAPSHOT_CASH = ("account.snapshot", 4)       # AccountSnapshotCashVersion
 MARK_CONTRACT = ("market.mark.recorded", 3)           # MarkRecordedContractVersion
 MARK_UNAVAILABLE = ("market.mark.unavailable", 1)     # MarkUnavailableSchemaVersion
+# Fractional capital-path inputs remain delivered history (ADR 0015; ADR 0026 D7-F).
+ACCOUNT_SNAPSHOT_FRACTIONAL_CASH = ("account.snapshot", 6)
+BROKER_SNAPSHOT_FRACTIONAL = ("account.broker.snapshot", 3)
 ADAPTER_KINDS = (ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT, BROKER_SNAPSHOT_V1, MARK, ACCOUNT_SNAPSHOT_CASH, MARK_CONTRACT,
-                 MARK_UNAVAILABLE)
+                 MARK_UNAVAILABLE, ACCOUNT_SNAPSHOT_FRACTIONAL_CASH, BROKER_SNAPSHOT_FRACTIONAL)
 
-# The account snapshots that state an account's positions, which the data
-# job reads an IRA's holdings from (tidata.holdings): version 3, the one the
-# adapter writes for Boost, and version 4, version 3 with the cash an IRA's
-# buys are budgeted from, the one it writes for the momentum engine
-# (AccountSnapshotCashVersion; ADR 0026 point 2). A snapshot of any other
-# version is refused there, never read as holding nothing (ADR 0015).
-POSITIONS_SNAPSHOTS = (ACCOUNT_SNAPSHOT, ACCOUNT_SNAPSHOT_CASH)
-# A target-weight account's fill (FillTargetWeightVersion), whose instrument
-# a holdings reading adds; version 4 is the Turtle reducer's.
+# Position-bearing snapshots used for holdings coverage: Boost v3, IRA cash
+# v4 and fractional IRA cash v6 (ADR 0026, D7-F; ADR 0015). The reader
+# collects instrument names only; unknown versions still fail closed.
+POSITIONS_SNAPSHOTS = (ACCOUNT_SNAPSHOT, ACCOUNT_SNAPSHOT_CASH, ACCOUNT_SNAPSHOT_FRACTIONAL_CASH)
+# Target-weight fills add their instrument to holdings coverage; v4 belongs
+# to the Turtle reducer (ADR 0026, D7-F; ADR 0015).
 TARGET_WEIGHT_FILL = ("execution.fill", 5)
+TARGET_WEIGHT_FILLS = (TARGET_WEIGHT_FILL, ("execution.fill", 6))
 # The owner's Run approval: versions 1 and 2 state no starting book, 3 to 6
 # may (OperatorRunApprovedSchemaVersion; a later version is refused until
 # this table names it).

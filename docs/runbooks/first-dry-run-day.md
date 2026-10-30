@@ -860,7 +860,7 @@ accounts/trad-ira.env    encrypted, unlocked
 1
 ira-adapter-unit-installed
   "client_id": 12,
-  "account_snapshot_version": 4,
+  "account_snapshot_version": 6,
   "resolve_contracts": true
 TI_ADAPTER_CLIENT_ID=12
 TI_ADAPTER_ACCOUNT_KEY=IBKR_ACCOUNT_TRAD_IRA
@@ -874,6 +874,21 @@ repository, a chat or a ticket (`docs/live-trading/lessons-2026-10.md` L12).
 
 ### I-1. Name the account and your birth month in the IRA's configuration
 
+Enable **fractional trading** on the IRA account in IBKR and keep **dividend
+reinvestment (DRIP) off**. The owner selected D7-F (ADR 0026):
+`execution.share_quantity` must be `"fractional"` and
+`execution.fractional_increment` must be `"0.0001"`. The shipped template
+sets both; the block below also updates an existing installed template
+and sets the adapter's `account_snapshot_version` to 6. Provisioning never
+overwrites an installed adapter configuration; if the preflight above
+shows 4, complete this update before starting the adapter. The block stops
+both services and stages both complete files before replacing either one
+(AGENTS.md durability; ADR 0026 D7-F). If any step fails or is interrupted,
+leave both services stopped, repair the cause and rerun the block before
+starting either service: the two file renames are not one atomic transaction.
+Holdings and fills may have up to four decimal places. A fifth decimal
+place is refused with its reason, never rounded by the adapter.
+
 The shipped `trad-ira.config` names the placeholder account `trad-ira` and the
 placeholder birth `YYYY-MM` (the glide path's age; the engine refuses to
 start on the placeholder). Replace `1975-06` below with your year and month
@@ -884,6 +899,8 @@ read from the unlocked file and never printed; it is then in
 <!-- rehearsed: ira-account -->
 ```sh
 sudo bash -eu <<'EOF2'
+systemctl stop ti-adapter@trad-ira
+systemctl stop ti-engine@trad-ira
 config=/etc/trend-investing/engines/trad-ira.config
 birth=1975-06
 account=$(sed -n 's/^IBKR_ACCOUNT_TRAD_IRA=//p' /run/trend-investing/secrets/accounts/trad-ira.env)
@@ -900,6 +917,45 @@ elif [ "$current" != "$account" ]; then
   exit 1
 fi
 sed -i "s/\"birth\": \"YYYY-MM\"/\"birth\": \"$birth\"/" "$config"
+python3 - "$config" <<'PY'
+import json
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+path = Path(sys.argv[1])
+adapter_path = Path("/etc/trend-investing/adapters/trad-ira.json")
+config = json.loads(path.read_text())
+adapter = json.loads(adapter_path.read_text())
+config["execution"]["share_quantity"] = "fractional"
+config["execution"]["fractional_increment"] = "0.0001"
+adapter["account_snapshot_version"] = 6
+staged = []
+try:
+    for destination, value in ((path, config), (adapter_path, adapter)):
+        contents = json.dumps(value, indent=2) + "\n"
+        metadata = destination.stat()
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination.parent,
+                                         prefix="." + destination.name + ".", delete=False) as output:
+            temporary = Path(output.name)
+            staged.append((temporary, destination))
+            os.fchown(output.fileno(), metadata.st_uid, metadata.st_gid)
+            os.fchmod(output.fileno(), stat.S_IMODE(metadata.st_mode))
+            output.write(contents)
+            output.flush()
+            os.fsync(output.fileno())
+    for temporary, destination in staged:
+        os.replace(temporary, destination)
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+finally:
+    for temporary, _ in staged:
+        temporary.unlink(missing_ok=True)
+PY
 [ "$(sed -n 's/^ *"account_id": *"\([^"]*\)".*/\1/p' "$config")" = "$account" ] || { echo "STOP: the account was not named."; exit 1; }
 echo account-named
 grep -c '"birth": "YYYY-MM"' "$config" || true
@@ -915,6 +971,11 @@ account-named
 ```
 
 ### I-2. Approve the IRA's first run with its starting book
+
+The existing starting-book approval accepts whole shares only (ADR 0026,
+D7-F amendment). Begin with cash or whole-share holdings. If the IRA already
+holds a fraction, its approval needs the separate starting-book migration;
+do not round that holding to make the approval pass.
 
 In IBKR, read the IRA paper account's holdings and its total cash, and use
 them here exactly as in step 2 (`-positions ""` only when it holds nothing).
@@ -1065,7 +1126,7 @@ sudo grep -c '"state":"halted"' /var/lib/trend-investing/engines/trad-ira/"$run"
   "client_id": 12,
   "mode": "dry-run",
   "paper_sending_enabled": false,
-  "account_snapshot_version": 4,
+  "account_snapshot_version": 6,
   "resolve_contracts": true
 active
 ~ ibkr adapter starting mode=dry-run client_id=12 sending=off
@@ -1102,15 +1163,29 @@ use depends only on whether this start had a file to deliver:
   said `ibkr stream no new file since <file>; caught up`, and the probe then
   passes with `probe: ok no new batch since start; caught up (...)`.
 
+The probe reads `execution.share_quantity` from the engine configuration:
+`fractional` requires the fractional cash snapshot version (currently 6);
+`minimum-lot` requires version 4. The example output below is for fractional
+shares; minimum-lot output reports version 4 and has no holdings line.
+
 <!-- rehearsed: ira-probe -->
 ```sh
 ( set -euo pipefail
 run=$(sudo sed -n 's/^TI_RUN=//p' /var/lib/trend-investing/engines/trad-ira/run.env)
+snapshot_version=$(sudo python3 - /etc/trend-investing/engines/trad-ira.config <<'PYTHON'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    rule = json.load(source)["execution"]["share_quantity"]
+# ADR 0026 D7-F uses fractional cash snapshots; D7-L keeps whole-share cash snapshots.
+print({"fractional": 6, "minimum-lot": 4}[rule])
+PYTHON
+)
 invocation=$(systemctl show -p InvocationID --value ti-adapter@trad-ira)
 sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat >/tmp/ti-adapter-trad-ira.journal
 cd /opt/trend-investing/adapter
 sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr probe --journal /tmp/ti-adapter-trad-ira.journal \
-  --engine-log /var/lib/trend-investing/engines/trad-ira/"$run".log --client-id 12 --snapshot-version 4 --expect-batch
+  --engine-log /var/lib/trend-investing/engines/trad-ira/"$run".log --client-id 12 --snapshot-version "$snapshot_version" --expect-batch
 )
 ```
 
@@ -1121,7 +1196,8 @@ sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr 
 ~ probe: ok connected to IB Gateway as client_id=12
 ~ probe: ok reconciled client_id=12: positions=[0-9]+ open_orders=0 executions=0
 ~ probe: ok queued run=run-ira-2026-10-29 files=trad-ira-[0-9-]+\.jsonl inputs=[0-9]+ \(delivered: [0-9]+ answered, [0-9]+ already committed\)
-~ probe: ok account snapshot version 4 as of .*settled_cash .*total_cash
+~ probe: ok account snapshot version 6 as of .*settled_cash .*total_cash
+~ probe: ok holdings: .*
 ~ probe: ok reconciliation journalled
 ~ probe: ok [0-9]+ mark\(s\) at version 3
 probe: ok no order released to be sent and none refused for a missing mark
@@ -1210,7 +1286,9 @@ the reporter's `-units` and `-resolve-units` lists cover Roth. Verify its
 reporter runs and the heartbeat remains Boost's alone.
 
 **Same day, before leaving the installation:** run I-8's probe for Roth,
-expect `client_id=13`, snapshot version 4 and sending off; retain the
+expect `client_id=13` and sending off. Read Roth's engine configuration
+instead of Traditional IRA's: `fractional` requires the fractional cash
+snapshot version (currently 6), and `minimum-lot` requires version 4. Retain the
 account-masked output. Start Roth's Flex reader by hand and confirm its
 executions proof; start its data job and reporter and read their unit
 results. Record a withheld decision's stated reason if one occurs. Do not

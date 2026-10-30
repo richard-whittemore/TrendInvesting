@@ -187,6 +187,7 @@ from relay import (LOG_INPUT, OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInva
                    Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
                    run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
+from quantities import quantity_scale
 from sender import NotReconciled, make_sender, release_to_request
 from account import NET_LIQUIDATION, SETTLED_CASH, TOTAL_CASH
 from book_basis import cash_change, fills_since, holdings_after, previous_close
@@ -621,7 +622,7 @@ class AdapterLoop:
             cfg.account_id, cfg.client_id, self._record, now=self._now, commission_wait=cfg.commission_wait,
             held_path=self._pending_path + HELD_SUFFIX, owns_lock=self.relay.holds, ready=self.ready,
             journalled=self._journalled(chain), acknowledged=self.pending.acknowledged_corrections(),
-            late_fills=self.pending.acknowledged_late_fills())
+            late_fills=self.pending.acknowledged_late_fills(), quantity_scale=quantity_scale(cfg))
         self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record,
                                     unverified_receipt=lambda: unverified_receipt(self.conn))
         self.conn.subscribe(self._cross_check_gateway_clock)

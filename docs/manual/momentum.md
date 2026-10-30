@@ -31,12 +31,13 @@ account snapshot and a mark and contract for every name the engine can
 decide ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter"), so the engine
 decides a real month-end in dry-run (`docs/runbooks/first-dry-run-day.md`,
 "The Traditional IRA"). **The IRAs cannot trade yet**: no IRA order is sent
-before the paper gate, the IRA's reporter and dashboard view are still to
-come, and the Roth IRA has no configuration. The configuration's hard limits (`max_orders_per_decision`
+before the paper gate. The reporter and dashboard read the IRA's decimal
+holdings and fills. The configuration's hard limits (`max_orders_per_decision`
 40, `max_order_fraction` 0.6) and its cash rule and share quantity
-(`settled-cash`, `minimum-lot`: decisions D5 and D7) are dry-run values for
-you to confirm before paper. So the "one IRA month" walk-through below stops
-at sending.
+(`settled-cash`, `fractional`: decisions D5 and D7) are recorded in the
+configuration. The owner selected fractional shares (D7-F) on 2026-10-29;
+the shipped increment is `0.0001` share. So the "one IRA month" walk-through
+below stops at sending.
 
 ## What it is and why
 
@@ -136,15 +137,16 @@ section 5; ADR 0026, point 2):
 
 1. It takes every instrument held or targeted, in alphabetical order.
 2. **Held, with no target:** sell the whole holding.
-3. **Not held, with a target:** buy target x net liquidation / price whole
-   shares.
+3. **Not held, with a target:** buy target x net liquidation / price
+   shares, rounded to the configured increment.
 4. **Held, with a target:** trade only when the holding's weight is **more
    than 25% of its target away** from it (`rebalance_band` 0.25, strictly
    more), and then trade back to the target. So a stock targeted at 4% is
    left alone between 3% and 5%.
-5. Every quantity is rounded **toward zero** to whole shares. A trade that
-   rounds to nothing is recorded as `strategy.order.skipped` with its reason,
-   never dropped silently.
+5. Under D7-F, every quantity is rounded **toward zero** to the configured
+   fractional increment (`0.0001` share in `trad-ira.config`). D7-L rounds
+   to whole shares. A trade that rounds to nothing is recorded as
+   `strategy.order.skipped` with its reason, never dropped silently.
 6. No sell is larger than the holding minus every sell already working.
 7. **Sells first.** The sells are sent at the decision. The **buys** are
    planned only once every sell has finished (filled, cancelled or refused),
@@ -173,7 +175,8 @@ section 5; ADR 0026, point 2):
    and rounded down again; a buy left with no share is recorded as skipped.
    This scaling is not in the backtest.
 
-Every order is a whole-share DAY limit order at the band's edge, with a
+Every order is a DAY limit order at the band's edge, in decimal shares
+under D7-F and whole shares under D7-L, with a
 client order ID made from the decision, the instrument and the side, as for
 Boost ([boost](boost.md#the-one-order)).
 
@@ -237,9 +240,17 @@ buys. A costly share does not cause the D7-L minimum-lot substitution.
 For example, an order for 7.25 shares filled by 3.5 leaves exactly 3.75
 outstanding. The journal records these as integer ten-thousandths with
 `quantity_scale: 10000`; the incomplete-sell page shows decimal shares.
-The engine supports these records; fractional adapter delivery and the
-summary/dashboard/probe rollout follow separately. The paper gate still
-controls sending. D7-L remains available and keeps its whole-share behavior.
+The adapter reads IBKR quantities as exact decimals, refuses more than four
+decimal places, and journals the scale with the integer units. The reporter,
+dashboard and probe read these records; an account configured for whole
+shares refuses a fractional holding. The paper gate still controls sending.
+D7-L remains available and keeps its whole-share behavior, as does Boost.
+
+Before starting the IRA, enable fractional trading for that account in IBKR
+and keep dividend reinvestment (DRIP) off. A dividend reinvestment would
+change the holding outside the engine's orders and require reconciliation.
+See the [first dry-run runbook](../runbooks/first-dry-run-day.md), I-1 and I-8,
+for configuration and the same-day probe.
 
 **Stops here today** marks the first step not on `main`.
 
@@ -247,7 +258,7 @@ controls sending. D7-L remains available and keeps its whole-share behavior.
 | --- | --- | --- | --- |
 | 1 | each session, the next morning | The data job records the whole market, the latest session's universe and sector labels, and writes SPY's, IEF's, SHY's and every holding's bars, the holdings read from the engine's own log ([market data](market-data.md), "A job for the IRAs"). | Built for the Traditional IRA: `ti-data@trad-ira`, weekday mornings at 06:15, 07:15 and 08:15 New York |
 | 2 | the morning after the last session of the month | The same job writes the compact stream, exactly as `encode --ranker`: bars for the named instruments, the universe snapshot, and the 500 ranked stocks' price histories ([momentum universe](momentum-universe.md)). | Built |
-| 3 | the same morning | The IRA's own adapter, `ti-adapter@trad-ira` (client ID 12), reads the account once and delivers that stream behind it: the account snapshot the engine reads (version 4: positions, net liquidation, IBKR's settled and total cash, from the same reading), and, before the session's close, a mark for every name the engine can decide, each ranked stock at its universe close and SPY, IEF, SHY and the holdings at their bars, each with the IBKR contract the adapter resolved for it by name; a name IBKR cannot resolve to one US-dollar stock gets no mark ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter" and "Contracts and marks for an IRA"). The morning reading stands for the close only with the IRA's own Flex executions proof (`ti-flex@trad-ira`, 05:45, 06:45, 07:45). | Built; the order to start the engine, its warm-up, the adapter and the same-day probe is `docs/runbooks/first-dry-run-day.md`, "The Traditional IRA" |
+| 3 | the same morning | The IRA's own adapter, `ti-adapter@trad-ira` (client ID 12), reads the account once and delivers that stream behind it: the account snapshot the engine reads (version 6 for D7-F: exact scaled positions, net liquidation, IBKR's settled and total cash, from the same reading), and, before the session's close, a mark for every name the engine can decide, each ranked stock at its universe close and SPY, IEF, SHY and the holdings at their bars, each with the IBKR contract the adapter resolved for it by name; a name IBKR cannot resolve to one US-dollar stock gets no mark ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter" and "Contracts and marks for an IRA"). The morning reading stands for the close only with the IRA's own Flex executions proof (`ti-flex@trad-ira`, 05:45, 06:45, 07:45). | Built; the order to start the engine, its warm-up, the adapter and the same-day probe is `docs/runbooks/first-dry-run-day.md`, "The Traditional IRA" |
 | 4 | at the close | The engine decides the month and plans the sells, checked against the limits; a buy for a name without a mark as of the close is refused (`missing-mark`) and recorded as a withheld pick. Its allocation stays in cash for the month; the account stays Normal and the other buys proceed subject to the other limits. | Built and tested on recorded inputs, and against the real IRA adapter with the scripted Gateway |
 | 5 | next session | In dry-run (now): nothing is sent; the engine records a synthetic cancel for each order it releases, so the buys are planned at the same close from the snapshot's settled cash. In paper (later): the adapter sends the sells; when every sell has finished, the engine plans and releases the buys from the cash realised. | Dry-run built and rehearsed: the IRA adapter runs and the engine decides a dry-run month. **Stops here today**: no IRA order is sent before the paper gate (AGENTS.md rule 5); sending one will need the adapter's sender to take the contract the journal records for a pick, which today names a contract only from `con_ids` |
 | 6 | after | Fills come back; the reporter and the dashboard show the month. | As for Boost ([boost](boost.md#one-boost-day-from-the-data-to-ibkr-and-back)) |

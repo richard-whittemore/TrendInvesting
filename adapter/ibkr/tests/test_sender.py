@@ -55,6 +55,21 @@ def paper_sender(h, journal, today=SESSION):
 
 
 class SenderTests(unittest.TestCase):
+    def test_sender_documents_the_account_quantity_policy(self):
+        self.assertIn("configured quantity scale", PaperSender.__doc__)
+        self.assertIn("ADR 0026 D7-F", PaperSender.__doc__)
+        self.assertNotIn("whole-share DAY", PaperSender.__doc__)
+
+    def test_unrepresentable_wire_price_is_refused_before_handover(self):
+        h = paper_harness()
+        sender = paper_sender(h, [])
+        next_id = h.conn.next_order_id
+        for price in (Decimal("1e999"), Decimal("1e-999")):
+            with self.subTest(price=price), self.assertRaises(ValueError):
+                sender.check(limit_request(limit_price=price))
+        self.assertEqual(h.conn.next_order_id, next_id)
+        self.assertEqual(h.fake.placed, [])
+
     def test_dry_run_journals_and_never_calls_place_order(self):
         h = Harness()
         h.conn.connect()

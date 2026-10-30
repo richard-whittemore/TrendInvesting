@@ -98,6 +98,21 @@ class CommandTests(unittest.TestCase):
         self.assertIn(("req_executions", REQUEST_ID_BASE + 1, ACCOUNT), self.fake.calls)
         self.assertNotIn(ACCOUNT, self.err.getvalue(), "the account number is never written to the log")
 
+    def test_client_id_mismatch_precedes_snapshot_config_refusal(self):
+        self.write_config(dict(CONFIG, account_snapshot_version=5))
+        self.assertEqual(self.run_main(self.argv("--client-id", "12")), 1)
+        self.assertEqual(self.err.getvalue(),
+                         "refused: the configuration {} names client_id 11, but the instance's settings give 12 "
+                         "(TI_ADAPTER_CLIENT_ID): each account's adapter has its own client ID\n".format(self.config))
+        self.assertEqual(self.made, [])
+
+        self.err = io.StringIO()
+        self.assertEqual(self.run_main(self.argv("--client-id", "11")), 1)
+        self.assertEqual(self.err.getvalue(),
+                         "refused: the configuration {} is refused: account_snapshot_version must be one of "
+                         "3, 4, 6\n".format(self.config))
+        self.assertEqual(self.made, [])
+
     def test_the_help_names_every_file_and_the_switch_that_enables_sending(self):
         out = subprocess.run([sys.executable, "-m", "adapter.ibkr", "run", "--help"], cwd=str(repo),
                              capture_output=True, text=True, check=True).stdout

@@ -11,6 +11,7 @@ if tests_dir not in sys.path:
 
 from fake_tws import FakeTWS, ACCOUNT
 from config import AdapterConfig
+from quantities import quantity_scale
 from tws import Event
 from connection import AccountNotManaged, Connection, ClientIdInUse, ConnectFailed, NotConnected
 
@@ -46,6 +47,7 @@ class Harness:
 
         self.conn = Connection(self.fake, config(**overrides), status_sink=self.statuses.append,
                                sleep=sleep, monotonic=self.clock)
+        self.fake.quantity_scale = quantity_scale(self.conn.config)
 
     def states(self):
         return [s.state for s in self.statuses]

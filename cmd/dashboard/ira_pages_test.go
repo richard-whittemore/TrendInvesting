@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -158,4 +159,134 @@ func TestDashboardIRAUnitIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ADR 0026 D7-F: journal quantities and the incomplete-sell page share one scale.
+func TestDashboardFractionalAdapterRecords(t *testing.T) {
+	raw, err := os.ReadFile("../../adapter/ibkr/tests/testdata/fractional_reports.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []struct {
+		Type    string          `json:"event_type"`
+		Version uint32          `json:"schema_version"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(raw, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("reports = %d, want submitted, partial fill, canceled", len(records))
+	}
+	var fill event.TargetWeightFillPayload
+	var ack event.LimitOrderLifecyclePayload
+	if err := json.Unmarshal(records[1].Payload, &fill); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(records[0].Payload, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if err := fill.ValidateSchema(records[1].Version); err != nil {
+		t.Fatal(err)
+	}
+	if err := ack.ValidateSchema(records[0].Version); err != nil {
+		t.Fatal(err)
+	}
+	sessionClose := time.Date(2026, time.October, 29, 21, 0, 0, 0, time.UTC)
+	releasedAt := sessionClose.Add(-24 * time.Hour)
+	entries := iraEntries(t, fill.AccountID)
+	var cfg event.TargetWeightConfigurationPayload
+	if err := json.Unmarshal(entries[0].Envelope.Payload, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Execution.ShareQuantity, cfg.Execution.FractionalIncrement = event.ShareQuantityFractional, "0.0001"
+	var sell event.OrderReleasedPayload
+	if err := json.Unmarshal(entries[3].Envelope.Payload, &sell); err != nil {
+		t.Fatal(err)
+	}
+	sell.ClientOrderID, sell.Quantity, sell.QuantityScale, sell.LimitPrice = ack.ClientOrderID, ack.Quantity, ack.QuantityScale, ack.LimitPrice
+	reports := event.NewOrderReports()
+	reports.Release(sell)
+	if _, err := reports.Lifecycle(ack); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reports.Fill(fill); err != nil {
+		t.Fatal(err)
+	}
+	order, _ := reports.Order(sell.ClientOrderID)
+	if order == nil || order.Terminal || order.Filled != 35000 || order.Released.Quantity-order.Filled != 37500 {
+		t.Fatalf("adapter partial fill lifecycle = %+v", order)
+	}
+	snap := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
+		AccountID: fill.AccountID, AsOf: sessionClose, Currency: "USD", NetLiquidation: 4000, QuantityScale: event.FractionalQuantityScale,
+		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 123456}}}, SettledCash: 100, TotalCash: 100}
+	entries = []journal.Entry{
+		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 1, event.TargetWeightConfigurationEventType, cfg.SchemaVersion(), "cfg", releasedAt.Add(-time.Hour), cfg)},
+		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 2, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s0", releasedAt, event.SessionClosedPayload{PeriodEnd: releasedAt, InstrumentIDs: []string{"SPY"}})},
+		{Kind: journal.KindDecision, Envelope: iraEnvelope(t, 3, event.OrderReleasedEventType, sell.SchemaVersion(), "release", releasedAt, sell)},
+		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 4, records[0].Type, records[0].Version, "ack", ack.OccurredAt, records[0].Payload)},
+		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 5, records[1].Type, records[1].Version, "fill", ack.OccurredAt, records[1].Payload)},
+		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 6, event.AccountSnapshotEventType, snap.SchemaVersion(), "snapshot", sessionClose, snap)},
+		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 7, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s1", sessionClose, event.SessionClosedPayload{PeriodEnd: sessionClose, InstrumentIDs: []string{"SPY"}})},
+	}
+	var buf bytes.Buffer
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", releasedAt.Add(-time.Hour), sessionClose), entries); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "ira.journal")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newHandlerFor([]string{path}, nil)
+	for _, url := range []string{"/", "/api/summary.json"} {
+		rec := get(h, http.MethodGet, url)
+		body := rec.Body.String()
+		if rec.Code != http.StatusOK || !strings.Contains(body, "3.75 of its 7.25 shares outstanding") {
+			t.Errorf("%s: status %d, decimal remainder absent: %s", url, rec.Code, body)
+		}
+		if url == "/" {
+			for _, want := range []string{"<td>AAA</td><td>12.3456</td>", "<td>3.5 @ 10.00</td>"} {
+				if !strings.Contains(body, want) {
+					t.Errorf("page lacks %q: %s", want, body)
+				}
+			}
+		}
+	}
+	// Venue cancellation ends the partial order without inventing another fill.
+	var canceled event.LimitOrderLifecyclePayload
+	if err := json.Unmarshal(records[2].Payload, &canceled); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reports.Lifecycle(canceled); err != nil {
+		t.Fatal(err)
+	}
+	if order, _ := reports.Order(sell.ClientOrderID); !order.Terminal || order.Filled != 35000 {
+		t.Fatalf("canceled order = %+v", order)
+	}
+	// ADR 0026, Mode: the engine's synthetic dry-run cancel names no venue
+	// order, and must match the exact scale and quantity of its unsent release.
+	dry := sell
+	dry.Mode, dry.Send = event.TradingModeDryRun, false
+	dryReports := event.NewOrderReports()
+	dryReports.Release(dry)
+	synthetic := canceled
+	synthetic.Synthetic, synthetic.OrderID, synthetic.Message = true, "", "dry-run: no order sent"
+	if synthetic.SchemaVersion() != event.OrderLifecycleFractionalSyntheticVersion {
+		t.Fatal("synthetic schema lost fractional scale")
+	}
+	if err := synthetic.ValidateSchema(synthetic.SchemaVersion()); err != nil {
+		t.Fatal(err)
+	}
+	wrong := synthetic
+	wrong.Quantity = 7
+	if _, err := dryReports.Lifecycle(wrong); err == nil {
+		t.Fatal("rounded synthetic cancel matched a 7.25-share release")
+	}
+	if _, err := dryReports.Lifecycle(synthetic); err != nil {
+		t.Fatal(err)
+	}
+	if order, _ := dryReports.Order(dry.ClientOrderID); !order.Terminal || order.Filled != 0 {
+		t.Fatalf("dry-run order = %+v", order)
+	}
+
 }

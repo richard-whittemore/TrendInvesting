@@ -104,7 +104,7 @@ func Fills(journals []Journal, f Filter) (Table, error) {
 			}
 			t.Rows = append(t.Rows, []string{
 				it.journal, strconv.FormatUint(it.seq, 10), it.at.UTC().Format("2006-01-02"), it.fill.InstrumentID, it.fill.Kind,
-				strconv.FormatInt(signedQuantity(it.fill.Kind, it.fill.Quantity), 10), money(it.fill.Price), money(it.fill.Commission),
+				event.FormatQuantity(signedQuantity(it.fill.Kind, it.fill.Quantity), it.fill.QuantityScale), money(it.fill.Price), money(it.fill.Commission),
 			})
 		}
 	}
@@ -153,7 +153,7 @@ func Totals(journals []Journal, f Filter) (Table, error) {
 	groups := map[key]*tally{}
 	var all tally
 	for _, j := range journals {
-		items, err := decode(j)
+		items, err := decodeWholeQuantities(j)
 		if err != nil {
 			return Table{}, err
 		}

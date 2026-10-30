@@ -373,8 +373,11 @@ def read_engine_log(path, engine=ENGINE):
 
 
 def _positions(path, n, positions):
-    """The instruments of a positions list (account.snapshot versions 3 and 4, a starting book); Refused if it
-    is not one, never read as holding nothing."""
+    """Read instruments from account.snapshot versions 3, 4 and 6 or a starting book (ADR 0026 D7-F; ADR 0027).
+
+    The caller checks the snapshot version and quantity scale; malformed positions
+    are refused, never read as holding nothing.
+    """
     if not isinstance(positions, list):
         raise _log_error(path, n, "cannot read holdings: its positions are not a list")
     out = set()
@@ -416,6 +419,11 @@ class _Holdings:
                 raise _log_error(self.path, n, "cannot read holdings: account.snapshot version {} (this job reads "
                                                "versions {})".format(e.get("schema_version"), ", ".join(
                                                    str(v) for _, v in kinds.POSITIONS_SNAPSHOTS)))
+            scale = payload.get("quantity_scale", 0) if isinstance(payload, dict) else None
+            expected_scale = 10000 if kind_version == kinds.ACCOUNT_SNAPSHOT_FRACTIONAL_CASH else 0
+            if type(scale) is not int or scale != expected_scale:
+                raise _log_error(self.path, n, "cannot read holdings: account.snapshot quantity_scale must be "
+                                               "integer {} (ADR 0026 D7-F)".format(expected_scale))
             self.current = _positions(self.path, n, payload.get("positions") if isinstance(payload, dict) else None)
             self.inherit = None
         elif e.get("type") == RUN_APPROVED:
@@ -434,7 +442,7 @@ class _Holdings:
                 raise _log_error(self.path, n, "cannot read holdings: its Run approval states no starting book and "
                                                "names no previous log")
         elif e.get("type") == FILL_TYPE:
-            if kind_version != kinds.TARGET_WEIGHT_FILL:
+            if kind_version not in kinds.TARGET_WEIGHT_FILLS:
                 raise _log_error(self.path, n, "cannot read holdings: {} version {}".format(
                     FILL_TYPE, e.get("schema_version")))
             ticker = payload.get("instrument_id") if isinstance(payload, dict) else None

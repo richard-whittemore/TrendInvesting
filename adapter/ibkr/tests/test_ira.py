@@ -1,8 +1,8 @@
 """The Traditional IRA's adapter: what the momentum engine reads, from one IBKR reading.
 
 ADR 0026 points 2 and 3; docs/manual/momentum.md, "One IRA month". The
-momentum engine reads account.snapshot version 4 (the settled and total
-cash its buys are budgeted from) and values every order it plans against a
+momentum engine reads account.snapshot version 4 (whole shares) or 6
+(D7-F), with the settled and total cash its buys are budgeted from and values every order it plans against a
 mark for that instrument as of the close (the risk gate refuses one with
 none, missing-mark). The compact IRA stream carries bars only for SPY, IEF,
 SHY and the holdings; a stock newly picked has only its close history and
@@ -37,6 +37,19 @@ from test_connection import Clock, config
 from test_delivery import _envelope, write_stream
 from test_loop import Ids
 from config import ConfigError
+from fake_tws import order
+from test_account import full_summary
+from test_connection import Harness
+from test_snapshot import WHY, state
+from test_account_shape import captured_fractional
+from test_sender import limit_request, paper_sender
+from snapshot import broker_snapshot_record, reconciliation_record, close_valuation
+from book_basis import Basis, _to_json, _from_json, holdings_after, cash_change, previous_close
+from probe import snapshot_fault, reconciliation_fault
+from orders import CommissionReport, OrderStatusReport, execution_report
+from sender import SentRecord, UnsendableOrder, release_to_request
+from reports import OrderReportJournal, UnreportableOrder
+import relay
 from delivery import StreamRefused, last_session, read_stream
 from loop import AdapterLoop
 from snapshot import (ACCOUNT_SNAPSHOT_TYPE, MARK_TYPE, account_snapshot_record, mark_record, read_account,
@@ -46,7 +59,7 @@ TESTDATA = tests_dir / "testdata"
 CLOSE = datetime(2027, 1, 14, 21, 0, tzinfo=timezone.utc)
 FRIDAY = date(2027, 1, 14)
 RUN = "engine"
-# The IRA's adapter configuration as deploy/etc/adapters/trad-ira.json.example sets it.
+# The legacy whole-share IRA configuration; the deployed D7-F example uses version 6.
 IRA = dict(client_id=12, account_snapshot_version=4, resolve_contracts=True, con_ids={})
 # Invented contract IDs for invented stocks.
 CON_IDS = {"AAA": 900001, "BBB": 900002, "SPY": 756733, "IEF": 8314, "SHY": 8315}
@@ -460,7 +473,7 @@ class IraFlexTests(unittest.TestCase):
 
     def test_a_snapshot_version_the_reader_does_not_know_is_still_refused(self):
         import flex
-        self.assertEqual(sorted(flex.ACCOUNT_SNAPSHOT_VERSIONS), [3, 4])
+        self.assertEqual(sorted(flex.ACCOUNT_SNAPSHOT_VERSIONS), [3, 4, 6])
 
 
 class DeliveredKindsTests(unittest.TestCase):
@@ -580,6 +593,24 @@ class AdapterTemplateTests(unittest.TestCase):
 class ClientIdTests(unittest.TestCase):
     """--client-id: the instance's settings and its configuration name the same client ID, or nothing starts."""
 
+    def test_rehearsal_drains_journal_after_matching_client_ids(self):
+        import subprocess
+        text = (REPO / "deploy/rehearsal/first-day.sh").read_text()
+        assertion = next(line for line in text.splitlines()
+                         if line.startswith("journalctl ") and "two client IDs" in line)
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "journal.txt"
+            for matched in (True, False):
+                with self.subTest(matched=matched):
+                    message = ("refused: names client_id 11, but the instance's settings give 12\n"
+                               if matched else "refused: another reason\n")
+                    journal.write_text(message + "later journal entry\n" * 100000)
+                    command = 'journalctl() { cat "$1"; }; fail() { exit 1; }; ' + assertion.replace(
+                        "journalctl -u ti-adapter@trad-ira.service --no-pager -o cat", 'journalctl "$1"')
+                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", command, "test", str(journal)],
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0 if matched else 1, result.stderr)
+
     def test_a_configuration_whose_client_id_differs_from_the_settings_is_refused(self):
         import io
         from cli import main
@@ -609,7 +640,8 @@ class ProbeTests(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.dir, True))
         values = json.loads((REPO / "deploy/etc/adapters/trad-ira.json.example").read_text())
-        values.update(connect_timeout=0.05, request_timeout=0.05, mark_timeout=0.05)
+        # These regression scenarios retain the legacy whole-share IRA contract.
+        values.update(account_snapshot_version=4, connect_timeout=0.05, request_timeout=0.05, mark_timeout=0.05)
         self.config = self.dir / "trad-ira.json"
         self.config.write_text(json.dumps(values))
         (self.dir / "account.env").write_text("IBKR_ACCOUNT_TRAD_IRA={}\n".format(ACCOUNT))
@@ -1369,6 +1401,395 @@ class ProbeOutcomeTests(ProbeTests):
         good = MarkValidationTests().good()
         for stamp in ("2027-02-30T21:00:00Z", "0001-01-01T00:00:00Z"):
             self.assertEqual(mark_fault(dict(good, as_of=stamp), 3, stamp), "as_of", stamp)
+
+
+def fractional_reading(quantity="12.3456", version=6):
+    h = connected(account_snapshot_version=version)
+    row = captured_fractional("fractional_position")
+    h.fake.positions = [(ACCOUNT, row.contract, Decimal(quantity), row.avgCost)]
+    h.fake.summary = full_summary() + [(ACCOUNT, "SettledCash", "500.00", "USD")]
+    return h
+
+
+class FractionalAccountTests(unittest.TestCase):
+    def test_config_selects_fractional_policy_and_shipped_ira_uses_it(self):
+        self.assertEqual(config(account_snapshot_version=6).account_snapshot_version, 6)
+        repo = Path(__file__).resolve().parents[3]
+        self.assertEqual(json.loads((repo / "deploy/etc/adapters/trad-ira.json.example").read_text())[
+            "account_snapshot_version"], 6)
+
+    def test_broker_decimal_is_written_in_exact_engine_units_on_all_records(self):
+        reading = read_account(fractional_reading().conn)
+        self.assertEqual(reading.positions, {"AAA": Decimal("12.3456")})
+        self.assertFalse(reading.unread)
+        records = [account_snapshot_record(reading, CLOSE, version=6),
+                   broker_snapshot_record(reading, False, why=WHY),
+                   reconciliation_record(reading, "fractional-reading")]
+        self.assertEqual([r.schema_version for r in records], [6, 3, 2])
+        for record in records:
+            with self.subTest(record=record.event_type):
+                self.assertEqual(record.payload["quantity_scale"], 10000)
+                self.assertEqual(record.payload["positions"][0]["quantity"], 123456)
+                json.dumps(record.payload, allow_nan=False)
+        self.assertEqual(close_valuation(reading, {"AAA": "10"}), Decimal("635.7560"))
+
+    def test_precision_and_whole_account_refusals_keep_the_reason(self):
+        for quantity, version, reason in [("12.34567", 6, "four decimal places"),
+                                          ("12.3456", 4, "whole-share"),
+                                          ("-0.1", 6, "nonnegative")]:
+            with self.subTest(quantity=quantity, version=version):
+                # Before v6 support exists, use a validated legacy config with
+                # only its version replaced so this seam reaches the callback.
+                h = fractional_reading(quantity, version=4)
+                h.conn.config = h.conn.config._replace(account_snapshot_version=version)
+                with self.assertLogs("ibkr", level="WARNING") as logged:
+                    reading = read_account(h.conn)
+                self.assertIn("positions", reading.unread)
+                self.assertEqual(reading.positions, {})
+                self.assertIn(reason, " ".join(logged.output))
+                self.assertIn(reason, reading.summary)
+
+    def test_open_order_total_and_snapshot_policy_cannot_be_mis_scaled(self):
+        h = fractional_reading()
+        h.fake.open_orders = [(7, contract(symbol="AAA", con_id=900001),
+                               order(action="SELL", total_quantity=Decimal("7.25")), state("Submitted"))]
+        reading = read_account(h.conn)
+        self.assertNotIn("open-orders", reading.unread)
+        record = broker_snapshot_record(reading, False, why=WHY)
+        self.assertEqual(record.payload["open_orders"][0]["remaining_quantity"], 72500)
+        with self.assertRaisesRegex(ValueError, "scale|policy"):
+            account_snapshot_record(reading, CLOSE, version=4)
+
+    def test_quantity_conversion_refuses_rounding_nonfinite_and_overflow(self):
+        from quantities import units, shares
+        self.assertEqual(units(Decimal("12.3456"), 10000), 123456)
+        self.assertEqual(shares(123456, 10000), Decimal("12.3456"))
+        self.assertEqual(units("1.00000", 10000), 10000)  # the same value, however the broker spells it
+        for bad in ("12.34567", "NaN", "Infinity", True, "922337203685477.5808"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                units(bad, 10000)
+        for scale in (1, True, "10000", 10000.0):
+            with self.subTest(scale=scale), self.assertRaises(ValueError):
+                shares(1, scale)
+
+
+class FractionalReconciliationTests(unittest.TestCase):
+    def test_book_and_fill_compare_exact_decimal_shares_and_cash(self):
+        from test_delivery import commit
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "synthetic.log"
+            engine = LoggedEngine(str(log), approval=run_approval("synthetic", starting_book=({}, 1000)))
+            payload = FractionalProbeTests().payload()
+            payload["total_cash"] = 1000
+            commit(engine, "reading:account.reconciliation", kind="account.reconciliation", version=2,
+                   payload=dict(payload, unreadable=[]))
+            commit(engine, "reading:account.snapshot", kind="account.snapshot", version=6, payload=payload)
+            daily, _ = previous_close(str(log))
+        positions, cash = daily.positions, daily.cash
+        self.assertEqual(positions, {"AAA": Decimal("12.3456")})
+        self.assertEqual(daily.refused, "")
+        fill = {"instrument_id": "AAA", "quantity": 35000, "quantity_scale": 10000,
+                "side": "sell", "price": 10, "commission": 1}
+        self.assertEqual(holdings_after(positions, [fill]), {"AAA": Decimal("8.8456")})
+        self.assertEqual(cash + cash_change([fill]), Decimal("1034.00"))
+        basis = Basis(positions, cash, [], "synthetic", False, "", datetime(2027, 1, 14, tzinfo=timezone.utc))
+        restored = _from_json(json.loads(json.dumps(_to_json(basis))))
+        self.assertEqual(restored.positions, positions)
+
+
+class FractionalProbeTests(unittest.TestCase):
+    def payload(self):
+        return {"account_id": "synthetic", "as_of": "2027-01-14T21:00:00Z", "currency": "USD",
+                "net_liquidation": 1000, "settled_cash": 100, "total_cash": 100,
+                "quantity_scale": 10000, "positions": [{"instrument_id": "AAA", "quantity": 123456}]}
+
+    def test_snapshot_scale_must_agree_with_configured_version(self):
+        p = self.payload()
+        self.assertEqual(snapshot_fault(p, 6), "")
+        self.assertIn("quantity_scale", snapshot_fault(p, 4))
+        for value in (None, 1, True, 10000.0):
+            p["quantity_scale"] = value
+            self.assertIn("quantity_scale", snapshot_fault(p, 6))
+        p = self.payload()
+        p["positions"][0]["quantity"] = 12.3456
+        self.assertTrue(snapshot_fault(p, 6))
+        p.pop("quantity_scale")
+        self.assertTrue(snapshot_fault(p, 4))
+        p = self.payload()
+        del p["settled_cash"]
+        self.assertEqual(snapshot_fault(p, 6), "settled_cash")
+
+    def test_probe_displays_decimal_holdings_for_a_complete_fractional_batch(self):
+        from probe import Report, _check_batch
+        from snapshot import mark_record, Contract
+        p = self.payload()
+        mark = mark_record("AAA", CLOSE, "10", "synthetic",
+                           contract=Contract("AAA", 900001, "SMART", "TEST", "USD"))
+        records = [("account.snapshot", 6, p), ("account.reconciliation", 2, dict(p, unreadable=[])),
+                   (mark.event_type, mark.schema_version, mark.payload),
+                   ("market.session.closed", 1, {"period_end": p["as_of"]})]
+        report = Report()
+        _check_batch([dict(id=str(n), type=kind, schema_version=version, payload=payload)
+                      for n, (kind, version, payload) in enumerate(records)], 6, report)
+        self.assertEqual(report.failures, 0, report.lines)
+        self.assertTrue(any("AAA 12.3456" in line for line in report.lines), report.lines)
+
+    def test_reconciliation_and_fill_use_account_policy(self):
+        import probe
+        p = self.payload()
+        p["unreadable"] = []
+        self.assertEqual(reconciliation_fault(p, snapshot_version=6, version=2), "")
+        self.assertIn("quantity_scale", reconciliation_fault(p, snapshot_version=4, version=2))
+        fill = {"account_id": "synthetic", "client_order_id": "sell-aaa", "fill_id": "synthetic.01",
+                "instrument_id": "AAA", "side": "sell", "quantity": 35000, "quantity_scale": 10000,
+                "price": 10, "commission": 1, "filled_at": "2027-01-14T21:00:00Z"}
+        self.assertEqual(probe.fill_fault(fill, 6, 6), "")
+        self.assertIn("quantity_scale", probe.fill_fault(fill, 6, 4))
+        fill["quantity"] = 3.5
+        self.assertTrue(probe.fill_fault(fill, 6, 6))
+
+
+class FractionalLoopTests(IraBatchHarness):
+    def test_fractional_position_explained_by_fill_reaches_delivery_and_reconciliation(self):
+        from test_delivery import commit
+        row = captured_fractional("fractional_position")
+        self.fake.positions = [(ACCOUNT, row.contract, row.position, row.avgCost)]
+        self.fake.summary = ira_summary(settled="9876.54", total="9876.54")
+        commit(self.engine, "synthetic-fill", kind="execution.fill", version=6, payload={
+            "account_id": ACCOUNT, "client_order_id": "synthetic-order", "fill_id": "synthetic.01",
+            "instrument_id": "AAA", "side": "buy", "quantity": 123456, "quantity_scale": 10000,
+            "price": 10, "commission": 0, "filled_at": "2027-01-14T15:00:00Z"})
+        sent = self.run_loop(held=("AAA",), account_snapshot_version=6)
+        for kind, version in (("account.snapshot", 6), ("account.broker.snapshot", 3),
+                              ("account.reconciliation", 2)):
+            matching = [e for e in sent if e["type"] == kind]
+            self.assertTrue(matching, (kind, sent))
+            for envelope in matching:
+                self.assertEqual(envelope["schema_version"], version)
+                self.assertEqual(envelope["payload"]["quantity_scale"], 10000)
+                self.assertEqual(envelope["payload"]["positions"][0]["quantity"], 123456)
+        self.assertEqual(self.fake.placed, [])
+
+
+class FractionalDeliveryTests(unittest.TestCase):
+    def test_delivery_keeps_scale_and_classifies_fractional_inputs_as_history(self):
+        from types import SimpleNamespace
+        from delivery import _entries, PostCloseReading, DELIVERED_KINDS
+        reading = read_account(fractional_reading().conn)
+        account = account_snapshot_record(reading, CLOSE, version=6)
+        broker = broker_snapshot_record(reading, False, why=WHY)
+        stream = SimpleNamespace(envelopes=[dict(id="close", type="market.session.closed", schema_version=1,
+                                                 event_time="2027-01-14T21:00:00Z", payload={})])
+        batch = PostCloseReading(account, broker, [], reading)
+        entries = _entries("synthetic", "snapshot", batch, [stream], book=True)
+        self.assertEqual([(e["event_type"], e["schema_version"]) for e in entries[:3]],
+                         [("account.reconciliation", 2), ("account.snapshot", 6), ("account.broker.snapshot", 3)])
+        for entry in entries[:3]:
+            self.assertEqual(entry["payload"]["quantity_scale"], 10000)
+            self.assertEqual(entry["payload"]["positions"][0]["quantity"], 123456)
+        self.assertIn(("account.snapshot", 6), DELIVERED_KINDS)
+        self.assertIn(("account.broker.snapshot", 3), DELIVERED_KINDS)
+
+    def test_flex_equity_reader_accepts_fractional_cash_snapshot(self):
+        import tempfile
+        import flex
+        from engine_double import LoggedEngine, run_approval
+        from test_delivery import commit
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "synthetic.log"
+            approval = run_approval("synthetic", starting_book=({}, 1000))
+            engine = LoggedEngine(str(path), approval=approval)
+            payload = FractionalProbeTests().payload()
+            commit(engine, "snapshot", kind="account.snapshot", version=6, payload=payload)
+            _, snapshots = flex.read_chain(str(path))
+            self.assertEqual(snapshots[0][1:], (Decimal("1000.0"), "USD"))
+
+
+NOW = datetime(2026, 10, 29, 19, 1, tzinfo=timezone.utc)
+SESSION = date(2026, 10, 16)
+
+
+def release():
+    return dict(account_id="synthetic", client_order_id="tw-fractional", instrument_id="AAA", side="sell",
+                quantity=72500, quantity_scale=10000, limit_price=10, mode="paper", send=True)
+
+
+def status(lifecycle="submitted"):
+    return OrderStatusReport(12, 17, None, "synthetic-order", None, lifecycle, Decimal("3.5"), Decimal("3.75"),
+                             None, None, None, None)
+
+
+class FractionalOrdersTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.held = str(Path(self.directory.name) / "held")
+
+    def journal(self, written, journalled=(), scale=10000):
+        return OrderReportJournal("synthetic", 12, written.append, lambda: NOW, 30, self.held,
+                                  lambda: True, lambda: True, journalled=journalled, quantity_scale=scale)
+
+    def test_release_maps_ticks_to_exact_decimal_and_rejects_bad_scales(self):
+        request = release_to_request(release(), "paper", {"AAA": 900001}, SESSION)
+        self.assertEqual(request.quantity, Decimal("7.25"))
+        for bad in (True, 1, 1000, 10000.0, "10000"):
+            with self.subTest(scale=bad), self.assertRaises(ValueError):
+                release_to_request(dict(release(), quantity_scale=bad), "paper", {"AAA": 900001}, SESSION)
+
+    def test_whole_valued_release_must_match_adapter_scale_before_handover(self):
+        for version, scale in ((4, 10000), (6, 0)):
+            for method in ("check", "send"):
+                with self.subTest(version=version, scale=scale, method=method):
+                    h = Harness(mode="paper")
+                    h.conn.connect()
+                    h.conn.mark_reconciled()
+                    h.conn.config = h.conn.config._replace(account_snapshot_version=version)
+                    order = dict(release(), account_id=h.conn.config.account_id,
+                                 quantity=scale or 1, quantity_scale=scale)
+                    request = release_to_request(order, "paper", {"AAA": 900001}, SESSION)
+                    written = []
+                    sender = paper_sender(h, written)
+                    next_id = h.conn.next_order_id
+                    with self.assertRaisesRegex(ValueError, "quantity scale") as caught:
+                        getattr(sender, method)(request)
+                    self.assertNotIsInstance(caught.exception, UnsendableOrder)
+                    self.assertIn("account_snapshot_version", str(caught.exception))
+                    self.assertIn("restart", str(caught.exception))
+                    self.assertEqual(h.fake.placed, [])
+                    self.assertEqual(written, [])
+                    self.assertEqual(h.conn.next_order_id, next_id)
+
+    def test_account_policy_controls_fractional_request_before_sending(self):
+        h = Harness(mode="paper")
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        request = limit_request(quantity=Decimal("7.25"), quantity_scale=10000)
+        with self.assertRaisesRegex(ValueError, "quantity scale"):
+            paper_sender(h, []).check(request)
+        h.conn.config = h.conn.config._replace(account_snapshot_version=6)
+        h.fake.quantity_scale = 10000
+        paper_sender(h, []).send(request)
+        self.assertEqual(h.fake.placed[0][2].totalQuantity, Decimal("7.25"))
+        with self.assertRaisesRegex(UnsendableOrder, "four decimal"):
+            paper_sender(h, []).check(limit_request(quantity=Decimal("7.25001"), quantity_scale=10000))
+
+    def test_resolve_errors_name_both_schema_scale_contracts(self):
+        cases = ((relay._fill_id, relay.FILL_TYPE, 5, 6),
+                 (relay._lifecycle, relay.LIFECYCLE_TYPE, 2, 4),
+                 (relay._retired, relay.RETIRED_TYPE, 1, 2))
+        for reader, event_type, legacy, fractional in cases:
+            for scale in (0, 10000.0):
+                with self.subTest(event_type=event_type, scale=scale):
+                    envelope = dict(schema_version=fractional, payload={"quantity_scale": scale})
+                    args = ("synthetic.log", 1, envelope) if reader == relay._retired else (
+                        "synthetic.log", 1, relay.LOG_INPUT, envelope)
+                    with self.assertRaises(relay.ResolveRefused) as caught:
+                        reader(*args)
+                    message = str(caught.exception)
+                    self.assertIn(event_type, message)
+                    self.assertIn("version {} (whole shares)".format(legacy), message)
+                    self.assertIn("version {} (quantity_scale integer 10000)".format(fractional), message)
+
+    def test_captured_partial_fill_and_held_cancel_survive_restart_at_exact_scale(self):
+        written = []
+        j = self.journal(written)
+        request = release_to_request(dict(release(), client_order_id="synthetic-order"), "paper", {"AAA": 900001}, SESSION)
+        j.sent(SentRecord(request, True, 12, 17))
+        j.on_record(status())
+        row = captured_fractional("fractional_fill")
+        report = execution_report(row.contract, row.execution)
+        j.on_record(report)
+        j.on_record(status("canceled"))
+        self.assertEqual([(r.schema_version, r.payload["quantity"]) for r in written], [(4, 72500)])
+        restarted = self.journal(written, list(written))
+        restarted.on_record(report)
+        restarted.on_record(CommissionReport(report.exec_id, Decimal("0.25"), "USD"))
+        self.assertEqual([(r.schema_version, r.payload["quantity"]) for r in written],
+                         [(4, 72500), (6, 35000), (4, 72500)])
+        self.assertTrue(all(r.payload["quantity_scale"] == 10000 for r in written))
+        self.assertEqual(Decimal(written[0].payload["quantity"] - written[1].payload["quantity"]) / 10000,
+                         Decimal("3.75"))
+        self.assertEqual(relay._fill_id("test", 1, relay.LOG_INPUT,
+                                       dict(schema_version=6, payload=written[1].payload)), report.exec_id)
+        self.assertEqual(relay._lifecycle("test", 1, relay.LOG_INPUT,
+                                         dict(schema_version=4, payload=written[2].payload)),
+                         ("synthetic-order", "canceled"))
+        # The Go report tests read this same adapter-produced shape.
+        expected = Path(__file__).parent / "testdata" / "fractional_reports.json"
+        self.assertEqual([dict(event_type=r.event_type, schema_version=r.schema_version, payload=r.payload)
+                          for r in written], json.loads(expected.read_text()))
+
+    def test_held_fractional_record_refuses_float_scale_and_overflow(self):
+        written = []
+        j = self.journal(written)
+        request = release_to_request(dict(release(), client_order_id="synthetic-order"),
+                                     "paper", {"AAA": 900001}, SESSION)
+        j.sent(SentRecord(request, True, 12, 17))
+        row = captured_fractional("fractional_fill")
+        j.on_record(execution_report(row.contract, row.execution))
+        j.on_record(status("canceled"))
+        original = json.loads(Path(self.held).read_text())
+        for field, value in (("quantity_scale", 10000.0), ("quantity", 2 ** 63)):
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(original))
+                changed[0]["record"]["payload"][field] = value
+                Path(self.held).write_text(json.dumps(changed))
+                with self.assertRaises(UnreportableOrder):
+                    self.journal([])
+
+    def test_whole_share_report_refuses_fractional_fill_with_reason(self):
+        j = self.journal([], scale=0)
+        row = captured_fractional("fractional_fill")
+        with self.assertRaisesRegex(UnreportableOrder, "whole"):
+            j.on_record(execution_report(row.contract, row.execution))
+
+    def test_relay_compares_mixed_version_quantities_in_shares(self):
+        fill = dict(account_id="synthetic", client_order_id="tw-fractional", instrument_id="AAA", side="sell",
+                    fill_id="synthetic.01", quantity=35000, quantity_scale=10000, price=10, commission=0.25,
+                    filled_at="2026-10-16T14:00:00Z")
+        groups = [[(1, relay.LOG_INPUT, dict(type=relay.FILL_TYPE, schema_version=6, payload=fill)),
+                   (2, relay.LOG_DECISION, dict(type=relay.RELEASED, schema_version=4, payload=release()))]]
+        ended, fills = relay._order_ends("test", groups, (), {})
+        self.assertEqual(fills["synthetic.01"], ("tw-fractional", Decimal("3.5")))
+        self.assertEqual(relay._open_orders(groups, ended, fills), {"tw-fractional"})
+        fills["synthetic.02"] = ("tw-fractional", Decimal("3.75"))
+        self.assertEqual(relay._open_orders(groups, ended, fills), set())
+        for version, scale in ((5, 10000), (6, 0), (6, True), (6, 1000)):
+            with self.subTest(version=version, scale=scale), self.assertRaises(relay.ResolveRefused):
+                relay._fill_id("test", 1, relay.LOG_INPUT,
+                               dict(schema_version=version, payload=dict(fill, quantity_scale=scale)))
+
+    def test_synthetic_fractional_decision_is_not_a_broker_cancellation(self):
+        groups = [[(1, relay.LOG_DECISION, dict(type=relay.LIFECYCLE_TYPE, schema_version=5,
+                   payload=dict(release(), status="canceled", synthetic=True)))]]
+        self.assertEqual(relay._order_ends("test", groups, (), {}), (set(), {}))
+
+    def test_journal_seed_refuses_schema_scale_disagreement(self):
+        from snapshot import Record
+        payload = dict(account_id="synthetic", client_order_id="synthetic-order", instrument_id="AAA",
+                       order_id="order:12:17", status="submitted", side="sell", quantity=72500,
+                       quantity_scale=10000, limit_price=10, occurred_at="2026-10-29T19:01:00Z", message="")
+        for version, scale in ((2, 10000), (4, 0), (4, 10000.0)):
+            with self.subTest(version=version, scale=scale), self.assertRaises(UnreportableOrder):
+                self.journal([], [Record("execution.order.lifecycle", version,
+                                        dict(payload, quantity_scale=scale))])
+
+    def test_journal_seed_refuses_invalid_fill_quantity(self):
+        from snapshot import Record
+        for quantity in (0, -1, 2 ** 63, True, 3.5):
+            with self.subTest(quantity=quantity), self.assertRaises(UnreportableOrder):
+                self.journal([], [Record("execution.fill", 6,
+                    dict(account_id="synthetic", fill_id="synthetic.01.01", quantity=quantity,
+                         quantity_scale=10000))])
+
+    def test_retirement_keeps_scale_and_version_in_durable_outbox(self):
+        pending = relay.PendingInput(str(Path(self.directory.name) / "pending"))
+        relay.retire_order(pending, release(), relay.RETIRED_SESSION_OVER, "session expired",
+                           relay.RETIRED_BY_ADAPTER, NOW, SESSION, "input:1")
+        entries = relay.Outbox(pending.path + relay.OUTBOX_SUFFIX).load()
+        self.assertEqual(entries[0]["schema_version"], 2)
+        self.assertEqual(entries[0]["payload"]["quantity_scale"], 10000)
+        self.assertTrue(relay._is_queued_retirement(entries[0]))
 
 
 if __name__ == "__main__":

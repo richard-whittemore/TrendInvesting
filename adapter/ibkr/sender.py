@@ -14,6 +14,7 @@ The re-check of ADR 0026 point 3's limits before sending is not here yet: it
 needs the hashed configuration, which the live engine configuration that
 names adapter ibkr will carry (ADR 0025 point 3).
 """
+import math
 from collections import namedtuple
 from datetime import date, datetime
 from decimal import Decimal
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from config import is_paper_account
+from quantities import quantity_scale, shares, units, valid_scale
 from connection import NotConnected
 from spelling import ibkr_symbol
 from values import to_decimal
@@ -28,7 +30,7 @@ from values import to_decimal
 ACTIONS = ("BUY", "SELL")
 PRICED_ORDER_TYPES = ("LMT",)
 UNPRICED_ORDER_TYPES = ("MKT",)
-# A released order is a whole-share limit order for the session (ADR 0026
+# A released order is a limit order for the session (ADR 0026
 # point 2, "Order type and price").
 RELEASE_ORDER_TYPE = "LMT"
 RELEASE_TIF = "DAY"
@@ -43,15 +45,17 @@ EXCHANGE = "SMART"
 SESSION_ZONE = ZoneInfo("America/New_York")
 
 OrderRequest = namedtuple("OrderRequest", (
-    "client_order_id account_id con_id symbol action quantity order_type limit_price tif session"),
-    defaults=(None,))
+    "client_order_id account_id con_id symbol action quantity order_type limit_price tif session quantity_scale"),
+    defaults=(None, 0))
 """An order the adapter was asked to place.
 
 client_order_id is the decision's tag, sent to IBKR as orderRef; IBKR's own
 order ID is never part of a request (plan.md section 5). session is the New
 York date of the session the order was released in (its input's event
 time); a released order is a limit order for that session only (ADR 0026
-point 2), so it is never sent in another.
+point 2), so it is never sent in another. quantity_scale retains the released
+order's units even for an integral Decimal; reports must use those same
+units (ADR 0026, D7-F).
 """
 
 DryRunRecord = namedtuple("DryRunRecord", "request send")
@@ -119,6 +123,8 @@ def validate(request):
     if not isinstance(request.quantity, Decimal) or not request.quantity.is_finite() \
             or request.quantity <= 0:
         raise ValueError("quantity must be a positive Decimal")
+    if not valid_scale(request.quantity_scale):
+        raise ValueError("invalid request quantity scale")
     if request.order_type in PRICED_ORDER_TYPES:
         if not isinstance(request.limit_price, Decimal) or not request.limit_price.is_finite() \
                 or request.limit_price <= 0:
@@ -164,8 +170,10 @@ class PaperSender:
     sends only a request for that account. An order goes out only while the
     link is up and reconciled (ADR 0025 point 5), for an account the
     session's login manages (IBKR's managedAccounts), through a client that
-    can place orders, as a whole-share DAY limit order released in today's
-    session (ADR 0026 point 2), under the next IBKR order ID, which is used
+    can place orders, as a DAY limit order released in today's session
+    (ADR 0026 point 2). Its released quantity scale must match the
+    configured quantity scale: whole shares or four-place fractional
+    shares (ADR 0026 D7-F). It uses the next IBKR order ID, which is used
     once whatever place_order does: a call that raised may still have
     reached IBKR. journal receives the SentRecord only after place_order
     returns; the write-ahead record of the hand-over is the relay's
@@ -234,12 +242,14 @@ class PaperSender:
         if request.account_id != config.account_id:
             raise ValueError("request for account {!r} on the connection to paper account {!r}".format(
                 request.account_id, config.account_id))
-        if request.order_type != RELEASE_ORDER_TYPE:
-            raise UnsendableOrder("a released order is a limit order, not {!r}".format(request.order_type))
-        if request.tif != RELEASE_TIF:
-            raise ValueError("a released order is a {} order, not {!r}".format(RELEASE_TIF, request.tif))
-        if request.quantity != request.quantity.to_integral_value():
-            raise UnsendableOrder("quantity {} is not whole shares".format(request.quantity))
+        if request.quantity_scale != quantity_scale(config):
+            raise ValueError("released order quantity scale does not match adapter account policy; "
+                             "check account_snapshot_version against the engine's quantity policy, "
+                             "complete the configuration migration and restart (ADR 0026 D7-F; "
+                             "docs/runbooks/first-dry-run-day.md)")
+        if not isinstance(request.symbol, str) or not request.symbol:
+            raise ValueError("the contract names no symbol")
+        check_order_shape(request_shape(request)[1], quantity_scale(config))
         if not isinstance(request.con_id, int) or isinstance(request.con_id, bool) or request.con_id <= 0:
             raise UnsendableOrder("con_id must be IBKR's positive contract ID")
         return config
@@ -256,6 +266,34 @@ class PaperSender:
         return record
 
 
+def check_order_shape(order, scale):
+    """Check the DAY limit shape shared by pre-handover checks and ibapi mapping.
+
+    ADR 0026 point 2 and D7-F: quantities are positive Decimal shares at
+    the configured account's scale, with no rounding; the wire price must
+    remain positive and finite after conversion to float.
+    """
+    if not isinstance(order.orderRef, str) or not order.orderRef or not isinstance(order.account, str) or not order.account:
+        raise ValueError("an order carries its client order ID (orderRef) and its account")
+    if order.action not in ACTIONS:
+        raise ValueError("action {!r} is not BUY or SELL".format(order.action))
+    quantity = order.totalQuantity
+    if not isinstance(quantity, Decimal) or not quantity.is_finite() or quantity <= 0:
+        raise ValueError("totalQuantity must be positive finite Decimal shares")
+    try:
+        units(quantity, scale, "order quantity")
+    except ValueError as err:
+        raise UnsendableOrder(str(err)) from None
+    if order.orderType != RELEASE_ORDER_TYPE:
+        raise UnsendableOrder("a released order is a limit order, not {!r}".format(order.orderType))
+    if not isinstance(order.lmtPrice, float) or not math.isfinite(order.lmtPrice) or order.lmtPrice <= 0:
+        raise ValueError("lmtPrice must be a positive finite float")
+    if order.tif != RELEASE_TIF:
+        raise ValueError("a released order is a {} order, not {!r}".format(RELEASE_TIF, order.tif))
+    if order.transmit is not True:
+        raise ValueError("an order the adapter sends is transmitted")
+
+
 def request_shape(request):
     """The (contract, order) a request is handed to TWSApi.place_order as: plain objects with ibapi's attribute names.
 
@@ -267,7 +305,8 @@ def request_shape(request):
                                currency=CURRENCY, exchange=EXCHANGE)
     order = SimpleNamespace(orderRef=request.client_order_id, account=request.account_id,
                             action=request.action, totalQuantity=request.quantity,
-                            orderType=request.order_type, lmtPrice=float(request.limit_price),
+                            orderType=request.order_type,
+                            lmtPrice=float(request.limit_price) if request.limit_price is not None else None,
                             tif=request.tif, transmit=True)
     return contract, order
 
@@ -278,7 +317,7 @@ def release_to_request(order, mode, con_ids, session=None):
     Only a release marked send whose mode is the adapter's own is sent
     (ADR 0026 point 3, "Mode"). con_ids maps the engine's instrument ID to
     IBKR's contract ID; an instrument with none is refused, never looked up
-    by name. That refusal, and a quantity with a fraction of a share, raise
+    by name. That refusal, and a noninteger wire quantity, raise
     UnsendableOrder: the order can never be sent as it stands. session is the New York date of the input whose reply released
     the order; without one the order is refused.
     """
@@ -295,18 +334,19 @@ def release_to_request(order, mode, con_ids, session=None):
         raise UnsendableOrder("no IBKR contract ID is configured for {!r}".format(symbol))
     quantity = order.get("quantity")
     if _is_fraction(quantity):
-        raise UnsendableOrder("quantity {!r} is a fraction of a share; IBKR takes whole shares only".format(quantity))
+        raise UnsendableOrder("quantity {!r} is not integer units at its declared quantity_scale".format(quantity))
     if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
-        raise ValueError("quantity {!r} is not a positive whole number of shares".format(quantity))
+        raise ValueError("quantity {!r} is not a positive integer quantity".format(quantity))
+    quantity = shares(quantity, order.get("quantity_scale", 0))
     limit = to_decimal(order.get("limit_price"), "limit_price")
     if limit <= 0:
         raise ValueError("limit_price must be positive")
     if not _is_date(session):
         raise ValueError("order {} has no session it was released in".format(order.get("client_order_id")))
     return OrderRequest(client_order_id=order["client_order_id"], account_id=order["account_id"],
-                        con_id=con_ids[symbol], symbol=symbol, action=action, quantity=Decimal(quantity),
+                        con_id=con_ids[symbol], symbol=symbol, action=action, quantity=quantity,
                         order_type=RELEASE_ORDER_TYPE, limit_price=limit, tif=RELEASE_TIF,
-                        session=session)
+                        session=session, quantity_scale=order.get("quantity_scale", 0))
 
 
 def _is_fraction(value):

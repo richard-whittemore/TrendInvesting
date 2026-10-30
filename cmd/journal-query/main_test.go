@@ -538,3 +538,26 @@ func TestReconcileWithTheRegistryAnchorChecksTheFinalRecordHash(t *testing.T) {
 		t.Fatal("one anchor names one journal: several journals with it are refused")
 	}
 }
+
+func TestFractionalFillsAndOrdersPrintShares(t *testing.T) {
+	d := day(2026, time.March, 2)
+	s := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
+		AccountID: "synthetic", AsOf: d, NetLiquidation: 100, Currency: "USD", QuantityScale: 10000,
+		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: 10, TotalCash: 10}
+	f := event.TargetWeightFillPayload{AccountID: s.AccountID, ClientOrderID: "synthetic-order", FillID: "synthetic-fill",
+		InstrumentID: "AAA", Side: "sell", Quantity: 12500, QuantityScale: 10000, Price: 2, FilledAt: d}
+	l := event.LimitOrderLifecyclePayload{AccountID: s.AccountID, ClientOrderID: f.ClientOrderID, OrderID: "synthetic-venue",
+		InstrumentID: "AAA", Side: "sell", Status: "submitted", Quantity: 72500, QuantityScale: 10000, LimitPrice: 2, OccurredAt: d}
+	path := writeJournal(t, "fractional", ev{journal.KindInput, event.AccountSnapshotEventType, s.SchemaVersion(), d, s},
+		ev{journal.KindInput, event.FillEventType, f.SchemaVersion(), d, f},
+		ev{journal.KindInput, event.OrderLifecycleEventType, l.SchemaVersion(), d, l})
+	for command, quantity := range map[string]string{"fills": "-1.25", "orders": "7.25"} {
+		out, err := query(t, command, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, quantity) || strings.Contains(out, "72500") || strings.Contains(out, "12500") {
+			t.Fatalf("%s printed units: %s", command, out)
+		}
+	}
+}

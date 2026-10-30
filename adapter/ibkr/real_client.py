@@ -22,16 +22,15 @@ IbapiUnavailable, so the rest of the adapter and its tests never need it.
 """
 import inspect
 import logging
-import math
 import sys
 import threading
 import time
-from decimal import Decimal
 
 from config import is_paper_account
 from connection import ConnectFailed
 from relay import HandoverUnconfirmed
-from sender import ACTIONS, CURRENCY, EXCHANGE, RELEASE_ORDER_TYPE, RELEASE_TIF, SEC_TYPE, SendRefused
+from quantities import quantity_scale
+from sender import CURRENCY, EXCHANGE, SEC_TYPE, SendRefused, check_order_shape
 from tws import TWSApi
 
 try:
@@ -120,7 +119,7 @@ ORDER_REQUEST_FIELDS = ("orderRef", "account", "action", "totalQuantity", "order
 # group or conditions, a real order (not whatIf), no stop or trail price,
 # not hidden, not all-or-none, no start or end time beyond DAY, no IBKR algo
 # and no price-management algo (explicitly off, not ibapi's None, which
-# means the account's own setting) (ADR 0026 point 2: a whole-share DAY
+# means the account's own setting) (ADR 0026 point 2 and D7-F: a DAY
 # limit order and nothing more).
 ORDER_FIELDS_SET = (
     ("outsideRth", False), ("parentId", 0), ("ocaGroup", ""), ("conditions", []), ("whatIf", False),
@@ -182,33 +181,21 @@ def ibapi_contract(request, contract_class):
     return contract
 
 
-def ibapi_order(request, order_class):
-    """An order_class (ibapi.order.Order) for the request's order: a whole-share DAY limit order, transmitted.
+def ibapi_order(request, order_class, scale=0):
+    """An order_class (ibapi.order.Order) for the request's order: a DAY limit order at the account quantity scale, transmitted.
 
     The request's fields are copied as they are (orderRef is the client
-    order ID; totalQuantity a whole Decimal, as ibapi 10.x takes it;
+    order ID; totalQuantity exact Decimal shares under ADR 0026 D7-F;
     lmtPrice a float), and every field in ORDER_FIELDS_SET is set to its
     plain value; the fields in DEFAULTS_TO_CONFIRM keep ibapi's default.
     Raises OrderShapeRefused for anything but tws.TWSApi.place_order's order
     shape, and for an ibapi Order without one of the fields set here.
     """
     values = _fields(request, ORDER_REQUEST_FIELDS, "order")
-    if not _is_text(values["orderRef"]) or not _is_text(values["account"]):
-        raise OrderShapeRefused("an order carries its client order ID (orderRef) and its account")
-    if values["action"] not in ACTIONS:
-        raise OrderShapeRefused("action {!r} is not BUY or SELL".format(values["action"]))
-    quantity = values["totalQuantity"]
-    if (not isinstance(quantity, Decimal) or not quantity.is_finite() or quantity <= 0
-            or quantity != quantity.to_integral_value()):
-        raise OrderShapeRefused("totalQuantity must be a positive whole number of shares as a Decimal")
-    price = values["lmtPrice"]
-    if not isinstance(price, float) or not math.isfinite(price) or price <= 0:
-        raise OrderShapeRefused("lmtPrice must be a positive finite float")
-    if values["orderType"] != RELEASE_ORDER_TYPE or values["tif"] != RELEASE_TIF:
-        raise OrderShapeRefused("an order is a {} {} order, not {} {}".format(
-            RELEASE_TIF, RELEASE_ORDER_TYPE, values["tif"], values["orderType"]))
-    if values["transmit"] is not True:
-        raise OrderShapeRefused("an order the adapter sends is transmitted")
+    try:
+        check_order_shape(request, scale)
+    except ValueError as err:
+        raise OrderShapeRefused(str(err)) from None
     order = order_class()
     for name in ORDER_REQUEST_FIELDS:
         _assign(order, name, values[name])
@@ -579,7 +566,7 @@ class IbapiClient(TWSApi):
         if getattr(order, "account", None) != self._config.account_id:
             raise SendRefused("an order for another account than the configured paper account is never placed")
         built_contract = ibapi_contract(contract, Contract)
-        built_order = ibapi_order(order, Order)
+        built_order = ibapi_order(order, Order, quantity_scale(self._config))
         client_order_id = getattr(order, "orderRef", None)
         if not self.is_connected():
             raise HandoverNotConfirmed(client_order_id, "before")

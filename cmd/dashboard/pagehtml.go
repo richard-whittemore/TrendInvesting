@@ -147,11 +147,11 @@ tr.urgent td:first-child{border-left:3px solid var(--neg)}
 <p class="assume">{{.Costs.Note}}</p></div>
 <div class="card"><h3>Change between paired points</h3>{{template "strip" strip .}}</div>
 </div><div>
-<div class="card"><h3>Holdings</h3>{{if .Holdings}}<table>{{range .Holdings}}<tr><td>{{.InstrumentID}}</td><td>{{.Quantity}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}</div>
+<div class="card"><h3>Holdings</h3>{{if .Holdings}}<table>{{$scale := .QuantityScale}}{{range .Holdings}}<tr><td>{{.InstrumentID}}</td><td>{{quantity .Quantity $scale}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}</div>
 <div class="card"><h3>Targets</h3>{{if .Decisions}}<table>{{range .Decisions}}<tr><td>{{.Outcome}}</td><td>{{.WithheldReason}}</td><td>{{range .Targets}}{{.InstrumentID}} {{weight .Weight}} {{end}}</td></tr>{{end}}</table>{{else}}<p>No decision today.</p>{{end}}</div>
-<div class="card"><h3>Orders</h3>{{if .Orders}}<table>{{range .Orders}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}} {{.Quantity}} {{.InstrumentID}} @ {{printf "%.2f" .LimitPrice}}</td><td>{{.StatusText}}</td><td>{{.Reason}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
+<div class="card"><h3>Orders</h3>{{if .Orders}}<table>{{range .Orders}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}} {{quantity .Quantity .QuantityScale}} {{.InstrumentID}} @ {{printf "%.2f" .LimitPrice}}</td><td>{{.StatusText}}</td><td>{{.Reason}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
 <p>Refusals today: {{.Refusals}}</p></div>
-<div class="card"><h3>Fills</h3>{{if .Fills}}<table>{{range .Fills}}<tr><td>{{.Side}}</td><td>{{.InstrumentID}}</td><td>{{.Quantity}} @ {{printf "%.2f" .Price}}</td><td>{{.ClientOrderID}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}</div>
+<div class="card"><h3>Fills</h3>{{if .Fills}}<table>{{range .Fills}}<tr><td>{{.Side}}</td><td>{{.InstrumentID}}</td><td>{{quantity .Quantity .QuantityScale}} @ {{printf "%.2f" .Price}}</td><td>{{.ClientOrderID}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}</div>
 {{if .SalesWithheld}}<div class="card"><h3>Sales back to 98% withheld</h3><table>{{range .SalesWithheld}}<tr><td>{{.ClientOrderID}}</td><td>{{.InstrumentID}}</td><td>{{.Reason}}</td><td>{{.Trigger}}</td><td>{{.Detail}}</td></tr>{{end}}</table></div>{{end}}
 {{if .Skipped}}<div class="card"><h3>Trades skipped</h3><table>{{range .Skipped}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}}</td><td>{{.InstrumentID}}</td><td>{{shares .Shares}} shares</td><td>{{.Reason}}</td></tr>{{end}}</table></div>{{end}}
 {{if .RejectedInputs}}<div class="card"><p class="urgent">Inputs not read: {{.RejectedInputs}} (an unknown schema version or values that fail validation; they move no figure).</p></div>{{end}}
