@@ -593,6 +593,24 @@ class AdapterTemplateTests(unittest.TestCase):
 class ClientIdTests(unittest.TestCase):
     """--client-id: the instance's settings and its configuration name the same client ID, or nothing starts."""
 
+    def test_rehearsal_drains_journal_after_matching_client_ids(self):
+        import subprocess
+        text = (REPO / "deploy/rehearsal/first-day.sh").read_text()
+        assertion = next(line for line in text.splitlines()
+                         if line.startswith("journalctl ") and "two client IDs" in line)
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "journal.txt"
+            for matched in (True, False):
+                with self.subTest(matched=matched):
+                    message = ("refused: names client_id 11, but the instance's settings give 12\n"
+                               if matched else "refused: another reason\n")
+                    journal.write_text(message + "later journal entry\n" * 100000)
+                    command = 'journalctl() { cat "$1"; }; fail() { exit 1; }; ' + assertion.replace(
+                        "journalctl -u ti-adapter@trad-ira.service --no-pager -o cat", 'journalctl "$1"')
+                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", command, "test", str(journal)],
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0 if matched else 1, result.stderr)
+
     def test_a_configuration_whose_client_id_differs_from_the_settings_is_refused(self):
         import io
         from cli import main

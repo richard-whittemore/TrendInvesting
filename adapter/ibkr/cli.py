@@ -237,6 +237,16 @@ def _read_secret(path, key):
 def load_config(args):
     """The AdapterConfig the arguments name, with the account from exactly one place; Refused otherwise."""
     values = _read_config(args.config)
+    # One adapter per account, each with its own client ID (ADR 0026 point 8).
+    # Refuse a different valid ID before other configuration checks so the
+    # instance mismatch remains the first diagnosis. Invalid IDs still go
+    # through AdapterConfig's strict validation and are never echoed here.
+    client_id = values.get("client_id")
+    if (type(client_id) is int and client_id > 0
+            and getattr(args, "client_id", None) is not None and args.client_id != client_id):
+        raise Refused("the configuration {} names client_id {}, but the instance's settings give {} "
+                      "(TI_ADAPTER_CLIENT_ID): each account's adapter has its own client ID".format(
+                          args.config, client_id, args.client_id))
     from_secrets = args.secrets is not None or args.account_key is not None
     if from_secrets:
         if args.secrets is None or args.account_key is None:
@@ -255,13 +265,6 @@ def load_config(args):
         account = values.get("account_id")
         message = mask_accounts(message, account if isinstance(account, str) else "")
         raise Refused("the configuration {} is refused: {}".format(args.config, message)) from None
-    # One adapter per account, each with its own client ID (ADR 0026 point 8):
-    # the settings the unit hands over and the configuration must agree, so
-    # a configuration copied from another account's never connects as it.
-    if getattr(args, "client_id", None) is not None and args.client_id != cfg.client_id:
-        raise Refused("the configuration {} names client_id {}, but the instance's settings give {} "
-                      "(TI_ADAPTER_CLIENT_ID): each account's adapter has its own client ID".format(
-                          args.config, cfg.client_id, args.client_id))
     return cfg
 
 

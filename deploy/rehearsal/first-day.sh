@@ -510,7 +510,9 @@ sed -i 's/"client_id": 12/"client_id": 11/' /etc/trend-investing/adapters/trad-i
 systemctl start ti-adapter@trad-ira.service || true
 for _ in $(seq 30); do systemctl is-failed --quiet ti-adapter@trad-ira.service && break; sleep 1; done
 systemctl is-failed --quiet ti-adapter@trad-ira.service || fail "the IRA adapter started on a configuration naming Boost's client ID"
-journalctl -u ti-adapter@trad-ira.service --no-pager -o cat | grep -q 'names client_id 11, but the instance.s settings give 12' || fail "the IRA adapter's refusal does not name the two client IDs"
+# Drain the journal: grep -q can close the pipe early and make journalctl
+# fail with SIGPIPE under pipefail even when the expected refusal is present.
+journalctl -u ti-adapter@trad-ira.service --no-pager -o cat | grep 'names client_id 11, but the instance.s settings give 12' >/dev/null || fail "the IRA adapter's refusal does not name the two client IDs"
 sed -i 's/"client_id": 11/"client_id": 12/' /etc/trend-investing/adapters/trad-ira.json
 systemctl reset-failed ti-adapter@trad-ira.service
 # The template refuses the boost instance: Boost keeps its own adapter unit.
