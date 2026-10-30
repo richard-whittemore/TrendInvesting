@@ -91,8 +91,11 @@ Use the installed, stamped engine and the same dry-run configuration/build
 as the recorded month. The recorded stream must include the calendar with
 the following session, warm-up bars/histories, universe, account snapshots
 and marks. Use the engine's **durable `.log`**, which has all these inputs;
-the market-data job's stream alone lacks the account and marks. Operator
-instructions require the separate recovery drill below. A `.journal`
+the market-data job's stream alone lacks the account and marks. Broker snapshots, Flex inputs, the run approval and owner instructions
+(including page acknowledgements) are replayed in their recorded delivery order.
+Keep the earlier durable logs beside the source when its approval names a
+previous run: the command copies that history privately for the engine to
+validate the unchanged approval. A `.journal`
 without durable input records is not a replay source.
 
 In the commands below, replace the example close with the recorded month's
@@ -117,10 +120,16 @@ Evidence: /tmp/ira-replay-<unique>
 Replay gate: PASS (owner must still sign the real-month half)
 ```
 
-The script passes `-as-of` equal to that close, replays earlier inputs as
-warm-up, and waits synchronously for each engine reply. It refuses an
-existing live socket, even a stale one, and any configuration outside
-momentum dry-run. It starts no adapter and releases only `send=false` orders.
+The script passes the recorded run start through `-as-of`, supplies its
+recorded approval through `-approval`, replays every committed input, and
+waits synchronously for each engine reply. The requested close selects the
+decision to compare, never filters input timestamps: an after-close broker
+reading can arrive before its close-stamped account snapshot. Each record
+and commit must match the durable hash chain; an uncommitted tail is retained
+as evidence and never replayed. The installed configuration hash and strategy
+version must match the recording. It refuses a running or starting systemd
+engine unit, an unknown unit state, an existing live socket (even stale), and
+any configuration outside momentum dry-run. It starts no adapter and releases only `send=false` orders.
 Every run gets a new private socket, log and journal under `/tmp`; it never
 uses the original run's output folders or operator inbox. The byte-for-byte
 input copy, configuration, durable replay log, journal and engine output
@@ -134,9 +143,12 @@ A withheld attempt instead prints, for example:
 ```
 
 It exits nonzero, retains evidence, and leaves the gate pending. A decided
-month with withheld picks or refused orders also fails. Read the decision payload and the
-original dry-run's decision: with identical inputs, configuration and build,
-intended targets, planned orders and `send=false` releases must agree. This
+month with withheld picks or refused orders also fails. The command compares
+the selected decision, all its plans and its releases field by field against
+the recording, ignoring envelope run identity, sequence and client order IDs
+(including their plan references). It prints the first difference and fails
+if any field, order or count differs. PASS appears only after the child exits
+cleanly and the durable output passes comparison. This
 replay never repairs a missed real month and does not prove fractional
 adapter/reporting readiness (M6b). Return the production instance via a
 **fresh approval** and the restart procedure in [durable-log.md](durable-log.md#restarting-an-engine),
@@ -188,8 +200,11 @@ file (never `-resume` for a deliberate stop), replays January and checks:
 HELD: rebalance-in-progress; no orders released
 ```
 
-The fake then confirms its sells cancelled, with SHY=10 and cash=10000
-unchanged. In a second owner shell, run **the complete command printed by
+The reconnected fake feeds January's cancellation reports to the fresh engine
+before clearance. The engine records and refuses these as orders this run
+never released; the driver verifies that refusal and continues the input
+sequence. It prints `RECONNECTED: old sell cancellations reported and refused
+as never released by this run`. SHY=10 and cash=10000 remain unchanged. In a second owner shell, run **the complete command printed by
 the driver**, with its actual evidence path and exact order list. Its form is:
 
 ```bash
@@ -204,7 +219,9 @@ sudo -u ti-operator /opt/trend-investing/bin/operator rebalance-cleared \
 Only Richard records this server-drill clearance. Return to the first shell
 and press Enter. The driver resumes the **fake feed**, checks the clearance
 was journalled and has no `.refused` note, feeds February, and compares its
-targets and orders against an on-time run over identical inputs. The fake
+targets, plans and release/refusal payloads against an on-time run over
+identical inputs, after both runs finish February's sell and buy phases.
+Missing, changed or refused buys fail the comparison. The fake
 cancels every released order; nothing fills or changes holdings/cash. Expected:
 
 ```text
@@ -227,9 +244,11 @@ its fake, with these focused tests (no real account or market data):
 TMPDIR=/tmp python3 -m unittest discover -s deploy/rehearsal -p 'test_ira*.py'
 ```
 
-The replay test uses `ira-stream.py --month-fixture` to stamp the existing
-synthetic month; the default `ira-stream.py` mode remains the non-decision
-warm-up. Preserve the evidence, record dated PASS/FAIL rows, restore the
+The replay test records the synthetic month through the real engine with
+an approval, broker readings, Flex inputs and an owner acknowledgement, then
+replays that committed log. `ira-stream.py --month-fixture` publishes a
+complete synthetic stream atomically; its default mode remains the
+non-decision warm-up. Preserve the evidence, record dated PASS/FAIL rows, restore the
 production instance by fresh approval, and perform the same-day probe.
 Gateway restart, logged-out pages, withheld-rebalance pages and real
 month-end observations remain Richard's server checks (lessons L4/L10/L11).

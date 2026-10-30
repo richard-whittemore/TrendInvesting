@@ -4,14 +4,22 @@ Gate status: PENDING
 
 Owner decisions: plan.md §9 Phase 3 (2026-10-28), paper sequencing and
 No Borrow Margin/fractional shares (2026-10-29); ADR 0026 points 1, 2 and 5;
-ADR 0027 restart model. Use one copy per IRA installation and preserve failed
-attempts alongside it. Nothing here authorizes sending, including to paper.
+ADR 0027 restart model. Use one copy per IRA installation, named
+`ira-drill-checklist-trad-ira.md` or `ira-drill-checklist-roth-ira.md` in this
+same directory. `go test ./internal/manualaudit/` audits the template and every
+`ira-drill-checklist*.md` copy there. Nothing here authorizes sending, including to paper.
 
-Every row is mandatory. Write an ISO date (`YYYY-MM-DD`), PASS or FAIL, and
-an outcome/evidence reference for each attempt. A blank or failed row keeps
-the gate pending. Only Richard signs the last row and changes Gate status to
-PASS after every row passes. `go test ./internal/manualaudit/` rejects a passed
-gate with missing or undated steps. Evidence paths must be private; record
+Every step is mandatory. Fill its blank row for the first attempt with an ISO
+date (`YYYY-MM-DD`), PASS or FAIL, and an outcome/evidence reference. For each
+retry, keep the earlier row and add a new dated row with the same Step id below
+it, in chronological order; attempts on the same date retain their row order.
+Every recorded attempt needs a valid date, outcome and evidence, including
+failed attempts. The latest attempt for each step determines its status: a
+blank or latest FAIL keeps the gate pending, while a later PASS resolves an
+earlier FAIL without erasing it. Only Richard signs the last row and changes
+Gate status to PASS after every step's latest attempt passes.
+`go test ./internal/manualaudit/` rejects a passed gate with missing, undated
+or latest-failed steps. Evidence paths must be private; record
 logical instance names only, never account numbers, credentials or screenshots
 with identifiers. Mask `DU` plus **letters and digits** (lesson L12).
 
@@ -37,4 +45,5 @@ Gateway/login and alert checks: [Gateway login](gateway-login.md),
 [alerts](../manual/alerts-and-dashboard.md). Same-day probe:
 [first dry-run day, Traditional IRA](first-dry-run-day.md#the-traditional-ira-its-engine-warm-up-adapter-and-same-day-probe).
 If a check fails, leave the gate pending, retain the failing evidence and record
-remediation and a new dated attempt; never erase the failed result (AGENTS.md).
+remediation and a new dated row with the same Step id; never erase the failed
+result (AGENTS.md).

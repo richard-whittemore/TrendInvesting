@@ -4,20 +4,81 @@ Standard-library Python only; the engine is played by a stand-in socket server t
 engine.decisions frame, as cmd/engine's wire contract does (cmd/engine/engine.go).
 """
 import hashlib
+import contextlib
+import io
 import importlib.util
 import json
 import os
+from pathlib import Path
 import socket
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("feed_month", os.path.join(HERE, "..", "feed-month.py"))
 feed_month = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(feed_month)
 
+stream_spec = importlib.util.spec_from_file_location("ira_stream", os.path.join(HERE, "ira-stream.py"))
+ira_stream = importlib.util.module_from_spec(stream_spec)
+stream_spec.loader.exec_module(ira_stream)
+
 MONTH = os.path.join(HERE, "..", "..", "cmd", "engine", "testdata", "momentum-month.jsonl")
+
+
+class MonthStreamTest(unittest.TestCase):
+    def test_serialized_payload_bytes_match_their_hash(self):
+        # ADR 0016 hashes the payload bytes consumed by the engine, including JSON spacing.
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            log = root / "synthetic.log"
+            log.write_text(json.dumps({"configuration_hash": "sha256:cfg", "strategy_version": "momentum/1"}) + "\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                ira_stream.write_month(str(log), str(root / "streams"), MONTH)
+            for raw in (root / "streams/synthetic/synthetic-month.jsonl").read_text().splitlines():
+                envelope = json.loads(raw)
+                payload_start = raw.index('"payload":') + len('"payload":')
+                payload_text = raw[payload_start:].lstrip()
+                _, end = json.JSONDecoder().raw_decode(payload_text)
+                self.assertEqual(envelope["payload_hash"], hashlib.sha256(payload_text[:end].encode()).hexdigest())
+
+
+    def test_failed_or_interrupted_write_never_publishes_partial_month_and_can_retry(self):
+        # AGENTS.md preserves evidence; the stream file contract publishes complete files only.
+        for interrupt in (False, True):
+            with self.subTest(interrupt=interrupt), tempfile.TemporaryDirectory(dir="/tmp") as directory:
+                root = Path(directory)
+                log, month = root / "synthetic.log", root / "month.jsonl"
+                log.write_text(json.dumps({"configuration_hash": "sha256:cfg", "strategy_version": "momentum/1"}) + "\n")
+                row = {"id": "synthetic", "type": "market.session.closed", "event_time": "2025-01-31T21:00:00Z",
+                       "payload": {"period_end": "2025-01-31T21:00:00Z"}}
+                valid = json.dumps(row) + "\n"
+                month.write_text(valid + (valid if interrupt else "malformed\n"))
+                target = root / "streams/synthetic/synthetic-month.jsonl"
+                loads = json.loads
+                calls = 0
+
+                def interrupted_loads(raw):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 3:
+                        raise KeyboardInterrupt()
+                    return loads(raw)
+
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with mock.patch.object(ira_stream.json, "loads", side_effect=interrupted_loads if interrupt else loads):
+                        with self.assertRaises(KeyboardInterrupt if interrupt else json.JSONDecodeError):
+                            ira_stream.write_month(str(log), str(root / "streams"), str(month))
+                    self.assertFalse(target.exists(), "partial month must not be published")
+                    month.write_text(valid + valid)
+                    ira_stream.write_month(str(log), str(root / "streams"), str(month))
+                    complete = target.read_bytes()
+                    self.assertEqual(len(complete.splitlines()), 2)
+                    with self.assertRaises(FileExistsError):
+                        ira_stream.write_month(str(log), str(root / "streams"), str(month))
+                    self.assertEqual(target.read_bytes(), complete, "published evidence must not be replaced")
 
 
 class StandIn(threading.Thread):

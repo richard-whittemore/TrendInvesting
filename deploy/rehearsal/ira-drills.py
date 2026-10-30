@@ -113,7 +113,7 @@ class FakeVenue:
             self.stop()
             raise
 
-    def send(self, row):
+    def send(self, row, expected_refusal=None):
         raw = json.dumps(row['payload'], separators=(',', ':'))
         env = dict(row, envelope_version=1, source='fake-venue', recorded_at=row['event_time'],
                    sequence=self.sequence, configuration_hash=self.header['configuration_hash'],
@@ -121,7 +121,15 @@ class FakeVenue:
         # Compact, as hashed: the engine rejects a payload whose bytes differ from its hash (ADR 0016).
         self.conn.sendall((json.dumps(env, separators=(',', ':')) + '\n').encode())
         frame = json.loads(self.replies.readline() or '{}')
-        require(frame.get('envelope', {}).get('type') == 'engine.decisions', 'fake input refused: ' + str(frame))
+        if expected_refusal is not None:
+            error = frame.get('error', {})
+            require(error.get('code') == 'decider_failed' and error.get('causation_id') == row['id'] and
+                    expected_refusal in error.get('message', ''), 'expected old-order refusal was not returned')
+            # A reducer refusal is committed and consumes its sequence (CONTEXT.md: Committed reply).
+            self.sequence = (error.get('sequence') or self.sequence) + 1
+            return []
+        require(frame.get('envelope', {}).get('type') == 'engine.decisions',
+                'fake input refused; inspect the private durable log')
         reply = frame['envelope']
         self.sequence = reply['sequence'] + 1
         decisions = reply['payload'].get('decisions') or []
@@ -132,8 +140,23 @@ class FakeVenue:
         for row in rows:
             self.send(row)
 
+    def cancel_reports(self, orders, at, expected_refusal=None):
+        """Feed venue cancellations, including an earlier run's reports (ADR 0026 point 5)."""
+        decisions = []
+        for order in orders:
+            ident = order['client_order_id']
+            payload = {k: order[k] for k in ('account_id', 'client_order_id', 'instrument_id', 'side', 'quantity', 'limit_price')}
+            if 'quantity_scale' in order:
+                payload['quantity_scale'] = order['quantity_scale']
+            payload.update(order_id='fake-' + ident, status='canceled', occurred_at=at)
+            decisions.extend(self.send(dict(type='execution.order.lifecycle',
+                                           schema_version=4 if payload.get('quantity_scale') else 2,
+                                           id='cancel:' + ident, event_time=at, payload=payload),
+                                       expected_refusal=expected_refusal))
+        return decisions
+
     def cancel_all(self, at):
-        # The local fake acknowledges cancellation, without executing or changing the book.
+        # Cancel both phases without fills; the last sell starts buys (ADR 0026 point 2).
         pending = [d['payload'] for d in self.decisions if d['type'] == 'risk.order.released']
         seen = set()
         while pending:
@@ -142,10 +165,7 @@ class FakeVenue:
             if ident in seen:
                 continue
             seen.add(ident)
-            payload = {k: order[k] for k in ('account_id', 'client_order_id', 'instrument_id', 'side', 'quantity', 'limit_price')}
-            payload.update(order_id='fake-' + ident, status='canceled', occurred_at=at)
-            out = self.send(dict(type='execution.order.lifecycle', schema_version=2, id='cancel:' + ident,
-                                 event_time=at, payload=payload))
+            out = self.cancel_reports([order], at)
             pending.extend(d['payload'] for d in out if d['type'] == 'risk.order.released')
 
     def stop(self):
@@ -226,6 +246,10 @@ def drill(interactive=False):
         require(len(targets) == 1 and targets[0]['withheld_reason'] == 'rebalance-in-progress', 'restart did not hold')
         require(not any(d['type'] == 'risk.order.released' for d in venue.decisions), 'hold released an order')
         print('HELD: rebalance-in-progress; no orders released', flush=True)
+        # The fresh run never released these orders; their reports cannot clear its inherited hold
+        # (ADR 0026 point 5). Require that exact refusal before the owner records the clearance.
+        venue.cancel_reports(released, '2025-01-31T22:00:30Z', expected_refusal='which this run never released')
+        print('RECONNECTED: old sell cancellations reported and refused as never released by this run', flush=True)
         command = [operator, 'rebalance-cleared', '-inbox', str(venue.inbox), '-account', ACCOUNT,
                    '-decision', tag, '-orders', ','.join(sorted(o['client_order_id'] for o in released)),
                    '-by', 'owner', '-detail', 'fake venue confirms cancelled; no broker connection',
@@ -244,10 +268,9 @@ def drill(interactive=False):
         require(not plans(venue, tag), 'abandoned January buys were released')
         recovered = [d['payload'] for d in venue.decisions if d['type'] == 'strategy.targets.decided'][-1]
         require(recovered['outcome'] == 'decided', 'next month did not decide')
-        # The month's orders as decided: the fake's cancellations below end the sells, after which the
-        # engine plans the buy phase (ADR 0026, point 2), so the comparison must read the plans first.
-        recovered_plans = plans(venue, febtag)
+        # The last sell's terminal report plans buys, so compare only after both phases (ADR 0026 point 2).
         venue.cancel_all('2025-03-03T14:30:00Z')
+        recovered_plans = plans(venue, febtag)
     finally:
         venue.stop()
     end = operate(operator, 'ti-trader', 'approve', '-log', venue.log, '-account', ACCOUNT,
@@ -258,17 +281,21 @@ def drill(interactive=False):
         control.feed(jan + feb)
         ontime = [d['payload'] for d in control.decisions if d['type'] == 'strategy.targets.decided'][-1]
         require(recovered['targets'] == ontime['targets'], 'targets differ from on-time control')
+        control.cancel_all('2025-03-03T14:30:00Z')
         mine, theirs = recovered_plans, plans(control, febtag)
 
         def gate_trail(v):
-            # What the gate did with each planned order: released (send?) or refused (why).
-            return [(d['type'].rsplit('.', 1)[1], d['payload'].get('side'), d['payload'].get('instrument_id'),
-                     d['payload'].get('send'), d['payload'].get('reason'), d['payload'].get('detail'))
-                    for d in v.decisions if d['type'] in ('risk.order.released', 'risk.order.refused')]
-        require(mine and mine == theirs, 'orders differ from on-time control; restarted: ' + json.dumps(mine, sort_keys=True) +
-                '; on-time: ' + json.dumps(theirs, sort_keys=True) + '; restarted gate trail: ' + json.dumps(gate_trail(venue)) +
-                '; on-time gate trail: ' + json.dumps(gate_trail(control)))
-        control.cancel_all('2025-03-03T14:30:00Z')
+            # Compare every release/refusal field for this decision (ADR 0026 point 2).
+            return [(d['type'], {k: value for k, value in d['payload'].items()
+                                 if k not in ('client_order_id', 'plan_id', 'tag')})
+                    for d in v.decisions if d['type'] in ('risk.order.released', 'risk.order.refused')
+                    and d['payload']['tag'] == febtag]
+        require({p['side'] for p in mine} == {'sell', 'buy'} and
+                {p['side'] for p in theirs} == {'sell', 'buy'}, 'both execution phases must plan orders')
+        require(mine == theirs and gate_trail(venue) == gate_trail(control),
+                'orders differ from on-time control; inspect both private logs for plans and gate outcomes')
+        require(not any(kind == 'risk.order.refused' for kind, _ in gate_trail(venue)),
+                'February orders refused; drill remains pending')
     finally:
         control.stop()
     control_end = operate(operator, 'ti-trader', 'approve', '-log', control.log, '-account', ACCOUNT,

@@ -88,7 +88,7 @@ def write_month(engine_log, streams, month):
     folder = os.path.join(streams, run)
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, "synthetic-month.jsonl")
-    with open(month, encoding="utf-8") as source, open(path, "x", encoding="utf-8") as out:
+    with open(month, encoding="utf-8") as source, open(path + ".part", "w", encoding="utf-8") as out:
         for n, raw in enumerate(source, 1):
             row = json.loads(raw)
             payload = json.dumps(row["payload"], separators=(",", ":"))
@@ -96,7 +96,10 @@ def write_month(engine_log, streams, month):
                        recorded_at=row["event_time"], correlation_id=run,
                        configuration_hash=header["configuration_hash"], strategy_version=header["strategy_version"],
                        payload_hash=hashlib.sha256(payload.encode()).hexdigest())
-            out.write(json.dumps(row) + "\n")
+            out.write(json.dumps(row, separators=(",", ":")) + "\n")
+    # Publish only a complete stream without replacing prior evidence (AGENTS.md rule 6).
+    os.link(path + ".part", path)
+    os.unlink(path + ".part")
     print(path)
 
 
