@@ -100,7 +100,7 @@ The Go side of the boundary is the `transport` package. It lives outside `intern
 
 The following are intentionally not selected in the initial scaffold:
 
-- PostgreSQL schema and migration tool;
+- a database: the hash-chained durable log is the record and every projection is rebuilt from it (ADR 0027); a database would be adopted only for a measured need;
 - observability vendor;
 - cloud provider and deployment topology; and
 - Kubernetes or service decomposition.
