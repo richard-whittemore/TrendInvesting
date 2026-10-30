@@ -306,8 +306,8 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 		if momentum {
 			_, refused = reports.Lifecycle(p)
 		} else if o, ok := byID[client]; ok && !p.Describes(o.released()) {
-			refused = fmt.Errorf("it reports %s %s %d %s at %v, which does not describe order %s as released (%s %s %d %s at %.2f)",
-				p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, o.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
+			refused = fmt.Errorf("it reports %s %s %s %s at %v, which does not describe order %s as released (%s %s %s %s at %.2f)",
+				p.AccountID, p.Side, event.FormatQuantity(p.Quantity, p.QuantityScale), p.InstrumentID, p.LimitPrice, o.ClientOrderID, o.AccountID, o.Side, event.FormatQuantity(o.Quantity, o.QuantityScale), o.InstrumentID, o.LimitPrice)
 		}
 	case e.Type == event.FillEventType && momentum:
 		var p event.TargetWeightFillPayload

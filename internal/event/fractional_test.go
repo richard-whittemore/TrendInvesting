@@ -494,7 +494,7 @@ func TestConservativeExecutionCents(t *testing.T) {
 		{"half cent", 72500, 10000, 10.10, 0.01, "73.24", 73.21},
 		{"above half cent", 72500, 10000, 10.101, 0.01, "73.25", 73.22},
 		{"below cent", 1, 10000, 0.01, 0, "0.01", 0},
-		{"whole exact cents", 3, 0, 0.07, 0, "0.21", 0.21},
+		{"whole exact cents", 3, 0, 0.07, 0, "0.21", event.QuantityValue(3, 0, 0.07)},
 		{"fractional exact cents", 2900, 10000, 1, 0, "0.29", 0.29},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

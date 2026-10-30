@@ -1677,9 +1677,12 @@ cash snapshot 6, fill 6, venue lifecycle 4, synthetic lifecycle 5, planned
 order 3, released order 4, refused order 5, broker snapshot 3, reconciliation
 input/result 2, skipped order 2, retirement 2 and target decision 11.
 Earlier supported schemas remain readable under their original meanings.
-The incomplete-sell page renders decimal outstanding quantities. General
-summary and journal-query surfaces refuse fractional records until their
-separate migration, so fixed-point counts cannot be presented as shares.
+The incomplete-sell page renders decimal outstanding quantities. Summary
+order lines and refused-report text carry the quantity scale and render
+decimal shares. The summary still refuses fractional configurations
+and other fractional record types, and journal-query surfaces refuse
+fractional records until their separate migration, so fixed-point counts
+cannot be presented as shares.
 
 
 The existing operator approval's `StartingBook` remains a whole-share
@@ -1705,14 +1708,19 @@ rounded up to cents, plus the order's maximum fees and its rounding slack.
 The planner and independent insufficient-cash gate use the same allowance;
 both journal it as `rounding_slack`. The allowance stays committed while the
 order is working and only its unused portion is released at termination.
-Actual fills debit their own cent-rounded cost and commission, without
-charging the allowance again.
+Each fractional buy fill debits its gross value rounded UP to the cent,
+plus its commission added without cent rounding, without charging the
+allowance again. Terminal budget spending retains this conservative estimate;
+closing the order releases only the reservation above that spending. This is
+distinct from reconciliation booking (ADR 0019), which rounds gross value
+and commission separately to the nearest cent: a 0.1-share fill at $10.01
+with no commission debits $1.01 from the budget but books $1.00.
 
 Each execution can add less than one cent of upward rounding. Reserving one
 cent per possible execution covers every quantity split through
 floor(100 × rounding_slack_per_order) executions: ten at the default. For
-example, four executions of 1.8125 shares at $10.10 book $73.24, which fits
-the $73.23 whole-order reservation plus $0.10 slack. This bound assumes fills
+example, four executions of 1.8125 shares at $10.10 debit $73.24 from the
+budget, which fits the $73.23 whole-order reservation plus $0.10 slack. This bound assumes fills
 at or below the buy limit and aggregate fees within the order's fee allowance.
 It is not a structural reserve for execution counts beyond that cap or other
 cash changes. The structural cash buffer remains an owner decision pending

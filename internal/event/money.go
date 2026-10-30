@@ -31,23 +31,35 @@ func (c ExecutionConfiguration) RoundingSlack() float64 {
 // BuyReservation adds the partial-execution allowance to the order's cent
 // ceiling and fees (ADR 0026, "Per-execution rounding reserve"). Fill debits
 // use BuyCost instead: slack is reserved once per order, never per fill.
-// All inputs must be validated; slack may be zero for legacy orders.
+// Whole-share orders preserve their original float expression and ignore
+// fractional slack (ADR 0026). All inputs must be validated.
 func BuyReservation(quantity, scale int64, price, fees, slack float64) *big.Rat {
+	if scale == 0 {
+		return BuyCost(quantity, scale, price, fees)
+	}
 	return new(big.Rat).Add(BuyCost(quantity, scale, price, fees), decimalMoney(slack))
 }
 
 // BuyCost returns the exact worst-case debit: quantity times the decimal
 // limit rounded up to a cent, plus fees (ADR 0026, point 2, "Worst-case cost").
-// Callers supply validated nonnegative quantities, prices and fees; no
-// intermediate float may discard a fraction of a cent before rounding.
+// Whole-share orders retain QuantityValue + fees in its original float
+// order (ADR 0026). Callers supply validated nonnegative quantities, prices
+// and fees; fractional values must not lose precision before cent rounding.
 func BuyCost(quantity, scale int64, price, fees float64) *big.Rat {
+	if scale == 0 {
+		return new(big.Rat).SetFloat64(QuantityValue(quantity, 0, price) + fees)
+	}
 	return new(big.Rat).Add(quantityCents(quantity, scale, price, true), decimalMoney(fees))
 }
 
 // SaleProceeds credits quantity times price rounded down to cents before
 // commission (ADR 0026, point 2, D5): an IRA never funds buys from a rounded-up
-// sale. Inputs must be validated nonnegative quantities, prices and commission.
+// sale. Whole-share fills preserve their unrounded float proceeds (ADR 0026).
+// Inputs must be validated nonnegative quantities, prices and commission.
 func SaleProceeds(quantity, scale int64, price, commission float64) float64 {
+	if scale == 0 {
+		return QuantityValue(quantity, 0, price) - commission
+	}
 	proceeds := new(big.Rat).Sub(quantityCents(quantity, scale, price, false), decimalMoney(commission))
 	value, _ := proceeds.Float64()
 	return value

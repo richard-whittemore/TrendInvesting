@@ -113,8 +113,8 @@ func (r *OrderReports) Lifecycle(p LimitOrderLifecyclePayload) (*ReportedOrder, 
 	}
 	if !p.Describes(o.Released) {
 		q := o.Released
-		return nil, fmt.Errorf("reports %s %s %d %s at %v, which describes no order %s as released (%s %s %d %s at %v)",
-			p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, q.ClientOrderID, q.AccountID, q.Side, q.Quantity, q.InstrumentID, q.LimitPrice)
+		return nil, fmt.Errorf("reports %s %s %s %s at %v, which describes no order %s as released (%s %s %s %s at %v)",
+			p.AccountID, p.Side, FormatQuantity(p.Quantity, p.QuantityScale), p.InstrumentID, p.LimitPrice, q.ClientOrderID, q.AccountID, q.Side, FormatQuantity(q.Quantity, q.QuantityScale), q.InstrumentID, q.LimitPrice)
 	}
 	o.Venue = true
 	if p.Terminal() {

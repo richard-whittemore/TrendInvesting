@@ -192,8 +192,9 @@ func PlanIRA(in IRAInput) (IRAPlan, error) {
 }
 
 // BuyCost is a buy's worst-case cost: quantity at the band's limit price,
-// rounded up to cents, plus the maximum commission, fees and the order's
+// rounded up to cents for fractional orders, plus maximum fees and the order's
 // explicit rounding slack (ADR 0026, "Per-execution rounding reserve").
+// Whole-share orders retain their original float arithmetic.
 // Buys worth $980 at the previous close cost
 // $1,029 at a 5% band before fees.
 func BuyCost(o event.OrderPlannedPayload, maxFees float64) float64 {
