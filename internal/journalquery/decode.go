@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
 	"time"
@@ -24,6 +25,9 @@ type item struct {
 	// payload names one, otherwise the journal's single account (see
 	// attributeAccounts), otherwise empty.
 	account string
+	// recordedScale keeps totals presentation tied to selected declarations,
+	// even when legacy arithmetic is upcast for replay (ADR 0026 D7-F).
+	recordedScale int64
 
 	fill      *fill
 	planned   *event.OrderPlannedPayload
@@ -337,25 +341,121 @@ func sameFill(x, y fill) bool {
 	return false
 }
 
-// decodeWholeQuantities preserves the fail-closed contract of aggregations
-// that still add whole shares (ADR 0015; ADR 0026 D7-F). Detail tables use
-// decode and format each record at its own scale.
-func decodeWholeQuantities(j Journal) ([]item, error) {
-	for _, record := range j.Records {
-		// Only an object can carry a scale; a record decode skips, such as an
-		// unrelated input whose payload is a scalar, is left to decode.
-		if trimmed := bytes.TrimLeft(record.Envelope.Payload, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
-			continue
+// decodeAggregations validates account scale histories before filtering
+// (ADR 0015), then upcasts legacy fills and snapshots for accounts that later
+// declare fractional units, with overflow and negative holdings refused
+// (ADR 0026, Amendment 2026-10-30, D7-F). Reverse transitions are refused.
+func decodeAggregations(journals []Journal) ([][]item, error) {
+	decoded := make([][]item, 0, len(journals))
+	scales := map[string]int64{}
+	for _, j := range journals {
+		for _, record := range j.Records {
+			// Unknown inputs are skipped, but malformed quantity metadata is refused
+			// rather than interpreted as a whole-share declaration (ADR 0015).
+			if trimmed := bytes.TrimLeft(record.Envelope.Payload, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
+				continue
+			}
+			var units struct {
+				AccountID     string `json:"account_id"`
+				QuantityScale int64  `json:"quantity_scale"`
+			}
+			if err := json.Unmarshal(record.Envelope.Payload, &units); err != nil {
+				return nil, fmt.Errorf("%s: record %d: %w", j.Name, record.Sequence, err)
+			}
+			if units.QuantityScale != 0 && units.QuantityScale != event.FractionalQuantityScale {
+				return nil, fmt.Errorf("%s: record %d: account %q: unsupported quantity scale %d", j.Name, record.Sequence, accountCell(units.AccountID), units.QuantityScale)
+			}
+			// The skipped equity-and-cash schema has no share units (ADR 0015).
+			if record.Envelope.Type == event.AccountSnapshotEventType && record.Envelope.SchemaVersion == event.AccountSnapshotSchemaVersion && units.QuantityScale != 0 {
+				return nil, fmt.Errorf("%s: record %d: %s: quantity_scale is not supported at this version", j.Name, record.Sequence, record.Envelope.Type)
+			}
 		}
-		var units struct {
-			QuantityScale int64 `json:"quantity_scale"`
-		}
-		if err := json.Unmarshal(record.Envelope.Payload, &units); err != nil {
+		items, err := decode(j)
+		if err != nil {
 			return nil, err
 		}
-		if units.QuantityScale != 0 {
-			return nil, fmt.Errorf("%s: fractional quantities require the journal-query aggregation migration", record.Envelope.Type)
+		// A transition is forward-only within one run's journal (ADR 0026, D7-F
+		// amendment: legacy whole-share records are upcast, never the reverse).
+		// Each journal is a run of its own, so the order is judged per journal;
+		// across journals an account's common scale is the highest it declared.
+		journalScales := map[string]int64{}
+		for i := range items {
+			it := &items[i]
+			scale, quantity := it.quantityScale()
+			if !quantity {
+				continue
+			}
+			it.recordedScale = scale
+			if previous, seen := journalScales[it.account]; seen && previous != scale && previous != 0 {
+				return nil, fmt.Errorf("%s: record %d: account %q has mixed quantity scales: %d and %d; fractional quantities cannot precede whole shares", j.Name, it.seq, accountCell(it.account), previous, scale)
+			}
+			journalScales[it.account] = scale
+			if scale > scales[it.account] {
+				scales[it.account] = scale
+			}
+		}
+		decoded = append(decoded, items)
+	}
+	for _, items := range decoded {
+		for _, it := range items {
+			if it.recordedScale == 0 && scales[it.account] == event.FractionalQuantityScale {
+				if err := it.upcastQuantities(); err != nil {
+					return nil, fmt.Errorf("%s: record %d: account %q: %w", it.journal, it.seq, accountCell(it.account), err)
+				}
+			}
 		}
 	}
-	return decode(j)
+	return decoded, nil
+}
+
+// upcastQuantities converts decoded legacy arithmetic to exact ticks, including
+// baseline holdings (ADR 0026, Amendment 2026-10-30, D7-F). Recorded payloads
+// remain untouched; these pointers belong to decode's private copies.
+func (it item) upcastQuantities() error {
+	var quantities []*int64
+	var scale *int64
+	switch {
+	case it.fill != nil:
+		quantities, scale = []*int64{&it.fill.Quantity}, &it.fill.QuantityScale
+	case it.snapshot != nil:
+		scale = &it.snapshot.QuantityScale
+		for i := range it.snapshot.Positions {
+			quantities = append(quantities, &it.snapshot.Positions[i].Quantity)
+		}
+	default:
+		return nil
+	}
+	for _, q := range quantities {
+		if *q < 0 || *q > math.MaxInt64/event.FractionalQuantityScale {
+			return fmt.Errorf("cannot upcast whole-share quantity %d to nonnegative ticks (negative quantity or int64 overflow)", *q)
+		}
+	}
+	for _, q := range quantities {
+		*q *= event.FractionalQuantityScale
+	}
+	*scale = event.FractionalQuantityScale
+	return nil
+}
+
+// quantityScale identifies records declaring share units (ADR 0026 D7-F).
+// Records without quantities do not declare a whole-share account.
+func (it item) quantityScale() (int64, bool) {
+	switch {
+	case it.fill != nil:
+		return it.fill.QuantityScale, true
+	case it.snapshot != nil:
+		return it.snapshot.QuantityScale, true
+	case it.planned != nil:
+		return it.planned.QuantityScale, true
+	case it.released != nil:
+		return it.released.QuantityScale, true
+	case it.refused != nil:
+		return it.refused.QuantityScale, true
+	case it.lifecycle != nil:
+		return it.lifecycle.QuantityScale, true
+	case it.skipped != nil:
+		return it.skipped.QuantityScale, true
+	default:
+		return 0, false
+	}
 }

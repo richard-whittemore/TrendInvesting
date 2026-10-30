@@ -65,6 +65,29 @@ func (f Filter) keepFill(it item) bool {
 	return it.fill != nil && f.keep(it, it.fill.InstrumentID)
 }
 
+// keepQuantity selects unit declarations for totals (ADR 0026 D7-F).
+// Snapshots declare account-wide units, including when no instrument is held.
+func (f Filter) keepQuantity(it item) bool {
+	switch {
+	case it.fill != nil:
+		return f.keepFill(it)
+	case it.snapshot != nil:
+		return f.keepAccount(it) && f.keepTime(it.at)
+	case it.planned != nil:
+		return f.keep(it, it.planned.InstrumentID)
+	case it.released != nil:
+		return f.keep(it, it.released.InstrumentID)
+	case it.refused != nil:
+		return f.keep(it, it.refused.InstrumentID)
+	case it.lifecycle != nil:
+		return f.keep(it, it.lifecycle.InstrumentID)
+	case it.skipped != nil:
+		return f.keep(it, it.skipped.InstrumentID)
+	default:
+		return false
+	}
+}
+
 // signedQuantity is a fill's effect on the position: entries, adds and buys
 // buy, stops, exits and sells sell (both fill versions record the executed
 // size unsigned).
@@ -125,48 +148,90 @@ type tally struct {
 	commission          float64
 }
 
-func (t *tally) add(f *fill) {
+func (t *tally) add(f *fill) error {
 	t.fills++
-	if signedQuantity(f.Kind, f.Quantity) > 0 {
-		t.bought += f.Quantity
-	} else {
-		t.sold += f.Quantity
+	quantity := &t.bought
+	if signedQuantity(f.Kind, f.Quantity) < 0 {
+		quantity = &t.sold
 	}
+	sum, ok := addQuantity(*quantity, f.Quantity)
+	if !ok {
+		return fmt.Errorf("quantity totals exceed int64 (overflow)")
+	}
+	*quantity = sum
 	t.commission += f.Commission
+	return nil
 }
 
-func (t tally) row(instrument, year string) []string {
-	return []string{instrument, year, strconv.FormatInt(t.fills, 10), strconv.FormatInt(t.bought, 10), strconv.FormatInt(t.sold, 10), moneySum(t.commission)}
+func (t tally) row(instrument, year string, scale int64) []string {
+	return []string{instrument, year, strconv.FormatInt(t.fills, 10), event.FormatQuantity(t.bought, scale), event.FormatQuantity(t.sold, scale), moneySum(t.commission)}
 }
 
 // Totals counts fills, shares bought and sold, and commission paid for each
-// instrument in each calendar year (UTC, by the fill's own time), followed by
-// a TOTAL row over everything that passed f.
+// instrument in each calendar year (UTC, by the fill's own time). Whole-share
+// selections retain their combined TOTAL (ADR 0016). Selections containing
+// fractional records show an account column and a TOTAL per account, so units
+// at different scales are never added (ADR 0026 D7-F).
 func Totals(journals []Journal, f Filter) (Table, error) {
 	if err := distinct(journals); err != nil {
 		return Table{}, err
 	}
+	decoded, err := decodeAggregations(journals)
+	if err != nil {
+		return Table{}, err
+	}
+	perAccount := false
+	scales := map[string]int64{}
+	for _, items := range decoded {
+		for _, it := range items {
+			if !f.keepQuantity(it) {
+				continue
+			}
+			scale, _ := it.quantityScale()
+			scales[it.account] = max(scales[it.account], scale)
+			perAccount = perAccount || it.recordedScale != 0
+		}
+	}
 	type key struct {
-		instrument string
-		year       int
+		account, instrument string
+		year                int
 	}
 	groups := map[key]*tally{}
-	var all tally
-	for _, j := range journals {
-		items, err := decodeWholeQuantities(j)
-		if err != nil {
-			return Table{}, err
+	totals := map[string]*tally{}
+	if perAccount {
+		for account := range scales {
+			totals[account] = &tally{}
 		}
+	} else {
+		totals[""] = &tally{}
+	}
+	for _, items := range decoded {
 		for _, it := range items {
 			if !f.keepFill(it) {
 				continue
 			}
-			k := key{it.fill.InstrumentID, it.at.UTC().Year()}
+			account := ""
+			if perAccount {
+				account = it.account
+			}
+			execution := *it.fill
+			if !perAccount && execution.QuantityScale != 0 {
+				// A whole-share selection retains its recorded units after replay's
+				// checked legacy upcast (ADR 0026 D7-F; ADR 0016).
+				execution.Quantity /= execution.QuantityScale
+				execution.QuantityScale = 0
+			}
+			scales[account] = execution.QuantityScale
+			k := key{account, it.fill.InstrumentID, it.at.UTC().Year()}
 			if groups[k] == nil {
 				groups[k] = &tally{}
 			}
-			groups[k].add(it.fill)
-			all.add(it.fill)
+			if err := groups[k].add(&execution); err != nil {
+				return Table{}, fmt.Errorf("%s: record %d: %w", it.journal, it.seq, err)
+			}
+			if err := totals[account].add(&execution); err != nil {
+				return Table{}, fmt.Errorf("%s: record %d: %w", it.journal, it.seq, err)
+			}
 		}
 	}
 	keys := make([]key, 0, len(groups))
@@ -174,15 +239,36 @@ func Totals(journals []Journal, f Filter) (Table, error) {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(a, b int) bool {
+		if keys[a].account != keys[b].account {
+			return keys[a].account < keys[b].account
+		}
 		if keys[a].instrument != keys[b].instrument {
 			return keys[a].instrument < keys[b].instrument
 		}
 		return keys[a].year < keys[b].year
 	})
 	t := Table{Columns: []string{"instrument", "year", "fills", "bought", "sold", "commission"}}
-	for _, k := range keys {
-		t.Rows = append(t.Rows, groups[k].row(k.instrument, strconv.Itoa(k.year)))
+	if perAccount {
+		t.Columns = append([]string{"account"}, t.Columns...)
 	}
-	t.Rows = append(t.Rows, all.row("TOTAL", "all"))
+	for _, k := range keys {
+		row := groups[k].row(k.instrument, strconv.Itoa(k.year), scales[k.account])
+		if perAccount {
+			row = append([]string{accountCell(k.account)}, row...)
+		}
+		t.Rows = append(t.Rows, row)
+	}
+	accounts := make([]string, 0, len(totals))
+	for account := range totals {
+		accounts = append(accounts, account)
+	}
+	sort.Strings(accounts)
+	for _, account := range accounts {
+		row := totals[account].row("TOTAL", "all", scales[account])
+		if perAccount {
+			row = append([]string{accountCell(account)}, row...)
+		}
+		t.Rows = append(t.Rows, row)
+	}
 	return t, nil
 }

@@ -1,0 +1,436 @@
+=== trading.jsonl orders text ===
+journal seq time account instrument event side quantity price note
+ERROR: <nil>
+=== trading.jsonl orders csv ===
+journal,seq,time,account,instrument,event,side,quantity,price,note
+ERROR: <nil>
+=== trading.jsonl orders json ===
+[]
+ERROR: <nil>
+=== trading.jsonl fills text ===
+journal seq time instrument kind quantity price commission
+trading.jsonl 1 2025-03-03 AAA entry 100 10.00 1.00
+trading.jsonl 2 2025-03-10 AAA add 50 11.00 0.50
+trading.jsonl 3 2025-06-02 BBB entry 200 5.00 2.00
+trading.jsonl 4 2026-01-05 AAA stop -150 12.00 1.50
+trading.jsonl 5 2026-02-02 BBB exit -200 6.00 2.00
+ERROR: <nil>
+=== trading.jsonl fills csv ===
+journal,seq,time,instrument,kind,quantity,price,commission
+trading.jsonl,1,2025-03-03,AAA,entry,100,10.00,1.00
+trading.jsonl,2,2025-03-10,AAA,add,50,11.00,0.50
+trading.jsonl,3,2025-06-02,BBB,entry,200,5.00,2.00
+trading.jsonl,4,2026-01-05,AAA,stop,-150,12.00,1.50
+trading.jsonl,5,2026-02-02,BBB,exit,-200,6.00,2.00
+ERROR: <nil>
+=== trading.jsonl fills json ===
+[{"journal":"trading.jsonl","seq":"1","time":"2025-03-03","instrument":"AAA","kind":"entry","quantity":"100","price":"10.00","commission":"1.00"},{"journal":"trading.jsonl","seq":"2","time":"2025-03-10","instrument":"AAA","kind":"add","quantity":"50","price":"11.00","commission":"0.50"},{"journal":"trading.jsonl","seq":"3","time":"2025-06-02","instrument":"BBB","kind":"entry","quantity":"200","price":"5.00","commission":"2.00"},{"journal":"trading.jsonl","seq":"4","time":"2026-01-05","instrument":"AAA","kind":"stop","quantity":"-150","price":"12.00","commission":"1.50"},{"journal":"trading.jsonl","seq":"5","time":"2026-02-02","instrument":"BBB","kind":"exit","quantity":"-200","price":"6.00","commission":"2.00"}]
+ERROR: <nil>
+=== trading.jsonl refusals text ===
+journal seq time account instrument event reason detail
+ERROR: <nil>
+=== trading.jsonl refusals csv ===
+journal,seq,time,account,instrument,event,reason,detail
+ERROR: <nil>
+=== trading.jsonl refusals json ===
+[]
+ERROR: <nil>
+=== trading.jsonl operator text ===
+journal seq time account input action by detail
+ERROR: <nil>
+=== trading.jsonl operator csv ===
+journal,seq,time,account,input,action,by,detail
+ERROR: <nil>
+=== trading.jsonl operator json ===
+[]
+ERROR: <nil>
+=== trading.jsonl positions text ===
+journal seq time account instrument kind change position
+trading.jsonl 1 2025-03-03 - AAA entry 100 100
+trading.jsonl 2 2025-03-10 - AAA add 50 150
+trading.jsonl 3 2025-06-02 - BBB entry 200 200
+trading.jsonl 4 2026-01-05 - AAA stop -150 0
+trading.jsonl 5 2026-02-02 - BBB exit -200 0
+ERROR: <nil>
+=== trading.jsonl positions csv ===
+journal,seq,time,account,instrument,kind,change,position
+trading.jsonl,1,2025-03-03,-,AAA,entry,100,100
+trading.jsonl,2,2025-03-10,-,AAA,add,50,150
+trading.jsonl,3,2025-06-02,-,BBB,entry,200,200
+trading.jsonl,4,2026-01-05,-,AAA,stop,-150,0
+trading.jsonl,5,2026-02-02,-,BBB,exit,-200,0
+ERROR: <nil>
+=== trading.jsonl positions json ===
+[{"journal":"trading.jsonl","seq":"1","time":"2025-03-03","account":"-","instrument":"AAA","kind":"entry","change":"100","position":"100"},{"journal":"trading.jsonl","seq":"2","time":"2025-03-10","account":"-","instrument":"AAA","kind":"add","change":"50","position":"150"},{"journal":"trading.jsonl","seq":"3","time":"2025-06-02","account":"-","instrument":"BBB","kind":"entry","change":"200","position":"200"},{"journal":"trading.jsonl","seq":"4","time":"2026-01-05","account":"-","instrument":"AAA","kind":"stop","change":"-150","position":"0"},{"journal":"trading.jsonl","seq":"5","time":"2026-02-02","account":"-","instrument":"BBB","kind":"exit","change":"-200","position":"0"}]
+ERROR: <nil>
+=== trading.jsonl totals text ===
+instrument year fills bought sold commission
+AAA 2025 2 150 0 1.50
+AAA 2026 1 0 150 1.50
+BBB 2025 1 200 0 2.00
+BBB 2026 1 0 200 2.00
+TOTAL all 5 350 350 7.00
+ERROR: <nil>
+=== trading.jsonl totals csv ===
+instrument,year,fills,bought,sold,commission
+AAA,2025,2,150,0,1.50
+AAA,2026,1,0,150,1.50
+BBB,2025,1,200,0,2.00
+BBB,2026,1,0,200,2.00
+TOTAL,all,5,350,350,7.00
+ERROR: <nil>
+=== trading.jsonl totals json ===
+[{"instrument":"AAA","year":"2025","fills":"2","bought":"150","sold":"0","commission":"1.50"},{"instrument":"AAA","year":"2026","fills":"1","bought":"0","sold":"150","commission":"1.50"},{"instrument":"BBB","year":"2025","fills":"1","bought":"200","sold":"0","commission":"2.00"},{"instrument":"BBB","year":"2026","fills":"1","bought":"0","sold":"200","commission":"2.00"},{"instrument":"TOTAL","year":"all","fills":"5","bought":"350","sold":"350","commission":"7.00"}]
+ERROR: <nil>
+=== trading.jsonl reconcile text ===
+ERROR: reconcile compared nothing in trading.jsonl: no account snapshot after the baseline met the selection, so no fills there were checked against the broker's positions
+=== trading.jsonl reconcile csv ===
+ERROR: reconcile compared nothing in trading.jsonl: no account snapshot after the baseline met the selection, so no fills there were checked against the broker's positions
+=== trading.jsonl reconcile json ===
+ERROR: reconcile compared nothing in trading.jsonl: no account snapshot after the baseline met the selection, so no fills there were checked against the broker's positions
+=== orders.jsonl orders text ===
+journal seq time account instrument event side quantity price note
+orders.jsonl 2 2026-03-02 A1 AAA planned buy 100 10.10 t1
+orders.jsonl 3 2026-03-02 A1 AAA released buy 100 10.10 mode=paper,send=true
+orders.jsonl 4 2026-03-02 A1 BBB planned sell 40 4.90 t2
+orders.jsonl 5 2026-03-02 A1 BBB refused sell 40 4.90 order-size
+ERROR: <nil>
+=== orders.jsonl orders csv ===
+journal,seq,time,account,instrument,event,side,quantity,price,note
+orders.jsonl,2,2026-03-02,A1,AAA,planned,buy,100,10.10,t1
+orders.jsonl,3,2026-03-02,A1,AAA,released,buy,100,10.10,"mode=paper,send=true"
+orders.jsonl,4,2026-03-02,A1,BBB,planned,sell,40,4.90,t2
+orders.jsonl,5,2026-03-02,A1,BBB,refused,sell,40,4.90,order-size
+ERROR: <nil>
+=== orders.jsonl orders json ===
+[{"journal":"orders.jsonl","seq":"2","time":"2026-03-02","account":"A1","instrument":"AAA","event":"planned","side":"buy","quantity":"100","price":"10.10","note":"t1"},{"journal":"orders.jsonl","seq":"3","time":"2026-03-02","account":"A1","instrument":"AAA","event":"released","side":"buy","quantity":"100","price":"10.10","note":"mode=paper,send=true"},{"journal":"orders.jsonl","seq":"4","time":"2026-03-02","account":"A1","instrument":"BBB","event":"planned","side":"sell","quantity":"40","price":"4.90","note":"t2"},{"journal":"orders.jsonl","seq":"5","time":"2026-03-02","account":"A1","instrument":"BBB","event":"refused","side":"sell","quantity":"40","price":"4.90","note":"order-size"}]
+ERROR: <nil>
+=== orders.jsonl fills text ===
+journal seq time instrument kind quantity price commission
+ERROR: <nil>
+=== orders.jsonl fills csv ===
+journal,seq,time,instrument,kind,quantity,price,commission
+ERROR: <nil>
+=== orders.jsonl fills json ===
+[]
+ERROR: <nil>
+=== orders.jsonl refusals text ===
+journal seq time account instrument event reason detail
+orders.jsonl 5 2026-03-02 A1 BBB refused order-size over-limit
+orders.jsonl 6 2026-03-02 A1 BBB engine-state degraded:risk-limit-breached breach
+ERROR: <nil>
+=== orders.jsonl refusals csv ===
+journal,seq,time,account,instrument,event,reason,detail
+orders.jsonl,5,2026-03-02,A1,BBB,refused,order-size,over-limit
+orders.jsonl,6,2026-03-02,A1,BBB,engine-state,degraded:risk-limit-breached,breach
+ERROR: <nil>
+=== orders.jsonl refusals json ===
+[{"journal":"orders.jsonl","seq":"5","time":"2026-03-02","account":"A1","instrument":"BBB","event":"refused","reason":"order-size","detail":"over-limit"},{"journal":"orders.jsonl","seq":"6","time":"2026-03-02","account":"A1","instrument":"BBB","event":"engine-state","reason":"degraded:risk-limit-breached","detail":"breach"}]
+ERROR: <nil>
+=== orders.jsonl operator text ===
+journal seq time account input action by detail
+ERROR: <nil>
+=== orders.jsonl operator csv ===
+journal,seq,time,account,input,action,by,detail
+ERROR: <nil>
+=== orders.jsonl operator json ===
+[]
+ERROR: <nil>
+=== orders.jsonl positions text ===
+journal seq time account instrument kind change position
+ERROR: <nil>
+=== orders.jsonl positions csv ===
+journal,seq,time,account,instrument,kind,change,position
+ERROR: <nil>
+=== orders.jsonl positions json ===
+[]
+ERROR: <nil>
+=== orders.jsonl totals text ===
+instrument year fills bought sold commission
+TOTAL all 0 0 0 0.00
+ERROR: <nil>
+=== orders.jsonl totals csv ===
+instrument,year,fills,bought,sold,commission
+TOTAL,all,0,0,0,0.00
+ERROR: <nil>
+=== orders.jsonl totals json ===
+[{"instrument":"TOTAL","year":"all","fills":"0","bought":"0","sold":"0","commission":"0.00"}]
+ERROR: <nil>
+=== orders.jsonl reconcile text ===
+ERROR: reconcile compared nothing in orders.jsonl: no account snapshot after the baseline met the selection, so no fills there were checked against the broker's positions
+=== orders.jsonl reconcile csv ===
+ERROR: reconcile compared nothing in orders.jsonl: no account snapshot after the baseline met the selection, so no fills there were checked against the broker's positions
+=== orders.jsonl reconcile json ===
+ERROR: reconcile compared nothing in orders.jsonl: no account snapshot after the baseline met the selection, so no fills there were checked against the broker's positions
+=== positions.jsonl orders text ===
+journal seq time account instrument event side quantity price note
+ERROR: <nil>
+=== positions.jsonl orders csv ===
+journal,seq,time,account,instrument,event,side,quantity,price,note
+ERROR: <nil>
+=== positions.jsonl orders json ===
+[]
+ERROR: <nil>
+=== positions.jsonl fills text ===
+journal seq time instrument kind quantity price commission
+positions.jsonl 2 2026-01-05 AAA entry 50 10.00 0.00
+positions.jsonl 3 2026-01-06 AAA stop -30 10.00 0.00
+positions.jsonl 4 2026-01-06 BBB entry 10 10.00 0.00
+positions.jsonl 6 2026-01-12 AAA exit -120 10.00 0.00
+ERROR: <nil>
+=== positions.jsonl fills csv ===
+journal,seq,time,instrument,kind,quantity,price,commission
+positions.jsonl,2,2026-01-05,AAA,entry,50,10.00,0.00
+positions.jsonl,3,2026-01-06,AAA,stop,-30,10.00,0.00
+positions.jsonl,4,2026-01-06,BBB,entry,10,10.00,0.00
+positions.jsonl,6,2026-01-12,AAA,exit,-120,10.00,0.00
+ERROR: <nil>
+=== positions.jsonl fills json ===
+[{"journal":"positions.jsonl","seq":"2","time":"2026-01-05","instrument":"AAA","kind":"entry","quantity":"50","price":"10.00","commission":"0.00"},{"journal":"positions.jsonl","seq":"3","time":"2026-01-06","instrument":"AAA","kind":"stop","quantity":"-30","price":"10.00","commission":"0.00"},{"journal":"positions.jsonl","seq":"4","time":"2026-01-06","instrument":"BBB","kind":"entry","quantity":"10","price":"10.00","commission":"0.00"},{"journal":"positions.jsonl","seq":"6","time":"2026-01-12","instrument":"AAA","kind":"exit","quantity":"-120","price":"10.00","commission":"0.00"}]
+ERROR: <nil>
+=== positions.jsonl refusals text ===
+journal seq time account instrument event reason detail
+ERROR: <nil>
+=== positions.jsonl refusals csv ===
+journal,seq,time,account,instrument,event,reason,detail
+ERROR: <nil>
+=== positions.jsonl refusals json ===
+[]
+ERROR: <nil>
+=== positions.jsonl operator text ===
+journal seq time account input action by detail
+ERROR: <nil>
+=== positions.jsonl operator csv ===
+journal,seq,time,account,input,action,by,detail
+ERROR: <nil>
+=== positions.jsonl operator json ===
+[]
+ERROR: <nil>
+=== positions.jsonl positions text ===
+journal seq time account instrument kind change position
+positions.jsonl 2 2026-01-05 A1 AAA entry 50 150
+positions.jsonl 3 2026-01-06 A1 AAA stop -30 120
+positions.jsonl 4 2026-01-06 A1 BBB entry 10 10
+positions.jsonl 6 2026-01-12 A1 AAA exit -120 0
+ERROR: <nil>
+=== positions.jsonl positions csv ===
+journal,seq,time,account,instrument,kind,change,position
+positions.jsonl,2,2026-01-05,A1,AAA,entry,50,150
+positions.jsonl,3,2026-01-06,A1,AAA,stop,-30,120
+positions.jsonl,4,2026-01-06,A1,BBB,entry,10,10
+positions.jsonl,6,2026-01-12,A1,AAA,exit,-120,0
+ERROR: <nil>
+=== positions.jsonl positions json ===
+[{"journal":"positions.jsonl","seq":"2","time":"2026-01-05","account":"A1","instrument":"AAA","kind":"entry","change":"50","position":"150"},{"journal":"positions.jsonl","seq":"3","time":"2026-01-06","account":"A1","instrument":"AAA","kind":"stop","change":"-30","position":"120"},{"journal":"positions.jsonl","seq":"4","time":"2026-01-06","account":"A1","instrument":"BBB","kind":"entry","change":"10","position":"10"},{"journal":"positions.jsonl","seq":"6","time":"2026-01-12","account":"A1","instrument":"AAA","kind":"exit","change":"-120","position":"0"}]
+ERROR: <nil>
+=== positions.jsonl totals text ===
+instrument year fills bought sold commission
+AAA 2026 3 50 150 0.00
+BBB 2026 1 10 0 0.00
+TOTAL all 4 60 150 0.00
+ERROR: <nil>
+=== positions.jsonl totals csv ===
+instrument,year,fills,bought,sold,commission
+AAA,2026,3,50,150,0.00
+BBB,2026,1,10,0,0.00
+TOTAL,all,4,60,150,0.00
+ERROR: <nil>
+=== positions.jsonl totals json ===
+[{"instrument":"AAA","year":"2026","fills":"3","bought":"50","sold":"150","commission":"0.00"},{"instrument":"BBB","year":"2026","fills":"1","bought":"10","sold":"0","commission":"0.00"},{"instrument":"TOTAL","year":"all","fills":"4","bought":"60","sold":"150","commission":"0.00"}]
+ERROR: <nil>
+=== positions.jsonl reconcile text ===
+journal seq time account instrument fills snapshot status
+positions.jsonl 5 2026-01-10 A1 AAA 120 120 ok
+positions.jsonl 5 2026-01-10 A1 BBB 10 10 ok
+positions.jsonl 7 2026-01-20 A1 AAA 0 20 DISAGREES
+positions.jsonl 7 2026-01-20 A1 BBB 10 10 ok
+ERROR: 1 disagreement(s) between the fills and the account snapshots
+=== positions.jsonl reconcile csv ===
+journal,seq,time,account,instrument,fills,snapshot,status
+positions.jsonl,5,2026-01-10,A1,AAA,120,120,ok
+positions.jsonl,5,2026-01-10,A1,BBB,10,10,ok
+positions.jsonl,7,2026-01-20,A1,AAA,0,20,DISAGREES
+positions.jsonl,7,2026-01-20,A1,BBB,10,10,ok
+ERROR: 1 disagreement(s) between the fills and the account snapshots
+=== positions.jsonl reconcile json ===
+[{"journal":"positions.jsonl","seq":"5","time":"2026-01-10","account":"A1","instrument":"AAA","fills":"120","snapshot":"120","status":"ok"},{"journal":"positions.jsonl","seq":"5","time":"2026-01-10","account":"A1","instrument":"BBB","fills":"10","snapshot":"10","status":"ok"},{"journal":"positions.jsonl","seq":"7","time":"2026-01-20","account":"A1","instrument":"AAA","fills":"0","snapshot":"20","status":"DISAGREES"},{"journal":"positions.jsonl","seq":"7","time":"2026-01-20","account":"A1","instrument":"BBB","fills":"10","snapshot":"10","status":"ok"}]
+ERROR: 1 disagreement(s) between the fills and the account snapshots
+=== held-one-lot-short.journal.jsonl orders text ===
+journal seq time account instrument event side quantity price note
+held-one-lot-short.journal.jsonl 499 2025-01-31 DUIRA HHH planned sell 10 23.85 targets-decided:DUIRA:2025-01-31T21:00:00Z
+held-one-lot-short.journal.jsonl 500 2025-01-31 DUIRA HHH released sell 10 23.85 mode=paper,send=true
+held-one-lot-short.journal.jsonl 501 2025-02-03 DUIRA HHH lifecycle-submitted sell 10 23.85 tw-ffea6d2ea8d12b8a6b9acf85
+held-one-lot-short.journal.jsonl 503 2025-02-03 DUIRA CCC planned buy 231 43.23 targets-decided:DUIRA:2025-01-31T21:00:00Z
+held-one-lot-short.journal.jsonl 504 2025-02-03 DUIRA CCC released buy 231 43.23 mode=paper,send=true
+held-one-lot-short.journal.jsonl 505 2025-02-03 DUIRA CCC lifecycle-submitted buy 231 43.23 tw-d59da82ba4b533e9209feecb
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl orders csv ===
+journal,seq,time,account,instrument,event,side,quantity,price,note
+held-one-lot-short.journal.jsonl,499,2025-01-31,DUIRA,HHH,planned,sell,10,23.85,targets-decided:DUIRA:2025-01-31T21:00:00Z
+held-one-lot-short.journal.jsonl,500,2025-01-31,DUIRA,HHH,released,sell,10,23.85,"mode=paper,send=true"
+held-one-lot-short.journal.jsonl,501,2025-02-03,DUIRA,HHH,lifecycle-submitted,sell,10,23.85,tw-ffea6d2ea8d12b8a6b9acf85
+held-one-lot-short.journal.jsonl,503,2025-02-03,DUIRA,CCC,planned,buy,231,43.23,targets-decided:DUIRA:2025-01-31T21:00:00Z
+held-one-lot-short.journal.jsonl,504,2025-02-03,DUIRA,CCC,released,buy,231,43.23,"mode=paper,send=true"
+held-one-lot-short.journal.jsonl,505,2025-02-03,DUIRA,CCC,lifecycle-submitted,buy,231,43.23,tw-d59da82ba4b533e9209feecb
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl orders json ===
+[{"journal":"held-one-lot-short.journal.jsonl","seq":"499","time":"2025-01-31","account":"DUIRA","instrument":"HHH","event":"planned","side":"sell","quantity":"10","price":"23.85","note":"targets-decided:DUIRA:2025-01-31T21:00:00Z"},{"journal":"held-one-lot-short.journal.jsonl","seq":"500","time":"2025-01-31","account":"DUIRA","instrument":"HHH","event":"released","side":"sell","quantity":"10","price":"23.85","note":"mode=paper,send=true"},{"journal":"held-one-lot-short.journal.jsonl","seq":"501","time":"2025-02-03","account":"DUIRA","instrument":"HHH","event":"lifecycle-submitted","side":"sell","quantity":"10","price":"23.85","note":"tw-ffea6d2ea8d12b8a6b9acf85"},{"journal":"held-one-lot-short.journal.jsonl","seq":"503","time":"2025-02-03","account":"DUIRA","instrument":"CCC","event":"planned","side":"buy","quantity":"231","price":"43.23","note":"targets-decided:DUIRA:2025-01-31T21:00:00Z"},{"journal":"held-one-lot-short.journal.jsonl","seq":"504","time":"2025-02-03","account":"DUIRA","instrument":"CCC","event":"released","side":"buy","quantity":"231","price":"43.23","note":"mode=paper,send=true"},{"journal":"held-one-lot-short.journal.jsonl","seq":"505","time":"2025-02-03","account":"DUIRA","instrument":"CCC","event":"lifecycle-submitted","side":"buy","quantity":"231","price":"43.23","note":"tw-d59da82ba4b533e9209feecb"}]
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl fills text ===
+journal seq time instrument kind quantity price commission
+held-one-lot-short.journal.jsonl 502 2025-02-03 HHH sell -10 25.23 0.50
+held-one-lot-short.journal.jsonl 506 2025-02-03 CCC buy 231 41.96 0.50
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl fills csv ===
+journal,seq,time,instrument,kind,quantity,price,commission
+held-one-lot-short.journal.jsonl,502,2025-02-03,HHH,sell,-10,25.23,0.50
+held-one-lot-short.journal.jsonl,506,2025-02-03,CCC,buy,231,41.96,0.50
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl fills json ===
+[{"journal":"held-one-lot-short.journal.jsonl","seq":"502","time":"2025-02-03","instrument":"HHH","kind":"sell","quantity":"-10","price":"25.23","commission":"0.50"},{"journal":"held-one-lot-short.journal.jsonl","seq":"506","time":"2025-02-03","instrument":"CCC","kind":"buy","quantity":"231","price":"41.96","commission":"0.50"}]
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl refusals text ===
+journal seq time account instrument event reason detail
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl refusals csv ===
+journal,seq,time,account,instrument,event,reason,detail
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl refusals json ===
+[]
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl operator text ===
+journal seq time account input action by detail
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl operator csv ===
+journal,seq,time,account,input,action,by,detail
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl operator json ===
+[]
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl positions text ===
+journal seq time account instrument kind change position
+held-one-lot-short.journal.jsonl 502 2025-02-03 DUIRA HHH sell -10 0
+held-one-lot-short.journal.jsonl 506 2025-02-03 DUIRA CCC buy 231 231
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl positions csv ===
+journal,seq,time,account,instrument,kind,change,position
+held-one-lot-short.journal.jsonl,502,2025-02-03,DUIRA,HHH,sell,-10,0
+held-one-lot-short.journal.jsonl,506,2025-02-03,DUIRA,CCC,buy,231,231
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl positions json ===
+[{"journal":"held-one-lot-short.journal.jsonl","seq":"502","time":"2025-02-03","account":"DUIRA","instrument":"HHH","kind":"sell","change":"-10","position":"0"},{"journal":"held-one-lot-short.journal.jsonl","seq":"506","time":"2025-02-03","account":"DUIRA","instrument":"CCC","kind":"buy","change":"231","position":"231"}]
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl totals text ===
+instrument year fills bought sold commission
+CCC 2025 1 231 0 0.50
+HHH 2025 1 0 10 0.50
+TOTAL all 2 231 10 1.00
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl totals csv ===
+instrument,year,fills,bought,sold,commission
+CCC,2025,1,231,0,0.50
+HHH,2025,1,0,10,0.50
+TOTAL,all,2,231,10,1.00
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl totals json ===
+[{"instrument":"CCC","year":"2025","fills":"1","bought":"231","sold":"0","commission":"0.50"},{"instrument":"HHH","year":"2025","fills":"1","bought":"0","sold":"10","commission":"0.50"},{"instrument":"TOTAL","year":"all","fills":"2","bought":"231","sold":"10","commission":"1.00"}]
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl reconcile text ===
+journal seq time account instrument fills snapshot status
+held-one-lot-short.journal.jsonl 38 2025-01-03 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 38 2025-01-03 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 62 2025-01-06 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 62 2025-01-06 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 86 2025-01-07 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 86 2025-01-07 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 110 2025-01-08 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 110 2025-01-08 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 133 2025-01-09 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 133 2025-01-09 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 155 2025-01-10 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 155 2025-01-10 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 177 2025-01-13 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 177 2025-01-13 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 199 2025-01-14 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 199 2025-01-14 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 221 2025-01-15 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 221 2025-01-15 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 243 2025-01-16 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 243 2025-01-16 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 265 2025-01-17 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 265 2025-01-17 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 287 2025-01-20 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 287 2025-01-20 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 309 2025-01-21 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 309 2025-01-21 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 331 2025-01-22 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 331 2025-01-22 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 353 2025-01-23 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 353 2025-01-23 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 375 2025-01-24 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 375 2025-01-24 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 397 2025-01-27 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 397 2025-01-27 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 419 2025-01-28 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 419 2025-01-28 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 441 2025-01-29 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 441 2025-01-29 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 463 2025-01-30 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 463 2025-01-30 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 486 2025-01-31 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 486 2025-01-31 DUIRA HHH 10 10 ok
+held-one-lot-short.journal.jsonl 517 2025-02-03 DUIRA AAA 1 1 ok
+held-one-lot-short.journal.jsonl 517 2025-02-03 DUIRA CCC 231 231 ok
+held-one-lot-short.journal.jsonl 517 2025-02-03 DUIRA HHH 0 0 ok
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl reconcile csv ===
+journal,seq,time,account,instrument,fills,snapshot,status
+held-one-lot-short.journal.jsonl,38,2025-01-03,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,38,2025-01-03,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,62,2025-01-06,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,62,2025-01-06,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,86,2025-01-07,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,86,2025-01-07,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,110,2025-01-08,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,110,2025-01-08,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,133,2025-01-09,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,133,2025-01-09,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,155,2025-01-10,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,155,2025-01-10,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,177,2025-01-13,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,177,2025-01-13,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,199,2025-01-14,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,199,2025-01-14,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,221,2025-01-15,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,221,2025-01-15,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,243,2025-01-16,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,243,2025-01-16,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,265,2025-01-17,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,265,2025-01-17,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,287,2025-01-20,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,287,2025-01-20,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,309,2025-01-21,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,309,2025-01-21,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,331,2025-01-22,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,331,2025-01-22,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,353,2025-01-23,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,353,2025-01-23,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,375,2025-01-24,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,375,2025-01-24,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,397,2025-01-27,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,397,2025-01-27,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,419,2025-01-28,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,419,2025-01-28,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,441,2025-01-29,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,441,2025-01-29,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,463,2025-01-30,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,463,2025-01-30,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,486,2025-01-31,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,486,2025-01-31,DUIRA,HHH,10,10,ok
+held-one-lot-short.journal.jsonl,517,2025-02-03,DUIRA,AAA,1,1,ok
+held-one-lot-short.journal.jsonl,517,2025-02-03,DUIRA,CCC,231,231,ok
+held-one-lot-short.journal.jsonl,517,2025-02-03,DUIRA,HHH,0,0,ok
+ERROR: <nil>
+=== held-one-lot-short.journal.jsonl reconcile json ===
+[{"journal":"held-one-lot-short.journal.jsonl","seq":"38","time":"2025-01-03","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"38","time":"2025-01-03","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"62","time":"2025-01-06","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"62","time":"2025-01-06","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"86","time":"2025-01-07","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"86","time":"2025-01-07","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"110","time":"2025-01-08","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"110","time":"2025-01-08","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"133","time":"2025-01-09","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"133","time":"2025-01-09","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"155","time":"2025-01-10","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"155","time":"2025-01-10","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"177","time":"2025-01-13","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"177","time":"2025-01-13","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"199","time":"2025-01-14","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"199","time":"2025-01-14","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"221","time":"2025-01-15","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"221","time":"2025-01-15","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"243","time":"2025-01-16","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"243","time":"2025-01-16","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"265","time":"2025-01-17","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"265","time":"2025-01-17","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"287","time":"2025-01-20","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"287","time":"2025-01-20","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"309","time":"2025-01-21","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"309","time":"2025-01-21","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"331","time":"2025-01-22","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"331","time":"2025-01-22","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"353","time":"2025-01-23","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"353","time":"2025-01-23","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"375","time":"2025-01-24","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"375","time":"2025-01-24","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"397","time":"2025-01-27","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"397","time":"2025-01-27","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"419","time":"2025-01-28","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"419","time":"2025-01-28","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"441","time":"2025-01-29","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"441","time":"2025-01-29","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"463","time":"2025-01-30","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"463","time":"2025-01-30","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"486","time":"2025-01-31","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"486","time":"2025-01-31","account":"DUIRA","instrument":"HHH","fills":"10","snapshot":"10","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"517","time":"2025-02-03","account":"DUIRA","instrument":"AAA","fills":"1","snapshot":"1","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"517","time":"2025-02-03","account":"DUIRA","instrument":"CCC","fills":"231","snapshot":"231","status":"ok"},{"journal":"held-one-lot-short.journal.jsonl","seq":"517","time":"2025-02-03","account":"DUIRA","instrument":"HHH","fills":"0","snapshot":"0","status":"ok"}]
+ERROR: <nil>

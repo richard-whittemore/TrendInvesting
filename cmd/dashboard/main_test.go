@@ -311,3 +311,24 @@ func TestJournalSliceReadsFractionalFillsAndOrders(t *testing.T) {
 		}
 	}
 }
+
+func TestJournalSliceReconcilesFractionalShares(t *testing.T) {
+	s := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
+		AccountID: "synthetic", AsOf: t0, NetLiquidation: 100, Currency: "USD", QuantityScale: 10000,
+		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: 10, TotalCash: 10}
+	f := event.TargetWeightFillPayload{AccountID: s.AccountID, ClientOrderID: "synthetic-order", FillID: "synthetic-fill",
+		InstrumentID: "AAA", Side: "sell", Quantity: 12501, QuantityScale: 10000, Price: 2, FilledAt: t0}
+	entries := []journal.Entry{
+		{Kind: journal.KindInput, Envelope: envelope(t, 4, event.AccountSnapshotEventType, s.SchemaVersion(), "baseline", s)},
+		{Kind: journal.KindInput, Envelope: envelope(t, 5, event.FillEventType, f.SchemaVersion(), "fill", f)},
+	}
+	s.Positions[0].Quantity = 60000
+	entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 6, event.AccountSnapshotEventType, s.SchemaVersion(), "comparison", s)})
+	path := writeJournalWith(t, t.TempDir(), entries...)
+	got := get(newHandlerFor([]string{path}, nil), http.MethodGet, "/api/journal-slice")
+	_, part, found := strings.Cut(got.Body.String(), "journal-query reconcile\n")
+	part, _, _ = strings.Cut(part, "\n## ")
+	if got.Code != http.StatusOK || !found || !strings.Contains(part, "DISAGREES") || strings.Contains(part, "migration") || strings.Contains(part, "60000") {
+		t.Fatalf("fractional reconcile not rendered: %s", part)
+	}
+}
