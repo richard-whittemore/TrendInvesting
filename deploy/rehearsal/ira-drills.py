@@ -110,7 +110,8 @@ class FakeVenue:
         env = dict(row, envelope_version=1, source='fake-venue', recorded_at=row['event_time'],
                    sequence=self.sequence, configuration_hash=self.header['configuration_hash'],
                    strategy_version=self.header['strategy_version'], payload_hash=hashlib.sha256(raw.encode()).hexdigest())
-        self.conn.sendall((json.dumps(env) + '\n').encode())
+        # Compact, as hashed: the engine rejects a payload whose bytes differ from its hash (ADR 0016).
+        self.conn.sendall((json.dumps(env, separators=(',', ':')) + '\n').encode())
         frame = json.loads(self.replies.readline() or '{}')
         require(frame.get('envelope', {}).get('type') == 'engine.decisions', 'fake input refused: ' + str(frame))
         reply = frame['envelope']
