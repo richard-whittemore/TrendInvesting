@@ -55,6 +55,7 @@ cp "$repo/adapter/marketdata/tests/testdata/boost-fixture.log" "$dist/boost-fixt
 # The synthetic month the IRA engine replays (cmd/engine/testdata; invented
 # prices only), as the server's demonstration replays it.
 cp "$repo/cmd/engine/testdata/momentum-month.jsonl" "$dist/momentum-month.jsonl"
+cp "$repo/cmd/engine/testdata/momentum-dry-run.json" "$dist/momentum-dry-run.json"
 (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
   -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=rehearsal" \
   -o "$dist/ti-engine" ./cmd/engine)
@@ -68,6 +69,9 @@ docker cp "$repo/deploy" "$id:/deploy"
 docker cp "$dist" "$id:/dist"
 # The adapter's pin check, run inside the container against the real install.
 docker cp "$repo/adapter/ibkr/ibapi_pin.py" "$id:/ibapi_pin.py"
+# The replay and the drills read the durable log through the adapter's shared reader, found beside
+# the deploy folder as in the checkout (the server reads the installed copy instead).
+docker cp "$repo/adapter" "$id:/root/adapter"
 docker start -a "$id"
 
 # A second container in which systemd is PID 1: the failed-unit hook as
@@ -95,6 +99,7 @@ docker cp "$dist" "$sd:/dist"
 # and its scripted fake gateway, and the first-day runbook whose commands
 # deploy/rehearsal/first-day.sh runs as written.
 docker cp "$repo/adapter" "$sd:/adapter"
+docker cp "$repo/adapter" "$sd:/root/adapter"
 docker cp "$repo/docs/runbooks/first-dry-run-day.md" "$sd:/first-dry-run-day.md"
 docker start "$sd" >/dev/null
 booted=""

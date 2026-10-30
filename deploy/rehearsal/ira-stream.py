@@ -3,6 +3,7 @@ as the data job writes one (adapter/marketdata/tidata.py, run_momentum; the file
 from invented prices. Never real market data.
 
     python3 ira-stream.py ENGINE_LOG STREAMS BASE LAST    prints the file it wrote
+    python3 ira-stream.py ENGINE_LOG STREAMS --month-fixture MONTH_JSONL    stamps the existing synthetic month
 
 The engine's durable log gives the run's identity (its configuration hash, strategy version and name, the log's name
 without .log); the file holds the NYSE calendar from BASE to the session after LAST, then for each session from BASE
@@ -16,10 +17,7 @@ import hashlib
 import json
 import os
 import sys
-
-# The installed adapter's copy of the data job's calendar (provision.sh adapter); TI_ADAPTER_ROOT elsewhere.
-sys.path.insert(0, os.path.join(os.environ.get("TI_ADAPTER_ROOT", "/opt/trend-investing/adapter"), "adapter"))
-from marketdata import nyse_calendar  # noqa: E402
+import tempfile
 
 PRICES = {"IEF": 95.0, "SHY": 82.0, "SPY": 500.0}
 ROWS = [("R00", 60.0, "Information Technology"), ("R01", 45.0, "Health Care"), ("R02", 30.0, "Energy")]
@@ -30,6 +28,10 @@ def stamp(t):
 
 
 def main(engine_log, streams, base, last):
+    # Only warm-up needs the installed calendar; fixture stamping stays standalone.
+    sys.path.insert(0, os.path.join(os.environ.get("TI_ADAPTER_ROOT", "/opt/trend-investing/adapter"), "adapter"))
+    from marketdata import nyse_calendar
+
     with open(engine_log, encoding="utf-8") as f:
         header = json.loads(f.readline())
     run = os.path.basename(engine_log)[:-len(".log")]
@@ -75,5 +77,40 @@ def main(engine_log, streams, base, last):
     print(path)
 
 
+def write_month(engine_log, streams, month):
+    """Stamp the existing synthetic month for the replay gate (plan.md section 9).
+
+    Unlike the warm-up stand-in above, this deliberately includes a decision
+    session, account snapshots and marks. Invented fixtures only (ADR 0026).
+    """
+    with open(engine_log, encoding="utf-8") as f:
+        header = json.loads(f.readline())
+    run = os.path.basename(engine_log).removesuffix(".log")
+    folder = os.path.join(streams, run)
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "synthetic-month.jsonl")
+    # Each attempt owns its temporary inode; retries cannot truncate published evidence (ADR 0027).
+    out = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="synthetic-month-",
+                                      suffix=".part", dir=folder, delete=False)
+    try:
+        with out, open(month, encoding="utf-8") as source:
+            for n, raw in enumerate(source, 1):
+                row = json.loads(raw)
+                payload = json.dumps(row["payload"], separators=(",", ":"))
+                row.update(envelope_version=1, sequence=n, source="synthetic-ira-stream",
+                           recorded_at=row["event_time"], correlation_id=run,
+                           configuration_hash=header["configuration_hash"], strategy_version=header["strategy_version"],
+                           payload_hash=hashlib.sha256(payload.encode()).hexdigest())
+                out.write(json.dumps(row, separators=(",", ":")) + "\n")
+        # Publish only a complete stream without replacing prior evidence (ADR 0027).
+        os.link(out.name, path)
+    finally:
+        os.unlink(out.name)
+    print(path)
+
+
 if __name__ == "__main__":
-    main(*sys.argv[1:5])
+    if len(sys.argv) == 5 and sys.argv[3] == "--month-fixture":
+        write_month(sys.argv[1], sys.argv[2], sys.argv[4])
+    else:
+        main(*sys.argv[1:5])
