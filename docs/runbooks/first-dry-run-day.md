@@ -881,7 +881,11 @@ reinvestment (DRIP) off**. The owner selected D7-F (ADR 0026):
 sets both; the block below also updates an existing installed template
 and sets the adapter's `account_snapshot_version` to 6. Provisioning never
 overwrites an installed adapter configuration; if the preflight above
-shows 4, complete this update before starting the adapter.
+shows 4, complete this update before starting the adapter. The block stops
+both services and stages both complete files before replacing either one
+(AGENTS.md durability; ADR 0026 D7-F). If any step fails or is interrupted,
+leave both services stopped, repair the cause and rerun the block before
+starting either service: the two file renames are not one atomic transaction.
 Holdings and fills may have up to four decimal places. A fifth decimal
 place is refused with its reason, never rounded by the adapter.
 
@@ -895,6 +899,8 @@ read from the unlocked file and never printed; it is then in
 <!-- rehearsed: ira-account -->
 ```sh
 sudo bash -eu <<'EOF2'
+systemctl stop ti-adapter@trad-ira
+systemctl stop ti-engine@trad-ira
 config=/etc/trend-investing/engines/trad-ira.config
 birth=1975-06
 account=$(sed -n 's/^IBKR_ACCOUNT_TRAD_IRA=//p' /run/trend-investing/secrets/accounts/trad-ira.env)
@@ -913,17 +919,42 @@ fi
 sed -i "s/\"birth\": \"YYYY-MM\"/\"birth\": \"$birth\"/" "$config"
 python3 - "$config" <<'PY'
 import json
+import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
 path = Path(sys.argv[1])
+adapter_path = Path("/etc/trend-investing/adapters/trad-ira.json")
 config = json.loads(path.read_text())
+adapter = json.loads(adapter_path.read_text())
 config["execution"]["share_quantity"] = "fractional"
 config["execution"]["fractional_increment"] = "0.0001"
-path.write_text(json.dumps(config, indent=2) + "\n")
-adapter_path = Path("/etc/trend-investing/adapters/trad-ira.json")
-adapter = json.loads(adapter_path.read_text())
 adapter["account_snapshot_version"] = 6
-adapter_path.write_text(json.dumps(adapter, indent=2) + "\n")
+staged = []
+try:
+    for destination, value in ((path, config), (adapter_path, adapter)):
+        contents = json.dumps(value, indent=2) + "\n"
+        metadata = destination.stat()
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination.parent,
+                                         prefix="." + destination.name + ".", delete=False) as output:
+            temporary = Path(output.name)
+            staged.append((temporary, destination))
+            os.fchown(output.fileno(), metadata.st_uid, metadata.st_gid)
+            os.fchmod(output.fileno(), stat.S_IMODE(metadata.st_mode))
+            output.write(contents)
+            output.flush()
+            os.fsync(output.fileno())
+    for temporary, destination in staged:
+        os.replace(temporary, destination)
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+finally:
+    for temporary, _ in staged:
+        temporary.unlink(missing_ok=True)
 PY
 [ "$(sed -n 's/^ *"account_id": *"\([^"]*\)".*/\1/p' "$config")" = "$account" ] || { echo "STOP: the account was not named."; exit 1; }
 echo account-named

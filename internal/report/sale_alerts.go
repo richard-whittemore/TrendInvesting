@@ -79,7 +79,7 @@ func (s sales) release(account string, e event.Envelope, p event.OrderReleasedPa
 		return Alert{}, false
 	}
 	sl.released = &p
-	order := fmt.Sprintf("sell %d %s, limit %.2f, client order ID %s", p.Quantity, p.InstrumentID, p.LimitPrice, p.ClientOrderID)
+	order := fmt.Sprintf("sell %s %s, limit %.2f, client order ID %s", event.FormatQuantity(p.Quantity, p.QuantityScale), p.InstrumentID, p.LimitPrice, p.ClientOrderID)
 	why := fmt.Sprintf("%s sale fired by %s", sl.planned.Sale.Kind, sl.planned.Sale.Trigger)
 	a := Alert{
 		Key: "sale-sent:" + p.ClientOrderID + "@" + account, Kind: KindSaleSent, Severity: Routine, AccountID: account, At: e.EventTime,
@@ -96,29 +96,31 @@ func (s sales) release(account string, e event.Envelope, p event.OrderReleasedPa
 }
 
 // fill returns the alert for one execution of a released sale (execution.fill
-// version 5), once per fill ID: a redelivered fill is the same execution.
+// versions 5 and 6), once per fill ID: a redelivered fill is the same execution.
+// Units must match the release (ADR 0026 D7-F); owner text shows shares.
 func (s sales) fill(account string, e event.Envelope, p event.TargetWeightFillPayload) (Alert, bool) {
 	sl, ok := s[p.ClientOrderID]
-	if !ok || sl.released == nil || p.AccountID != account || sl.fills[p.FillID] {
+	if !ok || sl.released == nil || p.AccountID != account || p.QuantityScale != sl.released.QuantityScale || sl.fills[p.FillID] {
 		return Alert{}, false
 	}
 	sl.fills[p.FillID] = true
 	sl.filled += p.Quantity
 	want := sl.released.Quantity
-	state := fmt.Sprintf("%d still to fill", want-sl.filled)
+	filled, wanted := event.FormatQuantity(sl.filled, p.QuantityScale), event.FormatQuantity(want, p.QuantityScale)
+	state := fmt.Sprintf("%s still to fill", event.FormatQuantity(want-sl.filled, p.QuantityScale))
 	if sl.filled >= want {
 		state = "the sale is complete"
 	}
 	return Alert{
 		Key: "sale-filled:" + e.ID + "@" + account, Kind: KindSaleFilled, Severity: Routine, AccountID: account, At: e.EventTime,
-		Title: fmt.Sprintf("%s: sale back to 98%% filled %d of %d (%s)", account, sl.filled, want, p.InstrumentID),
-		Body: fmt.Sprintf("Order %s sold %d %s at %.2f at %s (fill %s): %d of %d filled, %s.",
-			p.ClientOrderID, p.Quantity, p.InstrumentID, p.Price, p.FilledAt.UTC().Format(time.RFC3339), p.FillID, sl.filled, want, state),
+		Title: fmt.Sprintf("%s: sale back to 98%% filled %s of %s (%s)", account, filled, wanted, p.InstrumentID),
+		Body: fmt.Sprintf("Order %s sold %s %s at %.2f at %s (fill %s): %s of %s filled, %s.",
+			p.ClientOrderID, event.FormatQuantity(p.Quantity, p.QuantityScale), p.InstrumentID, p.Price, p.FilledAt.UTC().Format(time.RFC3339), p.FillID, filled, wanted, state),
 	}, true
 }
 
 // lifecycle returns the alert that IBKR ended a released sale before it
-// filled in full: canceled or invalid, by a venue's report (version 2) that
+// filled in full: canceled or invalid, by a venue's report (versions 2 and 4) that
 // describes the order as released, which is the report the engine reads. The
 // sale is not retried (ADR 0019, amended 2026-10-15: once per incident), so
 // the owner sells what is left by hand.
@@ -132,8 +134,8 @@ func (s sales) lifecycle(account string, e event.Envelope, p event.LimitOrderLif
 	return Alert{
 		Key: "sale-failed:" + p.ClientOrderID + "@" + account, Kind: KindSaleFailed, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: sale back to 98%% failed (%s, %s)", account, p.Status, p.InstrumentID),
-		Body: fmt.Sprintf("IBKR reported order %s %s at %s (%s): %d of %d filled. The program will not try the sale again; sell the remaining %d by hand at IBKR if exposure is still above 98%% of net liquidation, after checking no other sell is working (docs/runbooks/margin-warning.md).",
-			p.ClientOrderID, p.Status, p.OccurredAt.UTC().Format(time.RFC3339), p.Message, sl.filled, want, want-sl.filled),
+		Body: fmt.Sprintf("IBKR reported order %s %s at %s (%s): %s of %s filled. The program will not try the sale again; sell the remaining %s by hand at IBKR if exposure is still above 98%% of net liquidation, after checking no other sell is working (docs/runbooks/margin-warning.md).",
+			p.ClientOrderID, p.Status, p.OccurredAt.UTC().Format(time.RFC3339), p.Message, event.FormatQuantity(sl.filled, p.QuantityScale), event.FormatQuantity(want, p.QuantityScale), event.FormatQuantity(want-sl.filled, p.QuantityScale)),
 	}, true
 }
 

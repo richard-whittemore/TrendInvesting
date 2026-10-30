@@ -386,7 +386,7 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 			// engine refused it, so one that does not read raises no sale
 			// alert; the order's other alerts are unaffected.
 			var p event.TargetWeightFillPayload
-			if e.SchemaVersion != event.FillTargetWeightVersion || read(e, targetWeightFillVersions, &p) != nil {
+			if read(e, targetWeightFillVersions, &p) != nil {
 				continue
 			}
 			if a, ok := pending.fill(account, e, p); ok {
@@ -394,7 +394,7 @@ func alerts(envelopes []event.Envelope, instance string, requireInstance bool) (
 			}
 		case event.OrderLifecycleEventType:
 			var p event.LimitOrderLifecyclePayload
-			if e.SchemaVersion != event.OrderLifecycleLimitVersion || read(e, lifecycleVersions, &p) != nil {
+			if read(e, lifecycleVersions, &p) != nil {
 				continue
 			}
 			if a, ok := pending.lifecycle(account, e, p); ok {

@@ -2970,7 +2970,8 @@ def _fill_id(path, n, kind, envelope):
     payload = envelope["payload"]
     if (kind != LOG_INPUT or not _quantity_schema(envelope["schema_version"], payload, FILL_VERSION, 6)
             or not is_fill(payload)):
-        raise _unreadable(path, n, "it is a fill but not an input {} version {} as the engine reads one".format(
+        raise _unreadable(path, n, "it is a fill but not an input {} version {} (whole shares) or "
+                                   "version 6 (quantity_scale integer 10000) as the engine reads one".format(
             FILL_TYPE, FILL_VERSION))
     return payload["fill_id"]
 
@@ -2992,8 +2993,8 @@ def _lifecycle(path, n, kind, envelope):
     if (kind != LOG_INPUT or not _quantity_schema(envelope["schema_version"], payload, LIFECYCLE_VERSION, 4)
             or not isinstance(payload, dict)
             or not _is_text(payload.get("client_order_id")) or not _is_text(payload.get("status"))):
-        raise _unreadable(path, n, "it is a lifecycle report but not an input {} version {} as the adapter "
-                                   "journals one".format(LIFECYCLE_TYPE, LIFECYCLE_VERSION))
+        raise _unreadable(path, n, "it is a lifecycle report but not an input {} version {} (whole shares) or "
+                                   "version 4 (quantity_scale integer 10000) as the adapter journals one".format(LIFECYCLE_TYPE, LIFECYCLE_VERSION))
     return payload["client_order_id"], payload["status"]
 
 
@@ -3002,8 +3003,8 @@ def _retired(path, n, envelope):
     payload = envelope["payload"]
     if (not _quantity_schema(envelope["schema_version"], payload, RETIRED_VERSION, 2) or not isinstance(payload, dict)
             or not _is_text(payload.get("client_order_id"))):
-        raise _unreadable(path, n, "it is a retirement but not an input {} version {} as the adapter journals "
-                                   "one".format(RETIRED_TYPE, RETIRED_VERSION))
+        raise _unreadable(path, n, "it is a retirement but not an input {} version {} (whole shares) or "
+                                   "version 2 (quantity_scale integer 10000) as the adapter journals one".format(RETIRED_TYPE, RETIRED_VERSION))
     return payload["client_order_id"]
 
 

@@ -434,7 +434,7 @@ class _Holdings:
                 raise _log_error(self.path, n, "cannot read holdings: its Run approval states no starting book and "
                                                "names no previous log")
         elif e.get("type") == FILL_TYPE:
-            if kind_version != kinds.TARGET_WEIGHT_FILL:
+            if kind_version not in kinds.TARGET_WEIGHT_FILLS:
                 raise _log_error(self.path, n, "cannot read holdings: {} version {}".format(
                     FILL_TYPE, e.get("schema_version")))
             ticker = payload.get("instrument_id") if isinstance(payload, dict) else None

@@ -1635,18 +1635,55 @@ class FractionalOrdersTests(unittest.TestCase):
             with self.subTest(scale=bad), self.assertRaises(ValueError):
                 release_to_request(dict(release(), quantity_scale=bad), "paper", {"AAA": 900001}, SESSION)
 
+    def test_whole_valued_release_must_match_adapter_scale_before_handover(self):
+        for version, scale in ((4, 10000), (6, 0)):
+            for method in ("check", "send"):
+                with self.subTest(version=version, scale=scale, method=method):
+                    h = Harness(mode="paper")
+                    h.conn.connect()
+                    h.conn.mark_reconciled()
+                    h.conn.config = h.conn.config._replace(account_snapshot_version=version)
+                    order = dict(release(), account_id=h.conn.config.account_id,
+                                 quantity=scale or 1, quantity_scale=scale)
+                    request = release_to_request(order, "paper", {"AAA": 900001}, SESSION)
+                    written = []
+                    sender = paper_sender(h, written)
+                    next_id = h.conn.next_order_id
+                    with self.assertRaisesRegex(UnsendableOrder, "quantity scale"):
+                        getattr(sender, method)(request)
+                    self.assertEqual(h.fake.placed, [])
+                    self.assertEqual(written, [])
+                    self.assertEqual(h.conn.next_order_id, next_id)
+
     def test_account_policy_controls_fractional_request_before_sending(self):
         h = Harness(mode="paper")
         h.conn.connect()
         h.conn.mark_reconciled()
-        request = limit_request(quantity=Decimal("7.25"))
+        request = limit_request(quantity=Decimal("7.25"), quantity_scale=10000)
         with self.assertRaisesRegex(UnsendableOrder, "whole"):
             paper_sender(h, []).check(request)
         h.conn.config = h.conn.config._replace(account_snapshot_version=6)
         paper_sender(h, []).send(request)
         self.assertEqual(h.fake.placed[0][2].totalQuantity, Decimal("7.25"))
         with self.assertRaisesRegex(UnsendableOrder, "four decimal"):
-            paper_sender(h, []).check(limit_request(quantity=Decimal("7.25001")))
+            paper_sender(h, []).check(limit_request(quantity=Decimal("7.25001"), quantity_scale=10000))
+
+    def test_resolve_errors_name_both_schema_scale_contracts(self):
+        cases = ((relay._fill_id, relay.FILL_TYPE, 5, 6),
+                 (relay._lifecycle, relay.LIFECYCLE_TYPE, 2, 4),
+                 (relay._retired, relay.RETIRED_TYPE, 1, 2))
+        for reader, event_type, legacy, fractional in cases:
+            for scale in (0, 10000.0):
+                with self.subTest(event_type=event_type, scale=scale):
+                    envelope = dict(schema_version=fractional, payload={"quantity_scale": scale})
+                    args = ("synthetic.log", 1, envelope) if reader == relay._retired else (
+                        "synthetic.log", 1, relay.LOG_INPUT, envelope)
+                    with self.assertRaises(relay.ResolveRefused) as caught:
+                        reader(*args)
+                    message = str(caught.exception)
+                    self.assertIn(event_type, message)
+                    self.assertIn("version {} (whole shares)".format(legacy), message)
+                    self.assertIn("version {} (quantity_scale integer 10000)".format(fractional), message)
 
     def test_captured_partial_fill_and_held_cancel_survive_restart_at_exact_scale(self):
         written = []

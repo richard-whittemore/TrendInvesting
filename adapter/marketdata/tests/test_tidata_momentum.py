@@ -306,6 +306,14 @@ class MomentumHoldingsTest(unittest.TestCase):
         self.assertEqual(bars, ["CCC", "IEF", "SPY"])
         self.assertEqual(histories, ["AAA", "BBB"])
 
+    def test_fractional_snapshot_and_fill_keep_holdings_coverage(self):
+        inputs = [("account.snapshot", 6, {"positions": [
+            {"instrument_id": "CCC", "quantity": 123456}], "quantity_scale": 10000}),
+            ("execution.fill", 6, {"instrument_id": "DDD", "quantity": 35000, "quantity_scale": 10000})]
+        bars, histories = self.bars_on_the_decision(inputs)
+        self.assertEqual(bars, ["CCC", "DDD", "IEF", "SPY"])
+        self.assertEqual(histories, ["AAA", "BBB"])
+
     def test_a_fill_after_the_last_snapshot_is_held_too(self):
         bars, _ = self.bars_on_the_decision([snapshot("CCC"), fill("DDD")])
         self.assertEqual(bars, ["CCC", "DDD", "IEF", "SPY"])
@@ -606,6 +614,10 @@ class LogHoldingsRefusalTest(unittest.TestCase):
         for version in (2, 5):
             why = self.refused([snapshot("AAA"), snapshot("CCC", version=version)])
             self.assertIn("cannot read holdings: account.snapshot version {}".format(version), why)
+
+    def test_fractional_fill_after_a_legacy_snapshot_is_held(self):
+        self.assertEqual(self.held([snapshot("CCC"), ("execution.fill", 6, {
+            "instrument_id": "DDD", "quantity": 35000, "quantity_scale": 10000})]), ("CCC", "DDD"))
 
     def test_a_fill_or_an_approval_of_a_version_the_job_does_not_read_is_refused(self):
         self.assertIn("execution.fill version 4", self.refused([("execution.fill", 4, {"instrument_id": "AAA"})]))
