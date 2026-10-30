@@ -675,7 +675,11 @@ whether or not anything has executed: it reads the connection time the
 Gateway gives (for example `20261027 07:10:01 US/Eastern`, or `20261028
 09:49:19 EST`). Its zone must be a New York name (`US/Eastern`,
 `America/New_York`, `EST5EDT`) or an Eastern label (`EST`, `EDT`, `Eastern
-Standard Time`, `Eastern Daylight Time`). IBKR's label does not follow
+Standard Time`, `Eastern Daylight Time`). All these names and labels are
+read using `America/New_York` (ADR 0019, note of 2026-10-28). The adapter
+requires that zone at startup; `sudo deploy/provision.sh base` installs
+it through `tzdata`. The legacy `US/Eastern` zone and `tzdata-legacy`
+package are not required. IBKR's label does not follow
 daylight saving time (on 2026-10-28 a Gateway on New York time said `EST`
 in summer time), so the label is not taken to say the season: instead the
 time it states, read on New York's clock, must be within 5 minutes of the
