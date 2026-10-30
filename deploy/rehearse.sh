@@ -69,6 +69,9 @@ docker cp "$repo/deploy" "$id:/deploy"
 docker cp "$dist" "$id:/dist"
 # The adapter's pin check, run inside the container against the real install.
 docker cp "$repo/adapter/ibkr/ibapi_pin.py" "$id:/ibapi_pin.py"
+# The replay and the drills read the durable log through the adapter's shared reader, found beside
+# the deploy folder as in the checkout (the server reads the installed copy instead).
+docker cp "$repo/adapter" "$id:/root/adapter"
 docker start -a "$id"
 
 # A second container in which systemd is PID 1: the failed-unit hook as
@@ -96,6 +99,7 @@ docker cp "$dist" "$sd:/dist"
 # and its scripted fake gateway, and the first-day runbook whose commands
 # deploy/rehearsal/first-day.sh runs as written.
 docker cp "$repo/adapter" "$sd:/adapter"
+docker cp "$repo/adapter" "$sd:/root/adapter"
 docker cp "$repo/docs/runbooks/first-dry-run-day.md" "$sd:/first-dry-run-day.md"
 docker start "$sd" >/dev/null
 booted=""
