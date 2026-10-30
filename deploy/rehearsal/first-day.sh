@@ -485,10 +485,24 @@ written=$(runuser -u ti-trader -- python3 /deploy/rehearsal/ira-stream.py "$ira_
   /var/lib/trend-investing/data/streams/trad-ira 2025-01-02 2026-10-23) || fail "the stand-in IRA warm-up wrote no stream"
 test -s "$written" || fail "the stand-in IRA warm-up wrote no stream"
 step ira-adapter
-grep '"type":"account.snapshot"' "$ira_engines/run-ira-2026-10-29.log" | grep -q '"schema_version":4' || fail "the IRA engine journalled no version-4 account snapshot"
+snapshot_version=$(python3 - /etc/trend-investing/engines/trad-ira.config <<'PYTHON'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    rule = json.load(source)["execution"]["share_quantity"]
+# ADR 0026 D7-F uses fractional cash snapshots; D7-L keeps whole-share cash snapshots.
+print({"fractional": 6, "minimum-lot": 4}[rule])
+PYTHON
+)
+grep '"type":"account.snapshot"' "$ira_engines/run-ira-2026-10-29.log" | grep -q "\"schema_version\":${snapshot_version}[,}]" || fail "the IRA engine journalled no version-$snapshot_version account snapshot"
 grep '"type":"market.mark.recorded"' "$ira_engines/run-ira-2026-10-29.log" | grep -q '"con_id":' || fail "the IRA engine journalled no mark with its contract"
 if grep -q '"send":true' "$ira_engines/run-ira-2026-10-29.log"; then fail "the IRA's dry-run engine released an order to be sent"; fi
+# The documented example shows D7-F. Check the exact version selected by
+# this account's rule, retaining D7-L's version 4 and its lack of holdings output.
+remap_expr="s/account snapshot version 6 /account snapshot version $snapshot_version /"
+if test "$snapshot_version" = 4; then remap_expr+=';/~ probe: ok holdings:/d'; fi
 step ira-probe
+remap_expr='s/^$//'
 # A start whose configuration names another client ID never connects: the
 # template hands the adapter the instance's TI_ADAPTER_CLIENT_ID.
 systemctl stop ti-adapter@trad-ira.service
@@ -504,4 +518,4 @@ if systemctl start ti-adapter@boost.service 2>/dev/null; then sleep 2; fi
 journalctl -u ti-adapter@boost.service --no-pager -o cat | grep -q 'has its own adapter unit, ti-adapter-boost.service' || fail "ti-adapter@boost was not refused"
 systemctl reset-failed ti-adapter@boost.service || true
 systemctl stop ti-engine@trad-ira.service
-pass "the Traditional IRA: the runbook's blocks name its account and birth, approve its first run, start its engine, start ti-adapter@trad-ira (client ID 12) on its stream, which delivers a version-4 snapshot and marks with their contracts and sends nothing, and the same-day probe passes; a configuration naming another client ID and the boost instance of the template are refused"
+pass "the Traditional IRA: the runbook's blocks name its account and birth, approve its first run, start its engine, start ti-adapter@trad-ira (client ID 12) on its stream, which delivers a version-$snapshot_version snapshot selected by its execution rule and marks with their contracts and sends nothing, and the same-day probe passes; a configuration naming another client ID and the boost instance of the template are refused"

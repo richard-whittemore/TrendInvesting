@@ -257,14 +257,28 @@ files: the adapter's journal lines for that start and the engine's durable
 log. The exact block is `docs/runbooks/first-dry-run-day.md`, I-8 ("The same-day probe"):
 
 ```sh
+snapshot_version=$(sudo python3 - /etc/trend-investing/engines/trad-ira.config <<'PYTHON'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    rule = json.load(source)["execution"]["share_quantity"]
+# ADR 0026 D7-F uses fractional cash snapshots; D7-L keeps whole-share cash snapshots.
+print({"fractional": 6, "minimum-lot": 4}[rule])
+PYTHON
+)
 invocation=$(systemctl show -p InvocationID --value ti-adapter@trad-ira)
 sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat >/tmp/ti-adapter-trad-ira.journal
 cd /opt/trend-investing/adapter
 sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr probe \
   --journal /tmp/ti-adapter-trad-ira.journal \
-  --engine-log /var/lib/trend-investing/engines/trad-ira/<TI_RUN>.log --client-id 12 --snapshot-version 6 \
+  --engine-log /var/lib/trend-investing/engines/trad-ira/<TI_RUN>.log --client-id 12 --snapshot-version "$snapshot_version" \
   --expect-batch
 ```
+
+The command reads the engine's `execution.share_quantity`: `fractional`
+requires the fractional cash snapshot version (currently 6), and `minimum-lot`
+requires version 4. The example below shows fractional shares; minimum-lot
+output reports version 4 and has no holdings line.
 
 What a good start prints, one line a check, last line `probe: passed`. Its
 evidence is this start's own: the engine records it checks are the inputs

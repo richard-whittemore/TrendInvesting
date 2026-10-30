@@ -1132,15 +1132,29 @@ use depends only on whether this start had a file to deliver:
   said `ibkr stream no new file since <file>; caught up`, and the probe then
   passes with `probe: ok no new batch since start; caught up (...)`.
 
+The probe reads `execution.share_quantity` from the engine configuration:
+`fractional` requires the fractional cash snapshot version (currently 6);
+`minimum-lot` requires version 4. The example output below is for fractional
+shares; minimum-lot output reports version 4 and has no holdings line.
+
 <!-- rehearsed: ira-probe -->
 ```sh
 ( set -euo pipefail
 run=$(sudo sed -n 's/^TI_RUN=//p' /var/lib/trend-investing/engines/trad-ira/run.env)
+snapshot_version=$(sudo python3 - /etc/trend-investing/engines/trad-ira.config <<'PYTHON'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    rule = json.load(source)["execution"]["share_quantity"]
+# ADR 0026 D7-F uses fractional cash snapshots; D7-L keeps whole-share cash snapshots.
+print({"fractional": 6, "minimum-lot": 4}[rule])
+PYTHON
+)
 invocation=$(systemctl show -p InvocationID --value ti-adapter@trad-ira)
 sudo journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat >/tmp/ti-adapter-trad-ira.journal
 cd /opt/trend-investing/adapter
 sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr probe --journal /tmp/ti-adapter-trad-ira.journal \
-  --engine-log /var/lib/trend-investing/engines/trad-ira/"$run".log --client-id 12 --snapshot-version 6 --expect-batch
+  --engine-log /var/lib/trend-investing/engines/trad-ira/"$run".log --client-id 12 --snapshot-version "$snapshot_version" --expect-batch
 )
 ```
 
@@ -1241,7 +1255,9 @@ the reporter's `-units` and `-resolve-units` lists cover Roth. Verify its
 reporter runs and the heartbeat remains Boost's alone.
 
 **Same day, before leaving the installation:** run I-8's probe for Roth,
-expect `client_id=13`, snapshot version 4 and sending off; retain the
+expect `client_id=13` and sending off. Read Roth's engine configuration
+instead of Traditional IRA's: `fractional` requires the fractional cash
+snapshot version (currently 6), and `minimum-lot` requires version 4. Retain the
 account-masked output. Start Roth's Flex reader by hand and confirm its
 executions proof; start its data job and reporter and read their unit
 results. Record a withheld decision's stated reason if one occurs. Do not
