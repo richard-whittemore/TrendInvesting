@@ -82,8 +82,11 @@ class FakeVenue:
         try:
             deadline = time.monotonic() + 15
             while not (folder / 'engine.sock').exists():
-                require(self.process.poll() is None and time.monotonic() < deadline,
-                        'engine did not listen; inspect ' + str(folder))
+                if self.process.poll() is not None or time.monotonic() >= deadline:
+                    self.output.flush()
+                    # The engine's own words say why (the evidence folder is private to the container).
+                    require(False, 'engine did not listen; inspect ' + str(folder) + '\n' +
+                            (folder / (self.log.stem + '-output.txt')).read_text()[-1500:])
                 time.sleep(0.05)
             self.header = json.loads(self.log.read_text().splitlines()[0])
             self.conn = socket.socket(socket.AF_UNIX)
