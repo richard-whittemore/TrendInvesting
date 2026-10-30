@@ -256,8 +256,15 @@ def drill(interactive=False):
         ontime = [d['payload'] for d in control.decisions if d['type'] == 'strategy.targets.decided'][-1]
         require(recovered['targets'] == ontime['targets'], 'targets differ from on-time control')
         mine, theirs = plans(venue, febtag), plans(control, febtag)
+
+        def gate_trail(v):
+            # What the gate did with each planned order: released (send?) or refused (why).
+            return [(d['type'].rsplit('.', 1)[1], d['payload'].get('side'), d['payload'].get('instrument_id'),
+                     d['payload'].get('send'), d['payload'].get('reason'), d['payload'].get('detail'))
+                    for d in v.decisions if d['type'] in ('risk.order.released', 'risk.order.refused')]
         require(mine and mine == theirs, 'orders differ from on-time control; restarted: ' + json.dumps(mine, sort_keys=True) +
-                '; on-time: ' + json.dumps(theirs, sort_keys=True))
+                '; on-time: ' + json.dumps(theirs, sort_keys=True) + '; restarted gate trail: ' + json.dumps(gate_trail(venue)) +
+                '; on-time gate trail: ' + json.dumps(gate_trail(control)))
         control.cancel_all('2025-03-03T14:30:00Z')
     finally:
         control.stop()
