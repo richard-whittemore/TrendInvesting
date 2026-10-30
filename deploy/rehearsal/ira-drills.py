@@ -58,7 +58,7 @@ def month(path, days=0):
         if row['type'] == 'market.bar.completed':
             row['payload']['adjusted_base'] = '2025-01-02'
             if row['payload'].get('instrument_id') == HELD:
-                held_close = row['payload']['close']
+                held_close = row['payload']['raw']['close']
         if row['type'] == 'account.snapshot':
             row['payload']['account_id'] = ACCOUNT
             # An extra holding the rule never picks (an ETF, not a common stock, and not the trend or
