@@ -272,17 +272,26 @@ Each reading journals its staleness verdict. An expired check uses the
 later of Gateway time and receipt time for executions and withholds the
 next post-close reading, naming Gateway's clock.
 
-On a checked link, every execution callback is passively compared with its
-arrival time. More than **5 minutes ahead**, or **5 minutes plus plausible
-report age behind**, makes the link unchecked immediately and journals
-both times. Live unsolicited executions allow zero age beyond tolerance;
-requested historical executions allow the time since New York midnight
-on the request's day, including a response that crosses midnight.
-IBKR's order statuses carry no Gateway timestamp to cross-check. The cached
-handshake cannot renew itself, and server time cannot measure Gateway-local
-drift. A clock drifting slowly within tolerance is caught only at the next
-handshake. See [reconciliation](reconciliation.md) for the timestamp rules,
-withholding and journal evidence.
+On a checked link, a first live execution for an order this adapter run
+actually sent is passively compared with its callback arrival time. An
+absolute difference greater than **5 minutes** makes the link unchecked
+immediately and journals both times; the next post-close reading withholds,
+naming Gateway's clock. Requested execution replays, unsolicited
+redeliveries, and reports for orders this run did not send are never
+cross-checked. Reconciliation handles them, and executions on an unchecked
+link retain the later-of timestamp rule. There is no historical-age
+allowance or calendar-day calculation in the cross-check.
+
+IBKR's order statuses carry no Gateway timestamp to cross-check. In
+**dry-run**, nothing is sent, so the passive check never fires: the
+**12-hour validity interval** is the only ongoing clock rule there (or the
+configured interval). The cached handshake cannot renew itself, and server
+time cannot measure Gateway-local drift. Drift within tolerance is not
+rejected. It is rejected only once it exceeds tolerance on a qualifying
+live report or at a natural handshake; that handshake measures and logs
+the current offset and accepts it if still within tolerance. See
+[reconciliation](reconciliation.md) for the timestamp rules, withholding
+and journal evidence.
 
 The adapter states each batch's outcome from its own accounting, in lines
 beginning `ibkr stream batch files=<files>`. While a batch waits for its

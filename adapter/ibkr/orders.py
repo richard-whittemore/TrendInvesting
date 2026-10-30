@@ -447,7 +447,7 @@ def collect_broker_orders(conn):
     account = conn.config.account_id
     exec_req = conn.new_req_id()
     ticket = conn.ask_all_open_orders()
-    conn.ask_executions(exec_req)
+    conn.api.req_executions(exec_req, account)
     open_orders = {}
     executions = {}
     orders_done = execs_done = False

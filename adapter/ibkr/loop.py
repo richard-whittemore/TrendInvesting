@@ -553,6 +553,9 @@ class AdapterLoop:
         # day's list counts nothing new (a broker snapshot's cutoff
         # watermark too).
         self._account_executions = set()
+        # Only orders actually sent by this process supply live clock
+        # evidence; reconciliation never seeds this set (ADR 0019).
+        self._sent_orders = set()
         # Set when a reconcile finds the engine holding a book: the
         # reconciliation it is owed, sent once no execution awaits its
         # commission (_send_reconciliation).
@@ -668,34 +671,33 @@ class AdapterLoop:
     def _cross_check_gateway_clock(self, event):
         """Invalidate a checked link before stamping a report whose time is implausible (ADR 0019).
 
-        Live executions have no plausible age beyond the clock tolerance;
-        requested executions may reach back to New York midnight (ADR 0025
-        point 5). Compare to callback arrival, never later queue consumption.
-        IBKR's orderStatus has no Gateway timestamp, so it cannot cross-check
-        a clock. A fault remains unchecked until a natural new handshake.
+        Only a first live execution for an order sent in this run supplies
+        evidence. Requested executions and unsolicited redeliveries belong
+        to reconciliation, never to this check. Compare to callback arrival,
+        never later queue consumption. IBKR's orderStatus has no Gateway
+        timestamp. A fault lasts until a natural new handshake.
         """
         if event.name != "exec_details" or not gateway_clock_trusted(self.conn):
             return
         req_id, _, execution = event.args
+        identity = (execution.acctNumber, execution.clientId, execution.orderId, execution.orderRef)
+        if (req_id != -1 or identity not in self._sent_orders
+                or execution.execId in self._account_executions):
+            return
         received = event.received_at or self._now()
-        age = timedelta(0)
-        if req_id != -1:
-            requested = self.conn.execution_requested_at(req_id) or received
-            midnight = datetime.combine(requested.astimezone(NEW_YORK).date(), clock_time(0), NEW_YORK)
-            age = max(timedelta(0), received - midnight.astimezone(timezone.utc))
         problem, readings = _new_york_readings(execution.time, "IB Gateway's execution time")
         at = min(readings, key=lambda at: abs(at - received)) if readings else None
-        if not problem and -GATEWAY_CLOCK_TOLERANCE - age <= at - received <= GATEWAY_CLOCK_TOLERANCE:
-            verdict, reason = "checked", "within tolerance and plausible age"
+        if not problem and abs(at - received) <= GATEWAY_CLOCK_TOLERANCE:
+            verdict, reason = "checked", "within tolerance"
         else:
             self.conn.gateway_clock_offset = None
             self._clock_fault = "IB Gateway's clock cross-check failed: " + (problem or
-                "execution time {} is outside the tolerance and plausible age at receipt {}".format(
+                "execution time {} is outside the tolerance at receipt {}".format(
                     _stamp(at), _stamp(received)))
             verdict, reason = "unchecked", self._clock_fault
-        log.info("ibkr gateway clock cross-check gateway_at=%s received_at=%s plausible_age_seconds=%s "
-                 "verdict=%s reason=%s", _stamp(at) if at else "unreadable", _stamp(received),
-                 age.total_seconds(), verdict, reason, extra={"clock_observation": True})
+        log.info("ibkr gateway clock cross-check gateway_at=%s received_at=%s verdict=%s reason=%s",
+                 _stamp(at) if at else "unreadable", _stamp(received), verdict, reason,
+                 extra={"clock_observation": True})
 
     def _observe_gateway_clock(self):
         """Check the current natural handshake once; never reconnect for clock evidence (ADR 0019)."""
@@ -1046,6 +1048,8 @@ class AdapterLoop:
     def _sent(self, record):
         log.info("ibkr sent client_order_id=%s client_id=%d order_id=%d", record.request.client_order_id,
                  record.client_id, record.broker_order_id)
+        self._sent_orders.add((record.request.account_id, record.client_id, record.broker_order_id,
+                               record.request.client_order_id))
         self.reports.sent(record)
         self.tracker.placed(record.broker_order_id)
 

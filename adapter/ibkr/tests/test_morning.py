@@ -22,10 +22,12 @@ waits for the Flex reader's next firing.
 
 Synthetic figures only; nothing here reaches IBKR.
 """
+import contextlib
 import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -613,7 +615,34 @@ class MorningTests(unittest.TestCase):
         self.assert_withheld("Gateway's clock", "stale")
         self.assertEqual(len(self.fake.called("connect")), 1)
 
-    def test_evening_reading_withholds_on_another_accounts_clock_fault(self):
+    def release_clock_order(self, loop):
+        from test_loop import released_order
+        self.engine.decisions = {"clock-release": [released_order()]}
+        loop.submit("market.session.closed", 1,
+                    {"period_end": stamp(self.now), "instrument_ids": ["SPY"]},
+                    stamp(self.now), input_id="clock-release")
+        for _ in range(3):
+            loop.step()
+        self.assertEqual(len(self.fake.placed), 1)
+        return self.fake.placed[0]
+
+    @contextlib.contextmanager
+    def no_clock_check(self):
+        with mock.patch("loop.log.info") as logged:
+            yield
+        self.assertFalse(any("clock cross-check" in call.args[0] for call in logged.call_args_list),
+                         logged.call_args_list)
+
+    def clock_execution(self, loop, time, req_id=-1, **overrides):
+        fields = dict(order_ref="tw-paper-1", client_id=loop.config.client_id, time=time)
+        fields.update(overrides)
+        ex = execution(**fields)
+        self.fake.callbacks.exec_details(req_id, contract(), ex)
+        self.fake.callbacks.commission_report(SimpleNamespace(execId=ex.execId, commission=1.0, currency="USD"))
+        loop._pump_all()
+        return ex
+
+    def test_evening_reading_ignores_another_accounts_old_execution(self):
         self.at(ny(THURSDAY, 16))
         loop = self.loop()
         loop.start()
@@ -621,8 +650,8 @@ class MorningTests(unittest.TestCase):
         self.fake.callbacks.exec_details(-1, contract(), execution(account="DU_OTHER", time="20270114 18:00:00 EST"))
         loop.conn.pump(0)
         self.deliver(THURSDAY, loop)
-        self.assert_withheld("Gateway's clock", "cross-check")
-        self.assertEqual(len(self.fake.called("connect")), 1)
+        self.assert_as_of_close(THURSDAY)
+        self.assertIsNone(loop.tracker._unverified_receipt())
 
     def test_stale_check_observes_each_reading_without_pumping_or_reconnecting(self):
         self.at(ny(THURSDAY, 17))
@@ -650,12 +679,9 @@ class MorningTests(unittest.TestCase):
         loop = self.loop()
         loop.start()
         self.at(ny(FRIDAY_MORNING, 8, 5))
-        # Another account's report still exposes the shared Gateway clock;
-        # it must not become an execution in this account's journal.
-        ex = execution(account="DU_OTHER", time="20270115 07:05:00 EST")
-        self.fake.callbacks.exec_details(-1, contract(), ex)
+        self.release_clock_order(loop)
         with self.assertLogs("ibkr", "INFO") as logs:
-            loop.conn.pump(0)
+            self.clock_execution(loop, "20270115 07:05:00 EST")
         self.assertIsNone(loop.conn.gateway_clock_offset)
         self.assertEqual(loop.tracker._unverified_receipt(), self.now)
         fault = [line for line in logs.output if "clock cross-check" in line]
@@ -663,6 +689,8 @@ class MorningTests(unittest.TestCase):
         self.assertIn("gateway_at=2027-01-15T12:05:00Z", fault[0])
         self.assertIn("received_at=2027-01-15T13:05:00Z", fault[0])
         self.assertIn("verdict=unchecked", fault[0])
+        self.fake.positions = [(ACCOUNT, contract(), Decimal("151"), 312.5)]
+        self.fake.summary = [(a, t, "99594.00" if t == "TotalCashValue" else v, c) for a, t, v, c in SUMMARY]
         loop.reconcile()
         self.assertIsNone(loop.conn.gateway_clock_offset, "re-reading a cached handshake cannot clear a fault")
         self.proof(FRIDAY_MORNING)
@@ -674,7 +702,7 @@ class MorningTests(unittest.TestCase):
             loop.step()
         self.assertIsNone(loop.tracker._unverified_receipt(), "a natural new handshake can restore trust")
 
-    def test_requested_execution_cross_check_keeps_the_requests_day_across_midnight(self):
+    def test_requested_execution_across_midnight_supplies_no_clock_evidence(self):
         from orders import collect_broker_orders
         self.at(ny(THURSDAY, 23, 59))
         loop = self.loop()
@@ -688,25 +716,90 @@ class MorningTests(unittest.TestCase):
         collect_broker_orders(loop.conn)
         self.assertIsNone(loop.tracker._unverified_receipt())
 
-    def test_passive_cross_check_boundaries_replays_and_queue_delay(self):
+    def assert_clock_boundary(self, seconds, checked):
         from datetime import timedelta
-        cases = [(-300, -1, True), (-301, -1, False), (300, -1, True), (301, -1, False),
-                 (-3600, 123, True), (-8 * 3600 - 300, 123, True),
-                 (-8 * 3600 - 301, 123, False), (301, 123, False)]
-        for seconds, req_id, checked in cases:
-            with self.subTest(seconds=seconds, req_id=req_id):
-                self.at(ny(FRIDAY_MORNING, 8))
-                loop = self.loop()
-                loop.start()
-                at = self.now + timedelta(seconds=seconds)
-                ex = execution(account="DU_OTHER", time=at.astimezone(NEW_YORK).strftime("%Y%m%d %H:%M:%S EST"))
-                self.fake.callbacks.exec_details(req_id, contract(), ex)
-                # Delayed consumption must compare against arrival, not the later pump.
-                self.at(ny(FRIDAY_MORNING, 8, 30))
-                loop.conn.pump(0)
-                trusted = loop.tracker._unverified_receipt() is None
-                loop.close()
-                self.assertEqual(trusted, checked)
+        self.at(ny(FRIDAY_MORNING, 8))
+        loop = self.loop()
+        loop.start()
+        self.release_clock_order(loop)
+        at = self.now + timedelta(seconds=seconds)
+        ex = execution(order_ref="tw-paper-1", client_id=loop.config.client_id,
+                       time=at.astimezone(NEW_YORK).strftime("%Y%m%d %H:%M:%S EST"))
+        self.fake.callbacks.exec_details(-1, contract(), ex)
+        self.at(ny(FRIDAY_MORNING, 8, 30))
+        loop.conn.pump(0)
+        self.assertEqual(loop.tracker._unverified_receipt() is None, checked)
+
+    def test_live_execution_five_minutes_behind_is_within_tolerance(self):
+        self.assert_clock_boundary(-300, True)
+
+    def test_live_execution_over_five_minutes_behind_faults_before_queue_delay(self):
+        self.assert_clock_boundary(-301, False)
+
+    def test_live_execution_five_minutes_ahead_is_within_tolerance(self):
+        self.assert_clock_boundary(300, True)
+
+    def test_live_execution_over_five_minutes_ahead_faults_despite_queue_delay(self):
+        self.assert_clock_boundary(301, False)
+
+    def test_requested_executions_never_cross_check_even_for_a_sent_order(self):
+        loop = self.loop()
+        loop.start()
+        self.release_clock_order(loop)
+        from orders import collect_broker_orders
+        self.fake.executions = [(contract(), execution(order_ref="tw-paper-1", client_id=loop.config.client_id,
+                                                      time="20270115 07:05:00 EST"))]
+        with self.no_clock_check():
+            collect_broker_orders(loop.conn)
+        self.assertIsNone(loop.tracker._unverified_receipt())
+        # Unknown and late request IDs also supply no live clock evidence,
+        # irrespective of age, direction or calendar date.
+        for req_id, time in [(123, "20270114 07:05:00 EST"), (456, "20270115 09:05:00 EST")]:
+            with self.subTest(req_id=req_id), self.no_clock_check():
+                self.clock_execution(loop, time, req_id, exec_id="replay.{}.01".format(req_id))
+                self.assertIsNone(loop.tracker._unverified_receipt())
+
+    def test_unsolicited_unknown_execution_never_cross_checks(self):
+        loop = self.loop()
+        loop.start()
+        with self.no_clock_check():
+            self.clock_execution(loop, "20270115 07:05:00 EST", order_ref="unknown")
+        self.assertIsNone(loop.tracker._unverified_receipt())
+
+    def test_unsolicited_redelivery_of_sent_orders_execution_never_cross_checks(self):
+        loop = self.loop()
+        loop.start()
+        self.release_clock_order(loop)
+        ex = self.clock_execution(loop, "20270115 08:05:00 EST")
+        self.at(ny(FRIDAY_MORNING, 9, 5))
+        with self.no_clock_check():
+            self.fake.callbacks.exec_details(-1, contract(), ex)
+            loop.conn.pump(0)
+        self.assertIsNone(loop.tracker._unverified_receipt())
+
+    def test_dry_run_never_cross_checks_execution_callbacks(self):
+        loop = self.loop()
+        loop.config = loop.config._replace(mode="dry-run", paper_sending_enabled=False)
+        loop.start()
+        with self.no_clock_check():
+            self.clock_execution(loop, "20270115 07:05:00 EST")
+        self.assertEqual(self.fake.placed, [])
+        self.assertIsNone(loop.tracker._unverified_receipt())
+        self.at(ny(FRIDAY_MORNING, 21))
+        self.assertIn("stale", loop._gateway_problem())
+
+    def test_order_status_has_no_gateway_timestamp_to_cross_check(self):
+        loop = self.loop()
+        loop.start()
+        self.fake.on_place = self.fake.accept
+        self.release_clock_order(loop)
+        loop._pump_all()
+        self.at(ny(FRIDAY_MORNING, 9, 5))
+        self.fake.status(7, "Cancelled", filled="0", remaining="9")
+        for _ in range(3):
+            loop.step()
+        self.assertIsNone(loop.tracker._unverified_receipt())
+        self.assertEqual(self.sent("execution.order.lifecycle")[-1]["payload"]["occurred_at"], stamp(self.now))
 
     def test_clock_observation_preserves_the_upstream_restoration_wait(self):
         self.at(ny(FRIDAY_MORNING, 7))
@@ -722,7 +815,7 @@ class MorningTests(unittest.TestCase):
                 self.assertFalse(loop.conn.connected)
                 self.assertEqual(len(self.fake.called("connect")), 1)
 
-    def test_a_slow_drift_within_tolerance_needs_a_natural_handshake(self):
+    def test_a_natural_handshake_measures_but_accepts_drift_within_tolerance(self):
         self.at(ny(FRIDAY_MORNING, 7))
         loop = self.loop()
         loop.start()
@@ -741,22 +834,16 @@ class MorningTests(unittest.TestCase):
         self.assertIsNone(loop.tracker._unverified_receipt())
         self.assertTrue(any("offset_seconds=-120" in line for line in logs.output))
 
-    def test_passive_cross_check_within_tolerance_keeps_the_reading_at_the_close(self):
-        self.at(ny(FRIDAY_MORNING, 7))
+    def test_passive_cross_check_within_tolerance_keeps_the_link_checked(self):
         loop = self.loop()
         loop.start()
-        self.at(ny(FRIDAY_MORNING, 8, 5))
-        self.fake.callbacks.exec_details(-1, contract(), execution(account="DU_OTHER", time="20270115 08:03:00 EST"))
-        self.proof(FRIDAY_MORNING)
+        self.release_clock_order(loop)
         with self.assertLogs("ibkr", "INFO") as logs:
-            self.deliver(THURSDAY, loop)
-        self.assert_as_of_close(THURSDAY)
+            self.clock_execution(loop, "20270115 08:03:00 EST")
         self.assertIsNone(loop.tracker._unverified_receipt())
-        self.assertEqual(len(self.fake.called("connect")), 1)
         observations = [line for line in logs.output if "clock cross-check" in line]
         self.assertEqual(len(observations), 1, observations)
         self.assertIn("verdict=checked", observations[0])
-        self.assertFalse(any(c[0] == "place_order" for c in self.fake.calls))
 
     def test_clock_recheck_expiry_stamps_executions_at_receipt_before_any_reading(self):
         from orders import collect_broker_orders
