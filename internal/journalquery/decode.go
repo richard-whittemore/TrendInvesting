@@ -374,6 +374,11 @@ func decodeAggregations(journals []Journal) ([][]item, error) {
 		if err != nil {
 			return nil, err
 		}
+		// A transition is forward-only within one run's journal (ADR 0026, D7-F
+		// amendment: legacy whole-share records are upcast, never the reverse).
+		// Each journal is a run of its own, so the order is judged per journal;
+		// across journals an account's common scale is the highest it declared.
+		journalScales := map[string]int64{}
 		for i := range items {
 			it := &items[i]
 			scale, quantity := it.quantityScale()
@@ -381,10 +386,13 @@ func decodeAggregations(journals []Journal) ([][]item, error) {
 				continue
 			}
 			it.recordedScale = scale
-			if previous, seen := scales[it.account]; seen && previous != scale && previous != 0 {
+			if previous, seen := journalScales[it.account]; seen && previous != scale && previous != 0 {
 				return nil, fmt.Errorf("%s: record %d: account %q has mixed quantity scales: %d and %d; fractional quantities cannot precede whole shares", j.Name, it.seq, accountCell(it.account), previous, scale)
 			}
-			scales[it.account] = scale
+			journalScales[it.account] = scale
+			if scale > scales[it.account] {
+				scales[it.account] = scale
+			}
 		}
 		decoded = append(decoded, items)
 	}

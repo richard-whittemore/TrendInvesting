@@ -227,7 +227,15 @@ func TestFractionalThenWholeScalesWithinAnAccountAreRefusedByName(t *testing.T) 
 		for _, split := range []bool{false, true} {
 			js := []journalquery.Journal{load(t, "mixed", build(t, conflict, whole))}
 			if split {
+				// Two runs' journals: each is forward-only on its own, so the whole-share run is
+				// upcast to the account's declared scale rather than refused (ADR 0026, D7-F).
 				js = []journalquery.Journal{load(t, "fractional", build(t, conflict)), load(t, "whole", build(t, whole))}
+				for name, fn := range aggregationViews {
+					if _, err := fn(js, journalquery.Filter{Account: "elsewhere"}); err != nil && strings.Contains(err.Error(), "mixed quantity scales") {
+						t.Errorf("%s: two runs refused as one history: %v", name, err)
+					}
+				}
+				continue
 			}
 			for name, fn := range aggregationViews {
 				if _, err := fn(js, journalquery.Filter{Account: "elsewhere"}); err == nil || !strings.Contains(err.Error(), "mixed quantity scales") || !strings.Contains(err.Error(), "synthetic") || !strings.Contains(err.Error(), "10000") {
@@ -417,6 +425,25 @@ func TestFractionalSkippedOrderDeclaresTheAccountScale(t *testing.T) {
 				t.Errorf("%s refused fractional skip: %+v: %v", name, tab, err)
 			case name == "totals" && (len(tab.Rows) != 1 || strings.Join(tab.Rows[0], " ") != "synthetic TOTAL all 0 0 0 0.00"):
 				t.Errorf("missing zero TOTAL for skipped order: %+v", tab)
+			}
+		}
+	}
+}
+
+func TestTwoRunsOfOneAccountEachCuttingOverAggregateInEitherOrder(t *testing.T) {
+	// Each run's journal starts with a whole-share baseline and cuts over to fractional;
+	// the order is judged per journal, so naming the runs in either order aggregates.
+	run := func(name string, d time.Time, held int64) journalquery.Journal {
+		return load(t, name, build(t, scaledSnapshot("synthetic", held, 0, d), scaledSnapshot("synthetic", held, event.FractionalQuantityScale, d.Add(time.Hour))))
+	}
+	// Two distinct months, so the runs are not read as copies of one history.
+	first, second := run("run-1", at(time.March, 2), 1), run("run-2", at(time.April, 2), 2)
+	for _, js := range [][]journalquery.Journal{{first, second}, {second, first}} {
+		for name, fn := range aggregationViews {
+			// Reconcile may well disagree on this synthetic pair (no fills explain the
+			// change in holdings); what must not happen is a refusal of the scales.
+			if _, err := fn(js, journalquery.Filter{}); err != nil && strings.Contains(err.Error(), "mixed quantity scales") {
+				t.Errorf("%s refused two cut-over runs: %v", name, err)
 			}
 		}
 	}
