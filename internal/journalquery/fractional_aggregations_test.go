@@ -440,9 +440,16 @@ func TestTwoRunsOfOneAccountEachCuttingOverAggregateInEitherOrder(t *testing.T) 
 	first, second := run("run-1", at(time.March, 2), 1), run("run-2", at(time.April, 2), 2)
 	for _, js := range [][]journalquery.Journal{{first, second}, {second, first}} {
 		for name, fn := range aggregationViews {
-			// Reconcile may well disagree on this synthetic pair (no fills explain the
-			// change in holdings); what must not happen is a refusal of the scales.
-			if _, err := fn(js, journalquery.Filter{}); err != nil && strings.Contains(err.Error(), "mixed quantity scales") {
+			_, err := fn(js, journalquery.Filter{})
+			// Reconcile disagrees on this synthetic pair by design: no fill explains the
+			// change in holdings between the runs. Positions and totals must succeed.
+			if name == "reconcile" {
+				if err == nil || !strings.Contains(err.Error(), "disagreement") {
+					t.Errorf("reconcile on two cut-over runs: want the holdings disagreement, got %v", err)
+				}
+				continue
+			}
+			if err != nil {
 				t.Errorf("%s refused two cut-over runs: %v", name, err)
 			}
 		}

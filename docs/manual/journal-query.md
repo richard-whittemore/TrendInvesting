@@ -65,9 +65,12 @@ Every view reads both whole-share and fractional journals and prints shares.
 For `positions`, `totals` and `reconcile`, legacy whole-share records are
 upcast to ticks with overflow checked when that account later declares the
 fractional scale (ADR 0026 D7-F). These views refuse negative legacy holdings
-during upcast, a fractional record followed by a whole-share record, or two
-different nonzero scales, naming the account. They validate the entire supplied
-history before applying filters; narrowing a filter cannot bypass a refusal.
+during upcast, a fractional record followed by a whole-share record within one
+run's journal, or two different nonzero scales, naming the account. Each run's
+journal is judged on its own: two runs of one account that each cut over, or a
+whole-share run named beside a fractional one, aggregate at the account's
+declared scale. They validate the entire supplied history before applying
+filters; narrowing a filter cannot bypass a refusal.
 Unsupported numeric scales are refused even on records otherwise skipped.
 The `totals` schema follows the selected records: a whole-share selection keeps
 its combined TOTAL, and a fractional selection includes a zero TOTAL for each
