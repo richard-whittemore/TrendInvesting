@@ -31,7 +31,10 @@ func TestBuyReservationIncludesCentCeilingFeesAndSlack(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// 7.25 * 10.10 = 73.225, ceiling 73.23, plus 1.25 fees.
-			got := event.BuyReservation(72500, 10000, 10.10, 1.25, tc.slack)
+			got, err := event.BuyReservation(72500, 10000, 10.10, 1.25, tc.slack)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got.Cmp(tc.want) != 0 {
 				t.Fatalf("reservation = %s; want %s", got, tc.want)
 			}

@@ -194,12 +194,17 @@ func PlanIRA(in IRAInput) (IRAPlan, error) {
 // BuyCost is a buy's worst-case cost: quantity at the band's limit price,
 // rounded up to cents for fractional orders, plus maximum fees and the order's
 // explicit rounding slack (ADR 0026, "Per-execution rounding reserve").
-// Whole-share orders retain their original float arithmetic.
+// Whole-share orders retain their original float arithmetic. Invalid costs
+// return +Inf so budget comparisons fail closed.
 // Buys worth $980 at the previous close cost
 // $1,029 at a 5% band before fees.
 func BuyCost(o event.OrderPlannedPayload, maxFees float64) float64 {
-	cost, _ := event.BuyReservation(o.Quantity, o.QuantityScale, o.LimitPrice, maxFees, o.RoundingSlack).Float64()
-	return cost
+	cost, err := event.BuyReservation(o.Quantity, o.QuantityScale, o.LimitPrice, maxFees, o.RoundingSlack)
+	if err != nil {
+		return math.Inf(1)
+	}
+	value, _ := cost.Float64()
+	return value
 }
 
 // ScaleBuys fits buys to budget (ADR 0026, point 2, "Scaling"): when their
@@ -479,7 +484,13 @@ func scaleFractionalBuys(buys []event.OrderPlannedPayload, budget, maxFees float
 			return nil, nil, 0
 		}
 		slack.Add(slack, moneyRat(b.RoundingSlack))
-		atLimit.Add(atLimit, event.BuyCost(b.Quantity, b.QuantityScale, b.LimitPrice, 0))
+		cost, err := event.BuyReservation(b.Quantity, b.QuantityScale, b.LimitPrice, maxFees, b.RoundingSlack)
+		if err != nil {
+			return nil, nil, 0
+		}
+		cost.Sub(cost, moneyRat(maxFees))
+		cost.Sub(cost, moneyRat(b.RoundingSlack))
+		atLimit.Add(atLimit, cost)
 	}
 	fees := new(big.Rat).Mul(new(big.Rat).SetInt64(int64(len(buys))), moneyRat(maxFees))
 	total := new(big.Rat).Add(atLimit, fees)
@@ -493,10 +504,16 @@ func scaleFractionalBuys(buys []event.OrderPlannedPayload, budget, maxFees float
 	if ratio.Cmp(new(big.Rat).SetInt64(1)) > 0 {
 		ratio.SetInt64(1)
 	}
-	kept, cost, monetaryCost := fractionalOrdersAtScale(buys, increments, ratio, maxFees)
+	kept, cost, monetaryCost, err := fractionalOrdersAtScale(buys, increments, ratio, maxFees)
+	if err != nil {
+		return nil, nil, 0
+	}
 	if cost.Cmp(cash) > 0 {
 		ratio = fractionalFeeScale(sizingCash, fees, atLimit)
-		kept, cost, monetaryCost = fractionalOrdersAtScale(buys, increments, ratio, maxFees)
+		kept, cost, monetaryCost, err = fractionalOrdersAtScale(buys, increments, ratio, maxFees)
+		if err != nil {
+			return nil, nil, 0
+		}
 	}
 
 	// ADR 0026, "Scaling": cent ceilings and the gate's sequential float
@@ -509,7 +526,10 @@ func scaleFractionalBuys(buys []event.OrderPlannedPayload, budget, maxFees float
 		kept = nil
 		for range 128 {
 			mid := new(big.Rat).Quo(new(big.Rat).Add(low, high), big.NewRat(2, 1))
-			candidate, exact, monetary := fractionalOrdersAtScale(buys, increments, mid, maxFees)
+			candidate, exact, monetary, err := fractionalOrdersAtScale(buys, increments, mid, maxFees)
+			if err != nil {
+				return nil, nil, 0
+			}
 			if exact.Cmp(cash) <= 0 && monetary <= budget && fractionalRunningCashFits(candidate, budget, maxFees) {
 				low.Set(mid)
 				kept = candidate
@@ -559,7 +579,7 @@ func fractionalFeeScale(cash, fees, atLimit *big.Rat) *big.Rat {
 // fractionalOrdersAtScale rounds each exact scaled quantity down and
 // values the kept basket in both the exact and account monetary domains
 // using the conservative cent debit (ADR 0026, "Worst-case cost").
-func fractionalOrdersAtScale(buys []event.OrderPlannedPayload, increments []int64, ratio *big.Rat, maxFees float64) ([]event.OrderPlannedPayload, *big.Rat, float64) {
+func fractionalOrdersAtScale(buys []event.OrderPlannedPayload, increments []int64, ratio *big.Rat, maxFees float64) ([]event.OrderPlannedPayload, *big.Rat, float64, error) {
 	var kept []event.OrderPlannedPayload
 	exactCost := new(big.Rat)
 	monetaryCost := 0.0
@@ -568,11 +588,15 @@ func fractionalOrdersAtScale(buys []event.OrderPlannedPayload, increments []int6
 		b.Quantity, _ = floorIncrement(ticks, increments[i])
 		if b.Quantity > 0 {
 			kept = append(kept, b)
-			exactCost.Add(exactCost, event.BuyReservation(b.Quantity, b.QuantityScale, b.LimitPrice, maxFees, b.RoundingSlack))
+			cost, err := event.BuyReservation(b.Quantity, b.QuantityScale, b.LimitPrice, maxFees, b.RoundingSlack)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			exactCost.Add(exactCost, cost)
 			monetaryCost += BuyCost(b, maxFees)
 		}
 	}
-	return kept, exactCost, monetaryCost
+	return kept, exactCost, monetaryCost, nil
 }
 
 // fractionalRunningCashFits mirrors the risk gate's release-order cash

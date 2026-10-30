@@ -15,8 +15,16 @@ func TestWholeShareMoneyPreservesLegacyBits(t *testing.T) {
 		t.Helper()
 		wantBuy := event.QuantityValue(q, 0, price) + fees
 		wantSale := event.QuantityValue(q, 0, price) - fees
-		buy, _ := event.BuyCost(q, 0, price, fees).Float64()
-		reservation, _ := event.BuyReservation(q, 0, price, fees, 0).Float64()
+		buyRat, err := event.BuyCost(q, 0, price, fees)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buy, _ := buyRat.Float64()
+		reservationRat, err := event.BuyReservation(q, 0, price, fees, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reservation, _ := reservationRat.Float64()
 		sale := event.SaleProceeds(q, 0, price, fees)
 		if math.Float64bits(buy) != math.Float64bits(wantBuy) || math.Float64bits(reservation) != math.Float64bits(wantBuy) || math.Float64bits(sale) != math.Float64bits(wantSale) {
 			t.Errorf("q=%d price=%.17g fees=%.17g: buy=%.17g reserve=%.17g sale=%.17g; legacy buy=%.17g sale=%.17g", q, price, fees, buy, reservation, sale, wantBuy, wantSale)

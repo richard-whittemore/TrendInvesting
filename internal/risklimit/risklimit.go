@@ -646,7 +646,22 @@ func quantityBounds(book Book, plan []Order) error {
 // counted of which are not risk-reducing, against book.
 func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 	p := o.Planned
-	f, unvalued := g.figures(o, planSize, book)
+	buyCost := 0.0
+	var costErr error
+	if g.ira && p.Side == event.OrderSideBuy {
+		cost, err := event.BuyReservation(p.Quantity, p.QuantityScale, p.LimitPrice, g.maxFees, g.roundingSlack)
+		costErr = err
+		if costErr == nil {
+			buyCost, _ = cost.Float64()
+		}
+	}
+	// ADR 0026's cash check cannot certify an unrepresentable debit. Keep
+	// only finite input evidence until the engine-state refusals are checked.
+	f := event.RiskFigures{NetLiquidation: p.NetLiquidation, ReferencePrice: p.ReferencePrice, OrdersInDecision: planSize}
+	unvalued := ""
+	if costErr == nil {
+		f, unvalued = g.figures(o, planSize, book, buyCost)
+	}
 	if p.Sale != (event.SaleFigures{}) {
 		return g.checkSale(o, f)
 	}
@@ -677,6 +692,12 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 			out.Refused.Alert, pc.alerted = !pc.alerted, true
 			return out
 		}
+	}
+	if costErr != nil {
+		detail := "cannot establish a finite worst-case cash debit: " + costErr.Error()
+		out := Outcome{Refused: g.refusal(o, f, event.RefusedInsufficientCash, detail)}
+		g.degrade(&out, p.InstrumentID, detail, p.ClientOrderID)
+		return out
 	}
 	// After the engine-state and kill-switch refusals, so a stale snapshot
 	// never stops Boost's exit from firing the sale back to 98%.
@@ -825,7 +846,7 @@ func (g *Gate) breach(o Order, f event.RiskFigures, counted int, book *Book, unv
 // holding and working sells when one is readable. It also returns the first
 // holding, by instrument, that has no reference price, or "" when every one
 // has.
-func (g *Gate) figures(o Order, planSize int, book *Book) (f event.RiskFigures, unvalued string) {
+func (g *Gate) figures(o Order, planSize int, book *Book, buyCost float64) (f event.RiskFigures, unvalued string) {
 	p := o.Planned
 	held := book.Holdings[p.InstrumentID]
 	after := held + p.Quantity
@@ -863,7 +884,7 @@ func (g *Gate) figures(o Order, planSize int, book *Book) (f event.RiskFigures, 
 		if p.QuantityScale == event.FractionalQuantityScale {
 			f.RoundingSlack = g.roundingSlack
 		}
-		f.BuyCost, _ = event.BuyReservation(p.Quantity, p.QuantityScale, p.LimitPrice, g.maxFees, f.RoundingSlack).Float64()
+		f.BuyCost = buyCost
 		f.CashAvailable = book.CashAvailable
 	}
 	if holding, working, ok := g.brokerHolding(p.InstrumentID); ok {

@@ -498,7 +498,11 @@ func TestConservativeExecutionCents(t *testing.T) {
 		{"fractional exact cents", 2900, 10000, 1, 0, "0.29", 0.29},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := event.BuyCost(tc.quantity, tc.scale, tc.price, tc.fees).FloatString(2); got != tc.buy {
+			cost, err := event.BuyCost(tc.quantity, tc.scale, tc.price, tc.fees)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cost.FloatString(2); got != tc.buy {
 				t.Fatalf("buy %s, want %s", got, tc.buy)
 			}
 			if got := event.SaleProceeds(tc.quantity, tc.scale, tc.price, tc.fees); got != tc.sale {

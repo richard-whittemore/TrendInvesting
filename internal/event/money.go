@@ -1,6 +1,7 @@
 package event
 
 import (
+	"errors"
 	"math"
 	"math/big"
 	"strconv"
@@ -32,24 +33,51 @@ func (c ExecutionConfiguration) RoundingSlack() float64 {
 // ceiling and fees (ADR 0026, "Per-execution rounding reserve"). Fill debits
 // use BuyCost instead: slack is reserved once per order, never per fill.
 // Whole-share orders preserve their original float expression and ignore
-// fractional slack (ADR 0026). All inputs must be validated.
-func BuyReservation(quantity, scale int64, price, fees, slack float64) *big.Rat {
-	if scale == 0 {
-		return BuyCost(quantity, scale, price, fees)
+// fractional slack (ADR 0026). Invalid inputs or non-finite debits return an error.
+func BuyReservation(quantity, scale int64, price, fees, slack float64) (*big.Rat, error) {
+	if !isFinite(slack) || slack < 0 {
+		return nil, errors.New("buy reservation: rounding slack must be finite and nonnegative")
 	}
-	return new(big.Rat).Add(BuyCost(quantity, scale, price, fees), decimalMoney(slack))
+	cost, err := BuyCost(quantity, scale, price, fees)
+	if err != nil {
+		return nil, err
+	}
+	if scale != 0 {
+		cost.Add(cost, decimalMoney(slack))
+	}
+	return finiteBuyMoney(cost)
 }
 
 // BuyCost returns the exact worst-case debit: quantity times the decimal
 // limit rounded up to a cent, plus fees (ADR 0026, point 2, "Worst-case cost").
 // Whole-share orders retain QuantityValue + fees in its original float
-// order (ADR 0026). Callers supply validated nonnegative quantities, prices
-// and fees; fractional values must not lose precision before cent rounding.
-func BuyCost(quantity, scale int64, price, fees float64) *big.Rat {
-	if scale == 0 {
-		return new(big.Rat).SetFloat64(QuantityValue(quantity, 0, price) + fees)
+// order (ADR 0026). Invalid inputs and debits outside the finite monetary
+// range return an error; callers must refuse rather than commit cash.
+func BuyCost(quantity, scale int64, price, fees float64) (*big.Rat, error) {
+	if err := quantityScaleError(scale); err != nil {
+		return nil, err
 	}
-	return new(big.Rat).Add(quantityCents(quantity, scale, price, true), decimalMoney(fees))
+	if quantity < 0 || !isFinite(price) || price < 0 || !isFinite(fees) || fees < 0 {
+		return nil, errors.New("buy cost: quantity, price and fees must be finite and nonnegative")
+	}
+	if scale == 0 {
+		cost := new(big.Rat).SetFloat64(QuantityValue(quantity, 0, price) + fees)
+		if cost == nil {
+			return nil, errors.New("buy cost: debit exceeds the finite monetary range")
+		}
+		return cost, nil
+	}
+	return finiteBuyMoney(new(big.Rat).Add(quantityCents(quantity, scale, price, true), decimalMoney(fees)))
+}
+
+// finiteBuyMoney keeps ADR 0026's exact cent arithmetic within the account's
+// finite float monetary domain, including fees and the execution reserve.
+func finiteBuyMoney(cost *big.Rat) (*big.Rat, error) {
+	value, _ := cost.Float64()
+	if !isFinite(value) {
+		return nil, errors.New("buy cost: debit exceeds the finite monetary range")
+	}
+	return cost, nil
 }
 
 // SaleProceeds credits quantity times price rounded down to cents before

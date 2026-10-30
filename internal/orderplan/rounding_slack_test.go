@@ -59,7 +59,11 @@ func TestRoundingSlackCoversFourPartialExecutions(t *testing.T) {
 	for range 4 {
 		f := event.TargetWeightFillPayload{Quantity: 18125, QuantityScale: 10000, Price: 10.10, Side: event.OrderSideBuy}
 		posted -= reconcile.FillChange(f).Cash
-		debit, _ := event.BuyCost(f.Quantity, f.QuantityScale, f.Price, 0).Float64()
+		cost, err := event.BuyCost(f.Quantity, f.QuantityScale, f.Price, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		debit, _ := cost.Float64()
 		spent += debit
 	}
 	if posted != 7324 || spent > reserved || float64(posted)/100 > reserved {
