@@ -12,7 +12,7 @@ import (
 // section 9 and its dated owner decision, rather than elapsed calendar months.
 func TestIRAGateDocumentsOwnerDecisions(t *testing.T) {
 	root := repoRoot(t)
-	raw, err := os.ReadFile(filepath.Join(root, "docs/live-trading/plan.md"))
+	raw, err := os.ReadFile(filepath.Join(root, "docs", "live-trading", "plan.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func TestIRAGateDocumentsOwnerDecisions(t *testing.T) {
 	if strings.Contains(plan, "2 clean dry-run rebalances") {
 		t.Error("plan.md retains superseded gate")
 	}
-	raw, err = os.ReadFile(filepath.Join(root, "docs/runbooks/ira-drill-checklist.md"))
+	raw, err = os.ReadFile(filepath.Join(root, "docs", "runbooks", "ira-drill-checklist.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func iraChecklistProblems(doc string) []string {
 }
 
 func TestIRAChecklistRefusesIncompleteSignoff(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs/runbooks/ira-drill-checklist.md"))
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "runbooks", "ira-drill-checklist.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestIRAChecklistRefusesIncompleteSignoff(t *testing.T) {
 }
 
 func TestIRAChecklistRejectsBadDatesAndMissingEvidence(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs/runbooks/ira-drill-checklist.md"))
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "runbooks", "ira-drill-checklist.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
