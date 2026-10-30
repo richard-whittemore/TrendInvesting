@@ -28,7 +28,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -653,7 +653,7 @@ class MorningTests(unittest.TestCase):
         self.assert_as_of_close(THURSDAY)
         self.assertIsNone(loop.tracker._unverified_receipt())
 
-    def test_stale_check_observes_each_reading_without_pumping_or_reconnecting(self):
+    def test_stale_check_logs_changes_without_pumping_or_reconnecting(self):
         self.at(ny(THURSDAY, 17))
         loop = self.loop()
         loop.start()
@@ -664,10 +664,12 @@ class MorningTests(unittest.TestCase):
         loop.conn.pump = lambda _: self.fail("clock observation must not drain callbacks")
         with self.assertLogs("ibkr", "INFO") as logs:
             loop._check_gateway_clock()
+            loop.conn.gateway_clock_offset = timedelta(hours=-5)
             loop._check_gateway_clock()
+        self.assertIsNone(loop.conn.gateway_clock_offset, "every stale check must clear the offset")
         loop.conn.pump = original
         observations = [line for line in logs.output if "clock staleness" in line]
-        self.assertEqual(len(observations), 2)
+        self.assertEqual(len(observations), 1)
         self.assertTrue(all("verdict=unchecked" in line for line in observations))
         self.assertIs(loop.conn.inbox, inbox)
         self.assertEqual(len(self.fake.called("connect")), 1)
@@ -1375,6 +1377,17 @@ class MorningTests(unittest.TestCase):
         self.assert_as_of_close(THURSDAY)
 
     # -- waiting for the proof -------------------------------------------------
+    def test_a_waiting_reading_logs_clock_staleness_once(self):
+        self.at(ny(FRIDAY_MORNING, 6, 5))
+        with self.assertLogs("ibkr", "INFO") as logs:
+            loop = self.deliver(THURSDAY)
+            for _ in range(60):
+                self.at(self.now + timedelta(seconds=1))
+                loop.step()
+        self.assertEqual(self.sent(BROKER_SNAPSHOT_TYPE), [], "no proof yet: the batch waits")
+        observations = [line for line in logs.output if "ibkr gateway clock staleness" in line]
+        self.assertEqual(len(observations), 1, observations)
+
     def test_the_delivery_waits_for_the_proof_until_nine(self):
         self.at(ny(FRIDAY_MORNING, 6, 5))
         loop = self.deliver(THURSDAY)

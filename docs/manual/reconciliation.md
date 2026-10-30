@@ -720,6 +720,10 @@ withholds, naming Gateway's clock. IBKR's `orderStatus` callback carries
 **no Gateway timestamp** and therefore supplies no passive clock evidence;
 its lifecycle time remains the adapter's receipt time. A fault stays
 unchecked until a natural new handshake passes.
+A late first delivery (the first report after Gateway restores its link to
+IBKR's servers, or an IBKR correction carrying the original time) can fault
+a correct clock; the adapter then withholds the reading rather than risk
+accepting an unsafe one, and the fault clears at the next passing handshake.
 
 In **dry-run**, no orders are sent and the passive check never fires; the
 **12-hour validity interval** is the only ongoing clock rule there (or the
@@ -731,7 +735,8 @@ without one, the validity interval still expires normally.
 
 Each handshake logs `ibkr gateway clock recheck at=... checked_at=...
 offset_seconds=... verdict=checked|unchecked reason=...`. Each post-close
-reading and reconciliation logs `ibkr gateway clock staleness at=...
+reading and reconciliation checks staleness, logging only when the verdict,
+reason or handshake time changes: `ibkr gateway clock staleness at=...
 checked_at=... interval_seconds=... verdict=checked|unchecked reason=...`.
 The passive check logs `ibkr gateway clock cross-check gateway_at=...
 received_at=... verdict=checked|unchecked reason=...`,
@@ -741,7 +746,8 @@ prints the last clock observation, including a staleness or cross-check
 verdict.
 
 Every execution's time must be in one of the same zones; the passive
-comparison allows for a requested execution's plausible age. While the link's check holds it
+comparison uses only first live executions for orders this run sent, never
+requested executions. While the link's check holds it
 is read on New York's clock whatever its label; until then, the adapter
 records it at the time it heard of it (or the Gateway's time, if later),
 so a fill after the close is never recorded as one before it, even by a

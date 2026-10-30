@@ -310,8 +310,8 @@ def gateway_zone_problem(text, what="IBKR's execution time"):
     """Why text, a time IB Gateway gave as "YYYYMMDD HH:MM:SS Zone", is not a New York reading; "" when it is.
 
     The zone check alone (_new_york_readings), for each execution's time (ADR 0019). The handshake establishes
-    clock trust; _cross_check_gateway_clock compares execution times allowing their plausible age, since a
-    requested execution may be hours old.
+    clock trust; _cross_check_gateway_clock compares only first live executions for orders sent in this run
+    against callback receipt. Requested executions are never compared.
     """
     return _new_york_readings(text, what)[0]
 
@@ -579,6 +579,7 @@ class AdapterLoop:
         self._gateway_zone = "IB Gateway's connection time has not been read yet (no reconcile has run)"
         self._clock_fault = ""
         self._clock_checked_inbox = None
+        self._last_clock_staleness = None
         self._last_wait = ""
         self.delivery = None if streams is None else Deliverer(
             streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._batch_reading, new_id,
@@ -656,17 +657,22 @@ class AdapterLoop:
         Only a natural handshake refreshes evidence: ibapi caches its
         connection time, and reqCurrentTime measures IBKR's server instead
         of Gateway's local clock. Faults remain latched for this Inbox.
-        Each reading journals an observation, never an engine input.
+        Changes in verdict, reason or handshake time journal an observation,
+        never an engine input; repeated checks still clear an invalid offset.
         """
         if self._clock_checked_inbox is not self.conn.inbox:
             self._observe_gateway_clock()
         problem = self._gateway_problem()
         if problem:
             self.conn.gateway_clock_offset = None
+        verdict, reason = ("unchecked", problem) if problem else ("checked", "within interval")
+        observation = (verdict, reason, self.conn.connected_at)
+        if observation == self._last_clock_staleness:
+            return
         log.info("ibkr gateway clock staleness at=%s checked_at=%s interval_seconds=%s verdict=%s reason=%s",
                  _stamp(self._now()), _stamp(self.conn.connected_at) if self.conn.connected_at else "unknown",
-                 self.config.gateway_clock_check_interval, "unchecked" if problem else "checked",
-                 problem or "within interval", extra={"clock_observation": True})
+                 self.config.gateway_clock_check_interval, verdict, reason, extra={"clock_observation": True})
+        self._last_clock_staleness = observation
 
     def _cross_check_gateway_clock(self, event):
         """Invalidate a checked link before stamping a report whose time is implausible (ADR 0019).
