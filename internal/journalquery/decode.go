@@ -111,7 +111,7 @@ func decode(j Journal) ([]item, error) {
 			it.account = it.withheld.AccountID
 		case event.OrderSkippedEventType:
 			it.skipped = new(event.OrderSkippedPayload)
-			err = read(env, []uint32{event.OrderSkippedSchemaVersion}, it.skipped)
+			err = read(env, event.OrderSkippedVersions(), it.skipped)
 			it.account = it.skipped.AccountID
 		case event.OrderLifecycleEventType:
 			it.lifecycle, it.account, err = readLifecycle(env)

@@ -1368,3 +1368,18 @@ func TestQuantityScaleOnAnUnversionedPayloadIsRefused(t *testing.T) {
 		t.Fatalf("scale on an unversioned payload accepted or unnamed: %v", err)
 	}
 }
+
+func TestAFractionalSkippedTradeIsListedWithTheOrders(t *testing.T) {
+	// A fractional rebalance records a skip at the fractional version (ADR 0026, D7-F);
+	// the orders view lists it rather than refusing the journal.
+	d := at(time.March, 2)
+	skipped := event.OrderSkippedPayload{AccountID: "A", Tag: "t", ClientOrderID: "c-1", InstrumentID: "AAA", Side: event.OrderSideBuy,
+		Phase: event.OrderSideBuy, Reason: event.OrderSkippedBelowIncrement, TargetWeight: 0.5, NetLiquidation: 1, ReferencePrice: 3,
+		QuantityScale: event.FractionalQuantityScale, RequestedValue: "0.0010", FractionalIncrement: "0.0001"}
+	input := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, input, dec(event.OrderSkippedEventType, skipped.SchemaVersion(), d, skipped)))}
+	o, err := journalquery.Orders(js, journalquery.Filter{})
+	if err != nil || len(o.Rows) != 1 {
+		t.Fatalf("orders: %v %+v", err, o)
+	}
+}
