@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
 	"time"
@@ -24,6 +25,9 @@ type item struct {
 	// payload names one, otherwise the journal's single account (see
 	// attributeAccounts), otherwise empty.
 	account string
+	// recordedScale keeps totals presentation tied to selected declarations,
+	// even when legacy arithmetic is upcast for replay (ADR 0026 D7-F).
+	recordedScale int64
 
 	fill      *fill
 	planned   *event.OrderPlannedPayload
@@ -337,9 +341,10 @@ func sameFill(x, y fill) bool {
 	return false
 }
 
-// decodeAggregations validates one scale per account across the selection
-// before any arithmetic or filtering (ADR 0026 D7-F; ADR 0015). Quantities
-// remain integer units at their recorded scale; accounts are never rescaled.
+// decodeAggregations validates account scale histories before filtering
+// (ADR 0015), then upcasts legacy fills and snapshots for accounts that later
+// declare fractional units, with overflow and negative holdings refused
+// (ADR 0026, Amendment 2026-10-30, D7-F). Reverse transitions are refused.
 func decodeAggregations(journals []Journal) ([][]item, error) {
 	decoded := make([][]item, 0, len(journals))
 	scales := map[string]int64{}
@@ -351,29 +356,77 @@ func decodeAggregations(journals []Journal) ([][]item, error) {
 				continue
 			}
 			var units struct {
-				QuantityScale int64 `json:"quantity_scale"`
+				AccountID     string `json:"account_id"`
+				QuantityScale int64  `json:"quantity_scale"`
 			}
 			if err := json.Unmarshal(record.Envelope.Payload, &units); err != nil {
 				return nil, fmt.Errorf("%s: record %d: %w", j.Name, record.Sequence, err)
+			}
+			if units.QuantityScale != 0 && units.QuantityScale != event.FractionalQuantityScale {
+				return nil, fmt.Errorf("%s: record %d: account %q: unsupported quantity scale %d", j.Name, record.Sequence, accountCell(units.AccountID), units.QuantityScale)
+			}
+			// The skipped equity-and-cash schema has no share units (ADR 0015).
+			if record.Envelope.Type == event.AccountSnapshotEventType && record.Envelope.SchemaVersion == event.AccountSnapshotSchemaVersion && units.QuantityScale != 0 {
+				return nil, fmt.Errorf("%s: record %d: %s: quantity_scale is not supported at this version", j.Name, record.Sequence, record.Envelope.Type)
 			}
 		}
 		items, err := decode(j)
 		if err != nil {
 			return nil, err
 		}
-		for _, it := range items {
+		for i := range items {
+			it := &items[i]
 			scale, quantity := it.quantityScale()
 			if !quantity {
 				continue
 			}
-			if previous, seen := scales[it.account]; seen && previous != scale {
-				return nil, fmt.Errorf("%s: record %d: account %q has mixed quantity scales: %d and %d; one account must use one scale", j.Name, it.seq, accountCell(it.account), previous, scale)
+			it.recordedScale = scale
+			if previous, seen := scales[it.account]; seen && previous != scale && previous != 0 {
+				return nil, fmt.Errorf("%s: record %d: account %q has mixed quantity scales: %d and %d; fractional quantities cannot precede whole shares", j.Name, it.seq, accountCell(it.account), previous, scale)
 			}
 			scales[it.account] = scale
 		}
 		decoded = append(decoded, items)
 	}
+	for _, items := range decoded {
+		for _, it := range items {
+			if it.recordedScale == 0 && scales[it.account] == event.FractionalQuantityScale {
+				if err := it.upcastQuantities(); err != nil {
+					return nil, fmt.Errorf("%s: record %d: account %q: %w", it.journal, it.seq, accountCell(it.account), err)
+				}
+			}
+		}
+	}
 	return decoded, nil
+}
+
+// upcastQuantities converts decoded legacy arithmetic to exact ticks, including
+// baseline holdings (ADR 0026, Amendment 2026-10-30, D7-F). Recorded payloads
+// remain untouched; these pointers belong to decode's private copies.
+func (it item) upcastQuantities() error {
+	var quantities []*int64
+	var scale *int64
+	switch {
+	case it.fill != nil:
+		quantities, scale = []*int64{&it.fill.Quantity}, &it.fill.QuantityScale
+	case it.snapshot != nil:
+		scale = &it.snapshot.QuantityScale
+		for i := range it.snapshot.Positions {
+			quantities = append(quantities, &it.snapshot.Positions[i].Quantity)
+		}
+	default:
+		return nil
+	}
+	for _, q := range quantities {
+		if *q < 0 || *q > math.MaxInt64/event.FractionalQuantityScale {
+			return fmt.Errorf("cannot upcast whole-share quantity %d to nonnegative ticks (negative quantity or int64 overflow)", *q)
+		}
+	}
+	for _, q := range quantities {
+		*q *= event.FractionalQuantityScale
+	}
+	*scale = event.FractionalQuantityScale
+	return nil
 }
 
 // quantityScale identifies records declaring share units (ADR 0026 D7-F).

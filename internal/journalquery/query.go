@@ -65,6 +65,29 @@ func (f Filter) keepFill(it item) bool {
 	return it.fill != nil && f.keep(it, it.fill.InstrumentID)
 }
 
+// keepQuantity selects unit declarations for totals (ADR 0026 D7-F).
+// Snapshots declare account-wide units, including when no instrument is held.
+func (f Filter) keepQuantity(it item) bool {
+	switch {
+	case it.fill != nil:
+		return f.keepFill(it)
+	case it.snapshot != nil:
+		return f.keepAccount(it) && f.keepTime(it.at)
+	case it.planned != nil:
+		return f.keep(it, it.planned.InstrumentID)
+	case it.released != nil:
+		return f.keep(it, it.released.InstrumentID)
+	case it.refused != nil:
+		return f.keep(it, it.refused.InstrumentID)
+	case it.lifecycle != nil:
+		return f.keep(it, it.lifecycle.InstrumentID)
+	case it.skipped != nil:
+		return f.keep(it, it.skipped.InstrumentID)
+	default:
+		return false
+	}
+}
+
 // signedQuantity is a fill's effect on the position: entries, adds and buys
 // buy, stops, exits and sells sell (both fill versions record the executed
 // size unsigned).
@@ -158,10 +181,15 @@ func Totals(journals []Journal, f Filter) (Table, error) {
 		return Table{}, err
 	}
 	perAccount := false
+	scales := map[string]int64{}
 	for _, items := range decoded {
 		for _, it := range items {
+			if !f.keepQuantity(it) {
+				continue
+			}
 			scale, _ := it.quantityScale()
-			perAccount = perAccount || scale != 0
+			scales[it.account] = max(scales[it.account], scale)
+			perAccount = perAccount || it.recordedScale != 0
 		}
 	}
 	type key struct {
@@ -170,8 +198,11 @@ func Totals(journals []Journal, f Filter) (Table, error) {
 	}
 	groups := map[key]*tally{}
 	totals := map[string]*tally{}
-	scales := map[string]int64{}
-	if !perAccount {
+	if perAccount {
+		for account := range scales {
+			totals[account] = &tally{}
+		}
+	} else {
 		totals[""] = &tally{}
 	}
 	for _, items := range decoded {
@@ -183,18 +214,22 @@ func Totals(journals []Journal, f Filter) (Table, error) {
 			if perAccount {
 				account = it.account
 			}
-			scales[account] = it.fill.QuantityScale
+			execution := *it.fill
+			if !perAccount && execution.QuantityScale != 0 {
+				// A whole-share selection retains its recorded units after replay's
+				// checked legacy upcast (ADR 0026 D7-F; ADR 0016).
+				execution.Quantity /= execution.QuantityScale
+				execution.QuantityScale = 0
+			}
+			scales[account] = execution.QuantityScale
 			k := key{account, it.fill.InstrumentID, it.at.UTC().Year()}
 			if groups[k] == nil {
 				groups[k] = &tally{}
 			}
-			if totals[account] == nil {
-				totals[account] = &tally{}
-			}
-			if err := groups[k].add(it.fill); err != nil {
+			if err := groups[k].add(&execution); err != nil {
 				return Table{}, fmt.Errorf("%s: record %d: %w", it.journal, it.seq, err)
 			}
-			if err := totals[account].add(it.fill); err != nil {
+			if err := totals[account].add(&execution); err != nil {
 				return Table{}, fmt.Errorf("%s: record %d: %w", it.journal, it.seq, err)
 			}
 		}

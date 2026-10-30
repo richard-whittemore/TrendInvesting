@@ -62,6 +62,17 @@ Flags, all optional: `-account A1`, `-instrument AAA`, `-from 2026-01-01`,
 reports show the source journal in the first column; `totals` combines all selected journals.
 
 Every view reads both whole-share and fractional journals and prints shares.
+For `positions`, `totals` and `reconcile`, legacy whole-share records are
+upcast to ticks with overflow checked when that account later declares the
+fractional scale (ADR 0026 D7-F). These views refuse negative legacy holdings
+during upcast, a fractional record followed by a whole-share record, or two
+different nonzero scales, naming the account. They validate the entire supplied
+history before applying filters; narrowing a filter cannot bypass a refusal.
+Unsupported numeric scales are refused even on records otherwise skipped.
+The `totals` schema follows the selected records: a whole-share selection keeps
+its combined TOTAL, and a fractional selection includes a zero TOTAL for each
+selected known account even when no fill matches. Account snapshots declare
+account-wide units, including for an instrument with no selected fills.
 
 Name one file per run. A run resumed from a crash writes a new log that begins
 with every record of the log it resumed, and a second copy of a journal holds
@@ -184,7 +195,7 @@ name their own account.
 For a target-weight account's limit orders, an `orders` lifecycle row shows
 the order's side, its limit price and, in `note`, its client order id; a
 Turtle stop order's row shows its stop price and its tag. A dry-run engine's
-own synthetic report on an order it never sent (version 3, see `engine.md`)
+own synthetic report on an order it never sent (versions 3 and 5, see `engine.md`)
 shows as `synthetic-lifecycle-canceled`; it is never an execution, so it
 adds nothing to `fills`, `totals` or `positions`.
 
@@ -223,19 +234,24 @@ The tool prints its error on one line and exits with status 1. Apart from
 
 ## What it reads, and what it does not
 
-It reads fills of versions 4 (Turtle) and 5 (target-weight), order
-lifecycle changes of versions 1 (Turtle stop orders), 2 (target-weight
-limit orders) and 3 (a dry-run's synthetic report; a synthetic report at
-version 2, or a venue's at version 3, is refused), planned orders of
-versions 1 and 2 (2 is a sale back to 98%), risk-gate releases and refusals
-of versions 1, 2 and 3 (3 adds the broker figures, more reasons and the
-refusal's alert), withheld sales back to 98% (`risk.sale.withheld`, listed
-by `refusals` with their reason, `lapsed` included), skipped trades
-(`strategy.order.skipped`, listed by `orders`), engine-state changes,
+It reads fills of versions 4 (Turtle), 5 (whole-share target-weight) and
+6 (fractional target-weight); order lifecycle changes of versions 1 (Turtle
+stop orders), 2 (whole-share venue reports), 3 (whole-share synthetic reports),
+4 (fractional venue reports) and 5 (fractional synthetic reports). A synthetic
+report at a venue version, or a venue report at a synthetic version, is refused.
+It also reads planned orders of versions 1, 2 and 3 (2 is a sale back to 98%,
+3 uses fractional units), risk-gate releases of versions 1 through 4 and
+refusals of versions 1 through 5 (version 3 adds the broker figures, refusal 4
+adds the pending-cash-decrease reason, and release 4 and refusal 5 use fractional units),
+withheld sales back to 98% (`risk.sale.withheld`, listed by `refusals` with
+their reason, `lapsed` included), skipped trades of versions 1 and 2
+(`strategy.order.skipped`, whole-share and fractional, listed by `orders`), engine-state changes,
 kill switches, rebalance clearances, approvals, symbol changes, and account
-snapshots of versions 3 (positions) and 4 (positions and cash; the cash is
-not reported). The equity-and-cash snapshot (version 2), which holds no
-positions, is passed over by design.
+snapshots of versions 3 (whole-share positions), 4 (whole-share positions and
+cash), 5 (fractional positions) and 6 (fractional positions and cash); cash
+is not reported. The equity-and-cash snapshot (version 2), which holds no
+positions, is passed over by design, but aggregations refuse a nonzero
+`quantity_scale` on that schema.
 
 It does not report the broker snapshots, the marks, the bars, withheld
 decisions, the morning reconciliation's results (`risk.reconciliation.result`;
