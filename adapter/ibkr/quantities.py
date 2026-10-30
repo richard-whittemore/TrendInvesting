@@ -38,12 +38,14 @@ def units(value, scale=0, what="quantity"):
     else:
         if value < 0:
             raise ValueError("{} {} must be nonnegative for D7-F".format(what, value))
-        if value.as_tuple().exponent < -4:
+        # Judged by value, not by how the broker spelled it: "3.50000" is 3.5 ticks
+        # of a cent-of-a-share, "3.50001" is not (ADR 0026, D7-F).
+        ticks = value.scaleb(4)
+        if ticks != ticks.to_integral_value():
             raise ValueError("{} {} exceeds four decimal places".format(what, value))
         if value > Decimal("922337203685477.5807"):
             raise ValueError("{} overflows int64 quantity units".format(what))
-        whole, _, fraction = format(value, "f").partition(".")
-        result = int(whole + fraction.ljust(4, "0"))
+        result = int(ticks)
     if result < -(1 << 63) or result > INT64_MAX:
         raise ValueError("{} overflows int64 quantity units".format(what))
     return result

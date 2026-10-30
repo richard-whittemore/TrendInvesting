@@ -1464,7 +1464,8 @@ class FractionalAccountTests(unittest.TestCase):
         from quantities import units, shares
         self.assertEqual(units(Decimal("12.3456"), 10000), 123456)
         self.assertEqual(shares(123456, 10000), Decimal("12.3456"))
-        for bad in ("12.34567", "1.00000", "NaN", "Infinity", True, "922337203685477.5808"):
+        self.assertEqual(units("1.00000", 10000), 10000)  # the same value, however the broker spells it
+        for bad in ("12.34567", "NaN", "Infinity", True, "922337203685477.5808"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 units(bad, 10000)
         for scale in (1, True, "10000", 10000.0):
