@@ -503,8 +503,10 @@ file with `sudo install -m 0644 deploy/etc/ibkr-maintenance.json.example
 /etc/trend-investing/ibkr-maintenance.json` **only if the destination does not
 exist**. Edit the file when IBKR's pattern changes, then restart the adapter.
 `--maintenance FILE` selects another path.
-Without the file the adapter behaves exactly as before: no scheduled windows
-and the existing five-minute (`restore_timeout`) behavior. `{"windows": []}`
+Without the file there are no scheduled windows: a connectivity loss gets
+the existing five-minute (`restore_timeout`) wait and reconnect. The
+30-second client-id grace after the adapter's own close and the prompt stop
+during any wait apply with or without the file. `{"windows": []}`
 also means no scheduled windows. Malformed JSON,
 duplicate keys, unknown fields, invalid days, times or zones refuse startup
 with a reason. The startup journal names the schedule file and every window

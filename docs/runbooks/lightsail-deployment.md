@@ -34,8 +34,9 @@ installs it only if absent and preserves later owner edits;
 `provision.sh adapter` does not install the schedule. On an existing server,
 install it by hand with `sudo install -m 0644 deploy/etc/ibkr-maintenance.json.example
 /etc/trend-investing/ibkr-maintenance.json` **only if the destination does not
-exist**. Without the file the adapter behaves exactly as before, using its
-existing `restore_timeout` without scheduled windows. Edit the file when
+exist**. Without the file there are no scheduled windows, and a loss gets
+the existing `restore_timeout` wait; the client-id grace and the prompt stop
+apply either way. Edit the file when
 IBKR's pattern changes and restart the adapter to load it; see
 `docs/manual/ibkr-adapter.md`, "Scheduled interruptions and stopping during a wait".
 
