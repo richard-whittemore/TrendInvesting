@@ -143,19 +143,31 @@ func awaitReset(cfg config, errj *journal, sigs <-chan os.Signal) int {
 	}
 	cooldown := nightlyResetDelay(w.refused)
 	if cooldown <= 0 || !w.until.Equal(w.refused.Add(cooldown)) {
-		_ = errj.write("gateway-start: ignoring invalid reset wait: refusal or deadline is outside its reset night; startup remains counted\n")
-		return 0
+		// A refusal outside its reset night, or a deadline that is not the one
+		// the rule would have set, is state that cannot be trusted; it is kept
+		// for inspection and nothing launches on it (AGENTS.md: fail closed).
+		_ = errj.write(fmt.Sprintf("gateway-start: %s: the recorded reset wait is inconsistent (refusal %s, deadline %s); not launching until %s is put right\n",
+			stopPhrase, resetClockLabel(w.refused), resetClockLabel(w.until), cfg.StateFile))
+		return exitStopped
 	}
 	// The deadline is kept even when the clock stepped back a little; it can
 	// only lengthen the wait, never shorten it, and never past a full step.
-	delay := min(w.until.Sub(now), 15*time.Minute+resetClockSkew)
+	bounded := func(at time.Time) time.Duration { return min(w.until.Sub(at), 15*time.Minute+resetClockSkew) }
+	delay := bounded(now)
 	if delay <= 0 {
 		return 0
 	}
 	_ = errj.write(w.message(cfg.Now()))
 	// Compute again after the bounded journal write: the durable deadline, not
-	// the sink's speed, determines when another login is permitted.
-	delay = w.until.Sub(cfg.Now())
+	// the sink's speed, determines when another login is permitted; a clock
+	// that stepped back meanwhile is judged exactly as it was above.
+	now = cfg.Now()
+	if w.refused.After(now.Add(resetClockSkew)) {
+		_ = errj.write(fmt.Sprintf("gateway-start: %s: the clock stepped back %s past the recorded reset refusal; not launching until the clock or %s is put right\n",
+			stopPhrase, w.refused.Sub(now).Round(time.Second), cfg.StateFile))
+		return exitStopped
+	}
+	delay = bounded(now)
 	if delay > 0 {
 		select {
 		case <-cfg.After(delay):

@@ -839,10 +839,14 @@ interruption or crash can leave both an allowance consumed and its attempt
 counted. Journal errors and output drain timeouts cannot skip the wait. A
 permanent safety stop (exit 77, including untrusted IBC output) outranks a reset
 retry and retains the attempt; any persisted cooldown remains on disk.
-A persisted wait is honoured only for a nonfuture refusal with the expected
-15-minute-or-cutoff deadline inside that refusal's 23:40–01:00 ET night.
-Otherwise the journal says "ignoring invalid reset wait" and startup proceeds
-counted; unreadable history or structurally malformed state still stops safely.
+A persisted wait is honoured only when its refusal lies in a 23:40–01:00 ET
+night and its deadline is the 15-minute-or-cutoff one the rule would have set.
+A refusal up to two minutes ahead of the clock (an ordinary time correction)
+keeps its deadline, which can only lengthen the wait; one further ahead, an
+inconsistent pair, a history that does not account for its refusal, or a
+clock that has stepped back past a recorded refusal while IBC ran, all stop
+the unit with exit 77 and leave the file for you to inspect: correct the clock
+or delete the file, then start the unit.
 An accepted login clears counted attempts, but preserves rolling reset
 allowances. The unit is
 `Type=simple`, with no explicit `TimeoutStartSec` or watchdog: its start is

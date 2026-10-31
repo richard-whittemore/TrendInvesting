@@ -327,10 +327,11 @@ func TestResetAllowanceSurvivesIdleAcrossNights(t *testing.T) {
 	}
 }
 
-func TestResetInvalidWaitIsIgnoredAndStartupCounted(t *testing.T) {
+func TestResetInconsistentWaitStopsWithoutLaunching(t *testing.T) {
+	// A persisted wait whose refusal or deadline is not what the rule would have
+	// written is untrusted state: nothing launches on it (AGENTS.md: fail closed).
+	// A refusal ahead of the clock is TestResetWaitSurvivesABackwardClockStep.
 	now, _ := time.Parse(time.RFC3339, "2026-11-01T04:58:00Z")
-	// A refusal ahead of the clock is not ignored but stops the start: see
-	// TestResetWaitSurvivesABackwardClockStep.
 	for name, pair := range map[string][2]time.Time{
 		"outside night":          {now, now.Add(24 * time.Hour)},
 		"wrong cooldown":         {now, now.Add(time.Second)},
@@ -338,21 +339,24 @@ func TestResetInvalidWaitIsIgnoredAndStartupCounted(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t)
-			raw := fmt.Sprintf("reset %d %d 1\n", pair[0].Unix(), pair[1].Unix())
+			raw := fmt.Sprintf("reset %d %d 1 %d\n", pair[0].Unix(), pair[1].Unix(), pair[0].Unix())
 			if err := os.WriteFile(r.state, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			c := r.cfg(`exit 0`)
 			c.Now = func() time.Time { return now }
 			c.After = func(d time.Duration) <-chan time.Time {
-				t.Errorf("invalid wait slept for %s", d)
+				t.Errorf("inconsistent wait slept for %s", d)
 				ch := make(chan time.Time, 1)
 				ch <- now
 				return ch
 			}
 			code, output := r.run(c)
-			if code != 0 || len(r.counter()) != 1 || r.launches() != 1 || !strings.Contains(output, "ignoring invalid reset wait") {
-				t.Fatalf("code=%d launches=%d counted=%v: %s", code, r.launches(), r.counter(), output)
+			if code != exitStopped || r.launches() != 0 || !strings.Contains(output, "inconsistent") {
+				t.Fatalf("code=%d launches=%d: %s", code, r.launches(), output)
+			}
+			if raw2, _ := os.ReadFile(r.state); string(raw2) != raw {
+				t.Fatalf("the untrusted state was changed: %q", raw2)
 			}
 		})
 	}

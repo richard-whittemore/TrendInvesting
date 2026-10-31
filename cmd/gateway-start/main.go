@@ -579,6 +579,12 @@ func runIBC(cfg config, out, errj *journal, sigs <-chan os.Signal) int {
 					count, existing, cerr := loadCount(cfg.StateFile, refusedAt, cfg.Window)
 					wait, attempts, _ := splitReset(existing)
 					recent := wait.recentRefusals(refusedAt)
+					if n := len(recent); cerr == nil && n > 0 && refusedAt.Before(recent[n-1]) {
+						// The clock stepped back past a retained refusal: a history out of
+						// order would be refused at the next start, so the valid file is
+						// left as it is and nothing launches on an untrusted clock.
+						cerr = fmt.Errorf("the clock (%s) is behind the last recorded reset refusal (%s)", resetClockLabel(refusedAt), resetClockLabel(recent[n-1]))
+					}
 					reset := nightlyResetDelay(refusedAt) > 0 && len(recent) < maxResetWaits
 					var discounted []byte
 					if cerr == nil {

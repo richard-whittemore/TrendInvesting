@@ -18,7 +18,7 @@ func TestGatewayResetManualStatesDurableBoundAndActualWait(t *testing.T) {
 			t.Errorf("obsolete reset promise: %s", obsolete)
 		}
 	}
-	for _, want := range []string{"at most 4 uncounted reset refusals in any rolling 24 hours", "three counted refusals", "gateway-start: reset wait:", "waiting Nm until HH:MM ET (consumed reset allowances M of 4 in 24h)", "resumes the remaining wait", "interrupted by stop", "whole seconds", "ignoring invalid reset wait", "permanent safety stop"} {
+	for _, want := range []string{"at most 4 uncounted reset refusals in any rolling 24 hours", "three counted refusals", "gateway-start: reset wait:", "waiting Nm until HH:MM ET (consumed reset allowances M of 4 in 24h)", "resumes the remaining wait", "interrupted by stop", "whole seconds", "two minutes ahead of the clock", "exit 77 and leave the file", "permanent safety stop"} {
 		if !strings.Contains(manual, want) {
 			t.Errorf("manual lacks %q", want)
 		}
