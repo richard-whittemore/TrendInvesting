@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -73,7 +74,8 @@ class CommandTests(unittest.TestCase):
         self.config.write_text(json.dumps(values))
 
     def argv(self, *extra, account=True):
-        args = ["run", "--config", str(self.config), "--pending", str(self.pending), "--engine-log",
+        args = ["run", "--config", str(self.config), "--maintenance", str(self.dir / "no-maintenance.json"),
+                "--pending", str(self.pending), "--engine-log",
                 str(self.engine_log), "--socket", str(self.dir / "engine.sock"), "--ibapi-record", str(self.record),
                 "--versions", str(self.versions)]
         if account:
@@ -88,6 +90,62 @@ class CommandTests(unittest.TestCase):
         return main(argv, api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
                     should_stop=Steps(steps), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
                     protobuf_version=lambda: "5.29.5")
+
+    def test_malformed_maintenance_refuses_before_connecting(self):
+        schedule = self.dir / "maintenance.json"
+        schedule.write_text('{"windows": [{"days": ["Sat"], "start": "wrong"}]}')
+        self.assertEqual(self.run_main(self.argv("--maintenance", str(schedule))), 1)
+        self.assertIn("maintenance window 1", self.err.getvalue())
+        self.assertEqual(self.made, [])
+
+    def test_scheduled_restoration_reconciles_before_the_loop_is_ready(self):
+        from datetime import datetime, timezone
+        schedule = self.dir / "maintenance.json"
+        schedule.write_text(json.dumps({"windows": [
+            {"days": ["Sat"], "start": "00:00", "end": "12:00", "zone": "America/New_York"}]}))
+        positions = self.fake.req_positions
+        timers = []
+        def interrupted():
+            self.fake.req_positions = positions
+            timers.append(self.fake.hold_connectivity(seconds=.1))
+        self.fake.req_positions = interrupted
+        try:
+            result = main(self.argv("--maintenance", str(schedule)), api_factory=self.api,
+                          engine_connect=lambda *a: self.engine, should_stop=Steps(1),
+                          err=self.err, now=lambda: datetime(2026, 10, 31, 10, 0, tzinfo=timezone.utc), poll=.01,
+                          ibapi_version=lambda: (10, 51, 1), protobuf_version=lambda: "5.29.5")
+            self.assertEqual(result, 0, self.err.getvalue())
+            self.assertIn("ibkr reconciled client_id=11", self.err.getvalue())
+            self.assertIn("ibkr adapter stopped on request", self.err.getvalue())
+        finally:
+            for timer in timers:
+                timer.cancel()
+                timer.join()
+
+    def test_scheduled_expiry_has_distinct_status_and_gateway_remedy(self):
+        from datetime import datetime, timezone
+        schedule = self.dir / "maintenance.json"
+        schedule.write_text(json.dumps({"windows": [
+            {"days": ["Sat"], "start": "00:00", "end": "12:00", "zone": "America/New_York"}]}))
+        clock = [datetime(2026, 10, 31, 15, 59, tzinfo=timezone.utc)]
+        def positions():
+            self.fake.hold_connectivity()
+        self.fake.req_positions = positions
+        # Advance only after the loss is consumed and its bound is pinned.
+        from loop import AdapterLoop
+        reconcile = AdapterLoop.reconcile
+        def interrupted(loop):
+            reconcile(loop)
+            clock[0] = datetime(2026, 10, 31, 16, 0, tzinfo=timezone.utc)
+        with mock.patch.object(AdapterLoop, "reconcile", interrupted):
+            result = main(self.argv("--maintenance", str(schedule)), api_factory=self.api,
+                          engine_connect=lambda *a: self.engine, should_stop=lambda: False,
+                          err=self.err, now=lambda: clock[0], poll=.01,
+                          ibapi_version=lambda: (10, 51, 1), protobuf_version=lambda: "5.29.5")
+        self.assertEqual(result, 3, self.err.getvalue())
+        self.assertIn("Gateway restart is the remedy", self.err.getvalue())
+        self.assertFalse(self.fake.connected)
+        self.assertEqual(len(self.fake.called("connect")), 1)
 
     def test_run_connects_reconciles_and_stops_cleanly(self):
         self.assertEqual(self.run_main(self.argv()), 0, self.err.getvalue())
@@ -321,6 +379,112 @@ class CommandTests(unittest.TestCase):
         write_stream(streams / "run-1", __import__("datetime").date(2027, 1, 14), envelopes)
         self.assertEqual(self.run_main(self.argv("--streams", str(streams)), steps=10), 0, self.err.getvalue())
         self.assertEqual([e["type"] for e in self.engine.inputs()], FIRST + DAY)
+
+    def test_startup_names_loaded_or_missing_schedule(self):
+        from test_maintenance import DEFAULT
+        path = self.dir / "maintenance.json"
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                if installed:
+                    path.write_text(json.dumps(DEFAULT))
+                self.err = io.StringIO()
+                self.assertEqual(self.run_main(self.argv("--maintenance", str(path))), 0, self.err.getvalue())
+                journal = self.err.getvalue()
+                self.assertIn(str(path), journal)
+                if installed:
+                    self.assertIn("2 windows", journal)
+                    self.assertIn("23:40", journal)
+                    self.assertIn("12:00", journal)
+                    self.assertIn("America/New_York", journal)
+                else:
+                    self.assertIn("no schedule file exists", journal)
+                    self.assertIn("no windows apply", journal)
+
+    def test_startup_prints_a_midnight_end_as_24_00(self):
+        # A window that runs to the end of its day reads as such, never as 00:00–00:00.
+        path = self.dir / "maintenance.json"
+        path.write_text(json.dumps({"windows": [
+            {"days": ["Sat"], "start": "00:00", "end": "24:00", "zone": "America/New_York"}]}))
+        self.err = io.StringIO()
+        self.assertEqual(self.run_main(self.argv("--maintenance", str(path))), 0, self.err.getvalue())
+        self.assertIn("Sat 00:00–24:00 America/New_York", self.err.getvalue())
+
+    def test_recovery_delivers_fresh_runs_warmup_after_approval(self):
+        self.recover_after_stop(missing_schedule=False)
+
+    def test_recovery_delivers_fresh_runs_warmup_with_missing_schedule(self):
+        self.recover_after_stop(missing_schedule=True)
+
+    def recover_after_stop(self, missing_schedule):
+        from datetime import date, datetime, timezone
+        from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, final_hash
+        from test_delivery import session_envelopes, write_stream
+        from test_maintenance import DEFAULT
+
+        now = datetime(2026, 10, 31, 16, 45, tzinfo=timezone.utc) if missing_schedule else datetime(
+            2026, 10, 31, 9, 44, tzinfo=timezone.utc)
+        day = date(2026, 10, 23)
+        streams = self.dir / "streams"
+        schedule = self.dir / "maintenance.json"
+        if not missing_schedule:
+            schedule.write_text(json.dumps(DEFAULT))
+        from maintenance import MaintenanceSchedule
+        self.assertEqual(MaintenanceSchedule.load(schedule).window_end(now) is not None,
+                         not missing_schedule, "installed recovery drill must exercise a window")
+        for name in ("run-1", "run-2"):
+            write_stream(streams / name, day, session_envelopes(
+                [day], run=name, configuration_hash=CONFIGURATION_HASH, strategy_version=STRATEGY_VERSION))
+        self.fake.server_time = int(now.timestamp())
+
+        def run():
+            return main(self.argv("--streams", str(streams), "--maintenance", str(schedule)),
+                        api_factory=self.api, engine_connect=lambda *a: self.engine,
+                        should_stop=Steps(3), err=self.err, poll=.01, now=lambda: now,
+                        ibapi_version=lambda: (10, 51, 1), protobuf_version=lambda: "5.29.5")
+
+        # The recovery drill stops the adapter as soon as the engine has
+        # halted. Let SIGTERM coincide with a committed engine reply.
+        handlers = {}
+        decide = self.engine.decide
+
+        def answered(envelope):
+            reply = decide(envelope)
+            handlers[signal.SIGTERM](None, None)
+            return reply
+
+        self.engine.decide = answered
+        with mock.patch("cli.signal.signal", side_effect=lambda sig, handler: handlers.update({sig: handler})):
+            self.assertEqual(main(self.argv("--streams", str(streams)), api_factory=self.api,
+                                  engine_connect=lambda *a: self.engine, err=self.err, poll=.01, now=lambda: now,
+                                  ibapi_version=lambda: (10, 51, 1), protobuf_version=lambda: "5.29.5"),
+                             0, self.err.getvalue())
+        self.assertEqual(len(self.engine.received), 1, "shutdown must not start the next input")
+        self.assertFalse(self.pending.exists(), "the completed reply must be settled before shutdown")
+        previous = self.engine_log
+        self.engine_log = self.dir / "run-2.log"
+        self.engine = LoggedEngine(str(self.engine_log), approval=run_approval(
+            ACCOUNT, previous.name, final_hash(previous)))
+        self.assertEqual(self.engine.next_sequence, 3)
+        # An interrupted account download must close its old socket before
+        # reconciling again. Gateway retains client 11 for three seconds
+        # after that close; refused attempts must not renew the grace.
+        positions = self.fake.req_positions
+
+        def interrupted():
+            self.fake.req_positions = positions
+            self.fake.hold_connectivity()
+            self.fake.restore_connectivity()
+
+        self.fake.req_positions = interrupted
+        self.fake.stale_client_seconds = 3
+        self.err = io.StringIO()
+        self.assertEqual(run(), 0, self.err.getvalue())
+        self.assertIn("client id 11 still held after our own close", self.err.getvalue())
+        self.assertEqual("scheduled window ending" in self.err.getvalue(), not missing_schedule)
+        self.assertIn("session-closed:2026-10-23", self.err.getvalue())
+        self.assertEqual(self.engine.received[0]["sequence"], 3)
+        self.assertEqual({call[3] for call in self.fake.called("connect")}, {11})
+        self.assertEqual(self.fake.placed, [])
 
     def test_a_run_with_no_stream_folder_stops_and_names_the_warm_up(self):
         streams = self.dir / "streams"

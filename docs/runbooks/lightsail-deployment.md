@@ -28,6 +28,18 @@ Schedule (New York time, `TZ` set in each unit): Gateway restarts nightly at 11:
 
 ## Setup
 
+The adapter's shared interruption schedule is
+`/etc/trend-investing/ibkr-maintenance.json`. `sudo deploy/provision.sh services`
+installs it only if absent and preserves later owner edits;
+`provision.sh adapter` does not install the schedule. On an existing server,
+install it by hand with `sudo install -m 0644 deploy/etc/ibkr-maintenance.json.example
+/etc/trend-investing/ibkr-maintenance.json` **only if the destination does not
+exist**. Without the file there are no scheduled windows, and a loss gets
+the existing `restore_timeout` wait; the client-id grace and the prompt stop
+apply either way. Edit the file when
+IBKR's pattern changes and restart the adapter to load it; see
+`docs/manual/ibkr-adapter.md`, "Scheduled interruptions and stopping during a wait".
+
 1. **[OWNER] Create the Lightsail instance.** Ubuntu 24.04 LTS, x86_64 (not ARM: IBKR ships the Gateway for Linux x64 only), US East, the 2 GB plan (plan.md section 8), with your SSH key. Enable snapshots. This is a purchase; agents do not make it.
 2. **[OWNER] Create the Tailscale account** and install Tailscale on your phone and laptop.
 3. SSH in as `ubuntu` over the public address and fetch the repository (read-only checkout is enough): `git clone https://github.com/richard-whittemore/TrendInvesting.git`.

@@ -719,6 +719,12 @@ CONF
   # reaches as host.docker.internal; the adapter accepts any host name.
   install -d -m 0755 "$etc/adapters"
   install_adapter_settings "$here/etc/adapters" "$etc/adapters"
+  # Scheduled interruption bounds are owner-editable and kept on reruns
+  # (docs/manual/ibkr-adapter.md, scheduled interruptions).
+  if test ! -e "$etc/ibkr-maintenance.json"; then
+    install -m 0644 "$here/etc/ibkr-maintenance.json.example" "$etc/ibkr-maintenance.json"
+    log "installed $etc/ibkr-maintenance.json; review IBKR interruption windows before starting"
+  fi
 
   log "systemd units"
   # The reporter is one instance per engine (ti-reporter@<instance>); an

@@ -345,6 +345,82 @@ class ForwardingTests(unittest.TestCase):
         self.assertIn(("disconnect",), old_eclient.requests)
         client.disconnect()
 
+    def test_stop_interrupts_socket_opener_previous_opener_and_reader_waits(self):
+        from connection import Connection, ConnectFailed, StopRequested
+        from unittest.mock import patch
+        for kind in ("socket", "previous-opener", "previous-reader", "cleanup"):
+            with self.subTest(kind=kind):
+                real_client = self.module()
+                gate = threading.Event()
+                entered = threading.Event()
+                stop = threading.Event()
+                client = real_client.IbapiClient(start_reader=True)
+                conn = Connection(client, config(connect_timeout=2), lambda status: None, stop_event=stop)
+                if kind == "previous-opener":
+                    _EClient.connect_gate = gate
+                    with self.assertRaises(ConnectFailed):
+                        client.connect("127.0.0.1", 4002, 11, Recorder(), .01)
+                elif kind in ("previous-reader", "cleanup"):
+                    _EClient.run_gate = gate
+                    client.connect("127.0.0.1", 4002, 11, Recorder(), 1)
+                else:
+                    _EClient.connect_gate = gate
+                join = threading.Thread.join
+                def observed_join(thread, timeout=None):
+                    if thread.name == ("ibapi-reader" if "reader" in kind or kind == "cleanup" else "ibapi-connect"):
+                        entered.set()
+                    return join(thread, timeout)
+                def cancel():
+                    if entered.wait(1):
+                        time.sleep(.02)
+                        stop.set()
+                stopper = threading.Thread(target=cancel)
+                stopper.start()
+                caught = None
+                try:
+                    with patch.object(threading.Thread, "join", observed_join):
+                        started = time.monotonic()
+                        try:
+                            if kind == "cleanup":
+                                conn.drop("synthetic-reader-cleanup")
+                            else:
+                                conn.connect()
+                        except BaseException as err:
+                            caught = err
+                        elapsed = time.monotonic() - started
+                    self.assertTrue(entered.is_set(), "must stop inside the actual join")
+                    self.assertLess(elapsed, 1, kind)
+                    self.assertIsInstance(caught, StopRequested)
+                finally:
+                    gate.set()
+                    stopper.join(1)
+                    if client._opener is not None:
+                        client._opener.join(1)
+                    if client._reader is not None:
+                        client._reader.join(1)
+                    self.assertFalse(client.is_connected(), "late opener must release its socket")
+                    client.disconnect(wait=0)
+                    _EClient.connect_gate = None
+                    _EClient.run_gate = None
+
+    def test_requested_stop_closes_without_waiting_for_a_stuck_reader(self):
+        real_client = self.module()
+        _EClient.run_gate = threading.Event()
+        client = real_client.IbapiClient(start_reader=True)
+        client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+        reader = client._reader
+        try:
+            started = time.monotonic()
+            self.assertFalse(client.disconnect(wait=0))
+            self.assertLess(time.monotonic() - started, .5)
+            self.assertIs(client._reader, reader)
+            self.assertIn(("disconnect",), client._client.requests)
+        finally:
+            _EClient.run_gate.set()
+            reader.join(1)
+            _EClient.run_gate = None
+            client.disconnect()
+
     def test_a_reader_that_outlives_disconnect_is_kept_and_blocks_every_retry(self):
         real_client = self.module()
         from connection import ConnectFailed

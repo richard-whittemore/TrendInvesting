@@ -176,7 +176,7 @@ import uuid
 from datetime import datetime, time as clock_time, timedelta, timezone
 from decimal import Decimal
 
-from connection import Connection, LinkChanged, NotConnected
+from connection import Connection, LinkChanged, NotConnected, StopRequested
 from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReading, SnapshotRefused, market_open,
                       nyse_calendar, run_name)
 from orders import (EASTERN_LABELS, NEW_YORK, NEW_YORK_ZONES, OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete,
@@ -185,7 +185,7 @@ from orders import (EASTERN_LABELS, NEW_YORK, NEW_YORK_ZONES, OPEN_ORDER_DISAGRE
                     order_key, unverified_receipt)
 from relay import (LOG_INPUT, OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
                    Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
-                   run_logs)
+                   released_orders, run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from quantities import quantity_scale
 from sender import NotReconciled, make_sender, release_to_request
@@ -502,7 +502,19 @@ class _AskedOnItsOwnThread:
                 outcome["error"] = err
         worker = threading.Thread(target=ask, name="engine-exchange", daemon=True)
         worker.start()
-        self._await(worker)
+        try:
+            self._await(worker)
+        except StopRequested:
+            # A stop may race the reply's arrival. Give that exchange one
+            # bounded poll to finish, and let the relay settle an answered
+            # input only when it releases nothing to send. Otherwise keep
+            # it pending for replay or the owner's settlement (ADR 0027
+            # section 4; docs/manual/redelivery.md). No new broker work is
+            # done at shutdown, nor is an unanswered input discarded.
+            worker.join(ENGINE_WAIT_POLL)
+            if (worker.is_alive() or "reply" not in outcome
+                    or any(released_orders(outcome["reply"]))):
+                raise
         if "error" in outcome:
             raise outcome["error"]
         return outcome["reply"]
@@ -526,8 +538,11 @@ class AdapterLoop:
     """
 
     def __init__(self, config, api, engine_connect, pending_path, engine_log_path, now=_utc_now, today=None,
-                 sleep=time.sleep, monotonic=time.monotonic, poll=1.0, new_id=_new_id, streams=None, cash_ledger=None):
+                 sleep=time.sleep, monotonic=time.monotonic, poll=1.0, new_id=_new_id, streams=None, cash_ledger=None,
+                 maintenance=None, stop_event=None):
         self.config = config
+        self._maintenance = maintenance
+        self._stop_event = stop_event
         self._cash_ledger = cash_ledger
         self._api = api
         self._engine_connect = engine_connect
@@ -590,7 +605,7 @@ class AdapterLoop:
         """Take the pending file's lock, connect, reconcile, and settle any input left awaiting its reply."""
         cfg = self.config
         self.conn = Connection(self._api, cfg, self._status, sleep=self._sleep, monotonic=self._monotonic,
-                               wall_clock=self._now)
+                               wall_clock=self._now, maintenance=self._maintenance, stop_event=self._stop_event)
         sender = make_sender(cfg, self._sent, conn=self.conn, today=self._today)
         # The relay takes the adapter's exclusive lock first; the report
         # journal reads its held file only while that lock is held.
@@ -964,6 +979,8 @@ class AdapterLoop:
             self.start()
             while not should_stop():
                 self.step()
+        except StopRequested:
+            pass
         finally:
             self.close()
 
@@ -972,7 +989,10 @@ class AdapterLoop:
             self.relay.close()
         if self.conn is not None:
             try:
-                self._api.disconnect()
+                if self._stop_event is not None and self._stop_event.is_set():
+                    self._api.disconnect(wait=0)
+                else:
+                    self._api.disconnect()
             except Exception as err:  # the adapter is stopping either way
                 log.info("ibkr disconnect at stop failed: %s", type(err).__name__)
 
@@ -1811,6 +1831,10 @@ class AdapterLoop:
         try:
             self._settle_waiting()
             while True:
+                # Finish the current acknowledged input before honoring a
+                # stop; never start another exchange after it (ADR 0027
+                # section 4: the pending input is the one awaiting a reply).
+                self.conn._check_stop()
                 entries = self.outbox.load()
                 if not entries:
                     return

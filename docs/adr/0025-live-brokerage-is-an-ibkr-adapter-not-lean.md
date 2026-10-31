@@ -264,3 +264,59 @@ To point 5 and the amendment of 2026-10-18, for the IRAs' momentum engines
   name the contract the journal records for the pick; today it names one
   only from `con_ids`, and no IRA order is sent before the paper gate
   (AGENTS.md rule 5).
+
+
+## Amendment 2026-10-31: Scheduled interruptions and bounded shutdown
+
+The owner's scheduled-interruption policy is operational patience, not a
+strategy rule. Read the owner-edited schedule before connecting, reject
+ambiguous configuration (including duplicate JSON keys), and journal the
+file and windows loaded, or explicitly say the file is missing and no
+windows apply. Missing files and empty windows preserve the outside-window
+restore timeout.
+
+The shipped schedule is daily **23:40–01:00 America/New_York**, plus
+Saturday **00:00–24:00** and Sunday **00:00–14:00** in the same zone.
+The weekend windows merge through Sunday 14:00. On Saturday 2026-10-31 the
+paper system was unavailable from 15:11 ET; when it returns on a weekend is
+not yet established, so the weekend default is provisional, to be revised
+from the times this server records, and the owner edits the file when
+IBKR's pattern becomes clear.
+An end of 24:00 means the next midnight; it is never a valid start.
+
+Windows include their start and exclude their end. Merge touching or
+overlapping intervals. A repeated local boundary uses the earlier start
+and later end; a nonexistent boundary rolls forward across the DST gap.
+Callers supply aware UTC instants and receive aware UTC ends. Validate a
+weekly gap on every day of the entire startup calendar year, including both
+DST transitions; a merged interval longer than eight days is refused at
+startup. The runtime finite-end check remains in force.
+
+A first 1100/2110 inside a window fixes the deadline at the later of the
+window end and loss time plus restore_timeout (deployed: five minutes).
+Repeated losses do not extend it. Pin the same elapsed duration on a
+monotonic clock. Capture both wall-clock and monotonic receipt times for
+restoration; receipt at or after either deadline expires the session.
+A callback received before both deadlines remains timely when processed
+later. Without a receipt time, use that clock's current time. A wall-clock
+rollback therefore neither extends the wait nor admits a late restoration.
+Before checking expiry, drain only the callbacks queued at entry (including
+pending callbacks), stopping early if the loss clears. Then re-check expiry
+and the outside-window reconnect before consuming newly arriving traffic;
+continued arrivals cannot postpone either indefinitely. An actual socket
+close reconnects. Restoration
+still requires reconciliation, and scheduled expiry closes with exit 3 for
+a Gateway restart by the owner. The journal names the deadline's time zone
+and the later occurrence of a repeated hour.
+
+nextValidId establishes ownership of the fixed client ID, before reading
+the volunteered order list. An adapter close of that accepted session gets
+30 seconds of same-ID 326 retries, including a final attempt at the end;
+refused attempts never renew the grace. An unaccepted startup has no grace.
+The final connection attempt retains its bounded handshake timeout.
+
+SIGTERM interrupts restoration waits, reconnect backoff, connect-opener
+waits and reader cleanup within one second. An abandoned opener closes any
+late socket, and an unfinished opener or reader blocks session reuse.
+Automatic Gateway restart and making the reporter aware of the schedule
+remain separate work; its logged-out page can precede scheduled expiry.

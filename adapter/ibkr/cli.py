@@ -9,7 +9,7 @@ pin (ibapi_pin), and the engine's durable log (read at start by the loop).
 Then the loop runs (loop.AdapterLoop) until SIGTERM or SIGINT, or until it
 stops for a person. Exit status: 0 for a requested stop, 1 for a refusal or
 a stop for a person (the reason is written to standard error), 2 for a
-usage error.
+usage error, 3 for scheduled maintenance that ended without restoration (Gateway restart needed).
 """
 import argparse
 import json
@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import signal
+import threading
 import sys
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -85,6 +86,8 @@ except Refused as refusal:
     print("refused: {}".format(refusal), file=sys.stderr)
     sys.exit(1)
 
+from maintenance import DEFAULT_PATH, MaintenanceSchedule  # noqa: E402
+from connection import MaintenanceExpired  # noqa: E402
 from config import AdapterConfig, ConfigError  # noqa: E402
 from ibapi_pin import IbapiNotPinned, check_installed  # noqa: E402
 from loop import AdapterLoop  # noqa: E402
@@ -101,6 +104,8 @@ def _parser():
                      help="the adapter's configuration, a JSON object (config.py): host, port, client_id, mode, "
                           "the timing values, con_ids, and paper_sending_enabled (true to send in paper; "
                           "left out means false)")
+    run.add_argument("--maintenance", default=DEFAULT_PATH, metavar="FILE",
+                     help="IBKR maintenance schedule; missing means no scheduled windows")
     run.add_argument("--client-id", type=int, metavar="N",
                      help="the client ID the instance's settings give (TI_ADAPTER_CLIENT_ID in "
                           "/etc/trend-investing/engines/<instance>.env); the adapter refuses to start unless its "
@@ -307,12 +312,13 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
                             **({"sleep": flex_sleep} if flex_sleep else {}), **({"now": now} if now else {}))
     try:
         cfg = load_config(args)
+        maintenance = MaintenanceSchedule.load(args.maintenance)
         check_cash_ledger(args.cash_ledger, args.engine_log)
         require_zones(zone_lookup or ZoneInfo)
         version = check_installed(args.ibapi_record, args.versions,
                                   **({"installed_version": ibapi_version} if ibapi_version else {}),
                                   **({"installed_protobuf": protobuf_version} if protobuf_version else {}))
-    except (Refused, IbapiNotPinned) as refusal:
+    except (Refused, ConfigError, IbapiNotPinned) as refusal:
         print("refused: {}".format(refusal), file=err)
         return 1
     handler = logging.StreamHandler(err)
@@ -320,23 +326,36 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
     logger = logging.getLogger("ibkr")
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
-    stop = {"requested": False}
+    stop = threading.Event()
     if should_stop is None:
         def request_stop(signum, frame):
-            stop["requested"] = True
+            stop.set()
         signal.signal(signal.SIGTERM, request_stop)
         signal.signal(signal.SIGINT, request_stop)
-        should_stop = lambda: stop["requested"]  # noqa: E731
+        should_stop = stop.is_set
     try:
         logger.info("ibkr adapter starting mode=%s client_id=%d sending=%s ibapi=%s", cfg.mode, cfg.client_id,
                     "on" if cfg.paper_sending_enabled else "off", version)
+        if maintenance.file_exists:
+            windows = ["{} {}–{} {}".format(
+                ",".join(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[d] for d in sorted(days)),
+                start.strftime("%H:%M"), "24:00" if end.hour == 0 and end.minute == 0 else end.strftime("%H:%M"), zone.key)
+                for days, start, end, zone in maintenance.windows]
+            logger.info("ibkr maintenance schedule %s: %d windows loaded: %s", args.maintenance,
+                        len(windows), "; ".join(windows) if windows else "no windows apply")
+        else:
+            logger.info("ibkr maintenance schedule %s: no schedule file exists; no windows apply", args.maintenance)
         loop = AdapterLoop(cfg, (api_factory or _real_api)(cfg),
                            (engine_connect or _engine_connect)(args.socket, ENGINE_TIMEOUT), args.pending,
                            args.engine_log, poll=poll, streams=args.streams, cash_ledger=args.cash_ledger,
+                           maintenance=maintenance, stop_event=stop,
                            **({"today": today} if today is not None else {}),
                            **({"now": now} if now is not None else {}))
         loop.run(should_stop)
         logger.info("ibkr adapter stopped on request")
+    except MaintenanceExpired as stopped:
+        print("adapter stopped: MaintenanceExpired: {}".format(stopped), file=err)
+        return 3
     except Exception as stopped:  # every stop is reported, never swallowed
         print("adapter stopped: {}: {}".format(type(stopped).__name__, mask_accounts(str(stopped), cfg.account_id)),
               file=err)

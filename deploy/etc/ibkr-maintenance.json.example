@@ -1,0 +1,22 @@
+{
+  "windows": [
+    {
+      "days": ["daily"],
+      "start": "23:40",
+      "end": "01:00",
+      "zone": "America/New_York"
+    },
+    {
+      "days": ["Sat"],
+      "start": "00:00",
+      "end": "24:00",
+      "zone": "America/New_York"
+    },
+    {
+      "days": ["Sun"],
+      "start": "00:00",
+      "end": "14:00",
+      "zone": "America/New_York"
+    }
+  ]
+}
