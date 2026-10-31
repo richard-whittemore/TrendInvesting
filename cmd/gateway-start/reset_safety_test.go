@@ -329,8 +329,9 @@ func TestResetAllowanceSurvivesIdleAcrossNights(t *testing.T) {
 
 func TestResetInvalidWaitIsIgnoredAndStartupCounted(t *testing.T) {
 	now, _ := time.Parse(time.RFC3339, "2026-11-01T04:58:00Z")
+	// A refusal ahead of the clock is not ignored but stops the start: see
+	// TestResetWaitSurvivesABackwardClockStep.
 	for name, pair := range map[string][2]time.Time{
-		"future refusal":         {now.AddDate(1, 0, 0), now.AddDate(1, 0, 0).Add(2 * time.Minute)},
 		"outside night":          {now, now.Add(24 * time.Hour)},
 		"wrong cooldown":         {now, now.Add(time.Second)},
 		"refusal outside window": {now.Add(-12 * time.Hour), now.Add(-12*time.Hour + 15*time.Minute)},
