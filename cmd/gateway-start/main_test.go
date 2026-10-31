@@ -76,7 +76,11 @@ func (r *rig) counter() []string {
 	if err != nil {
 		return nil
 	}
-	return strings.Fields(string(raw))
+	_, attempts, err := splitReset(raw)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return strings.Fields(string(attempts))
 }
 
 func (r *rig) seed(lines ...time.Time) {
@@ -828,7 +832,7 @@ func TestNightlyResetBoundariesUseNewYorkRegardlessOfTheClocksZone(t *testing.T)
 			})
 			code, out := r.run(c)
 			if tc.reset {
-				want := "login refused at " + tc.clock + " ET inside IBKR's nightly reset hour; waiting 15 minutes, not counted (1 waits so far)"
+				want := "login refused at " + tc.clock + " ET inside IBKR's nightly reset hour; waiting "
 				if code != 0 || waits != 1 || r.launches() != 2 || !strings.Contains(out, want) || len(r.counter()) != 0 {
 					t.Fatalf("reset: exit %d, waits %d, launches %d, count %v: %s", code, waits, r.launches(), r.counter(), out)
 				}
@@ -849,12 +853,13 @@ func TestThreeResetRefusalsPreserveOlderAttemptsAndNeverStopTheRetries(t *testin
 	resetClock(r, &c, "2026-10-31T04:08:00Z", func(d time.Duration) {
 		waits++
 		got, _ := os.ReadFile(r.state)
+		_, got, _ = splitReset(got)
 		if d != 15*time.Minute || !bytes.Equal(got, before) {
 			t.Errorf("wait %d: duration %s, count %q; want 15m and unchanged %q", waits, d, got, before)
 		}
 	})
 	code, out := r.run(c)
-	if code != 0 || waits != 3 || r.launches() != 4 || len(r.counter()) != 0 || strings.Contains(out, stopPhrase) || !strings.Contains(out, "(3 waits so far)") {
+	if code != 0 || waits != 3 || r.launches() != 4 || len(r.counter()) != 0 || strings.Contains(out, stopPhrase) || !strings.Contains(out, "(uncounted 3 of 4 tonight)") {
 		t.Fatalf("exit %d, waits %d, launches %d, count %v: %s", code, waits, r.launches(), r.counter(), out)
 	}
 }
@@ -956,7 +961,7 @@ func TestServerManualNamesNightlyResetAndOrderedRecovery(t *testing.T) {
 			row = line
 		}
 	}
-	for _, want := range []string{"00:10 ET", "Friday", "01:00 ET", "waiting 15 minutes, not counted", "sudo systemctl start ti-gateway.service", "Login has completed", "sudo systemctl start ti-adapter-boost.service"} {
+	for _, want := range []string{"00:10 ET", "Friday", "01:00 ET", "waiting Nm until HH:MM ET (uncounted M of 4 tonight)", "sudo systemctl start ti-gateway.service", "Login has completed", "sudo systemctl start ti-adapter-boost.service"} {
 		if !strings.Contains(row, want) {
 			t.Errorf("gateway recovery row lacks %q", want)
 		}
@@ -1024,7 +1029,7 @@ func TestAUnitStopDuringResetOutputDoesNotBecomeAnotherResetWait(t *testing.T) {
 		return len(p), nil
 	}), timeout: time.Second}
 	var messages bytes.Buffer
-	code := runIBC(c, out, &journal{w: &messages, timeout: time.Second}, sigs, 0)
+	code := runIBC(c, out, &journal{w: &messages, timeout: time.Second}, sigs)
 	if code != 143 {
 		t.Fatalf("exit %d, want 143 after a unit stop, never another reset wait: %s", code, messages.String())
 	}

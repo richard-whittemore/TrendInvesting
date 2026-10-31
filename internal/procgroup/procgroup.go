@@ -9,8 +9,10 @@
 package procgroup
 
 import (
+	"errors"
 	"fmt"
 	"syscall"
+	"time"
 )
 
 // target is the kill(2) target of pid's own process group: -pid, for a
@@ -32,4 +34,34 @@ func kill(pid int, send func(int, syscall.Signal) error) error {
 		return err
 	}
 	return send(t, syscall.SIGKILL)
+}
+
+// WaitGone polls only the started command's guarded process group until ESRCH,
+// bounded by timeout (docs/development.md, "Ending processes"). The caller must
+// reap its child concurrently; even a zombie must disappear before relaunch.
+func WaitGone(pid int, timeout time.Duration) error { return waitGone(pid, timeout, syscall.Kill) }
+
+func waitGone(pid int, timeout time.Duration, probe func(int, syscall.Signal) error) error {
+	t, err := target(pid)
+	if err != nil {
+		return err
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		err := probe(t, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		select {
+		case <-deadline.C:
+			return fmt.Errorf("procgroup: group %d still exists after %s", pid, timeout)
+		case <-poll.C:
+		}
+	}
 }

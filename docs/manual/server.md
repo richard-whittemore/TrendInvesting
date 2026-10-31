@@ -806,14 +806,31 @@ record is `host-gateway.json` in `/var/lib/trend-investing/reports/`.
 user guide and `config.ini` cover only the second-factor timeouts and
 `LoginDialogDisplayTimeout`. The Gateway's start program (`ti-gateway-start`, run by `start-gateway.sh`) reads IBC's output for
 the refused-login dialog. Between **23:40 and 01:00 America/New_York**, a
-refusal is treated as IBKR's nightly session reset, usually around 00:10 ET
-and sometimes longer on Friday nights. It stops IBC and its descendants,
-removes only that start's provisional attempt (older attempts stay counted),
-and waits 15 minutes inside the running unit before starting IBC again. The
-journal says "login refused at HH:MM ET inside IBKR's nightly reset hour;
-waiting 15 minutes, not counted (N waits so far)". The last wait is shortened
-to end at 01:00 ET; from then on refusals count and the normal bound below
-applies. An accepted login still clears the count as before. The unit is
+refusal can be treated as IBKR's nightly session reset, usually around 00:10 ET
+and sometimes longer on Friday nights. There are **uncounted reset waits up to 4 per night**,
+then the **three counted refusals** stop retries: at most seven refused attempts
+without an accepted login, below the assumed lockout at ten. The counted limit
+can be lowered, but cannot be configured above three. The fifth reset refusal
+counts even before 01:00 ET. The repeated 01:00 hour on the autumn DST night is
+outside the reset window; the cutoff is the first 01:00 America/New_York.
+
+Before cleanup or journal output, the window file records the reset wait's
+end time and the night's consumed allowance, retaining the provisional attempt.
+The program kills IBC's own process group and polls until it is gone, with a
+bounded deadline, before draining output or relaunching. If the group cannot be
+confirmed gone, retries stop with 77 and the attempt stays counted. Only when
+returning the reset outcome does it remove that start's provisional attempt;
+older attempts stay counted. It waits up to 15 minutes, capped at 01:00 ET.
+Before sleeping, the journal reports the actual remaining duration and deadline:
+"gateway-start: reset wait: login refused at HH:MM ET inside IBKR's nightly reset hour;
+waiting Nm until HH:MM ET (uncounted M of 4 tonight)". At 00:58 this is 2m until
+01:00 ET, not 15 minutes. Cleanup that crosses the cutoff reports 0m; the
+next start is counted. A stop during the wait logs
+"gateway-start: reset wait: interrupted by stop". A restart or crash **resumes the remaining wait**
+before another IBC launch; a crash before the final discount keeps the attempt
+counted as well. Journal errors and output drain timeouts cannot skip the wait.
+An accepted login clears counted attempts, but preserves the night's reset
+allowance. The unit is
 `Type=simple`, with no explicit `TimeoutStartSec` or watchdog: its start is
 complete before the wait, so no readiness notification or timeout change is
 needed. This changes the retry bound's treatment of resets; the separate
@@ -831,26 +848,29 @@ the Gateway's, so the program assumes the same. It counts attempts: every
 start of IBC is one, written to disk before IBC is launched, whether or not IBC
 got as far as a login (a start that fails, such as a missing `xvfb-run`, costs
 one too); the nightly reset exception above removes that start's attempt
-when a reset refusal is seen. A completed login, or IBKR's prompt for the second factor (which
+only after confirmed cleanup, when returning the reset outcome. A completed login, or IBKR's prompt for the second factor (which
 means the password was accepted), clears the count; a refusal after such a login
-in the same run is a new attempt outside the reset window,
+in the same run is a new counted attempt unless a reset exemption remains,
 written when it is seen (if the program dies between seeing it and writing it,
-the next start counts anyway, so the bound is loose by at most one: at most 4
-refusals in 24 hours, against IBKR's documented 10; this is accepted). Three
+the next start counts anyway; this accepted-login relogin edge can add one
+refusal outside the pre-launch accounting). The nightly allowance is separate:
+uncounted reset waits up to 4 per night, then the three counted refusals. Three
 attempts (two retries) within 24 hours stop the unit and do not restart it
 (exit code 77); a start while 3 still count refuses at once with "login retries
-stopped" without touching IBKR. Any start counts, including your own `systemctl
-restart ti-gateway`, a reboot or a second-factor timeout, so after a good
-login a wrong password gets fewer retries, never more. A counter file it cannot
-read, trust (not a plain list of times) or write also refuses, since an unknown
+stopped" without touching IBKR. Every actual IBC launch is provisionally counted, including your own
+`systemctl restart ti-gateway`, a reboot or a second-factor timeout. Restarting
+during a persisted reset wait resumes it without launching IBC or consuming
+another attempt. A qualifying reset refusal can discount its launch only as
+described above. A counter file it cannot
+read, trust (invalid attempt times or reset metadata) or write also refuses, since an unknown
 history cannot authorise another try; so do IBC output that ends while IBC
 runs and a line over 64 KiB. The count is the file
 `/var/lib/ti-gateway/login-failures`. A journal that errs or takes nothing for
 30 seconds stops IBC with exit 75, so systemd starts it again: that restart
-counts as an attempt like any other, so a journal wedged while IBC runs cannot
-loop forever; so does an output reader that makes no progress after IBC ends, or that has not
+counts as an attempt unless the durable reset policy applies. A journal wedged
+while IBC runs cannot lift either bound; so does an output reader that makes no progress after IBC ends, or that has not
 finished 65 seconds (2 x the journal bound + 5 s) after IBC ends: it delivers what
-it can within those bounds, then exits 75, and what is left (a late line of an
+it can within those bounds, then exits 75 (a durable reset outcome takes precedence), and what is left (a late line of an
 orphan, lines still buffered) is dropped.
 Failed logins you make on IBKR's website, or with the wrong paper password
 elsewhere, count against IBKR's 10 too, which is why the program stops at 3.
@@ -1140,8 +1160,8 @@ stop, not after two sessions of silence.
 | The passphrase is lost | The encrypted files can never be read; there is no recovery | Fill every secret in again: remove the `.gpg` files (`sudo rm /etc/trend-investing/*.gpg /etc/trend-investing/accounts/*.gpg`), run `sudo deploy/provision.sh services`, which asks for a new passphrase, then enter each secret with `sudo ti-secrets edit` |
 | `provision.sh services` stops with "verification failed, nothing replaced and no plain text removed", or with "both exist and differ" | The plain-text file is kept and no encrypted copy replaces anything | For the first, run it again; if it keeps failing, see `journalctl` and the disk space. For the second, keep the right one as the message says, then run it again |
 | The Sunday phone prompt is missed | IBC exits, the unit starts it again after 30 seconds, and a new prompt arrives each time; nothing reaches IBKR meanwhile | Approve the next prompt (`docs/runbooks/gateway-login.md`) |
-| `ti-gateway` failed and stays down (the page `<host>: ti-gateway.service failed`); `journalctl -u ti-gateway` names the login file, or says "login retries stopped" | Exit 64, 65 or 78: the login file is empty, or holds an unknown key or value (for example a trading mode other than `paper` or `live`). Exit 77: the program stopped the retries (3 login attempts within 24 hours without an accepted login, or a counter it could not trust, or IBC output it could not watch), so IBKR cannot lock the login. IBKR's nightly session reset around 00:10 ET (longer on Friday nights) can also refuse a password that just worked. From 23:40 to 01:00 ET the unit waits it out internally: the journal says "login refused at HH:MM ET inside IBKR's nightly reset hour; waiting 15 minutes, not counted (N waits so far)". Reset refusals do not use up the bound. At 01:00 ET the usual counted retries resume; if the bound is then reached, exit 77 stops the unit and the next reporter firing pages the failed unit (the separate logged-out page can arrive earlier, as explained above). The unit does not restart on any of these exits, because none fixes itself. The reporter's next firing pages it (the Gateway has no `OnFailure=` hook), and holds back the outside heartbeat while it stays down | For the login file: fill it in or correct it with `sudo ti-secrets edit ibkr-login.env`, then `sudo systemctl start ti-gateway` (`docs/runbooks/gateway-login.md`). After a nightly reset, recover by hand after 01:00 ET: `sudo systemctl start ti-gateway.service`, wait for "Login has completed" in the journal, then `sudo systemctl start ti-adapter-boost.service`. If the journal says "login retries stopped", check the paper login and clear the counter as below before starting. For "login retries stopped": check the paper login on IBKR's website, delete `/var/lib/ti-gateway/login-failures`, then `sudo systemctl start ti-gateway` ("The Gateway is logged out", above) |
-| `<host>: IB Gateway is logged out` (or `journalctl -u ti-gateway` says "Unrecognized Username or Password" or "login retries stopped") | IBKR refused the login, typically after the nightly restart, and IBC left the dialog open. During the nightly reset window (23:40 to 01:00 ET), the start program waits 15 minutes and retries without counting the refusal. Outside it, the start program stops IBC and systemd starts it again, at most 3 login attempts of any kind within 24 hours (two retries; IBKR locks at 10); then the unit stops with exit 77 and stays down. You are paged after 10 minutes outside the restart windows, then hourly. If instead IBKR drops the session silently with no IBC event, you are paged only after about 3 hours 10 minutes: a limit you must agree to explicitly before live money | "The Gateway is logged out", above: check the paper login on IBKR's website, log out of any other session with the paper username, delete `/var/lib/ti-gateway/login-failures`, `sudo systemctl restart ti-gateway` |
+| `ti-gateway` failed and stays down (the page `<host>: ti-gateway.service failed`); `journalctl -u ti-gateway` names the login file, or says "login retries stopped" | Exit 64, 65 or 78: the login file is empty, or holds an unknown key or value (for example a trading mode other than `paper` or `live`). Exit 77: the program stopped the retries (3 login attempts within 24 hours without an accepted login, or a counter it could not trust, or IBC output it could not watch), so IBKR cannot lock the login. IBKR's nightly session reset around 00:10 ET (longer on Friday nights) can also refuse a password that just worked. From 23:40 to 01:00 ET the unit waits it out internally: the journal says "gateway-start: reset wait: login refused at HH:MM ET inside IBKR's nightly reset hour; waiting Nm until HH:MM ET (uncounted M of 4 tonight)". There are uncounted reset waits up to 4 per night, then the three counted refusals (at most seven without an accepted login). Restarting resumes the remaining wait; journal failures cannot skip it. At the fifth reset refusal or 01:00 ET, whichever comes first, counted retries resume; if the bound is then reached, exit 77 stops the unit and the next reporter firing pages the failed unit (the separate logged-out page can arrive earlier, as explained above). The unit does not restart on any of these exits, because none fixes itself. The reporter's next firing pages it (the Gateway has no `OnFailure=` hook), and holds back the outside heartbeat while it stays down | For the login file: fill it in or correct it with `sudo ti-secrets edit ibkr-login.env`, then `sudo systemctl start ti-gateway` (`docs/runbooks/gateway-login.md`). After a nightly reset, recover by hand after 01:00 ET: `sudo systemctl start ti-gateway.service`, wait for "Login has completed" in the journal, then `sudo systemctl start ti-adapter-boost.service`. If the journal says "login retries stopped", check the paper login and clear the counter as below before starting. For "login retries stopped": check the paper login on IBKR's website, delete `/var/lib/ti-gateway/login-failures`, then `sudo systemctl start ti-gateway` ("The Gateway is logged out", above) |
+| `<host>: IB Gateway is logged out` (or `journalctl -u ti-gateway` says "Unrecognized Username or Password" or "login retries stopped") | IBKR refused the login, typically after the nightly restart, and IBC left the dialog open. During the nightly reset window (23:40 to 01:00 ET), there are uncounted reset waits up to 4 per night, of up to 15 minutes each, capped at 01:00 ET; restarts resume a persisted wait. After those, or outside the window, the start program stops IBC and systemd starts it again, at most 3 login attempts of any kind within 24 hours (two retries; IBKR locks at 10); then the unit stops with exit 77 and stays down. You are paged after 10 minutes outside the restart windows, then hourly. If instead IBKR drops the session silently with no IBC event, you are paged only after about 3 hours 10 minutes: a limit you must agree to explicitly before live money | "The Gateway is logged out", above: check the paper login on IBKR's website, log out of any other session with the paper username, delete `/var/lib/ti-gateway/login-failures`, `sudo systemctl restart ti-gateway` |
 | The IBKR password is wrong | Outside the nightly reset window (23:40 to 01:00 ET), the refused login is retried at most twice (3 attempts in all; any start counts, so after a good login fewer), then the unit stops, so IBKR cannot lock the login; you are paged | Correct the file (`sudo ti-secrets edit ibkr-login.env`), delete `/var/lib/ti-gateway/login-failures`, start it again (`docs/runbooks/gateway-login.md`) |
 | The journal of `ti-data` or `ti-reporter@boost` says "waiting for the account's first run" (the unit is not failed) | No engine run has been started, so there is nothing to record or report. The data job writes nothing; the reporter sends no alert and, if nothing else is wrong, pings the heartbeat. Nothing is paged ("The reporter before the first run", below) | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine") |
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |

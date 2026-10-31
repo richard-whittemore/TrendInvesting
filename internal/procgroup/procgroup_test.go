@@ -1,6 +1,7 @@
 package procgroup
 
 import (
+	"errors"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -65,7 +66,39 @@ func TestKillEndsAStartedCommandsGroup(t *testing.T) {
 		if err == nil {
 			t.Fatal("the command was not killed")
 		}
+		if err := WaitGone(cmd.Process.Pid, time.Second); err != nil {
+			t.Fatalf("group survived cleanup: %v", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the command outlived Kill")
+	}
+}
+
+// Waits use only a guarded group probe (docs/development.md, "Ending processes").
+func TestWaitGonePollsUntilAbsentAndBoundsAStuckGroup(t *testing.T) {
+	for _, pid := range []int{0, 1, -1} {
+		if err := waitGone(pid, time.Millisecond, func(int, syscall.Signal) error { t.Fatal("unsafe probe"); return nil }); err == nil {
+			t.Errorf("pid %d accepted", pid)
+		}
+	}
+	probes := 0
+	err := waitGone(4242, time.Second, func(target int, sig syscall.Signal) error {
+		if target != -4242 || sig != 0 {
+			t.Fatalf("probe target %d signal %d", target, sig)
+		}
+		probes++
+		if probes < 3 {
+			return nil
+		}
+		return syscall.ESRCH
+	})
+	if err != nil || probes != 3 {
+		t.Fatalf("probes=%d err=%v", probes, err)
+	}
+	if err := waitGone(4242, time.Millisecond, func(int, syscall.Signal) error { return nil }); err == nil {
+		t.Fatal("live group passed the deadline")
+	}
+	if err := waitGone(4242, time.Second, func(int, syscall.Signal) error { return syscall.EPERM }); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("probe error=%v", err)
 	}
 }

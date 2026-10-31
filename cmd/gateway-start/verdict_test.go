@@ -19,16 +19,18 @@ func TestAStopOverridesAnEarlierRetryAndNeverTheOtherWay(t *testing.T) {
 	}
 }
 
-// Journal, reader and count failures must override a planned reset wait
-// (docs/manual/server.md, "The Gateway is logged out").
-func TestAFailureOverridesAResetWaitAndNeverTheOtherWay(t *testing.T) {
-	for _, code := range []int{exitRetry, exitStopped} {
-		var v verdictState
-		v.set(verdict{resetRetry, "reset"})
-		v.set(verdict{code, "failure"})
-		v.set(verdict{resetRetry, "reset"})
-		if got := v.get(); got == nil || got.code != code {
-			t.Fatalf("got %v, want %d kept instead of reset wait", got, code)
+// A durable reset wait outranks every other verdict (docs/manual/server.md,
+// "The Gateway is logged out"); journal and drain failures cannot skip it.
+func TestResetSafetyVerdictOutranksEveryOtherVerdict(t *testing.T) {
+	for _, other := range []int{exitRetry, exitStopped, exitInternal} {
+		for _, codes := range [][]int{{resetRetry, other}, {other, resetRetry}} {
+			var state verdictState
+			for _, code := range codes {
+				state.set(verdict{code: code})
+			}
+			if state.get().code != resetRetry {
+				t.Errorf("verdicts %v: got %d, want reset", codes, state.get().code)
+			}
 		}
 	}
 }
