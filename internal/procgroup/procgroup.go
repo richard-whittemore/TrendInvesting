@@ -36,9 +36,10 @@ func kill(pid int, send func(int, syscall.Signal) error) error {
 	return send(t, syscall.SIGKILL)
 }
 
-// WaitGone polls only the started command's guarded process group until ESRCH,
-// bounded by timeout (docs/development.md, "Ending processes"). The caller must
-// reap its child concurrently; even a zombie must disappear before relaunch.
+// WaitGone polls only the started command's guarded process group until it is
+// gone (ESRCH, or EPERM once the id belongs to another session), bounded by
+// timeout (docs/development.md, "Ending processes"). The caller must reap its
+// child concurrently; even a zombie must disappear before relaunch.
 func WaitGone(pid int, timeout time.Duration) error { return waitGone(pid, timeout, syscall.Kill) }
 
 func waitGone(pid int, timeout time.Duration, probe func(int, syscall.Signal) error) error {

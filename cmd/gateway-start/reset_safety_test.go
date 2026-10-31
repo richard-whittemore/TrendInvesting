@@ -353,7 +353,7 @@ func TestResetInconsistentWaitStopsWithoutLaunching(t *testing.T) {
 				return ch
 			}
 			code, output := r.run(c)
-			if code != exitStopped || r.launches() != 0 || !strings.Contains(output, "inconsistent") {
+			if code != exitStopped || r.launches() != 0 || !(strings.Contains(output, "inconsistent") || strings.Contains(output, "reset history")) {
 				t.Fatalf("code=%d launches=%d: %s", code, r.launches(), output)
 			}
 			if raw2, _ := os.ReadFile(r.state); string(raw2) != raw {
@@ -444,6 +444,7 @@ func TestResetHistoryMustBeConsistentWithTheRecordedRefusal(t *testing.T) {
 		pair + "1 1793509999\n",
 		pair + "2 1793508000 1793508500\n",
 		pair + "4 1 2 3 1793509080\n",
+		pair + "2 1793462400 1793509080\n", // the first entry is noon ET, outside any reset hour
 	} {
 		t.Run(raw, func(t *testing.T) {
 			r := newRig(t)

@@ -34,9 +34,10 @@ func (w resetWait) withAttempts(attempts []byte) []byte {
 	return append([]byte(header+"\n"), attempts...)
 }
 
-// splitReset separates legacy epoch-only files and validates reset-header
-// structure; awaitReset checks wait eligibility against the clock. Unknown
-// history fails closed (docs/development.md, "Principles").
+// splitReset separates the reset header, when there is one, from the attempt
+// lines and validates everything about it that does not need the clock;
+// awaitReset judges the wait against the clock. Anything the writer could not
+// have produced fails closed (docs/development.md, "Principles").
 func splitReset(raw []byte) (resetWait, []byte, error) {
 	var w resetWait
 	if !strings.HasPrefix(string(raw), "reset ") {
@@ -70,8 +71,9 @@ func splitReset(raw []byte) (resetWait, []byte, error) {
 		var previous int64
 		for _, at := range values[3:] {
 			// The writer prunes allowances older than 24 hours before it appends
-			// the refusal, so an entry that old was never written by it.
-			if at <= 0 || at < previous || at > values[0] || values[0]-at >= 24*60*60 {
+			// the refusal, and records only refusals inside the reset hour, so
+			// an entry that old or outside the hour was never written by it.
+			if at <= 0 || at < previous || at > values[0] || values[0]-at >= 24*60*60 || nightlyResetDelay(time.Unix(at, 0)) <= 0 {
 				return resetWait{}, nil, errors.New("invalid reset history")
 			}
 			previous = at
