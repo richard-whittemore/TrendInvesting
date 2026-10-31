@@ -339,7 +339,12 @@ what is missing. Do not run it for any other date: "Any other date is refused".
 
 The adapter carries the data job's files to the engine, behind a reading of
 the account from IB Gateway, and (in paper) the engine's orders back. Its
-shipped configuration, `/etc/trend-investing/adapters/boost.json`, is
+shared interruption schedule, `/etc/trend-investing/ibkr-maintenance.json`,
+is installed once by `deploy/provision.sh services` from
+`deploy/etc/ibkr-maintenance.json.example` and preserved on reruns. Review
+its daily 23:40–01:00 and Saturday 00:00–12:00 New York windows before
+starting ([adapter manual](../manual/ibkr-adapter.md), "Scheduled interruptions").
+The shipped configuration, `/etc/trend-investing/adapters/boost.json`, is
 `"mode": "dry-run"` and `"paper_sending_enabled": false`: it reads the account
 and sends nothing, whatever the Gateway's API setting. A read-only Gateway is
 fine. Do not edit that file.

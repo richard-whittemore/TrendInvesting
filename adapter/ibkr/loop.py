@@ -176,7 +176,7 @@ import uuid
 from datetime import datetime, time as clock_time, timedelta, timezone
 from decimal import Decimal
 
-from connection import Connection, LinkChanged, NotConnected
+from connection import Connection, LinkChanged, NotConnected, StopRequested
 from delivery import (DELIVERED_SUFFIX, SESSION_OPEN, Deliverer, PostCloseReading, SnapshotRefused, market_open,
                       nyse_calendar, run_name)
 from orders import (EASTERN_LABELS, NEW_YORK, NEW_YORK_ZONES, OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete,
@@ -526,8 +526,11 @@ class AdapterLoop:
     """
 
     def __init__(self, config, api, engine_connect, pending_path, engine_log_path, now=_utc_now, today=None,
-                 sleep=time.sleep, monotonic=time.monotonic, poll=1.0, new_id=_new_id, streams=None, cash_ledger=None):
+                 sleep=time.sleep, monotonic=time.monotonic, poll=1.0, new_id=_new_id, streams=None, cash_ledger=None,
+                 maintenance=None, stop_event=None):
         self.config = config
+        self._maintenance = maintenance
+        self._stop_event = stop_event
         self._cash_ledger = cash_ledger
         self._api = api
         self._engine_connect = engine_connect
@@ -590,7 +593,7 @@ class AdapterLoop:
         """Take the pending file's lock, connect, reconcile, and settle any input left awaiting its reply."""
         cfg = self.config
         self.conn = Connection(self._api, cfg, self._status, sleep=self._sleep, monotonic=self._monotonic,
-                               wall_clock=self._now)
+                               wall_clock=self._now, maintenance=self._maintenance, stop_event=self._stop_event)
         sender = make_sender(cfg, self._sent, conn=self.conn, today=self._today)
         # The relay takes the adapter's exclusive lock first; the report
         # journal reads its held file only while that lock is held.
@@ -964,6 +967,8 @@ class AdapterLoop:
             self.start()
             while not should_stop():
                 self.step()
+        except StopRequested:
+            pass
         finally:
             self.close()
 
@@ -972,7 +977,10 @@ class AdapterLoop:
             self.relay.close()
         if self.conn is not None:
             try:
-                self._api.disconnect()
+                if self._stop_event is not None and self._stop_event.is_set():
+                    self._api.disconnect(wait=0)
+                else:
+                    self._api.disconnect()
             except Exception as err:  # the adapter is stopping either way
                 log.info("ibkr disconnect at stop failed: %s", type(err).__name__)
 

@@ -68,7 +68,7 @@ class TWSApi:
     def connect(self, host, port, client_id, callbacks, timeout):
         raise NotImplementedError
 
-    def disconnect(self):
+    def disconnect(self, wait=None):
         raise NotImplementedError
 
     def is_connected(self):

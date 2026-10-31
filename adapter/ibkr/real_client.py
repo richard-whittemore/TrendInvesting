@@ -412,14 +412,16 @@ class IbapiClient(TWSApi):
                                             daemon=True)
             self._reader.start()
 
-    def disconnect(self):
+    def disconnect(self, wait=None):
         """Close this session's socket and wait for its reader to exit.
 
         Returns False if the reader is still running. It is kept, so the next
         connect checks the same reader again and refuses to start a session
-        beside it.
+        beside it. A requested process stop passes wait=0: the socket closes
+        without delaying exit for the daemon reader (docs/manual/ibkr-adapter.md,
+        stopping during a wait). Normal reconnects still join before reuse.
         """
-        return self._end_session(READER_STOP_TIMEOUT)
+        return self._end_session(READER_STOP_TIMEOUT if wait is None else wait)
 
     def _end_session(self, wait):
         if self._client is not None:
@@ -428,7 +430,8 @@ class IbapiClient(TWSApi):
         if reader is not None and reader is not threading.current_thread():
             reader.join(wait)
             if reader.is_alive():
-                log.warning("ibkr reader did not stop within %.2fs of disconnect", wait)
+                if wait:
+                    log.warning("ibkr reader did not stop within %.2fs of disconnect", wait)
                 return False
         self._reader = None
         return True

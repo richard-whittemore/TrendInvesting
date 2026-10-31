@@ -345,6 +345,24 @@ class ForwardingTests(unittest.TestCase):
         self.assertIn(("disconnect",), old_eclient.requests)
         client.disconnect()
 
+    def test_requested_stop_closes_without_waiting_for_a_stuck_reader(self):
+        real_client = self.module()
+        _EClient.run_gate = threading.Event()
+        client = real_client.IbapiClient(start_reader=True)
+        client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+        reader = client._reader
+        try:
+            started = time.monotonic()
+            self.assertFalse(client.disconnect(wait=0))
+            self.assertLess(time.monotonic() - started, .5)
+            self.assertIs(client._reader, reader)
+            self.assertIn(("disconnect",), client._client.requests)
+        finally:
+            _EClient.run_gate.set()
+            reader.join(1)
+            _EClient.run_gate = None
+            client.disconnect()
+
     def test_a_reader_that_outlives_disconnect_is_kept_and_blocks_every_retry(self):
         real_client = self.module()
         from connection import ConnectFailed

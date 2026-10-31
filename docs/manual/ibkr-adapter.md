@@ -428,7 +428,7 @@ adapter/ibkr/relay.py ...`.
 | "cannot be matched to any run" (the adapter stops) | A log beside a stream folder cannot be read from its first records (whether or not a folder of the run's own name exists): it may be this resumed run's own first log, damaged | After a crash resume, restore the first run's log from the backup; never run a warm-up for the new name. If the log is an old run's, once its run has ended move the folder out of `streams/boost/` and its log out of the engine's log folder (beside the running log), keeping both as evidence in a folder outside both ([market data](market-data.md), "A crash resume") |
 | A warning: "stream folder ... skipped: its log's first records cannot be read, so it cannot be matched to any run" | The warning that comes with the stop in the row above | As that row |
 | "the delivery record ... cannot be read" | The `.delivered` file beside the pending file holds something the adapter did not write | Restore it from the backup as it was; never edit it |
-| IBKR error 326 | Another program holds this engine's client ID; the adapter does not retry or pick another | Stop the other program |
+| IBKR error 326 | At startup, or after the 30-second grace following its own session close, another program holds this engine's client ID; the adapter stops and never picks another | Stop the other program. A transient 326 after its own close is retried as described under "Scheduled interruptions" |
 | Started in live mode | Refused until the limited-live gate | Use paper |
 | "no order the engine released explains" or "IBKR shows N unexplained open order(s) or execution(s)" | At start or after a reconnect IBKR shows an open order or a trade of today that no run of this engine released: one placed by hand or by another program, or by an earlier run no longer read. The link is not treated as matched; nothing is sent | Look at each in IBKR (the message lists them by order reference, client ID and order number). Cancel each unexplained open order that should not be there; reconcile each unexplained execution, which cannot be cancelled ([reconciliation](../runbooks/reconciliation.md), "Find the cause"). Reconcile before starting again ([paper trading](paper-trading.md), "What can go wrong") |
 | "could not be read in full" | IBKR did not answer every part of the account read at start or after a reconnect | Check IB Gateway is logged in, then start the adapter again |
@@ -478,6 +478,78 @@ the order stays released:
   (`docs/runbooks/durable-log.md`, "Restarting an engine"): its first
   decision plans to the target from scratch.
 
+## Scheduled interruptions and stopping during a wait
+
+The owner decision of 2026-10-31 treats IBKR's nightly server reset and
+Saturday maintenance as expected interruptions. That day's Saturday outage
+also established that waiting alone need not recover the Gateway: its 2110
+cleared only after a Gateway restart. The adapter therefore waits quietly
+until a fixed bound, then stops for the owner; it never restarts Gateway.
+
+The shared schedule is `/etc/trend-investing/ibkr-maintenance.json`, read at
+adapter start before any connection. `sudo deploy/provision.sh services`
+installs it from `deploy/etc/ibkr-maintenance.json.example` only if absent;
+reruns preserve the owner's edits. For an existing server, install just this
+file with `sudo install -m 0644 deploy/etc/ibkr-maintenance.json.example
+/etc/trend-investing/ibkr-maintenance.json` **only if the destination does not
+exist**. Restart the adapter after editing it. `--maintenance FILE` selects
+another path. No file, or `{"windows": []}`, means no scheduled windows and
+keeps the existing five-minute (`restore_timeout`) behavior. Malformed JSON,
+unknown fields, invalid days, times or zones refuse startup with a reason.
+
+The file is an object containing a `windows` array. Each entry contains
+`days` (a list of `Mon` through `Sun`, or `["daily"]`), `start` and `end`
+(`HH:MM`), and `zone` (an installed IANA zone). Days name the day a window
+starts; an end earlier than its start means the next day. Equal start and
+end, or windows covering the whole week without a gap, are refused. The
+shipped windows are daily **23:40–01:00 America/New_York** (a five-minute
+margin before the reset window) and Saturday **00:00–12:00 America/New_York**.
+Starts are inclusive and ends exclusive. Overlapping or touching windows
+are merged: Friday night's outage may wait until Saturday noon. At the
+2026-11-01 fall-back, the nightly end is the **later 01:00**, 06:00 UTC.
+Repeated start times use the earlier occurrence; a nonexistent spring
+boundary rolls forward across the clock gap. All deadline arithmetic uses
+UTC and a monotonic elapsed-time bound, so a clock rollback cannot extend
+an outage indefinitely.
+
+The invariant is fixed when the adapter consumes 1100 or 2110. Repeated
+loss notices do not renew it. The scheduled wait journals
+`ibkr link: IBKR servers lost inside the scheduled window ending HH:MM ET; waiting`
+once at its start and at most once per hour. Restoration (1102, or the
+existing data-lost restoration 1101) requires reconciliation before sending.
+A socket that actually closes is still reconnected; an open socket is kept
+through the scheduled wait. A safety close requested during an incomplete
+read remains deferred until restoration, as before.
+
+| Loss occurs | Restored before bound | No restoration by bound | SIGTERM during wait |
+| --- | --- | --- | --- |
+| Inside a scheduled window | Keep the session and reconcile | Close and exit **3**, with `IBKR connectivity did not return by the end of its scheduled window; a Gateway restart is the remedy` | Close, exit **0**, `ibkr adapter stopped on request`, within one second |
+| Outside all windows | Keep the session and reconcile | After `restore_timeout` (deployed: five minutes), close and reconnect | Same clean stop within one second |
+
+After closing its own established session, the adapter retries a 326
+(`client id in use`) with growing, capped backoff for up to **30 seconds**
+from the close, always with the same client ID (ADR 0025 point 3). Every
+pause names the wait and the remaining grace. Refused attempts never renew
+that grace; a persistent 326 then stops as a foreign holder. A 326 at initial
+startup, or after Gateway itself closed the socket, still stops immediately.
+A restored session needs no reconnect unless a deferred safety close was
+requested; a scheduled expiry never reconnects, so cannot encounter 326.
+SIGTERM also interrupts the reconnect backoff, the stale-ID grace, and
+reconciliation pauses within one second, with the same clean-stop line.
+
+Exit 3 is distinct from fault/refusal exit 1, but is deliberately nonzero:
+`Restart=no` leaves the unit failed, and the existing unit-failure notifier
+pages once with the Gateway remedy. The owner restarts Gateway, then the
+adapter. Automatic Gateway restart and reporter suppression are separate work.
+
+Tests: `test_maintenance.py`'s `test_loss_matrix` covers every combination
+of inside/outside, restored/not restored, SIGTERM/no SIGTERM, and stale/no
+stale 326 for both 1100 and 2110. `test_sigterm_waits` sends real SIGTERM to
+CLI subprocesses in each wait; `test_boundaries_overlap_weekday_and_dst_night`
+checks the DST boundary; `test_stale_id_grace_is_fixed_and_foreign_id_at_start_is_immediate`
+checks the hard grace. `test_cli.py` checks startup refusal and exit 3 with
+the remedy. Fixtures are synthetic; no real Gateway was used.
+
 ## What can go wrong, and what the adapter does then
 
 | What you see | What the program does | What you do |
@@ -487,7 +559,11 @@ the order stays released:
 | `refused: the configuration ... names client_id 11, but the instance's settings give 12 (TI_ADAPTER_CLIENT_ID)` | An IRA adapter's configuration names another account's client ID (a copy of Boost's file, say); it does not connect | Set `"client_id": 12` in `/etc/trend-investing/adapters/trad-ira.json` (or restore it from `trad-ira.json.example`), then start the adapter |
 | `ti-adapter@boost: the Boost account has its own adapter unit, ti-adapter-boost.service` and the unit failed | Someone started the template's boost instance; the template refuses it, so Boost never gets a second adapter | Nothing to settle: start Boost's adapter as `ti-adapter-boost`. `sudo systemctl reset-failed ti-adapter@boost` clears the failed instance |
 | The link to IB Gateway drops | Reconnects under the same client ID; reads IBKR's open-order list until two reads in a row agree, then the account, which must show the same working orders (both are read again if the orders changed meanwhile), and matches IBKR's orders, trades and balances before anything is sent; never resends an order IBKR already has, and an order that is still working is matched, not reported missing. A drop during those reads, including one because IBKR's open-order messages never paused for 2 seconds within 10, is reconnected the same way; but if the link is dropped during three reconciles in a row with none completed between them (a Gateway that keeps its connection up while another client or IBKR's own app keeps working the account's orders), the adapter stops (`ReconcileIncomplete`, "the link to IB Gateway was dropped during 3 reconciles in a row (last: open-orders-never-quiet)"; "last: gateway-lost-ibkr" means IB Gateway kept losing IBKR's servers, not another client working the orders). An order placed by hand that fills while the adapter reads the account shows in no open-order list, so its execution has the orders and the account read again, and the start or reconnect then stops on it ("no order the engine released explains"). After three disagreements in a row, or four account reads that never agree with the orders, it stops (`ReconcileIncomplete`, "the link is not reconciled and nothing is sent") | Nothing, unless it gives up (`docs/runbooks/gateway-login.md`) or stops with `ReconcileIncomplete`. A stop is never restarted for you: the unit file says `Restart=no` (`deploy/systemd/ti-adapter-boost.service`), so `systemctl status ti-adapter-boost` shows the unit `failed` and `journalctl -u ti-adapter-boost` ends with "adapter stopped: ReconcileIncomplete: ..." and the reason. Nothing reaches the engine while it is stopped, so if you miss it, the reporter's "no engine heartbeat" alert pages you once 2 sessions have closed with the engine's log unchanged ([alerts-and-dashboard](alerts-and-dashboard.md)). Look at IBKR's open orders and at what else is logged in to the account (TWS, the mobile app, another API client): once nothing is being placed, filled or cancelled, start the adapter again (`sudo systemctl start ti-adapter-boost`) |
-| IB Gateway loses IBKR's servers (IBKR's message 1100), then its connection closes | The adapter's link status says `connectivity-lost`, then `disconnected` the moment the connection closes; it connects again at once, with growing pauses, and matches everything again before sending. It never waits on a closed connection: the longest it waits for Gateway to restore IBKR's servers is `restore_timeout`, and only while the connection is still open. After `max_connect_attempts` failed tries it stops (`gave up after N attempts`) | Nothing, unless it gives up: `docs/runbooks/gateway-login.md` |
+| IB Gateway loses IBKR's servers (IBKR's message 1100 or 2110), then its connection closes | The adapter's link status says `connectivity-lost`, then `disconnected` the moment the connection closes; it connects again at once, with growing pauses, and matches everything again before sending. It never waits on a closed connection: while the connection stays open it waits until the scheduled window ends, or `restore_timeout` outside a window ("Scheduled interruptions" above). After `max_connect_attempts` failed tries it stops (`gave up after N attempts`) | Nothing, unless it gives up: `docs/runbooks/gateway-login.md` |
+| `ibkr link: IBKR servers lost inside the scheduled window ending HH:MM ET; waiting` | Keeps the session until 1102 and reconciles, journalling at most hourly; outside a window the five-minute reconnect behavior remains | Nothing while waiting. Review the schedule under "Scheduled interruptions" above |
+| `MaintenanceExpired: IBKR connectivity did not return by the end of its scheduled window; a Gateway restart is the remedy` | Closes cleanly with exit 3; the unit is failed and the existing unit-failure notifier pages once | Restart Gateway (`docs/runbooks/gateway-login.md`), then start the adapter. Waiting longer alone did not recover the observed Saturday outage |
+| `client id 11 still held after our own close; waiting ... for Gateway to remove it` | Retries 326 under the same ID for at most 30 seconds after its own close; a persistent or initial foreign holder still stops with `ClientIdInUse` | Wait for the bounded retry. If it stops, check for another adapter using the ID; never change the ID to bypass the refusal |
+| You stop the adapter during a connectivity wait, reconnect backoff or reconciliation pause | SIGTERM interrupts the wait within one second, closes and logs `ibkr adapter stopped on request`, exit 0 | Nothing: the requested stop does not wait for `TimeoutStopSec=60` |
 | The Gateway's nightly restart (11:45 PM New York) or Sunday re-login (09:00) | The link drops and comes back as above. An order IBKR accepted stays at IBKR, and is found again on reconnect | Approve the Sunday phone prompt. Not yet rehearsed against a real Gateway |
 | Gateway is down when an order is due | The order is refused before "about to send" and waits; it goes out once the link is back the same New York day | Bring the Gateway back. Past the day, it is stale (above) |
 | The adapter's unit failed, and you were paged: a page from the server (title ending `failed`, naming `ti-adapter-boost.service`, or an IRA's `ti-adapter@trad-ira.service`) with the adapter's last journal line as the reason, such as a stop for an incomplete reconciliation | The adapter stops itself on every condition in "Every stop, and the command that settles it" and systemd never restarts it (`Restart=no`). `ti-unit-failed@` paged you within a minute through PagerDuty and your own ntfy server, once for this failure (a restart that fails again before the adapter is seen well is the same failure, with a reminder at most once an hour); before this, nothing paged until the reporter's "no engine heartbeat" alert after two sessions. The reporter's firing pages it too if that page did not go, and resolves it once the adapter is no longer failed | Read the reason on the page, find it in "Every stop, and the command that settles it", run the settling command if it names one, then start the adapter ([paper trading](paper-trading.md), "Starting the adapter"). `journalctl -u ti-adapter-boost` (an IRA's: `journalctl -u ti-adapter@trad-ira`) has the whole reason |

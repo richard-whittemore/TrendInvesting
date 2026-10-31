@@ -73,7 +73,8 @@ class CommandTests(unittest.TestCase):
         self.config.write_text(json.dumps(values))
 
     def argv(self, *extra, account=True):
-        args = ["run", "--config", str(self.config), "--pending", str(self.pending), "--engine-log",
+        args = ["run", "--config", str(self.config), "--maintenance", str(self.dir / "no-maintenance.json"),
+                "--pending", str(self.pending), "--engine-log",
                 str(self.engine_log), "--socket", str(self.dir / "engine.sock"), "--ibapi-record", str(self.record),
                 "--versions", str(self.versions)]
         if account:
@@ -88,6 +89,62 @@ class CommandTests(unittest.TestCase):
         return main(argv, api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
                     should_stop=Steps(steps), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
                     protobuf_version=lambda: "5.29.5")
+
+    def test_malformed_maintenance_refuses_before_connecting(self):
+        schedule = self.dir / "maintenance.json"
+        schedule.write_text('{"windows": [{"days": ["Sat"], "start": "wrong"}]}')
+        self.assertEqual(self.run_main(self.argv("--maintenance", str(schedule))), 1)
+        self.assertIn("maintenance window 1", self.err.getvalue())
+        self.assertEqual(self.made, [])
+
+    def test_scheduled_restoration_reconciles_before_the_loop_is_ready(self):
+        from datetime import datetime, timezone
+        schedule = self.dir / "maintenance.json"
+        schedule.write_text(json.dumps({"windows": [
+            {"days": ["Sat"], "start": "00:00", "end": "12:00", "zone": "America/New_York"}]}))
+        positions = self.fake.req_positions
+        timers = []
+        def interrupted():
+            self.fake.req_positions = positions
+            timers.append(self.fake.hold_connectivity(seconds=.1))
+        self.fake.req_positions = interrupted
+        try:
+            result = main(self.argv("--maintenance", str(schedule)), api_factory=self.api,
+                          engine_connect=lambda *a: self.engine, should_stop=Steps(1),
+                          err=self.err, now=lambda: datetime(2026, 10, 31, 10, 0, tzinfo=timezone.utc), poll=.01,
+                          ibapi_version=lambda: (10, 51, 1), protobuf_version=lambda: "5.29.5")
+            self.assertEqual(result, 0, self.err.getvalue())
+            self.assertIn("ibkr reconciled client_id=11", self.err.getvalue())
+            self.assertIn("ibkr adapter stopped on request", self.err.getvalue())
+        finally:
+            for timer in timers:
+                timer.cancel()
+                timer.join()
+
+    def test_scheduled_expiry_has_distinct_status_and_gateway_remedy(self):
+        from datetime import datetime, timezone
+        schedule = self.dir / "maintenance.json"
+        schedule.write_text(json.dumps({"windows": [
+            {"days": ["Sat"], "start": "00:00", "end": "12:00", "zone": "America/New_York"}]}))
+        clock = [datetime(2026, 10, 31, 15, 59, tzinfo=timezone.utc)]
+        def positions():
+            self.fake.hold_connectivity()
+        self.fake.req_positions = positions
+        # Advance only after the loss is consumed and its bound is pinned.
+        from loop import AdapterLoop
+        reconcile = AdapterLoop.reconcile
+        def interrupted(loop):
+            reconcile(loop)
+            clock[0] = datetime(2026, 10, 31, 16, 0, tzinfo=timezone.utc)
+        with mock.patch.object(AdapterLoop, "reconcile", interrupted):
+            result = main(self.argv("--maintenance", str(schedule)), api_factory=self.api,
+                          engine_connect=lambda *a: self.engine, should_stop=lambda: False,
+                          err=self.err, now=lambda: clock[0], poll=.01,
+                          ibapi_version=lambda: (10, 51, 1), protobuf_version=lambda: "5.29.5")
+        self.assertEqual(result, 3, self.err.getvalue())
+        self.assertIn("Gateway restart is the remedy", self.err.getvalue())
+        self.assertFalse(self.fake.connected)
+        self.assertEqual(len(self.fake.called("connect")), 1)
 
     def test_run_connects_reconciles_and_stops_cleanly(self):
         self.assertEqual(self.run_main(self.argv()), 0, self.err.getvalue())

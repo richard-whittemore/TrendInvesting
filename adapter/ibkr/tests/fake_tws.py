@@ -6,6 +6,8 @@ code under test is exactly the code that runs against the real client. Every
 figure here is invented; none is a real price or account.
 """
 import sys
+import time
+import threading
 from collections import deque
 from datetime import datetime
 from decimal import Decimal
@@ -90,6 +92,9 @@ class FakeTWS(TWSApi):
 
     def __init__(self):
         self.calls = []
+        self.monotonic = time.monotonic
+        self.stale_client_seconds = 0
+        self._stale_until = 0
         self.quantity_scale = 0
         self.callbacks = None
         self.connected = False
@@ -241,6 +246,8 @@ class FakeTWS(TWSApi):
         if self.connect_hook is not None:
             self.connect_hook()
         behaviour = self.connect_behaviours.pop(0) if self.connect_behaviours else "ok"
+        if self.monotonic() < self._stale_until:
+            behaviour = "client-id-in-use"
         if behaviour == "hang":
             raise ConnectFailed("socket connect did not finish within {}s".format(timeout))
         if behaviour == "socket-error":
@@ -279,9 +286,24 @@ class FakeTWS(TWSApi):
         elif behaviour != "silent":
             raise AssertionError("unknown behaviour " + behaviour)
 
-    def disconnect(self):
+    def disconnect(self, wait=None):
         self.calls.append(("disconnect",))
+        if self.connected:
+            self._stale_until = self.monotonic() + self.stale_client_seconds
         self.connected = False
+
+    def hold_connectivity(self, code=2110, seconds=None):
+        """Hold the session through a server outage, optionally restoring after real seconds."""
+        self.callbacks.error(-1, code, "synthetic IBKR server interruption")
+        if seconds is not None:
+            callbacks = self.callbacks
+            timer = threading.Timer(seconds, lambda: callbacks.error(-1, 1102, "synthetic restoration"))
+            timer.daemon = True
+            timer.start()
+            return timer
+
+    def restore_connectivity(self):
+        self.callbacks.error(-1, 1102, "synthetic restoration")
 
     def is_connected(self):
         return self.connected
