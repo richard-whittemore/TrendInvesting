@@ -89,7 +89,7 @@ func TestResetSafetyJournalFailureStillWaits(t *testing.T) {
 					t.Errorf("delay=%s", d)
 				}
 			})
-			var out, errw io.Writer = io.Discard, io.Discard
+			var out, errw = io.Discard, io.Discard
 			if which == "stdout" {
 				out = failingWriter{}
 			} else {
@@ -222,7 +222,7 @@ func TestResetSafetyStopWinsWhenTimerIsReady(t *testing.T) {
 	r := newRig(t)
 	now, _ := time.Parse(time.RFC3339, "2026-11-01T04:58:00Z")
 	w := resetWait{now, now.Add(2 * time.Minute), 1}
-	if err := os.WriteFile(r.state, w.withAttempts(nil), 0600); err != nil {
+	if err := os.WriteFile(r.state, w.withAttempts(nil), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c := r.cfg(`exit 0`)
@@ -248,7 +248,7 @@ func TestResetSafetyMalformedWaitFailsClosed(t *testing.T) {
 	} {
 		t.Run(raw, func(t *testing.T) {
 			r := newRig(t)
-			if err := os.WriteFile(r.state, []byte(raw), 0600); err != nil {
+			if err := os.WriteFile(r.state, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if code, output := r.run(r.cfg(`exit 0`)); code != exitStopped || r.launches() != 0 {
@@ -262,7 +262,7 @@ func TestResetSafetyAcceptedLoginKeepsNightlyAllowance(t *testing.T) {
 	r := newRig(t)
 	at, _ := time.Parse(time.RFC3339, "2026-11-01T04:40:00Z")
 	w := resetWait{at.Add(-15 * time.Minute), at, 4}
-	if err := os.WriteFile(r.state, w.withAttempts(nil), 0600); err != nil {
+	if err := os.WriteFile(r.state, w.withAttempts(nil), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c := r.cfg(`echo 'IBC: Login has completed'; echo '` + refusal + `'`)

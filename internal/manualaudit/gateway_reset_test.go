@@ -8,7 +8,7 @@ import (
 )
 
 func TestGatewayResetManualStatesDurableBoundAndActualWait(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs/manual/server.md"))
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "manual", "server.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
