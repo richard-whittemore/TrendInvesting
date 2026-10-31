@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -767,5 +770,262 @@ func TestTheSettingsCannotMakeAFailingStartsCycleLongerThanTenMinutes(t *testing
 	worst := 3*c.SinkTimeout + 2*c.StopDeadline + c.DrainDeadline + 30*time.Second
 	if worst >= 10*time.Minute {
 		t.Fatalf("worst cycle %s is not under ten minutes", worst)
+	}
+}
+
+// Synthetic IBC output exercises the reset policy in docs/manual/server.md,
+// "The Gateway is logged out"; the clock advances without contacting IBKR.
+func resetClock(r *rig, c *config, at string, onWait func(time.Duration)) {
+	r.t.Helper()
+	now, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	var mu sync.Mutex
+	c.Now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	c.After = func(d time.Duration) <-chan time.Time {
+		if onWait != nil {
+			onWait(d)
+		}
+		mu.Lock()
+		now = now.Add(d)
+		next := now
+		mu.Unlock()
+		ch := make(chan time.Time, 1)
+		ch <- next
+		return ch
+	}
+}
+
+func TestNightlyResetBoundariesUseNewYorkRegardlessOfTheClocksZone(t *testing.T) {
+	for _, tc := range []struct {
+		at    string
+		clock string
+		reset bool
+	}{
+		{"2026-10-31T03:39:59Z", "23:39", false},
+		{"2026-10-31T03:40:00Z", "23:40", true},
+		{"2026-10-31T04:08:00Z", "00:08", true},
+		{"2026-10-31T04:59:59Z", "00:59", true},
+		{"2026-10-31T05:00:00Z", "01:00", false},
+		{"2026-10-31T05:05:00Z", "01:05", false},
+		{"2026-12-01T05:08:00Z", "00:08", true},
+		{"2026-12-01T06:00:00Z", "01:00", false},
+	} {
+		t.Run(tc.at, func(t *testing.T) {
+			r := newRig(t)
+			c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then echo '` + refusal + `'; else echo 'IBC: Login has completed'; fi`)
+			waits := 0
+			resetClock(r, &c, tc.at, func(d time.Duration) {
+				waits++
+				if d <= 0 || d > 15*time.Minute || len(r.counter()) != 0 {
+					t.Errorf("wait %s, count %v; want an uncounted reset and at most 15m", d, r.counter())
+				}
+			})
+			code, out := r.run(c)
+			if tc.reset {
+				want := "login refused at " + tc.clock + " ET inside IBKR's nightly reset hour; waiting 15 minutes, not counted (1 waits so far)"
+				if code != 0 || waits != 1 || r.launches() != 2 || !strings.Contains(out, want) || len(r.counter()) != 0 {
+					t.Fatalf("reset: exit %d, waits %d, launches %d, count %v: %s", code, waits, r.launches(), r.counter(), out)
+				}
+			} else if code != 75 || waits != 0 || len(r.counter()) != 1 {
+				t.Fatalf("outside reset: exit %d, waits %d, count %v: %s", code, waits, r.counter(), out)
+			}
+		})
+	}
+}
+
+func TestThreeResetRefusalsPreserveOlderAttemptsAndNeverStopTheRetries(t *testing.T) {
+	r := newRig(t)
+	r.now = time.Date(2026, 10, 31, 4, 8, 0, 0, time.UTC)
+	r.seed(r.now, r.now.Add(-time.Hour))
+	before, _ := os.ReadFile(r.state)
+	c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -le 3 ]; then echo '` + refusal + `'; else echo 'IBC: Login has completed'; fi`)
+	waits := 0
+	resetClock(r, &c, "2026-10-31T04:08:00Z", func(d time.Duration) {
+		waits++
+		got, _ := os.ReadFile(r.state)
+		if d != 15*time.Minute || !bytes.Equal(got, before) {
+			t.Errorf("wait %d: duration %s, count %q; want 15m and unchanged %q", waits, d, got, before)
+		}
+	})
+	code, out := r.run(c)
+	if code != 0 || waits != 3 || r.launches() != 4 || len(r.counter()) != 0 || strings.Contains(out, stopPhrase) || !strings.Contains(out, "(3 waits so far)") {
+		t.Fatalf("exit %d, waits %d, launches %d, count %v: %s", code, waits, r.launches(), r.counter(), out)
+	}
+}
+
+func TestResetWaitEndsAtOneAndTheNextRefusalReachesTheExistingBound(t *testing.T) {
+	r := newRig(t)
+	r.now = time.Date(2026, 10, 31, 4, 58, 0, 0, time.UTC)
+	r.seed(r.now, r.now.Add(-time.Hour))
+	c := r.cfg(`echo '` + refusal + `'`)
+	waits := 0
+	resetClock(r, &c, "2026-10-31T04:58:00Z", func(d time.Duration) {
+		waits++
+		if d != 2*time.Minute {
+			t.Errorf("wait %s; want 2m to the 01:00 ET cutoff", d)
+		}
+	})
+	code, out := r.run(c)
+	if code != 77 || waits != 1 || r.launches() != 2 || len(r.counter()) != 3 || !strings.Contains(out, stopPhrase) {
+		t.Fatalf("exit %d, waits %d, launches %d, count %v: %s", code, waits, r.launches(), r.counter(), out)
+	}
+}
+
+func TestRefusalsAtOneOhFiveKeepTheExistingRetryBound(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`echo '` + refusal + `'`)
+	resetClock(r, &c, "2026-10-31T05:05:00Z", func(time.Duration) { t.Error("wait outside the reset window") })
+	for _, want := range []int{75, 75, 77} {
+		if code, out := r.run(c); code != want {
+			t.Fatalf("exit %d, want %d: %s", code, want, out)
+		}
+	}
+}
+
+func TestGatewayUnitAllowsTheResetWaitWithoutReadinessOrWatchdogNotifications(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/systemd/ti-gateway.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := string(raw)
+	if !strings.Contains(unit, "Type=simple\n") || strings.Contains(unit, "WatchdogSec=") || strings.Contains(unit, "TimeoutStartSec=") {
+		t.Fatal("reassess the in-process reset wait: unit type, start timeout or watchdog changed")
+	}
+	for _, want := range []string{"Restart=always\n", "RestartSec=30\n", "RestartPreventExitStatus=64 65 77 78\n"} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("unit lacks %q", want)
+		}
+	}
+}
+
+func TestResetRefusalAfterAnAcceptedLoginDoesNotRestoreTheOldCount(t *testing.T) {
+	r := newRig(t)
+	r.now = time.Date(2026, 10, 31, 4, 8, 0, 0, time.UTC)
+	r.seed(r.now.Add(-time.Hour))
+	c := r.cfg(`echo 'IBC: Login has completed'; if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then echo '` + refusal + `'; fi`)
+	waits := 0
+	resetClock(r, &c, "2026-10-31T04:08:00Z", func(time.Duration) {
+		waits++
+		if len(r.counter()) != 0 {
+			t.Errorf("accepted login's cleared count restored: %v", r.counter())
+		}
+	})
+	code, out := r.run(c)
+	if code != 0 || waits != 1 || len(r.counter()) != 0 {
+		t.Fatalf("exit %d, waits %d, count %v: %s", code, waits, r.counter(), out)
+	}
+}
+
+func TestResetRetryEndsIBCsDescendantsBeforeWaiting(t *testing.T) {
+	r := newRig(t)
+	pidFile := filepath.Join(r.dir, "child")
+	c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then sleep 3 & echo $! > ` + pidFile + `; echo '` + refusal + `'; wait; else echo 'IBC: Login has completed'; fi`)
+	waits := 0
+	resetClock(r, &c, "2026-10-31T04:08:00Z", func(time.Duration) {
+		waits++
+		raw, err := os.ReadFile(pidFile)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		out, _ := exec.Command("ps", "-p", strings.TrimSpace(string(raw)), "-o", "stat=").Output()
+		if status := strings.TrimSpace(string(out)); status != "" && !strings.HasPrefix(status, "Z") {
+			t.Errorf("IBC descendant still running during the wait: %s", status)
+		}
+	})
+	code, out := r.run(c)
+	if code != 0 || waits != 1 {
+		t.Fatalf("exit %d, waits %d: %s", code, waits, out)
+	}
+}
+
+func TestServerManualNamesNightlyResetAndOrderedRecovery(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/manual/server.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "| `ti-gateway` failed and stays down") {
+			row = line
+		}
+	}
+	for _, want := range []string{"00:10 ET", "Friday", "01:00 ET", "waiting 15 minutes, not counted", "sudo systemctl start ti-gateway.service", "Login has completed", "sudo systemctl start ti-adapter-boost.service"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("gateway recovery row lacks %q", want)
+		}
+	}
+}
+
+func TestResetWaitCanBeInterruptedWhenTheUnitStops(t *testing.T) {
+	if os.Getenv("TI_TEST_RESET_WAIT") == "1" {
+		dir := os.Getenv("TI_TEST_RESET_DIR")
+		r := &rig{t: t, dir: dir, state: filepath.Join(dir, "login-failures")}
+		c := r.cfg(`echo '` + refusal + `'`)
+		resetClock(r, &c, "2026-10-31T04:08:00Z", nil)
+		c.After = func(time.Duration) <-chan time.Time {
+			fmt.Println("reset wait started")
+			return nil
+		}
+		os.Exit(run(c, os.Stdout, os.Stderr))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestResetWaitCanBeInterruptedWhenTheUnitStops$")
+	cmd.Env = append(os.Environ(), "TI_TEST_RESET_WAIT=1", "TI_TEST_RESET_DIR="+t.TempDir())
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ready := false
+	scanner := bufio.NewScanner(pipe)
+	for scanner.Scan() {
+		if scanner.Text() == "reset wait started" {
+			ready = true
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				t.Error(err)
+			}
+			break
+		}
+	}
+	err = cmd.Wait()
+	var ee *exec.ExitError
+	if !ready || !errors.As(err, &ee) || ee.ExitCode() != 143 {
+		t.Fatalf("wait reached %v, exit %v; want SIGTERM to interrupt the wait (143)", ready, err)
+	}
+}
+
+func TestAUnitStopDuringResetOutputDoesNotBecomeAnotherResetWait(t *testing.T) {
+	r := newRig(t)
+	c := r.cfg(`printf 'noise\n` + refusal + `\n'; while :; do :; done`)
+	resetClock(r, &c, "2026-10-31T04:08:00Z", nil)
+	c.Accepted = regexp.MustCompile(defaultAccepted)
+	c.SinkTimeout = time.Second
+	sigs := make(chan os.Signal, 1)
+	out := &journal{w: writerFunc(func(p []byte) (int, error) {
+		if strings.TrimSpace(string(p)) == "noise" {
+			sigs <- syscall.SIGTERM
+			// Hold the buffered refusal until the supervisor consumes the stop.
+			deadline := time.Now().Add(time.Second)
+			for len(sigs) > 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+		}
+		return len(p), nil
+	}), timeout: time.Second}
+	var messages bytes.Buffer
+	code := runIBC(c, out, &journal{w: &messages, timeout: time.Second}, sigs, 0)
+	if code != 143 {
+		t.Fatalf("exit %d, want 143 after a unit stop, never another reset wait: %s", code, messages.String())
 	}
 }
