@@ -277,9 +277,11 @@ restore timeout.
 
 The shipped schedule is daily **23:40–01:00 America/New_York**, plus
 Saturday **00:00–24:00** and Sunday **00:00–14:00** in the same zone.
-The weekend windows merge through Sunday 14:00. The owner's 2026-10-31
-evidence records paper-system unavailability from Saturday afternoon until
-Sunday early afternoon; the owner edits the file when IBKR's pattern changes.
+The weekend windows merge through Sunday 14:00. On Saturday 2026-10-31 the
+paper system was unavailable from 15:11 ET; when it returns on a weekend is
+not yet established, so the weekend default is provisional, to be revised
+from the times this server records, and the owner edits the file when
+IBKR's pattern becomes clear.
 An end of 24:00 means the next midnight; it is never a valid start.
 
 Windows include their start and exclude their end. Merge touching or
