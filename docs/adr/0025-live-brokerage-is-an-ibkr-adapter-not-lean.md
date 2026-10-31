@@ -275,6 +275,13 @@ file and windows loaded, or explicitly say the file is missing and no
 windows apply. Missing files and empty windows preserve the outside-window
 restore timeout.
 
+The shipped schedule is daily **23:40–01:00 America/New_York**, plus
+Saturday **00:00–24:00** and Sunday **00:00–14:00** in the same zone.
+The weekend windows merge through Sunday 14:00. The owner's 2026-10-31
+evidence records paper-system unavailability from Saturday afternoon until
+Sunday early afternoon; the owner edits the file when IBKR's pattern changes.
+An end of 24:00 means the next midnight; it is never a valid start.
+
 Windows include their start and exclude their end. Merge touching or
 overlapping intervals. A repeated local boundary uses the earlier start
 and later end; a nonexistent boundary rolls forward across the DST gap.
@@ -286,9 +293,16 @@ startup. The runtime finite-end check remains in force.
 A first 1100/2110 inside a window fixes the deadline at the later of the
 window end and loss time plus restore_timeout (deployed: five minutes).
 Repeated losses do not extend it. Pin the same elapsed duration on a
-monotonic clock so moving the wall clock back cannot prolong the wait.
-Judge restoration by callback receipt time, consuming queued callbacks
-before declaring expiry; an actual socket close reconnects. Restoration
+monotonic clock. Capture both wall-clock and monotonic receipt times for
+restoration; receipt at or after either deadline expires the session.
+A callback received before both deadlines remains timely when processed
+later. Without a receipt time, use that clock's current time. A wall-clock
+rollback therefore neither extends the wait nor admits a late restoration.
+Before checking expiry, drain only the callbacks queued at entry (including
+pending callbacks), stopping early if the loss clears. Then re-check expiry
+and the outside-window reconnect before consuming newly arriving traffic;
+continued arrivals cannot postpone either indefinitely. An actual socket
+close reconnects. Restoration
 still requires reconciliation, and scheduled expiry closes with exit 3 for
 a Gateway restart by the owner. The journal names the deadline's time zone
 and the later occurrence of a repeated hour.

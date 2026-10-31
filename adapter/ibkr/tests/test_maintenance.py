@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_connection import Harness
 import connection
 
+# Synthetic short windows for docs/manual/ibkr-adapter.md's interruption cases;
+# CLI tests share them; the shipped weekend default is checked separately below.
 DEFAULT = {"windows": [
     {"days": ["daily"], "start": "23:40", "end": "01:00", "zone": "America/New_York"},
     {"days": ["Sat"], "start": "00:00", "end": "12:00", "zone": "America/New_York"},
@@ -27,6 +29,45 @@ def utc(text):
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_shipped_schedule_covers_weekend_until_sunday_afternoon(self):
+        from maintenance import MaintenanceSchedule
+        path = Path(__file__).resolve().parents[3] / "deploy/etc/ibkr-maintenance.json.example"
+        self.assertEqual(json.loads(path.read_text()), {"windows": [
+            {"days": ["daily"], "start": "23:40", "end": "01:00", "zone": "America/New_York"},
+            {"days": ["Sat"], "start": "00:00", "end": "24:00", "zone": "America/New_York"},
+            {"days": ["Sun"], "start": "00:00", "end": "14:00", "zone": "America/New_York"},
+        ]})
+        schedule = MaintenanceSchedule.load(path)
+        cases = [
+            ("2026-10-30T03:40:00", "2026-10-30T05:00:00"),
+            ("2026-10-30T05:00:00", None),
+            ("2026-10-31T03:39:59", None),
+            ("2026-10-31T03:40:00", "2026-11-01T19:00:00"),
+            ("2026-10-31T04:00:00", "2026-11-01T19:00:00"),
+            ("2026-10-31T19:11:00", "2026-11-01T19:00:00"),
+            ("2026-11-01T04:00:00", "2026-11-01T19:00:00"),
+            ("2026-11-01T05:30:00", "2026-11-01T19:00:00"),
+            ("2026-11-01T06:30:00", "2026-11-01T19:00:00"),
+            ("2026-11-01T18:59:59", "2026-11-01T19:00:00"),
+            ("2026-11-01T19:00:00", None),
+            ("2026-10-25T17:08:00", "2026-10-25T18:00:00"),
+            ("2026-03-08T07:30:00", "2026-03-08T18:00:00"),
+        ]
+        for now, end in cases:
+            with self.subTest(now=now):
+                self.assertEqual(schedule.window_end(utc(now)), utc(end) if end else None)
+
+    def test_end_of_day_is_allowed_only_as_an_end_and_keeps_weekly_gap(self):
+        from maintenance import MaintenanceSchedule
+        from config import ConfigError
+        window = {"days": ["Sat"], "start": "00:00", "end": "24:00", "zone": "America/New_York"}
+        schedule = MaintenanceSchedule.from_mapping({"windows": [window]})
+        self.assertEqual(schedule.window_end(utc("2026-10-31T04:00:00")), utc("2026-11-01T04:00:00"))
+        self.assertIsNone(schedule.window_end(utc("2026-11-01T04:00:00")))
+        for changes in ({"start": "24:00"}, {"end": "24:01"}, {"end": "00:00"}, {"days": ["daily"]}):
+            with self.subTest(changes=changes), self.assertRaises(ConfigError):
+                MaintenanceSchedule.from_mapping({"windows": [dict(window, **changes)]})
+
     def test_boundaries_overlap_weekday_and_dst_night(self):
         from maintenance import MaintenanceSchedule
         schedule = MaintenanceSchedule.from_mapping(DEFAULT)
@@ -147,6 +188,36 @@ class InterruptionTests(unittest.TestCase):
         with self.assertRaises(connection.MaintenanceExpired):
             h.conn.maintain()
 
+    def test_queued_notices_cannot_postpone_expiry_or_reconnect(self):
+        for inside in (True, False):
+            with self.subTest(inside=inside):
+                h = self.harness(inside)
+                h.fake.hold_connectivity()
+                h.conn.pump(0)
+                h.clock.now = (h.conn._maintenance_deadline if inside else
+                               h.conn._lost_at + h.conn.config.restore_timeout) - 1
+                h.fake.callbacks.error(-1, 2104, "synthetic pending notice")
+                h.conn._pending.append(h.conn.inbox.get(0))
+                h.fake.callbacks.error(-1, 2104, "synthetic queued notice")
+                seen = []
+                def more_notices(event):
+                    if event.name == "error" and event.args[1] == 2104:
+                        seen.append(event.args[2])
+                        self.assertLessEqual(len(seen), 2, "new callbacks postponed the deadline check")
+                        h.clock.now += 1
+                        h.fake.callbacks.error(-1, 2104, "synthetic new notice")
+                h.conn.subscribe(more_notices)
+                if inside:
+                    with self.assertRaises(connection.MaintenanceExpired):
+                        h.conn.maintain()
+                    self.assertFalse(h.fake.connected)
+                else:
+                    h.conn.maintain()
+                    self.assertTrue(h.conn.connected)
+                    self.assertTrue(h.conn.needs_reconciliation)
+                self.assertEqual(seen, ["synthetic pending notice", "synthetic queued notice"])
+                self.assertEqual(len(h.fake.called("connect")), 1 if inside else 2)
+
     def test_wall_clock_rollback_does_not_extend_wait(self):
         h = self.harness(True)
         h.fake.hold_connectivity()
@@ -159,6 +230,29 @@ class InterruptionTests(unittest.TestCase):
         h.clock.now = deadline
         with self.assertRaises(connection.MaintenanceExpired):
             h.conn.maintain()
+
+    def test_restoration_receipt_honours_monotonic_deadline_after_rollback(self):
+        for consume, code, offset in itertools.product(("pump", "maintain"), (1101, 1102), (-1, 0, 1)):
+            with self.subTest(consume=consume, code=code, receipt_offset=offset):
+                h = self.harness(True)
+                h.fake.hold_connectivity()
+                h.conn.pump(0)
+                deadline = h.conn._maintenance_deadline
+                h.conn._wall_clock = lambda: utc("2026-10-30T09:44:00")
+                h.clock.now = deadline + offset
+                h.fake.callbacks.error(-1, code, "synthetic restoration")
+                h.clock.now = deadline + 2
+                consume_callback = (lambda: h.conn.pump(0)) if consume == "pump" else h.conn.maintain
+                if offset < 0:
+                    consume_callback()
+                    self.assertTrue(h.conn.connected)
+                    self.assertTrue(h.conn.needs_reconciliation)
+                else:
+                    with self.assertRaises(connection.MaintenanceExpired):
+                        consume_callback()
+                    self.assertFalse(h.fake.connected)
+                    self.assertFalse(h.conn.connected)
+                self.assertEqual(len(h.fake.called("connect")), 1)
 
     def test_fall_back_wait_names_the_later_hour(self):
         h = self.harness(True)

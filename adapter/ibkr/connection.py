@@ -177,7 +177,7 @@ class Connection:
         self._wall_clock = wall_clock
         self._subscribers = []
         self._pending = deque()
-        self.inbox = Inbox(self.now_utc)
+        self.inbox = Inbox(self.now_utc, self._monotonic)
         self.connected = False
         self.needs_reconciliation = True
         # The adapter's own wall-clock time when the current link's handshake
@@ -650,7 +650,7 @@ class Connection:
         log.info("ibkr connecting host=%s port=%d client_id=%d", cfg.host, cfg.port, cfg.client_id)
         # A fresh Inbox per attempt: a callback from an abandoned session can
         # never be read as part of this one.
-        self.inbox = Inbox(self.now_utc)
+        self.inbox = Inbox(self.now_utc, self._monotonic)
         self._pending.clear()
         self.connected_at = None
         self._connected_monotonic = None
@@ -839,10 +839,12 @@ class Connection:
         call (ADR 0025 point 3).
         """
         self._check_stop()
-        # Apply queued callbacks before expiry: restoration is judged at receipt,
-        # and a closed socket must reconnect (docs/manual/ibkr-adapter.md).
-        while self._lost_at is not None and self.pump(0) is not None:
-            pass
+        # ADR 0025: drain only what is queued at entry before checking expiry,
+        # so incoming traffic cannot postpone the bound or outside reconnect.
+        # Restoration is judged at receipt; a closed socket must reconnect.
+        for _ in range(len(self._pending) + self.inbox.queued_count()):
+            if self._lost_at is None or self.pump(0) is None:
+                break
         if self.connected:
             self.check_heartbeat()
         if self._lost_at is not None:
@@ -944,7 +946,7 @@ class Connection:
             self.last_server_time = event.args[0]
             self._probe_sent_at = None
         elif event.name == "error":
-            self._apply_error(event.args[1], event.received_at)
+            self._apply_error(event.args[1], event.received_at, event.received_monotonic)
 
     def _account_values_seen(self, event):
         """Note an account-values callback for settle_account_values; an error is still applied as any other."""
@@ -955,7 +957,7 @@ class Connection:
         if self._values_quiet_until is not None:
             self._values_quiet_until = max(self._values_quiet_until, self._monotonic() + ACCOUNT_VALUES_QUIET)
         if event.name == "error":
-            self._apply_error(event.args[1], event.received_at)
+            self._apply_error(event.args[1], event.received_at, event.received_monotonic)
 
     def _is_echo(self, event):
         """Whether an openOrder row is IBKR's echo of an order this client placed on this session (see placing)."""
@@ -965,16 +967,14 @@ class Connection:
             return True
         return False
 
-    def _check_maintenance_end(self, received_at=None):
+    def _check_maintenance_end(self, received_at=None, received_monotonic=None):
         if self._lost_at is None or self._maintenance_end is None:
             return
         # ADR 0025, scheduled interruptions: a queued restoration is judged
-        # at receipt; without one, wall or monotonic expiry ends the wait.
-        if received_at is not None:
-            expired = received_at >= self._maintenance_expires_at
-        else:
-            expired = (self.now_utc() >= self._maintenance_expires_at
-                       or self._monotonic() >= self._maintenance_deadline)
+        # against both receipt clocks; without one, use its current time.
+        wall = received_at if received_at is not None else self.now_utc()
+        monotonic = received_monotonic if received_monotonic is not None else self._monotonic()
+        expired = wall >= self._maintenance_expires_at or monotonic >= self._maintenance_deadline
         if expired:
             self._abandon()
             raise MaintenanceExpired("IBKR connectivity did not return by the end of its scheduled "
@@ -988,7 +988,7 @@ class Connection:
                  ending, self._maintenance_expires_at.isoformat())
         self._maintenance_notice = self._monotonic() + 3600
 
-    def _apply_error(self, code, received_at=None):
+    def _apply_error(self, code, received_at=None, received_monotonic=None):
         if code in (CODE_CONNECTIVITY_LOST, CODE_SERVER_LINK_BROKEN):
             self.connected = False
             if self._lost_at is None:
@@ -1002,7 +1002,7 @@ class Connection:
                     self._log_maintenance_wait()
                 self._report("connectivity-lost", "gateway-lost-ibkr", ibkr_code=code)
         elif code in (CODE_RESTORED_DATA_LOST, CODE_RESTORED_DATA_MAINTAINED):
-            self._check_maintenance_end(received_at)
+            self._check_maintenance_end(received_at, received_monotonic)
             if self._drop_when_restored is not None:
                 reason = self._drop_when_restored
                 self._abandon()

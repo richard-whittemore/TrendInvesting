@@ -54,7 +54,7 @@ subject to the paper gate, and live sending remains disabled.
 | Piece (file) | What it does | Built? |
 | --- | --- | --- |
 | Configuration (`config.py`) | Host, port (4002 is IB Gateway's paper port), this engine's client ID, the IBKR account, the mode, the timing bounds (`commission_wait` among them) and `con_ids`, IBKR's contract number for each instrument. Every value is required except `gateway_clock_check_interval` (43200 seconds, 12 hours, when left out; allowed range 1 to 48 hours), `paper_sending_enabled` (off when left out), and the IRA's two, `account_snapshot_version` (3, Boost's, when left out; 4 for a whole-share IRA, 6 for a fractional IRA) and `resolve_contracts` (off when left out; on for an IRA), so Boost's configuration reads exactly as before ("The IRAs' adapter", below). That includes `mark_timeout`, how long the adapter waits for IBKR's last prices (the example sets 15 seconds: IBKR sends the last price at once but only finishes the request at the end of an 11-second window, and the adapter takes a price only from a finished request, so a wait of 11 seconds or less can miss a price IBKR did send). A key that looks like a credential is refused: the adapter never holds the IBKR login, IBC does. A paper configuration must name a paper account (beginning `DU`), and `live` is refused | Built |
-| Connection (`connection.py`) | Connects under the engine's own **client ID** (Boost 11, Traditional IRA 12, Roth IRA 13; 0 is refused). Set IB Gateway's **Master API client ID** to it (Configure > Settings > API > Settings): IBKR shows an API client other clients' and TWS's executions only then, and the adapter asks for every client's (`docs/runbooks/first-paper-order.md`, A4); its check of the holdings and cash since the previous close needs no client ID ([paper trading](paper-trading.md), "A paper day"). It notices a lost link (a closed socket, IBKR's codes 1100, 2110, 504, 1300, or no answer to a heartbeat) and a restored one (1101, 1102), after which it matches IBKR's orders and balances again before sending, and reconnects with growing pauses. When Gateway says it has lost IBKR's servers (1100 or 2110) it waits for Gateway to restore them (1101, 1102) for at most `restore_timeout`, and only while Gateway's connection stays open: if the connection closes during that wait, it reports the link lost at once and connects again straight away. Each new session records which accounts the IBKR login manages | Built |
+| Connection (`connection.py`) | Connects under the engine's own **client ID** (Boost 11, Traditional IRA 12, Roth IRA 13; 0 is refused). Set IB Gateway's **Master API client ID** to it (Configure > Settings > API > Settings): IBKR shows an API client other clients' and TWS's executions only then, and the adapter asks for every client's (`docs/runbooks/first-paper-order.md`, A4); its check of the holdings and cash since the previous close needs no client ID ([paper trading](paper-trading.md), "A paper day"). It notices a lost link (a closed socket, IBKR's codes 1100, 2110, 504, 1300, or no answer to a heartbeat) and a restored one (1101, 1102), after which it matches IBKR's orders and balances again before sending, and reconnects with growing pauses. When Gateway says it has lost IBKR's servers (1100 or 2110) it waits for Gateway to restore them (1101, 1102) until the later of the scheduled window end and loss time plus `restore_timeout` (outside a window, `restore_timeout`; "Scheduled interruptions" below), and only while Gateway's connection stays open: if the connection closes during that wait, it reports the link lost at once and connects again straight away. Each new session records which accounts the IBKR login manages | Built |
 | Account read (`account.py`, `snapshot.py`) | Reads positions, net liquidation, total cash, Excess Liquidity and every open order in one pass, bracketed by IBKR's clock, and builds the records the engine reads from one reading: the engine's **account snapshot** (positions and net liquidation, which orders are valued against), the **broker snapshot** the risk gate sizes sells from and the margin alarm watches, both stamped as of the session's close when the reading stands for it (your decision of 2026-10-18) or at the read time with the reason, the **mark** (the delivered bar's official close, IBKR's last price beside it, which the price band compares with when it is set), and the **reconciliation** the engine compares against its book. For an IRA (`account_snapshot_version` 4 for whole shares, 6 for D7-F) the account snapshot includes the same positions and net liquidation with IBKR's **settled cash** (`SettledCash`) and **total cash** (`TotalCashValue`) beside them, from the same reading; a reading without both gives no snapshot at all, never one with a zero. Anything IBKR did not deliver, or delivered in a form the engine cannot hold exactly, is marked **unreadable**, never sent as zero ([reconciliation](reconciliation.md), "What the adapter sends") | Built |
 | Contracts (`snapshot.py`, `resolve_contracts`) | For an IRA only (`resolve_contracts`): asks IBKR, by name (a class share in IBKR's spelling, `BRK.B` as `BRK B`), for the contract of each instrument a delivery marks, as a US-dollar stock on SMART, and records the one contract IBKR answers (its contract number, SMART, its primary exchange, US dollars) with the mark. A name IBKR answers with no contract, more than one, or one that is not that name's own US-dollar stock gets no mark ("Contracts and marks for an IRA", below) | Built, against a stand-in for IB Gateway built from what IBKR's own `ibapi` hands the adapter |
 | Same-day probe (`probe.py`) | `python3 -m adapter.ibkr probe ...`: reads one start's journal lines and the engine's durable log, talks to nothing, and says check by check whether the start worked ("The same-day probe", below) | Built; run on the server after every adapter install |
@@ -481,20 +481,28 @@ the order stays released:
 ## Scheduled interruptions and stopping during a wait
 
 The owner decision of 2026-10-31 treats IBKR's nightly server reset and
-Saturday maintenance as expected interruptions. That day's Saturday outage
-also established that waiting alone need not recover the Gateway: its 2110
+weekend maintenance as expected interruptions. The owner's journals show
+the paper account could not be read from 17:07 ET on 2026-10-25 and the link
+returned at 13:08 ET on 2026-10-26; on 2026-10-31 the host became unreachable
+at 15:11 ET and Client Portal showed "NAV calculation currently unavailable".
+The owner's observed pattern is Saturday afternoon through Sunday early
+afternoon, so the default covers all Saturday and Sunday through 14:00.
+The 2026-10-31 outage also established that waiting alone need not recover the Gateway: its 2110
 cleared only after a Gateway restart. The adapter therefore waits quietly
 until a fixed bound, then stops for the owner; it never restarts Gateway.
 
 The shared schedule is `/etc/trend-investing/ibkr-maintenance.json`, read at
 adapter start before any connection. `sudo deploy/provision.sh services`
 installs it from `deploy/etc/ibkr-maintenance.json.example` only if absent;
-reruns preserve the owner's edits. For an existing server, install just this
+reruns preserve the owner's edits. `provision.sh adapter` does not install the schedule.
+For an existing server, install just this
 file with `sudo install -m 0644 deploy/etc/ibkr-maintenance.json.example
 /etc/trend-investing/ibkr-maintenance.json` **only if the destination does not
-exist**. Restart the adapter after editing it. `--maintenance FILE` selects
-another path. No file, or `{"windows": []}`, means no scheduled windows and
-keeps the existing five-minute (`restore_timeout`) behavior. Malformed JSON,
+exist**. Edit the file when IBKR's pattern changes, then restart the adapter.
+`--maintenance FILE` selects another path.
+Without the file the adapter behaves exactly as before: no scheduled windows
+and the existing five-minute (`restore_timeout`) behavior. `{"windows": []}`
+also means no scheduled windows. Malformed JSON,
 duplicate keys, unknown fields, invalid days, times or zones refuse startup
 with a reason. The startup journal names the schedule file and every window
 loaded (days, start, end and zone); a missing file says plainly
@@ -503,15 +511,18 @@ journal before leaving the adapter for the night.
 
 The file is an object containing a `windows` array. Each entry contains
 `days` (a list of `Mon` through `Sun`, or `["daily"]`), `start` and `end`
-(`HH:MM`), and `zone` (an installed IANA zone). Days name the day a window
-starts; an end earlier than its start means the next day. Equal start and
-end, or windows covering the whole week without a gap, are refused. Validation
+(`HH:MM`, with **24:00 allowed only as an end** meaning the next midnight),
+and `zone` (an installed IANA zone). Days name the day a window
+starts; an end earlier than its start means the next day. Equal written start
+and end, or windows covering the whole week without a gap, are refused. Validation
 checks every day of the startup calendar year, including both DST transitions.
 The shipped windows are daily **23:40–01:00 America/New_York** (a five-minute
-margin before the reset window) and Saturday **00:00–12:00 America/New_York**.
+margin before the reset window), plus Saturday **00:00–24:00** and Sunday
+**00:00–14:00** in the same zone.
 Starts are inclusive and ends exclusive. Overlapping or touching windows
-are merged: Friday night's outage may wait until Saturday noon. At the
-2026-11-01 fall-back, the nightly end is the **later 01:00**, 06:00 UTC.
+are merged: Friday night's outage may wait until Sunday 14:00, including
+across the 2026-11-01 fall-back (that Sunday end is 19:00 UTC).
+For a nightly window alone on that fall-back, its end is the **later 01:00**, 06:00 UTC.
 Repeated start times use the earlier occurrence; a nonexistent spring
 boundary rolls forward across the clock gap. All deadline arithmetic uses
 UTC and a monotonic elapsed-time bound, so a clock rollback cannot extend
@@ -523,9 +534,15 @@ window end gets the deployed five-minute minimum. Repeated loss notices do
 not renew it. The scheduled wait journals
 `ibkr link: IBKR servers lost inside the scheduled window ending HH:MM ZONE; waiting until UTC-DEADLINE`
 once at its start and at most once per hour. On the fall-back night the end
-reads `01:00 EST, the later one`. Restoration (1102, or the existing data-lost
-restoration 1101) is judged by when the callback was received, even if it is
-processed after the deadline, and requires reconciliation before sending.
+reads `01:00 EST, the later one` if the configured window ends at that repeated
+hour; the shipped weekend window ends at `14:00 EST`.
+Restoration (1102, or the existing data-lost restoration 1101) must have been
+received before both the wall-clock and monotonic deadlines, even if it is
+processed later. A clock rollback cannot admit a late restoration.
+Before checking expiry or reconnecting outside a window, `maintain()` drains
+only the callbacks queued at entry, including pending callbacks, stopping
+early if the loss clears; newly arriving traffic cannot prolong that drain.
+Restoration requires reconciliation before sending.
 A socket that actually closes is still reconnected; an open socket is kept
 through the scheduled wait. A safety close requested during an incomplete
 read remains deferred until restoration, as before.
@@ -567,6 +584,14 @@ can occur. `test_stop_matrix_interrupts_an_entered_wait` sets stop from a
 thread only after restoration, stale-ID or reconnect waits begin.
 `test_loss_just_before_window_end_gets_five_minutes` checks the minimum and
 `test_wall_clock_rollback_does_not_extend_wait` checks the monotonic bound.
+`test_restoration_receipt_honours_monotonic_deadline_after_rollback` checks
+both restoration codes at either side of that bound, through `pump()` and
+`maintain()`, including timely receipts processed late.
+`test_queued_notices_cannot_postpone_expiry_or_reconnect` checks continued
+arrivals during both scheduled and outside-window losses.
+`test_shipped_schedule_covers_weekend_until_sunday_afternoon` checks the
+installed example's merged weekend, exclusive end and both DST transitions;
+`test_end_of_day_is_allowed_only_as_an_end_and_keeps_weekly_gap` checks 24:00.
 `test_sigterm_waits` sends real SIGTERM to
 CLI subprocesses in each wait; `test_boundaries_overlap_weekday_and_dst_night`
 checks the DST boundary; `test_stale_id_grace_is_fixed_and_foreign_id_at_start_is_immediate`

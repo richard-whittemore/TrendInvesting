@@ -13,7 +13,7 @@ two published signatures are reduced to one here.
 import queue
 from collections import namedtuple
 
-Event = namedtuple("Event", "name args received_at", defaults=(None,))
+Event = namedtuple("Event", "name args received_at received_monotonic", defaults=(None, None))
 
 
 class TWSApi:
@@ -124,7 +124,7 @@ class TWSApi:
 
 def _recorder(name):
     def record(self, *args):
-        self._queue.put(Event(name, args, self._wall_clock()))
+        self._queue.put(Event(name, args, self._wall_clock(), self._monotonic()))
     record.__name__ = name
     return record
 
@@ -160,11 +160,14 @@ class Inbox:
         "contract_details_end",  # (req_id)
     )
 
-    def __init__(self, wall_clock=lambda: None):
+    def __init__(self, wall_clock=lambda: None, monotonic=lambda: None):
         self._queue = queue.Queue()
         # Capture arrival on the reader thread, so queue delays cannot look
         # like Gateway clock drift (docs/manual/reconciliation.md).
         self._wall_clock = wall_clock
+        # ADR 0025: restoration must arrive before both deadline clocks,
+        # even if the wall clock moves backward or consumption is delayed.
+        self._monotonic = monotonic
 
     def note(self, name, *args):
         """Queue the adapter's own note name (with args) behind every callback already received.
@@ -184,6 +187,13 @@ class Inbox:
             return self._queue.get(timeout=timeout)
         except queue.Empty:
             return None
+
+    def queued_count(self):
+        """Count callbacks queued now; only the adapter thread consumes them (ADR 0025).
+
+        A drain capped at this count cannot be extended by incoming traffic.
+        """
+        return self._queue.qsize()
 
 
 for _name in Inbox.CALLBACKS:

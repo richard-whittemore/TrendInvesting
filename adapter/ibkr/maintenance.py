@@ -44,10 +44,13 @@ class MaintenanceSchedule:
             times = []
             for key in ("start", "end"):
                 text = row[key]
+                # ADR 0025: 24:00 is the next midnight, only as an end.
+                if key == "end" and text == "24:00":
+                    text = "00:00"
                 if not isinstance(text, str) or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", text):
-                    raise ConfigError(prefix + key + " must be HH:MM (00:00 through 23:59)")
+                    raise ConfigError(prefix + key + " must be HH:MM (00:00 through 23:59; end also allows 24:00)")
                 times.append(datetime.strptime(text, "%H:%M").time())
-            if times[0] == times[1]:
+            if times[0] == times[1] and row["end"] != "24:00":
                 raise ConfigError(prefix + "start and end must differ")
             try:
                 zone = ZoneInfo(row["zone"])
@@ -82,7 +85,7 @@ class MaintenanceSchedule:
                 day = today + timedelta(days=offset)
                 if day.weekday() not in days:
                     continue
-                finish = day + timedelta(days=int(end < start))
+                finish = day + timedelta(days=int(end <= start))
                 intervals.append((_boundary(day, start, zone, False), _boundary(finish, end, zone, True)))
         merged = []
         for start, end in sorted(intervals):
