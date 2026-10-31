@@ -448,7 +448,12 @@ func TestResetHistoryMustBeConsistentWithTheRecordedRefusal(t *testing.T) {
 			if err := os.WriteFile(r.state, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if code, output := r.run(r.cfg(`exit 0`)); code != exitStopped || r.launches() != 0 {
+			// The clock sits just after the refusal, inside its wait, so neither the
+			// skew check nor an expired deadline can be what stops the start.
+			c := r.cfg(`exit 0`)
+			resetClock(r, &c, "2026-11-01T04:59:00Z", func(d time.Duration) { t.Errorf("an inconsistent history was waited on for %s", d) })
+			code, output := r.run(c)
+			if code != exitStopped || r.launches() != 0 || !strings.Contains(output, "reset history") {
 				t.Fatalf("inconsistent history allowed startup: code=%d launches=%d %s", code, r.launches(), output)
 			}
 		})
