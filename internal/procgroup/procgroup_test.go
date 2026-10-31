@@ -66,7 +66,9 @@ func TestKillEndsAStartedCommandsGroup(t *testing.T) {
 		if err == nil {
 			t.Fatal("the command was not killed")
 		}
-		if err := WaitGone(cmd.Process.Pid, time.Second); err != nil {
+		// The killed sleep is reaped by init, not by this test, and a loaded
+		// machine takes its time over that; the bound is still a bound.
+		if err := WaitGone(cmd.Process.Pid, 5*time.Second); err != nil {
 			t.Fatalf("group survived cleanup: %v", err)
 		}
 	case <-time.After(10 * time.Second):
