@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/richard-whittemore/TrendInvesting/internal/procgroup"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1043,7 +1044,7 @@ func TestBlockedRendererStopsOnSignal(t *testing.T) {
 		dir := os.Getenv("TI_TEST_RENDER_DIR")
 		r := &rig{t: t, dir: dir, state: filepath.Join(dir, "login-failures"), now: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)}
 		c := r.cfg(`exit 0`)
-		c.Render = []string{"sh", "-c", `trap '' TERM INT; echo renderer-ready; sleep 3`}
+		c.Render = []string{"sh", "-c", `trap '' TERM INT; echo renderer-ready $$; sleep 3`}
 		c.StopDeadline = 100 * time.Millisecond
 		os.Exit(run(c, os.Stdout, os.Stderr))
 	}
@@ -1063,12 +1064,18 @@ func TestBlockedRendererStopsOnSignal(t *testing.T) {
 				t.Fatal(err)
 			}
 			scanner := bufio.NewScanner(pipe)
-			ready := false
+			ready, rendererPid := false, 0
 			for scanner.Scan() {
-				if scanner.Text() == "renderer-ready" {
+				if fields := strings.Fields(scanner.Text()); len(fields) == 2 && fields[0] == "renderer-ready" {
 					ready = true
+					rendererPid, _ = strconv.Atoi(fields[1])
 					break
 				}
+			}
+			if rendererPid > 1 {
+				// Whatever the outcome, the renderer this test started is ended by the
+				// one guarded way (docs/development.md, "Ending processes").
+				t.Cleanup(func() { _ = procgroup.Kill(rendererPid) })
 			}
 			start := time.Now()
 			if err := cmd.Process.Signal(sig); err != nil {
@@ -1081,6 +1088,13 @@ func TestBlockedRendererStopsOnSignal(t *testing.T) {
 			}
 			if r.launches() != 0 || len(r.counter()) != 0 {
 				t.Fatalf("stopped renderer launched IBC: launches=%d count=%v", r.launches(), r.counter())
+			}
+			// The renderer's own group must be gone, not merely abandoned.
+			if rendererPid <= 1 {
+				t.Fatal("the renderer did not report its pid")
+			}
+			if err := procgroup.WaitGone(rendererPid, time.Second); err != nil {
+				t.Fatalf("the renderer's process group survived the supervisor's stop: %v", err)
 			}
 		})
 	}

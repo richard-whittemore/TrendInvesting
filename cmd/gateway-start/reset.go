@@ -44,7 +44,9 @@ func splitReset(raw []byte) (resetWait, []byte, error) {
 	}
 	line, rest, ok := strings.Cut(string(raw), "\n")
 	fields := strings.Fields(line)
-	if !ok || len(fields) < 4 {
+	// refusal, deadline, count and the count's timestamps: a header without the
+	// timestamps cannot account for the rolling allowance and is refused.
+	if !ok || len(fields) < 5 {
 		return w, nil, errors.New("malformed reset wait")
 	}
 	values := make([]int64, len(fields)-1)
@@ -58,14 +60,7 @@ func splitReset(raw []byte) (resetWait, []byte, error) {
 		return w, nil, errors.New("invalid reset allowance")
 	}
 	w.refused, w.until = time.Unix(values[0], 0), time.Unix(values[1], 0)
-	if len(values) == 3 {
-		// Legacy nightly counts have no individual timestamps. Charging all
-		// at the latest refusal conservatively preserves the rolling bound
-		// (docs/manual/server.md, reset policy).
-		for range int(values[2]) {
-			w.refusals = append(w.refusals, w.refused)
-		}
-	} else {
+	{
 		if len(values)-3 != int(values[2]) {
 			return resetWait{}, nil, errors.New("invalid reset history length")
 		}

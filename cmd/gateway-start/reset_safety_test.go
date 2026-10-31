@@ -251,6 +251,7 @@ func TestResetSafetyMalformedWaitFailsClosed(t *testing.T) {
 	for _, raw := range []string{
 		"reset 1793509080\n", "reset invalid 1793509200 1\n",
 		"reset 1793509080 1793509200 0\n", "reset 1793509080 1793509200 5\n",
+		"reset 1793509080 1793509200 1\n", "reset 1793509080 1793509200 2 1793509080\n",
 		"reset 1793509080 1793509200 1\nreset 1 2 3\n",
 	} {
 		t.Run(raw, func(t *testing.T) {
