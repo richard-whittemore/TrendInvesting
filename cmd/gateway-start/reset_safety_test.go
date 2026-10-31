@@ -353,7 +353,7 @@ func TestResetInconsistentWaitStopsWithoutLaunching(t *testing.T) {
 				return ch
 			}
 			code, output := r.run(c)
-			if code != exitStopped || r.launches() != 0 || !(strings.Contains(output, "inconsistent") || strings.Contains(output, "reset history")) {
+			if code != exitStopped || r.launches() != 0 || (!strings.Contains(output, "inconsistent") && !strings.Contains(output, "reset history")) {
 				t.Fatalf("code=%d launches=%d: %s", code, r.launches(), output)
 			}
 			if raw2, _ := os.ReadFile(r.state); string(raw2) != raw {
