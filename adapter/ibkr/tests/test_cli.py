@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -378,6 +379,78 @@ class CommandTests(unittest.TestCase):
         write_stream(streams / "run-1", __import__("datetime").date(2027, 1, 14), envelopes)
         self.assertEqual(self.run_main(self.argv("--streams", str(streams)), steps=10), 0, self.err.getvalue())
         self.assertEqual([e["type"] for e in self.engine.inputs()], FIRST + DAY)
+
+    def test_recovery_delivers_fresh_runs_warmup_after_approval(self):
+        self.recover_after_stop(missing_schedule=False)
+
+    def test_recovery_delivers_fresh_runs_warmup_with_missing_schedule(self):
+        self.recover_after_stop(missing_schedule=True)
+
+    def recover_after_stop(self, missing_schedule):
+        from datetime import date, datetime, timezone
+        from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, final_hash
+        from test_delivery import session_envelopes, write_stream
+        from test_maintenance import DEFAULT
+
+        now = datetime(2026, 10, 31, 16, 45, tzinfo=timezone.utc)
+        day = date(2026, 10, 23)
+        streams = self.dir / "streams"
+        schedule = self.dir / "maintenance.json"
+        if not missing_schedule:
+            schedule.write_text(json.dumps(DEFAULT))
+        for name in ("run-1", "run-2"):
+            write_stream(streams / name, day, session_envelopes(
+                [day], run=name, configuration_hash=CONFIGURATION_HASH, strategy_version=STRATEGY_VERSION))
+        self.fake.server_time = int(now.timestamp())
+
+        def run():
+            return main(self.argv("--streams", str(streams), "--maintenance", str(schedule)),
+                        api_factory=self.api, engine_connect=lambda *a: self.engine,
+                        should_stop=Steps(3), err=self.err, poll=.01, now=lambda: now,
+                        ibapi_version=lambda: (10, 51, 1), protobuf_version=lambda: "5.29.5")
+
+        # The recovery drill stops the adapter as soon as the engine has
+        # halted. Let SIGTERM coincide with a committed engine reply.
+        handlers = {}
+        decide = self.engine.decide
+
+        def answered(envelope):
+            reply = decide(envelope)
+            handlers[signal.SIGTERM](None, None)
+            return reply
+
+        self.engine.decide = answered
+        with mock.patch("cli.signal.signal", side_effect=lambda sig, handler: handlers.update({sig: handler})):
+            self.assertEqual(main(self.argv("--streams", str(streams)), api_factory=self.api,
+                                  engine_connect=lambda *a: self.engine, err=self.err, poll=.01, now=lambda: now,
+                                  ibapi_version=lambda: (10, 51, 1), protobuf_version=lambda: "5.29.5"),
+                             0, self.err.getvalue())
+        self.assertEqual(len(self.engine.received), 1, "shutdown must not start the next input")
+        self.assertFalse(self.pending.exists(), "the completed reply must be settled before shutdown")
+        previous = self.engine_log
+        self.engine_log = self.dir / "run-2.log"
+        self.engine = LoggedEngine(str(self.engine_log), approval=run_approval(
+            ACCOUNT, previous.name, final_hash(previous)))
+        self.assertEqual(self.engine.next_sequence, 3)
+        # An interrupted account download must close its old socket before
+        # reconciling again. Gateway retains client 11 for three seconds
+        # after that close; refused attempts must not renew the grace.
+        positions = self.fake.req_positions
+
+        def interrupted():
+            self.fake.req_positions = positions
+            self.fake.hold_connectivity()
+            self.fake.restore_connectivity()
+
+        self.fake.req_positions = interrupted
+        self.fake.stale_client_seconds = 3
+        self.err = io.StringIO()
+        self.assertEqual(run(), 0, self.err.getvalue())
+        self.assertIn("client id 11 still held after our own close", self.err.getvalue())
+        self.assertIn("session-closed:2026-10-23", self.err.getvalue())
+        self.assertEqual(self.engine.received[0]["sequence"], 3)
+        self.assertEqual({call[3] for call in self.fake.called("connect")}, {11})
+        self.assertEqual(self.fake.placed, [])
 
     def test_a_run_with_no_stream_folder_stops_and_names_the_warm_up(self):
         streams = self.dir / "streams"

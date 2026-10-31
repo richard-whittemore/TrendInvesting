@@ -185,7 +185,7 @@ from orders import (EASTERN_LABELS, NEW_YORK, NEW_YORK_ZONES, OPEN_ORDER_DISAGRE
                     order_key, unverified_receipt)
 from relay import (LOG_INPUT, OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput,
                    Relay, ResolveRefused, earlier_run, read_engine_log, released_client_order_ids, run_chain, run_identity,
-                   run_logs)
+                   released_orders, run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from quantities import quantity_scale
 from sender import NotReconciled, make_sender, release_to_request
@@ -502,7 +502,19 @@ class _AskedOnItsOwnThread:
                 outcome["error"] = err
         worker = threading.Thread(target=ask, name="engine-exchange", daemon=True)
         worker.start()
-        self._await(worker)
+        try:
+            self._await(worker)
+        except StopRequested:
+            # A stop may race the reply's arrival. Give that exchange one
+            # bounded poll to finish, and let the relay settle an answered
+            # input only when it releases nothing to send. Otherwise keep
+            # it pending for replay or the owner's settlement (ADR 0027
+            # section 4; docs/manual/redelivery.md). No new broker work is
+            # done at shutdown, nor is an unanswered input discarded.
+            worker.join(ENGINE_WAIT_POLL)
+            if (worker.is_alive() or "reply" not in outcome
+                    or any(released_orders(outcome["reply"]))):
+                raise
         if "error" in outcome:
             raise outcome["error"]
         return outcome["reply"]
@@ -1819,6 +1831,10 @@ class AdapterLoop:
         try:
             self._settle_waiting()
             while True:
+                # Finish the current acknowledged input before honoring a
+                # stop; never start another exchange after it (ADR 0027
+                # section 4: the pending input is the one awaiting a reply).
+                self.conn._check_stop()
                 entries = self.outbox.load()
                 if not entries:
                     return
