@@ -62,7 +62,9 @@ func splitReset(raw []byte) (resetWait, []byte, error) {
 	}
 	w.refused, w.until = time.Unix(values[0], 0), time.Unix(values[1], 0)
 	{
-		if len(values)-3 != int(values[2]) {
+		// Compared in the parsed width: the count was bounded above, and the
+		// comparison never narrows a parsed integer.
+		if int64(len(values)-3) != values[2] {
 			return resetWait{}, nil, errors.New("invalid reset history length")
 		}
 		// The history is accounting: every entry is a real refusal at or before
