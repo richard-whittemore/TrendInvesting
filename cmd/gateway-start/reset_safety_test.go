@@ -431,11 +431,17 @@ func TestFinalResetVerdictWaitsForCleanupDecision(t *testing.T) {
 func TestResetHistoryMustBeConsistentWithTheRecordedRefusal(t *testing.T) {
 	// A header whose history does not account for its refusal could replenish the
 	// allowance; it fails closed instead (AGENTS.md: fail closed).
+	// The refusal (00:58 ET on the DST night) and its 2-minute-to-cutoff deadline
+	// are a consistent pair, so only the history can be what fails each case.
+	const pair = "reset 1793509080 1793509200 "
+	if w, _, err := splitReset([]byte(pair + "1 1793509080\n")); err != nil || len(w.refusals) != 1 {
+		t.Fatalf("the consistent pair itself must parse: %v", err)
+	}
 	for _, raw := range []string{
-		"reset 1793509080 1793509980 4 0 0 0 0\n",
-		"reset 1793509080 1793509980 2 1793508000 1793507000\n",
-		"reset 1793509080 1793509980 1 1793509999\n",
-		"reset 1793509080 1793509980 2 1793508000 1793508500\n",
+		pair + "4 0 0 0 0\n",
+		pair + "2 1793508000 1793507000\n",
+		pair + "1 1793509999\n",
+		pair + "2 1793508000 1793508500\n",
 	} {
 		t.Run(raw, func(t *testing.T) {
 			r := newRig(t)
