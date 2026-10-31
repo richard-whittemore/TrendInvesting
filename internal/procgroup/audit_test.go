@@ -36,7 +36,7 @@ const selfFile = "internal/procgroup/audit_test.go"
 
 // TestNoKillOutsideTheGuardedFunctions fails if any Go source or shell
 // script under cmd/, internal/ or transport/, tests included, calls kill(2)
-// other than through Kill (syscall's or x/sys/unix's Kill, by any import
+// other than through Kill and WaitGone (syscall's or x/sys/unix's Kill, by any import
 // name), or names kill, pkill or killall as a command (a path to one, one
 // started by exec, or one followed by its arguments, in any string, a
 // shell script's or `sh -c`'s included) outside guarded.
@@ -44,6 +44,25 @@ func TestNoKillOutsideTheGuardedFunctions(t *testing.T) {
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Keep the folder exemption for stand-ins, but audit the actual syscall
+	// references in its production source (docs/development.md, "Ending processes").
+	src, err := os.ReadFile(filepath.Join(root, "internal", "procgroup", "procgroup.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A path outside the exempt folder makes the same parser report all
+	// syscall references, including aliases and function values.
+	calls, err := auditSource("internal/procgroup.go", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"internal/procgroup.go:Kill calls syscall.Kill: end a process group with procgroup.Kill",
+		"internal/procgroup.go:WaitGone calls syscall.Kill: end a process group with procgroup.Kill",
+	}
+	if !slices.Equal(calls, want) {
+		t.Errorf("only Kill and WaitGone may call syscall.Kill; got %v", calls)
 	}
 	var files int
 	for _, top := range []string{"cmd", "internal", "transport"} {
@@ -262,4 +281,18 @@ func literal(l *ast.BasicLit) (string, bool) {
 	}
 	v, err := strconv.Unquote(l.Value)
 	return v, err == nil
+}
+
+func TestEndingProcessesDocumentsBothCallers(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/development.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := strings.Split(strings.Split(string(raw), "## Ending processes")[1], "\n## ")[0]
+	text := strings.Join(strings.Fields(section), " ")
+	for _, want := range []string{"`procgroup.Kill` and `procgroup.WaitGone`", "only probes with signal 0", "only kill(2) callers"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("Ending processes lacks %q", want)
+		}
+	}
 }

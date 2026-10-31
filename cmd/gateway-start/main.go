@@ -7,11 +7,15 @@
 // Password"): it leaves the dialog open and never exits, so the Gateway sat
 // logged out for hours with the unit active. On the first such dialog of a run
 // this program counts it, durably, and then stops its own child (SIGTERM, then
-// SIGKILL after a deadline) so systemd starts the unit again. It signals
-// nothing but that child's own process handle: no group, no pid 0 or -1, no
-// killall or pkill (docs/development.md, "Ending processes"). What is left of
-// IBC's process tree (java, Xvfb) is ended by systemd's KillMode=control-group
-// when this program exits.
+// SIGKILL after a deadline) so systemd starts the unit again. During IBKR's
+// nightly reset (23:40 to 01:00 New York time), up to four refusals per rolling 24 hours
+// instead persist a wait and its consumed allowance before cleanup. The program
+// kills and waits for IBC's own group (docs/development.md, "Ending processes"),
+// then discounts only this start's provisional attempt at the reset return.
+// The wait lasts up to 15 minutes, capped at the first 01:00 ET, and survives
+// restarts. Older attempts remain counted (docs/manual/server.md, "The Gateway
+// is logged out"). On other exits systemd's KillMode=control-group ends any
+// remaining java and Xvfb processes.
 //
 // IBKR's documentation says "After ten failed login attempts in 24 hours, your
 // Portal log in will be disabled" (IBKR Guides, "Log In and Log Out",
@@ -20,22 +24,25 @@
 // search only, its page being a script). That is the Client Portal login; IBKR
 // publishes no separate figure for the Gateway's API login, so the same is
 // assumed. The owner's own failed web attempts count against it too, so the
-// bound is 3 attempts within 24 hours.
+// counted bound is at most 3 attempts within 24 hours, plus at most 4 reset
+// exemptions within the same rolling 24 hours: at most 7 refusals without an accepted login.
 //
 // The count is a file of epoch-second lines, one per attempt in the last 24
-// hours. Every exec of IBC is one attempt, written to disk (file and directory
-// synced) BEFORE IBC starts, whether or not it got as far as a login; a
+// hours, with an optional reset header holding refusal time, wait deadline and
+// consumed allowance timestamps. Every exec of IBC is one attempt, written to
+// disk (file and directory synced) BEFORE IBC starts, whether or not it got as far as a login; a
 // completed login, or the prompt for the second factor (IBKR has accepted the
-// credentials), clears them. A refusal after such a login in the same run (the
-// nightly or Sunday restart, a second-factor relogin) is a new attempt, written
-// when it is seen; if this program dies between seeing it and writing it the
-// next start counts anyway, so the bound is loose by at most one. At 3 attempts
-// the program exits 77. A count that cannot be read, trusted or written fails
-// closed the same way, without launching IBC.
+// credentials), clears counted attempts but preserves the reset allowance.
+// A refusal after such a login in the same run (the nightly or Sunday restart, a second-factor relogin) is a new attempt, written
+// when it is seen, except during the nightly reset; if this program dies
+// between seeing it and writing it the next start counts anyway, so the
+// bound is loose by at most one. At 3 attempts the program exits 77. A count
+// that cannot be read, trusted or written fails closed the same way, without launching IBC.
 //
 // Every write to the journal is bounded. A journal that errs, writes short or
 // takes nothing for SinkTimeout stops IBC and exits 75, so the unit starts
-// again: the bound above does not depend on the journal, so this heals.
+// again, unless a durable reset outcome requires waiting first. Neither bound
+// depends on the journal.
 //
 // Exit codes: 75 = stop IBC and start again (a refusal below the bound, or a
 // journal that failed); 77 = retries stopped, always saying "login retries
@@ -61,9 +68,13 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
+	"github.com/richard-whittemore/TrendInvesting/internal/procgroup"
 )
 
 const (
+	resetRetry   = -1 // internal outcome; a durable reset wait outranks journal/drain verdicts
 	exitRetry    = 75
 	exitStopped  = 77
 	exitInternal = 70
@@ -84,6 +95,7 @@ type config struct {
 	DrainDeadline time.Duration  // how long output is read after the child ends
 	SinkTimeout   time.Duration  // how long one write to the journal may take before the run fails closed
 	Now           func() time.Time
+	After         func(time.Duration) <-chan time.Time
 	Warnings      []string // settings that were invalid, reported through the same bounded journal writes
 }
 
@@ -106,8 +118,9 @@ const (
 	maxLine         = 64 << 10
 	defaultRender   = "/usr/local/libexec/trend-investing/render-ibc-config.sh"
 	defaultState    = "/var/lib/ti-gateway/login-failures"
-	// maxBound caps the sink timeout and the stop deadline: the longest cycle of
-	// a failing start is 3 x sink + 2 x stop + the drain's 5 s + the unit's 30 s,
+	// maxBound caps the sink timeout and the stop deadline: outside reset waits
+	// (docs/manual/server.md), the longest cycle of a failing start is
+	// 3 x sink + 2 x stop + the drain's 5 s + the unit's 30 s,
 	// 335 s at 60 each, under the ten minutes within which the reporter's restart
 	// rule (cmd/reporter, advanceRestartRule) catches a loop. The defaults make it
 	// 155 s.
@@ -138,7 +151,7 @@ func configFromEnv(getenv func(string) string) (c config, warn []string) {
 	c = config{
 		Render:        []string{pick("TI_GATEWAY_RENDER", defaultRender)},
 		StateFile:     pick("TI_GATEWAY_STATE_FILE", defaultState),
-		Max:           intIn("TI_GATEWAY_LOGIN_MAX_FAILURES", 1, 9, defaultMax),
+		Max:           intIn("TI_GATEWAY_LOGIN_MAX_FAILURES", 1, defaultMax, defaultMax),
 		StopDeadline:  time.Duration(intIn("TI_GATEWAY_STOP_DEADLINE", 1, maxBound, int(defaultStop/time.Second))) * time.Second,
 		DrainDeadline: defaultDrain,
 		SinkTimeout:   time.Duration(intIn("TI_GATEWAY_SINK_TIMEOUT", 1, maxBound, int(defaultSink/time.Second))) * time.Second,
@@ -170,7 +183,8 @@ var epochLine = regexp.MustCompile(`^\d{1,12}$`)
 
 // loadCount returns the refusals recorded within the window and the file's
 // exact content. A count that is not a regular file, cannot be read, or holds
-// anything but whole epoch-second lines is an error, never "no history".
+// anything but whole epoch-second lines and a valid optional reset header is
+// an error, never "no history" (docs/manual/server.md, reset policy).
 func loadCount(path string, now time.Time, window time.Duration) (n int, raw []byte, err error) {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -192,7 +206,14 @@ func loadCount(path string, now time.Time, window time.Duration) (n int, raw []b
 	if raw[len(raw)-1] != '\n' {
 		return 0, nil, errors.New("the last line is not complete")
 	}
-	for _, l := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+	_, attempts, err := splitReset(raw)
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(attempts) == 0 {
+		return 0, raw, nil
+	}
+	for _, l := range strings.Split(strings.TrimSuffix(string(attempts), "\n"), "\n") {
 		if !epochLine.MatchString(l) {
 			return 0, nil, fmt.Errorf("line %q is not a time", l)
 		}
@@ -318,7 +339,8 @@ type verdict struct {
 }
 
 // verdictState holds the one outcome of a run: a stop (77) always replaces a
-// retry (75), whichever is seen first, and nothing replaces a stop.
+// retry (75) or reset; a durable reset outranks restartable failures so neither
+// a drain nor a journal failure can skip the wait (docs/manual/server.md).
 type verdictState struct {
 	mu sync.Mutex
 	v  *verdict
@@ -327,7 +349,8 @@ type verdictState struct {
 func (s *verdictState) set(v verdict) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.v == nil || v.code > s.v.code {
+	if s.v == nil || v.code == exitStopped || (s.v.code != exitStopped &&
+		(v.code == resetRetry || (s.v.code != resetRetry && v.code > s.v.code))) {
 		s.v = &v
 	}
 }
@@ -338,13 +361,15 @@ func (s *verdictState) get() *verdict {
 	return s.v
 }
 
-// run starts IBC and supervises it. The rule in one sentence: every exec of
-// IBC is one attempt, written to disk before it starts, and a completed login
-// clears them; a refusal after a completed login in the same run is a new
-// attempt, written when it is seen.
+// run supervises IBC, waiting out nightly reset refusals inside the unit
+// (docs/manual/server.md, "The Gateway is logged out"). Other refusals retain
+// the durable retry bound; accepted logins retain their clearing semantics.
 func run(cfg config, stdout, stderr io.Writer) int {
 	if cfg.Accepted == nil {
 		cfg.Accepted = regexp.MustCompile(defaultAccepted)
+	}
+	if cfg.After == nil {
+		cfg.After = time.After
 	}
 	if cfg.SinkTimeout <= 0 {
 		cfg.SinkTimeout = defaultSink
@@ -352,13 +377,15 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	out := &journal{w: stdout, timeout: cfg.SinkTimeout}
 	errj := &journal{w: stderr, timeout: cfg.SinkTimeout}
 	say := func(format string, a ...any) { _ = errj.write(fmt.Sprintf("gateway-start: "+format+"\n", a...)) }
-	stopped := func(format string, a ...any) int {
-		say(stopPhrase+": "+format, a...)
-		return exitStopped
-	}
 	// cannot reports that IBC cannot be started, in the words the health check
 	// reads (cmd/reporter keys on "cannot start IBC") when the journal works.
 	cannot := func(format string, a ...any) { say("cannot start IBC: "+format, a...) }
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigs)
+	if code := awaitReset(cfg, errj, sigs); code != 0 {
+		return code
+	}
 	for _, w := range cfg.Warnings {
 		say("%s", w)
 	}
@@ -368,7 +395,29 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		r := exec.Command(cfg.Render[0], cfg.Render[1:]...)
 		var renderFailed atomic.Bool
 		r.Stdout, r.Stderr = boundedWriter{out, &renderFailed}, boundedWriter{errj, &renderFailed}
-		err := r.Run()
+		r.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		r.WaitDelay = cfg.StopDeadline
+		if sig := pendingStop(sigs); sig != nil {
+			return 128 + int(sig.(syscall.Signal))
+		}
+		err := r.Start()
+		if err == nil {
+			rendered := make(chan error, 1)
+			go func() { rendered <- r.Wait() }()
+			select {
+			case err = <-rendered:
+			case sig := <-sigs:
+				// Stop only the renderer's own group, even when it ignores
+				// termination (docs/development.md, "Ending processes").
+				_ = procgroup.Kill(r.Process.Pid)
+				select {
+				case <-rendered:
+				case <-time.After(cfg.StopDeadline):
+				}
+				_ = procgroup.WaitGone(r.Process.Pid, cfg.StopDeadline)
+				return 128 + int(sig.(syscall.Signal))
+			}
+		}
 		if renderFailed.Load() {
 			// What the renderer said cannot be journalled: stop before IBC starts.
 			cannot("the journal is not taking the config renderer's output, so the unit starts again; no attempt was counted")
@@ -392,6 +441,45 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		return exitConfig
 	}
 
+	for {
+		if sig := pendingStop(sigs); sig != nil {
+			return 128 + int(sig.(syscall.Signal))
+		}
+		if code := runIBC(cfg, out, errj, sigs); code != resetRetry {
+			return code
+		}
+		if code := awaitReset(cfg, errj, sigs); code != 0 {
+			return code
+		}
+	}
+}
+
+// nightlyResetDelay applies the owner's reset policy, including its 01:00 ET
+// cutoff (docs/manual/server.md, "The Gateway is logged out"), in the engines'
+// embedded New York zone, independently of the host's local zone.
+func nightlyResetDelay(now time.Time) time.Duration {
+	et := now.In(nysecalendar.NewYork)
+	minute := et.Hour()*60 + et.Minute()
+	if minute >= 60 && minute < 23*60+40 {
+		return 0
+	}
+	return min(15*time.Minute, resetCutoff(now).Sub(now))
+}
+
+// runIBC supervises one child; resetRetry is returned only after the child
+// and its process group have been ended, so a reset retry cannot overlap IBCs
+// (docs/development.md, "Ending processes").
+func runIBC(cfg config, out, errj *journal, sigs <-chan os.Signal) int {
+	say := func(format string, a ...any) { _ = errj.write(fmt.Sprintf("gateway-start: "+format+"\n", a...)) }
+	stopped := func(format string, a ...any) int {
+		say(stopPhrase+": "+format, a...)
+		return exitStopped
+	}
+	cannot := func(format string, a ...any) { say("cannot start IBC: "+format, a...) }
+
+	if sig := pendingStop(sigs); sig != nil {
+		return 128 + int(sig.(syscall.Signal))
+	}
 	n, raw, err := loadCount(cfg.StateFile, cfg.Now(), cfg.Window)
 	if err != nil {
 		return stopped("%s is unreadable or malformed (%v), so the number of login attempts is unknown; not starting IBC so the IBKR login cannot be locked. Check the paper login on the IBKR website, then delete %s and start the unit", cfg.StateFile, err, cfg.StateFile)
@@ -416,7 +504,13 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	}
 	//nolint:gosec // G204: IBC's command is built from the unit's environment (GATEWAY_MAJOR, RUNTIME_DIRECTORY) or TI_GATEWAY_IBC in the rehearsal, never from IBC's output.
 	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout, cmd.Stderr = pw, pw
+	if sig := pendingStop(sigs); sig != nil {
+		_ = pr.Close()
+		_ = pw.Close()
+		return 128 + int(sig.(syscall.Signal))
+	}
 	if err := cmd.Start(); err != nil {
 		_ = pr.Close()
 		_ = pw.Close()
@@ -425,6 +519,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	}
 	_ = pw.Close()
 
+	resetCh := make(chan resetDecision, 1)
 	var (
 		final  verdictState
 		stopCh = make(chan struct{})
@@ -448,7 +543,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	go func() {
 		defer close(readerDone)
 		br := bufio.NewReaderSize(drainReader{pr, cfg.DrainDeadline, &draining}, maxLine)
-		seen, relogin := false, false
+		seen, relogin, resetting := false, false, false
 		for {
 			if abandoned.Load() {
 				return // the run is over and its verdict final: nothing more is acted on
@@ -466,23 +561,57 @@ func run(cfg config, stdout, stderr io.Writer) int {
 				trimmed := strings.TrimRight(text, "\r\n")
 				// The count is settled on disk BEFORE the line goes to the journal
 				// or any decision is taken.
-				if cfg.Accepted.MatchString(trimmed) {
-					if err := writeDurable(cfg.StateFile, nil); err != nil {
+				if !resetting && cfg.Accepted.MatchString(trimmed) {
+					_, current, readErr := loadCount(cfg.StateFile, cfg.Now(), cfg.Window)
+					wait, _, _ := splitReset(current)
+					clearErr := readErr
+					if clearErr == nil {
+						clearErr = writeDurable(cfg.StateFile, wait.withAttempts(nil))
+					}
+					if err := clearErr; err != nil {
 						say("the login attempts could not be confirmed cleared after the accepted login (%v); the count may still hold the old attempts", err)
 					}
 					relogin, seen = true, false
 				}
 				if !seen && cfg.Pattern.MatchString(trimmed) {
 					seen = true
-					count, existing, cerr := loadCount(cfg.StateFile, cfg.Now(), cfg.Window)
-					if cerr == nil && relogin {
-						// IBC logged in again by itself and was refused: its own attempt.
-						cerr = writeDurable(cfg.StateFile, attempt(existing))
-						count++
+					refusedAt := cfg.Now().Truncate(time.Second)
+					count, existing, cerr := loadCount(cfg.StateFile, refusedAt, cfg.Window)
+					wait, attempts, _ := splitReset(existing)
+					recent := wait.recentRefusals(refusedAt)
+					if n := len(recent); cerr == nil && n > 0 && refusedAt.Before(recent[n-1]) {
+						// The clock stepped back past a retained refusal: a history out of
+						// order would be refused at the next start, so the valid file is
+						// left as it is and nothing launches on an untrusted clock.
+						cerr = fmt.Errorf("the clock (%s) is behind the last recorded reset refusal (%s)", resetClockLabel(refusedAt), resetClockLabel(recent[n-1]))
+					}
+					reset := nightlyResetDelay(refusedAt) > 0 && len(recent) < maxResetWaits
+					var discounted []byte
+					if cerr == nil {
+						switch {
+						case reset:
+							// Persist the cooldown and consume its allowance BEFORE cleanup or
+							// journal I/O; retain the attempt until the reset return below
+							// (docs/manual/server.md, "The Gateway is logged out").
+							wait = resetWait{refusedAt, refusedAt.Add(nightlyResetDelay(refusedAt)), append(recent, refusedAt)}
+							cerr = writeDurable(cfg.StateFile, wait.withAttempts(attempts))
+							_, previous, _ := splitReset(raw)
+							if relogin {
+								previous = nil
+							}
+							discounted = wait.withAttempts(previous)
+						case relogin:
+							cerr = writeDurable(cfg.StateFile, attempt(existing))
+							count++
+						}
 					}
 					switch {
 					case cerr != nil:
 						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": the login count cannot be kept (%v); stopping IBC and not retrying", cerr)})
+					case reset:
+						resetting = true
+						resetCh <- resetDecision{discounted: discounted, wait: wait}
+						stop(verdict{resetRetry, ""})
 					case count >= cfg.Max:
 						stop(verdict{exitStopped, fmt.Sprintf(stopPhrase+": %d of %d login attempts within the window, the last refused (a start that failed counts too); stopping IBC and not retrying", count, cfg.Max)})
 					default:
@@ -512,12 +641,29 @@ func run(cfg config, stdout, stderr io.Writer) int {
 
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
-	defer signal.Stop(sigs)
 
 	var waitErr error
+	var interrupted os.Signal
 	childEnded := false
+	var reset *resetDecision
+	var groupErr error
+	endResetGroup := func(decision resetDecision) {
+		reset = &decision
+		// The unit stays active during cooldown, so systemd cannot clean this
+		// group for us (docs/development.md, "Ending processes").
+		if err := procgroup.Kill(cmd.Process.Pid); err != nil && !errors.Is(err, syscall.ESRCH) {
+			groupErr = err
+			return
+		}
+		if !childEnded {
+			select {
+			case waitErr = <-exited:
+				childEnded = true
+			case <-time.After(cfg.StopDeadline):
+			}
+		}
+		groupErr = procgroup.WaitGone(cmd.Process.Pid, cfg.StopDeadline)
+	}
 	stopChild := func() {
 		// Only this program's own child, through its own handle.
 		_ = cmd.Process.Signal(syscall.SIGTERM)
@@ -538,8 +684,13 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	case waitErr = <-exited:
 		childEnded = true
 	case <-stopCh:
-		stopChild()
-	case <-sigs:
+		select {
+		case decision := <-resetCh:
+			endResetGroup(decision)
+		default:
+			stopChild()
+		}
+	case interrupted = <-sigs:
 		stopChild()
 	case <-readerDone:
 		// The output ended. If IBC ends with it, that is all; if IBC still runs,
@@ -553,6 +704,12 @@ func run(cfg config, stdout, stderr io.Writer) int {
 		}
 	}
 
+	select {
+	case decision := <-resetCh:
+		endResetGroup(decision)
+	default:
+	}
+
 	// After IBC ends its output is read on, each read bounded by DrainDeadline of
 	// waiting (the deadline is set before every read, so time spent writing
 	// buffered lines to the journal does not use it up). What the reader gets
@@ -561,8 +718,8 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	// writes later than DrainDeadline after the last read, and lines still
 	// buffered or in the pipe. Two bounds end the wait with 75 (restartable:
 	// every exec was counted before it started, so a reader that never
-	// finished cannot lift the bound): no progress for DrainDeadline +
-	// SinkTimeout + 2 s, and a total of 2 x SinkTimeout + DrainDeadline since
+	// finished cannot lift the bound; a durable reset still waits): no progress
+	// for DrainDeadline + SinkTimeout + 2 s, and a total of 2 x SinkTimeout + DrainDeadline since
 	// IBC ended (65 s by default).
 	drainStart := time.Now()
 	mark()
@@ -573,6 +730,8 @@ func run(cfg config, stdout, stderr io.Writer) int {
 drain:
 	for {
 		select {
+		case decision := <-resetCh:
+			endResetGroup(decision)
 		case <-readerDone:
 			break drain
 		case <-time.After(250 * time.Millisecond):
@@ -589,10 +748,45 @@ drain:
 	abandoned.Store(true) // before the close, so a read it wakes returns quietly
 	_ = pr.Close()
 
-	if v := final.get(); v != nil {
-		say("%s", v.msg)
+	// Snapshot the verdict once; a reset verdict must consume its published
+	// decision before returning (docs/development.md, "Ending processes").
+	v := final.get()
+	if reset == nil {
+		if decision := receiveReset(v, resetCh); decision != nil {
+			endResetGroup(*decision)
+		}
+	}
+	if permanent := final.get(); permanent != nil && permanent.code == exitStopped {
+		_ = errj.write("gateway-start: " + permanent.msg + "\n")
+		return permanent.code
+	}
+	if reset != nil {
+		if groupErr != nil {
+			return stopped("cannot end IBC's process group before the reset retry (%v)", groupErr)
+		}
+		if !childEnded {
+			return stopped("IBC did not end; refusing to overlap it with a reset retry")
+		}
+		_ = errj.write(reset.wait.message(cfg.Now()))
+		if interrupted == nil {
+			interrupted = pendingStop(sigs)
+		}
+		if interrupted != nil {
+			say("reset wait: interrupted by stop")
+			return 128 + int(interrupted.(syscall.Signal))
+		}
+		// The only discount point: cleanup is confirmed and the durable wait
+		// survives every later restart (docs/manual/server.md, reset policy).
+		if err := writeDurable(cfg.StateFile, reset.discounted); err != nil {
+			return stopped("cannot settle the reset attempt (%v); retaining the durable wait", err)
+		}
+		return resetRetry
+	}
+	if v != nil {
+		_ = errj.write("gateway-start: " + v.msg + "\n")
 		return v.code
 	}
+
 	var ee *exec.ExitError
 	switch {
 	case !childEnded:
