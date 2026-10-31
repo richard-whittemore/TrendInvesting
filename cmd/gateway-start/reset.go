@@ -84,12 +84,21 @@ func splitReset(raw []byte) (resetWait, []byte, error) {
 			return resetWait{}, nil, errors.New("reset history does not end at the recorded refusal")
 		}
 	}
+	// The deadline must be the one the rule set for that refusal: any other
+	// pair is untrusted state, refused by every reader so that no later
+	// refusal can overwrite it (docs/manual/server.md, reset policy).
+	if cooldown := nightlyResetDelay(w.refused); cooldown <= 0 || !w.until.Equal(w.refused.Add(cooldown)) {
+		return resetWait{}, nil, fmt.Errorf("inconsistent reset wait: refusal %s, deadline %s", resetClockLabel(w.refused), resetClockLabel(w.until))
+	}
 	return w, []byte(rest), nil
 }
 
-// resetClockSkew is how far a recorded refusal may lie ahead of the clock
-// before the wait is treated as untrustworthy: an NTP step of seconds is
-// ordinary, a refusal minutes in the future is a clock or state fault.
+// resetClockSkew is the tolerance for a recorded refusal that lies ahead of
+// the clock (docs/manual/server.md, "The Gateway is logged out", reset
+// policy): within it the persisted deadline is kept, which can only lengthen
+// the wait; beyond it the start stops with exit 77 and changes nothing on
+// disk, because an ordinary time correction is seconds and minutes mean a
+// clock or state fault.
 const resetClockSkew = 2 * time.Minute
 
 // resetCutoff identifies a night by its first 01:00 New York time, including
@@ -141,15 +150,6 @@ func awaitReset(cfg config, errj *journal, sigs <-chan os.Signal) int {
 			stopPhrase, w.refused.Sub(now).Round(time.Second), cfg.StateFile))
 		return exitStopped
 	}
-	cooldown := nightlyResetDelay(w.refused)
-	if cooldown <= 0 || !w.until.Equal(w.refused.Add(cooldown)) {
-		// A refusal outside its reset night, or a deadline that is not the one
-		// the rule would have set, is state that cannot be trusted; it is kept
-		// for inspection and nothing launches on it (AGENTS.md: fail closed).
-		_ = errj.write(fmt.Sprintf("gateway-start: %s: the recorded reset wait is inconsistent (refusal %s, deadline %s); not launching until %s is put right\n",
-			stopPhrase, resetClockLabel(w.refused), resetClockLabel(w.until), cfg.StateFile))
-		return exitStopped
-	}
 	// The deadline is kept even when the clock stepped back a little; it can
 	// only lengthen the wait, never shorten it, and never past a full step.
 	bounded := func(at time.Time) time.Duration { return min(w.until.Sub(at), 15*time.Minute+resetClockSkew) }
@@ -191,7 +191,7 @@ func (w resetWait) message(now time.Time) string {
 	}
 	whole := (remaining + unit - 1) / unit
 	return fmt.Sprintf("gateway-start: reset wait: login refused at %s ET inside IBKR's nightly reset hour; waiting %d%s until %s ET (consumed reset allowances %d of 4 in 24h)\n",
-		resetClockLabel(w.refused), whole, suffix, resetClockLabel(w.until), len(w.refusals))
+		resetClockLabel(w.refused), whole, suffix, resetClockLabel(w.until), len(w.recentRefusals(now)))
 }
 
 // recentRefusals retains consumed allowances across nights and DST; future
