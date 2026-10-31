@@ -264,3 +264,43 @@ To point 5 and the amendment of 2026-10-18, for the IRAs' momentum engines
   name the contract the journal records for the pick; today it names one
   only from `con_ids`, and no IRA order is sent before the paper gate
   (AGENTS.md rule 5).
+
+
+## Amendment 2026-10-31: Scheduled interruptions and bounded shutdown
+
+The owner's scheduled-interruption policy is operational patience, not a
+strategy rule. Read the owner-edited schedule before connecting, reject
+ambiguous configuration (including duplicate JSON keys), and journal the
+file and windows loaded, or explicitly say the file is missing and no
+windows apply. Missing files and empty windows preserve the outside-window
+restore timeout.
+
+Windows include their start and exclude their end. Merge touching or
+overlapping intervals. A repeated local boundary uses the earlier start
+and later end; a nonexistent boundary rolls forward across the DST gap.
+Callers supply aware UTC instants and receive aware UTC ends. Validate a
+weekly gap on every day of the entire startup calendar year, including both
+DST transitions; a merged interval longer than eight days is refused at
+startup. The runtime finite-end check remains in force.
+
+A first 1100/2110 inside a window fixes the deadline at the later of the
+window end and loss time plus restore_timeout (deployed: five minutes).
+Repeated losses do not extend it. Pin the same elapsed duration on a
+monotonic clock so moving the wall clock back cannot prolong the wait.
+Judge restoration by callback receipt time, consuming queued callbacks
+before declaring expiry; an actual socket close reconnects. Restoration
+still requires reconciliation, and scheduled expiry closes with exit 3 for
+a Gateway restart by the owner. The journal names the deadline's time zone
+and the later occurrence of a repeated hour.
+
+nextValidId establishes ownership of the fixed client ID, before reading
+the volunteered order list. An adapter close of that accepted session gets
+30 seconds of same-ID 326 retries, including a final attempt at the end;
+refused attempts never renew the grace. An unaccepted startup has no grace.
+The final connection attempt retains its bounded handshake timeout.
+
+SIGTERM interrupts restoration waits, reconnect backoff, connect-opener
+waits and reader cleanup within one second. An abandoned opener closes any
+late socket, and an unfinished opener or reader blocks session reuse.
+Automatic Gateway restart and making the reporter aware of the schedule
+remain separate work; its logged-out page can precede scheduled expiry.

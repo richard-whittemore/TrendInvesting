@@ -65,6 +65,10 @@ class TWSApi:
     down holds the input rather than read as the switch being off.
     """
 
+    # Connection supplies the process stop event; socket/reader waits must
+    # observe it (docs/manual/ibkr-adapter.md, stopping during a wait).
+    stop_event = None
+
     def connect(self, host, port, client_id, callbacks, timeout):
         raise NotImplementedError
 

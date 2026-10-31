@@ -27,7 +27,7 @@ import threading
 import time
 
 from config import is_paper_account
-from connection import ConnectFailed
+from connection import ConnectFailed, StopRequested
 from relay import HandoverUnconfirmed
 from quantities import quantity_scale
 from sender import CURRENCY, EXCHANGE, SEC_TYPE, SendRefused, check_order_shape
@@ -359,19 +359,23 @@ class IbapiClient(TWSApi):
     def connect(self, host, port, client_id, callbacks, timeout):
         # One deadline bounds the whole call: waiting out an abandoned attempt
         # spends the same timeout the new attempt then has left.
+        self._check_stop()
         deadline = self._monotonic() + timeout
         previous = self._opener
         if previous is not None and previous.is_alive():
             # An abandoned attempt is still inside EClient.connect and may yet
             # take this client ID; wait for it to finish and clean up.
-            previous.join(max(deadline - self._monotonic(), 0))
+            self._join(previous, max(deadline - self._monotonic(), 0))
+            self._check_stop()
             if previous.is_alive():
                 raise ConnectFailed("an abandoned connect attempt has not finished")
         # The previous reader must have stopped before a new session starts;
         # waiting for it spends the same deadline.
         if not self._end_session(min(READER_STOP_TIMEOUT,
                                      max(deadline - self._monotonic(), 0))):
+            self._check_stop()
             raise ConnectFailed("the previous session's reader has not stopped")
+        self._check_stop()
         remaining = deadline - self._monotonic()
         if remaining <= 0:
             raise ConnectFailed("no time left within {}s for a new connect attempt".format(timeout))
@@ -395,7 +399,7 @@ class IbapiClient(TWSApi):
         opener = threading.Thread(target=open_socket, name="ibapi-connect", daemon=True)
         self._opener = opener
         opener.start()
-        opener.join(remaining)
+        self._join(opener, remaining)
         with lock:
             timed_out = opener.is_alive()
             attempt["abandoned"] = timed_out
@@ -403,7 +407,11 @@ class IbapiClient(TWSApi):
             # Closing the socket unblocks the opener; it starts no reader, and
             # disconnects its client itself if the connect completes later.
             self.disconnect()
+            self._check_stop()
             raise ConnectFailed("socket connect did not finish within {}s".format(timeout))
+        if self._stopping():
+            self.disconnect()
+            self._check_stop()
         if failure:
             self.disconnect()
             raise ConnectFailed("socket connect failed: {}".format(type(failure[0]).__name__))
@@ -428,13 +436,33 @@ class IbapiClient(TWSApi):
             self._client.disconnect()
         reader = self._reader
         if reader is not None and reader is not threading.current_thread():
-            reader.join(wait)
+            self._join(reader, wait)
             if reader.is_alive():
-                if wait:
+                if wait and not self._stopping():
                     log.warning("ibkr reader did not stop within %.2fs of disconnect", wait)
                 return False
         self._reader = None
         return True
+
+    def _stopping(self):
+        return self.stop_event is not None and self.stop_event.is_set()
+
+    def _check_stop(self):
+        if self._stopping():
+            raise StopRequested()
+
+    def _join(self, thread, timeout):
+        """Bound thread waits and observe stop within 0.1s (docs/manual/ibkr-adapter.md).
+
+        Keep abandoned openers/readers until they finish; ADR 0025's fixed
+        client ID must never be claimed by overlapping sessions.
+        """
+        deadline = time.monotonic() + timeout
+        while thread.is_alive() and not self._stopping():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            thread.join(min(.1, remaining))
 
     def is_connected(self):
         """Whether EClient's state and ibapi's own socket are both open.

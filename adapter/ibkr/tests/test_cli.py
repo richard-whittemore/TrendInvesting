@@ -380,6 +380,26 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(self.run_main(self.argv("--streams", str(streams)), steps=10), 0, self.err.getvalue())
         self.assertEqual([e["type"] for e in self.engine.inputs()], FIRST + DAY)
 
+    def test_startup_names_loaded_or_missing_schedule(self):
+        from test_maintenance import DEFAULT
+        path = self.dir / "maintenance.json"
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                if installed:
+                    path.write_text(json.dumps(DEFAULT))
+                self.err = io.StringIO()
+                self.assertEqual(self.run_main(self.argv("--maintenance", str(path))), 0, self.err.getvalue())
+                journal = self.err.getvalue()
+                self.assertIn(str(path), journal)
+                if installed:
+                    self.assertIn("2 windows", journal)
+                    self.assertIn("23:40", journal)
+                    self.assertIn("12:00", journal)
+                    self.assertIn("America/New_York", journal)
+                else:
+                    self.assertIn("no schedule file exists", journal)
+                    self.assertIn("no windows apply", journal)
+
     def test_recovery_delivers_fresh_runs_warmup_after_approval(self):
         self.recover_after_stop(missing_schedule=False)
 
@@ -392,12 +412,16 @@ class CommandTests(unittest.TestCase):
         from test_delivery import session_envelopes, write_stream
         from test_maintenance import DEFAULT
 
-        now = datetime(2026, 10, 31, 16, 45, tzinfo=timezone.utc)
+        now = datetime(2026, 10, 31, 16, 45, tzinfo=timezone.utc) if missing_schedule else datetime(
+            2026, 10, 31, 9, 44, tzinfo=timezone.utc)
         day = date(2026, 10, 23)
         streams = self.dir / "streams"
         schedule = self.dir / "maintenance.json"
         if not missing_schedule:
             schedule.write_text(json.dumps(DEFAULT))
+        from maintenance import MaintenanceSchedule
+        self.assertEqual(MaintenanceSchedule.load(schedule).window_end(now) is not None,
+                         not missing_schedule, "installed recovery drill must exercise a window")
         for name in ("run-1", "run-2"):
             write_stream(streams / name, day, session_envelopes(
                 [day], run=name, configuration_hash=CONFIGURATION_HASH, strategy_version=STRATEGY_VERSION))
@@ -447,6 +471,7 @@ class CommandTests(unittest.TestCase):
         self.err = io.StringIO()
         self.assertEqual(run(), 0, self.err.getvalue())
         self.assertIn("client id 11 still held after our own close", self.err.getvalue())
+        self.assertEqual("scheduled window ending" in self.err.getvalue(), not missing_schedule)
         self.assertIn("session-closed:2026-10-23", self.err.getvalue())
         self.assertEqual(self.engine.received[0]["sequence"], 3)
         self.assertEqual({call[3] for call in self.fake.called("connect")}, {11})

@@ -9,7 +9,7 @@ ConnectionStatus records reported here are what that heartbeat is built from.
 import logging
 import time
 from collections import deque, namedtuple
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from tws import Inbox
 from maintenance import MaintenanceSchedule
@@ -161,8 +161,10 @@ class Connection:
         self.api = api
         self.maintenance = maintenance or MaintenanceSchedule()
         self.stop_event = stop_event
+        self.api.stop_event = stop_event
         self._maintenance_end = None
         self._maintenance_deadline = None
+        self._maintenance_expires_at = None
         self._maintenance_notice = None
         self._owns_session = False
         self._client_release_until = None
@@ -691,10 +693,12 @@ class Connection:
                 self.connected_at = self._wall_clock()
                 self._connected_monotonic = self._monotonic()
                 self.next_order_id = event.args[0]
-                self._take_volunteered_list()
-                self.connected = True
+                # ADR 0025: nextValidId accepts this session's fixed client ID.
+                # Our close during the volunteered read therefore needs release grace.
                 self._owns_session = True
                 self._client_release_until = None
+                self._take_volunteered_list()
+                self.connected = True
                 self.needs_reconciliation = True
                 self.last_drop_reason = None
                 self._report("connected")
@@ -787,9 +791,6 @@ class Connection:
                 log.info("ibkr link: client id %d still held after our own close; waiting %gs "
                          "for Gateway to remove it (%gs remain)", cfg.client_id, wait, remaining)
                 self._wait(wait)
-                if self._monotonic() >= self._client_release_until:
-                    self._report("refused", "client-id-in-use", ibkr_code=CODE_CLIENT_ID_IN_USE)
-                    raise
                 delay = min(delay * 2, cfg.backoff_max)
             except ConnectFailed as err:
                 log.info("ibkr connect attempt=%d failed: %s", attempt, err)
@@ -813,8 +814,9 @@ class Connection:
         be matched to their requests: the reconnected session has a new
         Inbox, which no answer of the old one can reach. While Gateway has
         lost IBKR's servers (1100/2110) the drop waits for the restoration
-        (1101/1102) or the bound maintain() enforces: the scheduled window
-        end, otherwise restore_timeout. An outage restored in time does not
+        (1101/1102) or the bound maintain() enforces: the later of the
+        scheduled window end and restore_timeout after loss (ADR 0025),
+        otherwise restore_timeout. An outage restored in time does not
         use up the connect attempts; the
         restored socket is then dropped, never read on.
         """
@@ -829,14 +831,18 @@ class Connection:
 
         While Gateway reports it has lost IBKR's servers (1100/2110), Gateway
         reconnects to them itself, so the adapter waits for its restoration
-        (1101/1102) until the scheduled window ends, or outside a window
-        up to restore_timeout. Scheduled expiry stops for a Gateway restart;
+        (1101/1102) until the later of the scheduled window end and
+        restore_timeout after loss, or outside a window up to restore_timeout. Scheduled expiry stops for a Gateway restart;
         outside expiry drops the link and reconnects (docs/manual/ibkr-adapter.md).
         Any other lost link is reconnected at once, with
         backoff. ClientIdInUse and a give-up propagate: both are a person's
         call (ADR 0025 point 3).
         """
         self._check_stop()
+        # Apply queued callbacks before expiry: restoration is judged at receipt,
+        # and a closed socket must reconnect (docs/manual/ibkr-adapter.md).
+        while self._lost_at is not None and self.pump(0) is not None:
+            pass
         if self.connected:
             self.check_heartbeat()
         if self._lost_at is not None:
@@ -844,8 +850,10 @@ class Connection:
                 self._check_maintenance_end()
                 if self._monotonic() >= self._maintenance_notice:
                     self._log_maintenance_wait()
+                self.pump(min(.1, self._maintenance_deadline - self._monotonic()))
                 return
             if self._monotonic() - self._lost_at < self.config.restore_timeout:
+                self.pump(min(.1, self._lost_at + self.config.restore_timeout - self._monotonic()))
                 return
             self._report("disconnected", "connectivity-not-restored")
             self.reconnect()
@@ -865,6 +873,7 @@ class Connection:
             self.api.disconnect()
         except Exception as err:  # the link is being discarded either way
             log.info("ibkr disconnect during cleanup failed: %s", type(err).__name__)
+        self._check_stop()
 
     # -- consuming callbacks ---------------------------------------------
     def pump(self, timeout):
@@ -935,7 +944,7 @@ class Connection:
             self.last_server_time = event.args[0]
             self._probe_sent_at = None
         elif event.name == "error":
-            self._apply_error(event.args[1])
+            self._apply_error(event.args[1], event.received_at)
 
     def _account_values_seen(self, event):
         """Note an account-values callback for settle_account_values; an error is still applied as any other."""
@@ -946,7 +955,7 @@ class Connection:
         if self._values_quiet_until is not None:
             self._values_quiet_until = max(self._values_quiet_until, self._monotonic() + ACCOUNT_VALUES_QUIET)
         if event.name == "error":
-            self._apply_error(event.args[1])
+            self._apply_error(event.args[1], event.received_at)
 
     def _is_echo(self, event):
         """Whether an openOrder row is IBKR's echo of an order this client placed on this session (see placing)."""
@@ -956,21 +965,30 @@ class Connection:
             return True
         return False
 
-    def _check_maintenance_end(self):
-        if (self._lost_at is not None and self._maintenance_end is not None
-                and (self.now_utc() >= self._maintenance_end
-                     or self._monotonic() >= self._maintenance_deadline)):
+    def _check_maintenance_end(self, received_at=None):
+        if self._lost_at is None or self._maintenance_end is None:
+            return
+        # ADR 0025, scheduled interruptions: a queued restoration is judged
+        # at receipt; without one, wall or monotonic expiry ends the wait.
+        if received_at is not None:
+            expired = received_at >= self._maintenance_expires_at
+        else:
+            expired = (self.now_utc() >= self._maintenance_expires_at
+                       or self._monotonic() >= self._maintenance_deadline)
+        if expired:
             self._abandon()
             raise MaintenanceExpired("IBKR connectivity did not return by the end of its scheduled "
                                      "window; a Gateway restart is the remedy")
 
     def _log_maintenance_wait(self):
         from zoneinfo import ZoneInfo
-        log.info("ibkr link: IBKR servers lost inside the scheduled window ending %s ET; waiting",
-                 self._maintenance_end.astimezone(ZoneInfo("America/New_York")).strftime("%H:%M"))
+        local_end = self._maintenance_end.astimezone(ZoneInfo("America/New_York"))
+        ending = local_end.strftime("%H:%M %Z") + (", the later one" if local_end.fold else "")
+        log.info("ibkr link: IBKR servers lost inside the scheduled window ending %s; waiting until %s",
+                 ending, self._maintenance_expires_at.isoformat())
         self._maintenance_notice = self._monotonic() + 3600
 
-    def _apply_error(self, code):
+    def _apply_error(self, code, received_at=None):
         if code in (CODE_CONNECTIVITY_LOST, CODE_SERVER_LINK_BROKEN):
             self.connected = False
             if self._lost_at is None:
@@ -978,11 +996,13 @@ class Connection:
                 now = self.now_utc()
                 self._maintenance_end = self.maintenance.window_end(now)
                 if self._maintenance_end is not None:
-                    self._maintenance_deadline = self._lost_at + (self._maintenance_end - now).total_seconds()
+                    self._maintenance_expires_at = max(
+                        self._maintenance_end, now + timedelta(seconds=self.config.restore_timeout))
+                    self._maintenance_deadline = self._lost_at + (self._maintenance_expires_at - now).total_seconds()
                     self._log_maintenance_wait()
                 self._report("connectivity-lost", "gateway-lost-ibkr", ibkr_code=code)
         elif code in (CODE_RESTORED_DATA_LOST, CODE_RESTORED_DATA_MAINTAINED):
-            self._check_maintenance_end()
+            self._check_maintenance_end(received_at)
             if self._drop_when_restored is not None:
                 reason = self._drop_when_restored
                 self._abandon()

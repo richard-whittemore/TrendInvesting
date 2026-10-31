@@ -336,6 +336,15 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
     try:
         logger.info("ibkr adapter starting mode=%s client_id=%d sending=%s ibapi=%s", cfg.mode, cfg.client_id,
                     "on" if cfg.paper_sending_enabled else "off", version)
+        if maintenance.file_exists:
+            windows = ["{} {}–{} {}".format(
+                ",".join(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[d] for d in sorted(days)),
+                start.strftime("%H:%M"), end.strftime("%H:%M"), zone.key)
+                for days, start, end, zone in maintenance.windows]
+            logger.info("ibkr maintenance schedule %s: %d windows loaded: %s", args.maintenance,
+                        len(windows), "; ".join(windows) if windows else "no windows apply")
+        else:
+            logger.info("ibkr maintenance schedule %s: no schedule file exists; no windows apply", args.maintenance)
         loop = AdapterLoop(cfg, (api_factory or _real_api)(cfg),
                            (engine_connect or _engine_connect)(args.socket, ENGINE_TIMEOUT), args.pending,
                            args.engine_log, poll=poll, streams=args.streams, cash_ledger=args.cash_ledger,

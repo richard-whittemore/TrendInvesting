@@ -13,14 +13,17 @@ DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 class MaintenanceSchedule:
     def __init__(self, windows=()):
         self.windows = tuple(windows)
+        self.file_exists = True
 
     @classmethod
     def load(cls, path=DEFAULT_PATH):
         try:
             with open(path, encoding="utf-8") as stream:
-                return cls.from_mapping(json.load(stream))
+                return cls.from_mapping(json.load(stream, object_pairs_hook=_unique_fields))
         except FileNotFoundError:
-            return cls()
+            schedule = cls()
+            schedule.file_exists = False
+            return schedule
         except (OSError, ValueError) as err:
             raise ConfigError("maintenance schedule {}: {}".format(path, err)) from None
 
@@ -55,13 +58,19 @@ class MaintenanceSchedule:
         schedule = cls(windows)
         # Refuse weekly coverage without a gap: every loss must have a bound
         # (docs/manual/ibkr-adapter.md, scheduled interruptions).
-        for month in (1, 7):
-            schedule.window_end(datetime(2026, month, 5, tzinfo=timezone.utc))
+        year = datetime.now(timezone.utc).year
+        day = datetime(year, 1, 1, tzinfo=timezone.utc)
+        while day.year == year:
+            schedule.window_end(day)
+            day += timedelta(days=1)
         return schedule
 
     def window_end(self, now):
         """End of the union containing now, UTC, or None; starts inclusive, ends exclusive.
 
+        Rule: ADR 0025, "Scheduled interruptions and bounded shutdown".
+        The caller supplies now as an aware UTC instant. The result is an
+        aware UTC instant too, never local clock arithmetic.
         A repeated local boundary uses its earliest start and latest end. A
         nonexistent boundary rolls forward across the DST gap. Compare UTC
         instants, never subtract local datetimes across a clock change.
@@ -94,3 +103,12 @@ def _boundary(day, clock, zone, ending):
     choices = [local.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc) for fold in (0, 1)]
     valid = [at for at in choices if at.astimezone(zone).replace(tzinfo=None) == local]
     return (max if ending else min)(valid) if valid else max(choices)
+
+
+def _unique_fields(pairs):
+    fields = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError("duplicate JSON field: " + key)
+        fields[key] = value
+    return fields
