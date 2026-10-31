@@ -14,24 +14,29 @@ import (
 
 const maxResetWaits = 4
 
-// resetWait is the durable cooldown and nightly allowance in the window file
+// resetWait is the durable cooldown and rolling 24-hour allowance in the window file
 // (docs/manual/server.md, "The Gateway is logged out"). Accepted logins clear
 // counted attempts, never this allowance. The epoch deadline survives DST.
 type resetWait struct {
-	refused time.Time
-	until   time.Time
-	count   int
+	refused  time.Time
+	until    time.Time
+	refusals []time.Time
 }
 
 func (w resetWait) withAttempts(attempts []byte) []byte {
-	if w.count == 0 {
+	if len(w.refusals) == 0 {
 		return append([]byte(nil), attempts...)
 	}
-	return append([]byte(fmt.Sprintf("reset %d %d %d\n", w.refused.Unix(), w.until.Unix(), w.count)), attempts...)
+	header := fmt.Sprintf("reset %d %d %d", w.refused.Unix(), w.until.Unix(), len(w.refusals))
+	for _, at := range w.refusals {
+		header += fmt.Sprintf(" %d", at.Unix())
+	}
+	return append([]byte(header+"\n"), attempts...)
 }
 
-// splitReset accepts legacy epoch-only files and one validated reset header;
-// unknown state fails closed (docs/development.md, "Principles").
+// splitReset separates legacy epoch-only files and validates reset-header
+// structure; awaitReset checks wait eligibility against the clock. Unknown
+// history fails closed (docs/development.md, "Principles").
 func splitReset(raw []byte) (resetWait, []byte, error) {
 	var w resetWait
 	if !strings.HasPrefix(string(raw), "reset ") {
@@ -39,10 +44,10 @@ func splitReset(raw []byte) (resetWait, []byte, error) {
 	}
 	line, rest, ok := strings.Cut(string(raw), "\n")
 	fields := strings.Fields(line)
-	if !ok || len(fields) != 4 {
+	if !ok || len(fields) < 4 {
 		return w, nil, errors.New("malformed reset wait")
 	}
-	values := [3]int64{}
+	values := make([]int64, len(fields)-1)
 	for i, field := range fields[1:] {
 		if !epochLine.MatchString(field) {
 			return w, nil, errors.New("invalid reset value")
@@ -52,10 +57,21 @@ func splitReset(raw []byte) (resetWait, []byte, error) {
 	if values[2] < 1 || values[2] > maxResetWaits {
 		return w, nil, errors.New("invalid reset allowance")
 	}
-	w = resetWait{time.Unix(values[0], 0), time.Unix(values[1], 0), int(values[2])}
-	delay := nightlyResetDelay(w.refused)
-	if delay <= 0 || !w.until.Equal(w.refused.Add(delay)) {
-		return resetWait{}, nil, errors.New("invalid reset deadline or allowance")
+	w.refused, w.until = time.Unix(values[0], 0), time.Unix(values[1], 0)
+	if len(values) == 3 {
+		// Legacy nightly counts have no individual timestamps. Charging all
+		// at the latest refusal conservatively preserves the rolling bound
+		// (docs/manual/server.md, reset policy).
+		for range int(values[2]) {
+			w.refusals = append(w.refusals, w.refused)
+		}
+	} else {
+		if len(values)-3 != int(values[2]) {
+			return resetWait{}, nil, errors.New("invalid reset history length")
+		}
+		for _, at := range values[3:] {
+			w.refusals = append(w.refusals, time.Unix(at, 0))
+		}
 	}
 	return w, []byte(rest), nil
 }
@@ -90,7 +106,7 @@ func awaitReset(cfg config, errj *journal, sigs <-chan os.Signal) int {
 	}
 	w, _, _ := splitReset(raw) // loadCount validated the header and attempt lines.
 	interrupt := func(sig os.Signal) int {
-		if w.count > 0 {
+		if len(w.refusals) > 0 {
 			_ = errj.write("gateway-start: reset wait: interrupted by stop\n")
 		}
 		return 128 + int(sig.(syscall.Signal))
@@ -98,10 +114,16 @@ func awaitReset(cfg config, errj *journal, sigs <-chan os.Signal) int {
 	if sig := pendingStop(sigs); sig != nil {
 		return interrupt(sig)
 	}
-	if w.count == 0 {
+	if len(w.refusals) == 0 {
 		return 0
 	}
-	delay := w.until.Sub(cfg.Now())
+	now := cfg.Now()
+	cooldown := nightlyResetDelay(w.refused)
+	if w.refused.After(now) || cooldown <= 0 || !w.until.Equal(w.refused.Add(cooldown)) {
+		_ = errj.write("gateway-start: ignoring invalid reset wait: refusal or deadline is outside its reset night or ahead of the clock; startup remains counted\n")
+		return 0
+	}
+	delay := w.until.Sub(now)
 	if delay <= 0 {
 		return 0
 	}
@@ -125,6 +147,52 @@ func awaitReset(cfg config, errj *journal, sigs <-chan os.Signal) int {
 // message describes the remaining durable wait at the decision point, including
 // cleanup that crossed the cutoff (docs/manual/server.md, reset policy).
 func (w resetWait) message(now time.Time) string {
-	return fmt.Sprintf("gateway-start: reset wait: login refused at %s ET inside IBKR's nightly reset hour; waiting %gm until %s ET (uncounted %d of 4 tonight)\n",
-		w.refused.In(nysecalendar.NewYork).Format("15:04"), max(0, w.until.Sub(now).Minutes()), w.until.In(nysecalendar.NewYork).Format("15:04"), w.count)
+	remaining := max(time.Duration(0), w.until.Sub(now))
+	unit, suffix := time.Minute, "m"
+	if remaining < time.Minute {
+		unit, suffix = time.Second, "s"
+	}
+	whole := (remaining + unit - 1) / unit
+	return fmt.Sprintf("gateway-start: reset wait: login refused at %s ET inside IBKR's nightly reset hour; waiting %d%s until %s ET (consumed reset allowances %d of 4 in 24h)\n",
+		resetClockLabel(w.refused), whole, suffix, resetClockLabel(w.until), len(w.refusals))
+}
+
+// recentRefusals retains consumed allowances across nights and DST; future
+// timestamps also remain charged after a clock correction (docs/manual/server.md).
+func (w resetWait) recentRefusals(now time.Time) []time.Time {
+	var recent []time.Time
+	for _, at := range w.refusals {
+		if now.Sub(at) < 24*time.Hour {
+			recent = append(recent, at)
+		}
+	}
+	return recent
+}
+
+func resetClockLabel(at time.Time) string {
+	format := "15:04"
+	if at.Second() != 0 {
+		format = "15:04:05"
+	}
+	return at.In(nysecalendar.NewYork).Format(format)
+}
+
+type resetDecision struct {
+	discounted []byte
+	wait       resetWait
+}
+
+// receiveReset retrieves the final cleanup decision before a reset return
+// (docs/development.md, "Ending processes").
+func receiveReset(v *verdict, decisions <-chan resetDecision) *resetDecision {
+	if v != nil && v.code == resetRetry {
+		decision := <-decisions // The reader publishes the decision before its verdict.
+		return &decision
+	}
+	select {
+	case decision := <-decisions:
+		return &decision
+	default:
+		return nil
+	}
 }

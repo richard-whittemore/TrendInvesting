@@ -814,7 +814,7 @@ func TestNightlyResetBoundariesUseNewYorkRegardlessOfTheClocksZone(t *testing.T)
 		{"2026-10-31T03:39:59Z", "23:39", false},
 		{"2026-10-31T03:40:00Z", "23:40", true},
 		{"2026-10-31T04:08:00Z", "00:08", true},
-		{"2026-10-31T04:59:59Z", "00:59", true},
+		{"2026-10-31T04:59:59Z", "00:59:59", true},
 		{"2026-10-31T05:00:00Z", "01:00", false},
 		{"2026-10-31T05:05:00Z", "01:05", false},
 		{"2026-12-01T05:08:00Z", "00:08", true},
@@ -859,7 +859,7 @@ func TestThreeResetRefusalsPreserveOlderAttemptsAndNeverStopTheRetries(t *testin
 		}
 	})
 	code, out := r.run(c)
-	if code != 0 || waits != 3 || r.launches() != 4 || len(r.counter()) != 0 || strings.Contains(out, stopPhrase) || !strings.Contains(out, "(uncounted 3 of 4 tonight)") {
+	if code != 0 || waits != 3 || r.launches() != 4 || len(r.counter()) != 0 || strings.Contains(out, stopPhrase) || !strings.Contains(out, "(consumed reset allowances 3 of 4 in 24h)") {
 		t.Fatalf("exit %d, waits %d, launches %d, count %v: %s", code, waits, r.launches(), r.counter(), out)
 	}
 }
@@ -961,7 +961,7 @@ func TestServerManualNamesNightlyResetAndOrderedRecovery(t *testing.T) {
 			row = line
 		}
 	}
-	for _, want := range []string{"00:10 ET", "Friday", "01:00 ET", "waiting Nm until HH:MM ET (uncounted M of 4 tonight)", "sudo systemctl start ti-gateway.service", "Login has completed", "sudo systemctl start ti-adapter-boost.service"} {
+	for _, want := range []string{"00:10 ET", "Friday", "01:00 ET", "waiting Nm until HH:MM ET (consumed reset allowances M of 4 in 24h)", "sudo systemctl start ti-gateway.service", "Login has completed", "sudo systemctl start ti-adapter-boost.service"} {
 		if !strings.Contains(row, want) {
 			t.Errorf("gateway recovery row lacks %q", want)
 		}
@@ -1032,5 +1032,56 @@ func TestAUnitStopDuringResetOutputDoesNotBecomeAnotherResetWait(t *testing.T) {
 	code := runIBC(c, out, &journal{w: &messages, timeout: time.Second}, sigs)
 	if code != 143 {
 		t.Fatalf("exit %d, want 143 after a unit stop, never another reset wait: %s", code, messages.String())
+	}
+	assertInterruptedResetCounted(t, r)
+}
+
+// Synthetic renderer ignores termination and does no signalling of its own;
+// the supervisor must still stop (docs/development.md, "Ending processes").
+func TestBlockedRendererStopsOnSignal(t *testing.T) {
+	if os.Getenv("TI_TEST_BLOCKED_RENDERER") == "1" {
+		dir := os.Getenv("TI_TEST_RENDER_DIR")
+		r := &rig{t: t, dir: dir, state: filepath.Join(dir, "login-failures"), now: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)}
+		c := r.cfg(`exit 0`)
+		c.Render = []string{"sh", "-c", `trap '' TERM INT; echo renderer-ready; sleep 3`}
+		c.StopDeadline = 100 * time.Millisecond
+		os.Exit(run(c, os.Stdout, os.Stderr))
+	}
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT} {
+		t.Run(sig.String(), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBlockedRendererStopsOnSignal$")
+			r := newRig(t)
+			cmd.Env = append(os.Environ(), "TI_TEST_BLOCKED_RENDERER=1", "TI_TEST_RENDER_DIR="+r.dir)
+			pipe, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd.Stderr = cmd.Stdout
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			scanner := bufio.NewScanner(pipe)
+			ready := false
+			for scanner.Scan() {
+				if scanner.Text() == "renderer-ready" {
+					ready = true
+					break
+				}
+			}
+			start := time.Now()
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			err = cmd.Wait()
+			var ee *exec.ExitError
+			if !ready || !errors.As(err, &ee) || ee.ExitCode() != 128+int(sig) || time.Since(start) > time.Second {
+				t.Fatalf("ready=%v exit=%v elapsed=%s; blocked renderer must stop promptly with %d", ready, err, time.Since(start), 128+int(sig))
+			}
+			if r.launches() != 0 || len(r.counter()) != 0 {
+				t.Fatalf("stopped renderer launched IBC: launches=%d count=%v", r.launches(), r.counter())
+			}
+		})
 	}
 }

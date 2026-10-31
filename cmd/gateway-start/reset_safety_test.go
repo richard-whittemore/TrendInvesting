@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -117,7 +118,7 @@ func TestResetSafetyChattyDescendantCannotOverrideWait(t *testing.T) {
 }
 
 func TestResetSafetyPendingStopPreventsLaunch(t *testing.T) {
-	for _, when := range []string{"entry", "before exec", "during refusal"} {
+	for _, when := range []string{"entry", "before exec", "during refusal", "during reset message"} {
 		t.Run(when, func(t *testing.T) {
 			r := newRig(t)
 			c := r.cfg(`echo '` + refusal + `'`)
@@ -132,6 +133,9 @@ func TestResetSafetyPendingStopPreventsLaunch(t *testing.T) {
 				if when == "before exec" && strings.Contains(string(p), "starting IBC") {
 					sigs <- syscall.SIGTERM
 				}
+				if when == "during reset message" && strings.Contains(string(p), "reset wait: login refused") {
+					sigs <- syscall.SIGTERM
+				}
 				return messages.Write(p)
 			})
 			out := writerFunc(func(p []byte) (int, error) {
@@ -142,13 +146,16 @@ func TestResetSafetyPendingStopPreventsLaunch(t *testing.T) {
 			})
 			code := runIBC(c, &journal{w: out, timeout: time.Second}, &journal{w: errw, timeout: time.Second}, sigs)
 			wantLaunches := 0
-			if when == "during refusal" {
+			if when == "during refusal" || when == "during reset message" {
 				wantLaunches = 1
 			}
 			if code != 143 || r.launches() != wantLaunches {
 				t.Fatalf("code=%d launches=%d; want 143, %d: %s", code, r.launches(), wantLaunches, messages.String())
 			}
-			if when == "during refusal" && !strings.Contains(messages.String(), "gateway-start: reset wait: interrupted by stop") {
+			if when == "during refusal" || when == "during reset message" {
+				assertInterruptedResetCounted(t, r)
+			}
+			if (when == "during refusal" || when == "during reset message") && !strings.Contains(messages.String(), "gateway-start: reset wait: interrupted by stop") {
 				t.Errorf("missing interruption prefix: %s", messages.String())
 			}
 		})
@@ -159,7 +166,7 @@ func TestResetSafetyDecisionLogsActualDelayBeforeWait(t *testing.T) {
 	r := newRig(t)
 	c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then echo '` + refusal + `'; fi`)
 	log := &recordingJournal{}
-	want := "gateway-start: reset wait: login refused at 00:58 ET inside IBKR's nightly reset hour; waiting 2m until 01:00 ET (uncounted 1 of 4 tonight)"
+	want := "gateway-start: reset wait: login refused at 00:58 ET inside IBKR's nightly reset hour; waiting 2m until 01:00 ET (consumed reset allowances 1 of 4 in 24h)"
 	resetClock(r, &c, "2026-11-01T04:58:00Z", func(time.Duration) {
 		if !strings.Contains(log.text(), want) {
 			t.Errorf("decision missing before wait: %s", log.text())
@@ -213,7 +220,7 @@ func TestResetSafetyCleanupPastCutoffReportsZeroWait(t *testing.T) {
 	var messages bytes.Buffer
 	out := writerFunc(func(p []byte) (int, error) { mu.Lock(); now = now.Add(time.Minute); mu.Unlock(); return len(p), nil })
 	code := runIBC(c, &journal{w: out, timeout: time.Second}, &journal{w: &messages, timeout: time.Second}, make(chan os.Signal))
-	if code != resetRetry || !strings.Contains(messages.String(), "waiting 0m until 01:00 ET (uncounted 1 of 4 tonight)") {
+	if code != resetRetry || !strings.Contains(messages.String(), "waiting 0s until 01:00 ET (consumed reset allowances 1 of 4 in 24h)") {
 		t.Fatalf("outcome=%d, missing actual zero wait at cutoff: %s", code, messages.String())
 	}
 }
@@ -221,7 +228,7 @@ func TestResetSafetyCleanupPastCutoffReportsZeroWait(t *testing.T) {
 func TestResetSafetyStopWinsWhenTimerIsReady(t *testing.T) {
 	r := newRig(t)
 	now, _ := time.Parse(time.RFC3339, "2026-11-01T04:58:00Z")
-	w := resetWait{now, now.Add(2 * time.Minute), 1}
+	w := resetWait{now, now.Add(2 * time.Minute), []time.Time{now}}
 	if err := os.WriteFile(r.state, w.withAttempts(nil), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +251,7 @@ func TestResetSafetyMalformedWaitFailsClosed(t *testing.T) {
 	for _, raw := range []string{
 		"reset 1793509080\n", "reset invalid 1793509200 1\n",
 		"reset 1793509080 1793509200 0\n", "reset 1793509080 1793509200 5\n",
-		"reset 1793509080 1793509081 1\n", "reset 1793509080 1793509200 1\nreset 1 2 3\n",
+		"reset 1793509080 1793509200 1\nreset 1 2 3\n",
 	} {
 		t.Run(raw, func(t *testing.T) {
 			r := newRig(t)
@@ -258,10 +265,10 @@ func TestResetSafetyMalformedWaitFailsClosed(t *testing.T) {
 	}
 }
 
-func TestResetSafetyAcceptedLoginKeepsNightlyAllowance(t *testing.T) {
+func TestResetSafetyAcceptedLoginKeepsRollingAllowance(t *testing.T) {
 	r := newRig(t)
 	at, _ := time.Parse(time.RFC3339, "2026-11-01T04:40:00Z")
-	w := resetWait{at.Add(-15 * time.Minute), at, 4}
+	w := resetWait{at.Add(-15 * time.Minute), at, []time.Time{at.Add(-60 * time.Minute), at.Add(-45 * time.Minute), at.Add(-30 * time.Minute), at.Add(-15 * time.Minute)}}
 	if err := os.WriteFile(r.state, w.withAttempts(nil), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -269,5 +276,149 @@ func TestResetSafetyAcceptedLoginKeepsNightlyAllowance(t *testing.T) {
 	resetClock(r, &c, at.Format(time.RFC3339), func(time.Duration) { t.Error("accepted login replenished reset allowance") })
 	if code, output := r.run(c); code != exitRetry || len(r.counter()) != 1 {
 		t.Fatalf("fifth reset refusal after acceptance: code=%d count=%v: %s", code, r.counter(), output)
+	}
+}
+
+// Synthetic nights exercise the rolling budget in docs/manual/server.md,
+// including an idle supervisor over the spring clock change.
+func TestResetAllowanceSurvivesIdleAcrossNights(t *testing.T) {
+	for _, start := range []string{"2027-03-14T05:00:00Z", "2026-10-30T04:00:00Z", "2026-11-01T04:00:00Z"} {
+		t.Run(start, func(t *testing.T) {
+			r := newRig(t)
+			first, _ := time.Parse(time.RFC3339, start)
+			c := r.cfg(`echo '` + refusal + `'`)
+			c.Accepted = regexp.MustCompile(defaultAccepted)
+			var messages bytes.Buffer
+			for i := 0; i < 4; i++ {
+				at := first.Add(time.Duration(i) * 15 * time.Minute)
+				c.Now = func() time.Time { return at }
+				if code := runIBC(c, &journal{w: io.Discard, timeout: time.Second}, &journal{w: &messages, timeout: time.Second}, make(chan os.Signal)); code != resetRetry {
+					t.Fatalf("first night refusal %d: %d: %s", i, code, messages.String())
+				}
+			}
+			// Spring and ordinary nights retain all four; after the autumn change
+			// all four are older than 24h and may expire.
+			next := first.Add(23*time.Hour + 40*time.Minute)
+			if start == "2026-11-01T04:00:00Z" {
+				next = first.Add(25*time.Hour + 40*time.Minute)
+			}
+			c.Now = func() time.Time { return next }
+			if start == "2026-11-01T04:00:00Z" {
+				// 00:40 EST on the following night, after the 25-hour day.
+				if code := runIBC(c, &journal{w: io.Discard, timeout: time.Second}, &journal{w: &messages, timeout: time.Second}, make(chan os.Signal)); code != resetRetry {
+					t.Fatalf("expired allowances did not renew: %d: %s", code, messages.String())
+				}
+				return
+			}
+			// On spring's shortened day, use 23:40 EDT rather than 00:40 EDT.
+			if start == "2027-03-14T05:00:00Z" {
+				next = first.Add(22*time.Hour + 40*time.Minute)
+			}
+			for i, want := range []int{exitRetry, exitRetry, exitStopped} {
+				if code := runIBC(c, &journal{w: io.Discard, timeout: time.Second}, &journal{w: &messages, timeout: time.Second}, make(chan os.Signal)); code != want {
+					t.Fatalf("idle restart %d: code=%d want=%d; previous night's allowances must remain spent: %s", i, code, want, messages.String())
+				}
+				next = next.Add(5 * time.Minute)
+			}
+			if r.launches() != 7 || len(r.counter()) != 3 {
+				t.Fatalf("launches=%d counted=%v; want seven and three", r.launches(), r.counter())
+			}
+		})
+	}
+}
+
+func TestResetInvalidWaitIsIgnoredAndStartupCounted(t *testing.T) {
+	now, _ := time.Parse(time.RFC3339, "2026-11-01T04:58:00Z")
+	for name, pair := range map[string][2]time.Time{
+		"future refusal":         {now.AddDate(1, 0, 0), now.AddDate(1, 0, 0).Add(2 * time.Minute)},
+		"outside night":          {now, now.Add(24 * time.Hour)},
+		"wrong cooldown":         {now, now.Add(time.Second)},
+		"refusal outside window": {now.Add(-12 * time.Hour), now.Add(-12*time.Hour + 15*time.Minute)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			raw := fmt.Sprintf("reset %d %d 1\n", pair[0].Unix(), pair[1].Unix())
+			if err := os.WriteFile(r.state, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c := r.cfg(`exit 0`)
+			c.Now = func() time.Time { return now }
+			c.After = func(d time.Duration) <-chan time.Time {
+				t.Errorf("invalid wait slept for %s", d)
+				ch := make(chan time.Time, 1)
+				ch <- now
+				return ch
+			}
+			code, output := r.run(c)
+			if code != 0 || len(r.counter()) != 1 || r.launches() != 1 || !strings.Contains(output, "ignoring invalid reset wait") {
+				t.Fatalf("code=%d launches=%d counted=%v: %s", code, r.launches(), r.counter(), output)
+			}
+		})
+	}
+}
+
+func TestPermanentOutputStopKeepsResetAttemptCounted(t *testing.T) {
+	r := newRig(t)
+	// One oversized synthetic line contains a refusal in the same read buffer.
+	c := r.cfg(`printf '` + refusal + `'; head -c 65536 /dev/zero | tr '\000' x; printf '\n'`)
+	c.Accepted = regexp.MustCompile(defaultAccepted)
+	resetClock(r, &c, "2026-11-01T04:58:00Z", nil)
+	var messages bytes.Buffer
+	code := runIBC(c, &journal{w: io.Discard, timeout: time.Second}, &journal{w: &messages, timeout: time.Second}, make(chan os.Signal))
+	if code != exitStopped || len(r.counter()) != 1 || !strings.Contains(messages.String(), "longer than 64 KiB") {
+		t.Fatalf("code=%d count=%v; permanent stop must survive reset: %s", code, r.counter(), messages.String())
+	}
+}
+
+func TestResetMessageUsesWholeUnitsAndConsumedAllowances(t *testing.T) {
+	at, _ := time.Parse(time.RFC3339, "2026-11-01T04:08:00Z")
+	w := resetWait{at, at.Add(15 * time.Minute), []time.Time{at}}
+	for _, tc := range []struct {
+		elapsed time.Duration
+		want    string
+	}{
+		{1230 * time.Millisecond, "waiting 15m"},
+		{14*time.Minute + 1230*time.Millisecond, "waiting 59s"},
+		{15 * time.Minute, "waiting 0s"},
+	} {
+		got := w.message(at.Add(tc.elapsed))
+		if !strings.Contains(got, tc.want) || !strings.Contains(got, "consumed reset allowances 1 of 4 in 24h") || strings.Contains(got, "uncounted") {
+			t.Errorf("want %q and consumed allowances, got %s", tc.want, got)
+		}
+	}
+}
+
+func assertInterruptedResetCounted(t *testing.T, r *rig) {
+	t.Helper()
+	raw, err := os.ReadFile(r.state)
+	if err != nil || len(r.counter()) != 1 || !strings.HasPrefix(string(raw), "reset ") {
+		t.Fatalf("interrupted reset lost provisional count or header: %q, %v", raw, err)
+	}
+}
+
+// Delay delivery to the final handoff: a reset verdict must not escape through
+// the generic return while its cleanup decision is still pending
+// (docs/development.md, "Ending processes").
+func TestFinalResetVerdictWaitsForCleanupDecision(t *testing.T) {
+	decisions := make(chan resetDecision)
+	done := make(chan *resetDecision, 1)
+	go func() { done <- receiveReset(&verdict{code: resetRetry}, decisions) }()
+	select {
+	case got := <-done:
+		t.Fatalf("reset verdict returned before its cleanup decision: %v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+	select {
+	case decisions <- resetDecision{discounted: []byte("settled")}:
+	case <-time.After(time.Second):
+		t.Fatal("reset decision has no receiver")
+	}
+	select {
+	case got := <-done:
+		if got == nil || string(got.discounted) != "settled" {
+			t.Fatalf("lost cleanup decision: %v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reset decision was not delivered")
 	}
 }

@@ -19,17 +19,21 @@ func TestAStopOverridesAnEarlierRetryAndNeverTheOtherWay(t *testing.T) {
 	}
 }
 
-// A durable reset wait outranks every other verdict (docs/manual/server.md,
+// A permanent safety stop outranks a durable reset wait (docs/manual/server.md,
 // "The Gateway is logged out"); journal and drain failures cannot skip it.
-func TestResetSafetyVerdictOutranksEveryOtherVerdict(t *testing.T) {
+func TestResetSafetyVerdictPreservesPermanentStop(t *testing.T) {
 	for _, other := range []int{exitRetry, exitStopped, exitInternal} {
 		for _, codes := range [][]int{{resetRetry, other}, {other, resetRetry}} {
 			var state verdictState
 			for _, code := range codes {
 				state.set(verdict{code: code})
 			}
-			if state.get().code != resetRetry {
-				t.Errorf("verdicts %v: got %d, want reset", codes, state.get().code)
+			want := resetRetry
+			if other == exitStopped {
+				want = exitStopped
+			}
+			if state.get().code != want {
+				t.Errorf("verdicts %v: got %d, want %d", codes, state.get().code, want)
 			}
 		}
 	}
