@@ -98,7 +98,9 @@ func TestWaitGonePollsUntilAbsentAndBoundsAStuckGroup(t *testing.T) {
 	if err := waitGone(4242, time.Millisecond, func(int, syscall.Signal) error { return nil }); err == nil {
 		t.Fatal("live group passed the deadline")
 	}
-	if err := waitGone(4242, time.Second, func(int, syscall.Signal) error { return syscall.EPERM }); !errors.Is(err, syscall.EPERM) {
+	// EPERM and ESRCH both mean the started command's group is gone; any other
+	// answer from the probe is an error the caller must see.
+	if err := waitGone(4242, time.Second, func(int, syscall.Signal) error { return syscall.EINVAL }); !errors.Is(err, syscall.EINVAL) {
 		t.Fatalf("probe error=%v", err)
 	}
 }
