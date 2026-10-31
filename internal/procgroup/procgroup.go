@@ -52,7 +52,12 @@ func waitGone(pid int, timeout time.Duration, probe func(int, syscall.Signal) er
 	defer poll.Stop()
 	for {
 		err := probe(t, 0)
-		if errors.Is(err, syscall.ESRCH) {
+		// kill(2) to a group fails with ESRCH when no process has that group
+		// and with EPERM when none of the processes that have it may be
+		// signalled by the caller: either way, nothing the caller started is
+		// left under the id (the id has been reused by another session), so
+		// the guarded group is gone.
+		if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) {
 			return nil
 		}
 		if err != nil {

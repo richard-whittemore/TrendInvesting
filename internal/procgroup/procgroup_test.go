@@ -102,3 +102,13 @@ func TestWaitGonePollsUntilAbsentAndBoundsAStuckGroup(t *testing.T) {
 		t.Fatalf("probe error=%v", err)
 	}
 }
+
+func TestWaitGoneTreatsAReusedGroupAsGone(t *testing.T) {
+	// EPERM from a signal-0 probe means every process under the id belongs to
+	// someone else: the started command's group is gone, the id reused.
+	calls := 0
+	probe := func(int, syscall.Signal) error { calls++; return syscall.EPERM }
+	if err := waitGone(4242, time.Second, probe); err != nil || calls != 1 {
+		t.Fatalf("err=%v calls=%d; a reused id is gone, not an error", err, calls)
+	}
+}
