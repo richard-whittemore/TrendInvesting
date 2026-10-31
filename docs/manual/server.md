@@ -818,8 +818,9 @@ Before cleanup or journal output, the window file records the reset wait's
 end time and the timestamps of consumed reset allowances, retaining the
 provisional attempt. Allowances expire individually after 24 elapsed hours;
 a new calendar night, an idle unit, or either DST change never renews them.
-Legacy headers without individual timestamps charge every allowance at their
-last refusal time, conservatively delaying expiry.
+A header written by an earlier build, without the timestamps, is refused as
+malformed (exit 77): delete `/var/lib/ti-gateway/login-failures` and start the
+unit; nothing is migrated.
 The program kills IBC's own process group and polls until it is gone, with a
 bounded deadline, before draining output or relaunching. If the group cannot be
 confirmed gone, retries stop with 77 and the attempt stays counted. Only when

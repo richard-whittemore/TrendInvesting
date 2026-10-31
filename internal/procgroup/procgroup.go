@@ -54,9 +54,11 @@ func waitGone(pid int, timeout time.Duration, probe func(int, syscall.Signal) er
 		err := probe(t, 0)
 		// kill(2) to a group fails with ESRCH when no process has that group
 		// and with EPERM when none of the processes that have it may be
-		// signalled by the caller: either way, nothing the caller started is
-		// left under the id (the id has been reused by another session), so
-		// the guarded group is gone.
+		// signalled by the caller. Every program here runs as one unprivileged
+		// user under NoNewPrivileges (deploy/systemd/*.service), so nothing a
+		// caller started can take on credentials the caller cannot signal:
+		// EPERM can only mean the id now belongs to another session, and the
+		// guarded group is gone (docs/development.md, "Ending processes").
 		if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) {
 			return nil
 		}

@@ -69,7 +69,9 @@ func splitReset(raw []byte) (resetWait, []byte, error) {
 		// other shape could replenish the allowance, so it fails closed (AGENTS.md).
 		var previous int64
 		for _, at := range values[3:] {
-			if at <= 0 || at < previous || at > values[0] {
+			// The writer prunes allowances older than 24 hours before it appends
+			// the refusal, so an entry that old was never written by it.
+			if at <= 0 || at < previous || at > values[0] || values[0]-at >= 24*60*60 {
 				return resetWait{}, nil, errors.New("invalid reset history")
 			}
 			previous = at

@@ -443,6 +443,7 @@ func TestResetHistoryMustBeConsistentWithTheRecordedRefusal(t *testing.T) {
 		pair + "2 1793508000 1793507000\n",
 		pair + "1 1793509999\n",
 		pair + "2 1793508000 1793508500\n",
+		pair + "4 1 2 3 1793509080\n",
 	} {
 		t.Run(raw, func(t *testing.T) {
 			r := newRig(t)

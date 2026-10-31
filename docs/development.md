@@ -314,7 +314,10 @@ session):
   below, so its target is never -1 (every process) or 0 (the caller's own
   group). `procgroup.Kill` and `procgroup.WaitGone` are the only kill(2) callers.
   `WaitGone` uses the same pid guard and only probes with signal 0; its
-  polling is bounded and never sends a terminating signal.
+  polling is bounded and never sends a terminating signal. It treats EPERM
+  from the probe as the group being gone: every service runs as one
+  unprivileged user under `NoNewPrivileges`, so nothing it started can hold
+  credentials it cannot signal, and EPERM can only mean the id was reused.
 - The triage job's gate ends the gate user's processes in one function,
   `pkillGateUser` (`cmd/triage`), which resolves the gate user's UID and
   refuses unless it exists, is not the job's own and is not root, asks
