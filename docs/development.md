@@ -312,7 +312,12 @@ session):
 - A command started in a group of its own (`Setpgid`) is ended with
   `procgroup.Kill(pid)` (`internal/procgroup`), which refuses any pid of 1 or
   below, so its target is never -1 (every process) or 0 (the caller's own
-  group). Nothing else calls `kill(2)`.
+  group). `procgroup.Kill` and `procgroup.WaitGone` are the only kill(2) callers.
+  `WaitGone` uses the same pid guard and only probes with signal 0; its
+  polling is bounded and never sends a terminating signal. It treats EPERM
+  from the probe as the group being gone: every service runs as one
+  unprivileged user under `NoNewPrivileges`, so nothing it started can hold
+  credentials it cannot signal, and EPERM can only mean the id was reused.
 - The triage job's gate ends the gate user's processes in one function,
   `pkillGateUser` (`cmd/triage`), which resolves the gate user's UID and
   refuses unless it exists, is not the job's own and is not root, asks
@@ -332,11 +337,13 @@ session):
 `internal/procgroup`'s `TestNoKillOutsideTheGuardedFunctions` fails the
 build if any source under `cmd/`, `internal/` or `transport/`, tests and
 shell scripts included, calls `kill(2)` other than through
-`procgroup.Kill` (`syscall`'s or `x/sys/unix`'s `Kill`, under any import
-name), or names a signalling program as a command (a path to one, one
+`procgroup.Kill` and `procgroup.WaitGone` (`syscall`'s or `x/sys/unix`'s
+`Kill`, under any import name), or names a signalling program as a command (a path to one, one
 started by `exec`, or one followed by its arguments, in any string a test
 writes as a script or hands to `sh -c`) outside its short list of guarded
-declarations; `TestTheAuditCatchesEverySeededKill` proves it catches each
+declarations. The procgroup folder remains exempt from that scan, but the
+same audit reads `procgroup.go` and asserts that only `Kill` and `WaitGone`
+reference `syscall.Kill`; `TestTheAuditCatchesEverySeededKill` proves it catches each
 form, the exact `kill -KILL -1` among them.
 
 A test that binds a Unix socket under `/tmp` (for a path short enough for
