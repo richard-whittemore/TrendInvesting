@@ -339,7 +339,7 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
         if maintenance.file_exists:
             windows = ["{} {}–{} {}".format(
                 ",".join(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[d] for d in sorted(days)),
-                start.strftime("%H:%M"), end.strftime("%H:%M"), zone.key)
+                start.strftime("%H:%M"), "24:00" if end.hour == 0 and end.minute == 0 else end.strftime("%H:%M"), zone.key)
                 for days, start, end, zone in maintenance.windows]
             logger.info("ibkr maintenance schedule %s: %d windows loaded: %s", args.maintenance,
                         len(windows), "; ".join(windows) if windows else "no windows apply")

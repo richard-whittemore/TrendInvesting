@@ -481,12 +481,15 @@ the order stays released:
 ## Scheduled interruptions and stopping during a wait
 
 The owner decision of 2026-10-31 treats IBKR's nightly server reset and
-weekend maintenance as expected interruptions. The owner's journals show
-the paper account could not be read from 17:07 ET on 2026-10-25 and the link
-returned at 13:08 ET on 2026-10-26; on 2026-10-31 the host became unreachable
-at 15:11 ET and Client Portal showed "NAV calculation currently unavailable".
-The owner's observed pattern is Saturday afternoon through Sunday early
-afternoon, so the default covers all Saturday and Sunday through 14:00.
+weekend maintenance as expected interruptions. On Saturday 2026-10-31 IBKR
+announced maintenance from 10:00 to 12:00 ET, then IBKR's paper host became
+unreachable at 15:11 ET and Client Portal showed "NAV calculation currently
+unavailable" for the paper account. The weekend before, the account could
+not be read on Sunday evening 2026-10-25 and the link was lost again for
+five minutes on Monday 2026-10-26 at 13:00 ET. When IBKR's paper system
+returns on a weekend is not yet established, so the default is provisional:
+all of Saturday and Sunday through 14:00 ET, to be revised from the times
+this server records. Edit the file when IBKR's pattern becomes clear.
 The 2026-10-31 outage also established that waiting alone need not recover the Gateway: its 2110
 cleared only after a Gateway restart. The adapter therefore waits quietly
 until a fixed bound, then stops for the owner; it never restarts Gateway.

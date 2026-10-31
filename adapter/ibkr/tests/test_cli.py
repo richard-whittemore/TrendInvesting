@@ -400,6 +400,15 @@ class CommandTests(unittest.TestCase):
                     self.assertIn("no schedule file exists", journal)
                     self.assertIn("no windows apply", journal)
 
+    def test_startup_prints_a_midnight_end_as_24_00(self):
+        # A window that runs to the end of its day reads as such, never as 00:00–00:00.
+        path = self.dir / "maintenance.json"
+        path.write_text(json.dumps({"windows": [
+            {"days": ["Sat"], "start": "00:00", "end": "24:00", "zone": "America/New_York"}]}))
+        self.err = io.StringIO()
+        self.assertEqual(self.run_main(self.argv("--maintenance", str(path))), 0, self.err.getvalue())
+        self.assertIn("Sat 00:00–24:00 America/New_York", self.err.getvalue())
+
     def test_recovery_delivers_fresh_runs_warmup_after_approval(self):
         self.recover_after_stop(missing_schedule=False)
 
