@@ -69,12 +69,28 @@ func splitReset(raw []byte) (resetWait, []byte, error) {
 		if len(values)-3 != int(values[2]) {
 			return resetWait{}, nil, errors.New("invalid reset history length")
 		}
+		// The history is accounting: every entry is a real refusal at or before
+		// the recorded one, in order, and the recorded refusal is its last. Any
+		// other shape could replenish the allowance, so it fails closed (AGENTS.md).
+		var previous int64
 		for _, at := range values[3:] {
+			if at <= 0 || at < previous || at > values[0] {
+				return resetWait{}, nil, errors.New("invalid reset history")
+			}
+			previous = at
 			w.refusals = append(w.refusals, time.Unix(at, 0))
+		}
+		if previous != values[0] {
+			return resetWait{}, nil, errors.New("reset history does not end at the recorded refusal")
 		}
 	}
 	return w, []byte(rest), nil
 }
+
+// resetClockSkew is how far a recorded refusal may lie ahead of the clock
+// before the wait is treated as untrustworthy: an NTP step of seconds is
+// ordinary, a refusal minutes in the future is a clock or state fault.
+const resetClockSkew = 2 * time.Minute
 
 // resetCutoff identifies a night by its first 01:00 New York time, including
 // the repeated hour at DST's end (docs/manual/server.md, reset policy).
@@ -118,12 +134,21 @@ func awaitReset(cfg config, errj *journal, sigs <-chan os.Signal) int {
 		return 0
 	}
 	now := cfg.Now()
+	if w.refused.After(now.Add(resetClockSkew)) {
+		// A clock that went backwards past the recorded refusal cannot say how
+		// much of the wait remains; another launch is the one thing not allowed.
+		_ = errj.write(fmt.Sprintf("gateway-start: %s: the recorded reset refusal is %s ahead of the clock; not launching until the clock or %s is put right\n",
+			stopPhrase, w.refused.Sub(now).Round(time.Second), cfg.StateFile))
+		return exitStopped
+	}
 	cooldown := nightlyResetDelay(w.refused)
-	if w.refused.After(now) || cooldown <= 0 || !w.until.Equal(w.refused.Add(cooldown)) {
-		_ = errj.write("gateway-start: ignoring invalid reset wait: refusal or deadline is outside its reset night or ahead of the clock; startup remains counted\n")
+	if cooldown <= 0 || !w.until.Equal(w.refused.Add(cooldown)) {
+		_ = errj.write("gateway-start: ignoring invalid reset wait: refusal or deadline is outside its reset night; startup remains counted\n")
 		return 0
 	}
-	delay := w.until.Sub(now)
+	// The deadline is kept even when the clock stepped back a little; it can
+	// only lengthen the wait, never shorten it, and never past a full step.
+	delay := min(w.until.Sub(now), 15*time.Minute+resetClockSkew)
 	if delay <= 0 {
 		return 0
 	}

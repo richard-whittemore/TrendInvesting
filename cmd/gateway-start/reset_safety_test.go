@@ -422,3 +422,53 @@ func TestFinalResetVerdictWaitsForCleanupDecision(t *testing.T) {
 		t.Fatal("reset decision was not delivered")
 	}
 }
+
+func TestResetHistoryMustBeConsistentWithTheRecordedRefusal(t *testing.T) {
+	// A header whose history does not account for its refusal could replenish the
+	// allowance; it fails closed instead (AGENTS.md: fail closed).
+	for _, raw := range []string{
+		"reset 1793509080 1793509980 4 0 0 0 0\n",
+		"reset 1793509080 1793509980 2 1793508000 1793507000\n",
+		"reset 1793509080 1793509980 1 1793509999\n",
+		"reset 1793509080 1793509980 2 1793508000 1793508500\n",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			r := newRig(t)
+			if err := os.WriteFile(r.state, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if code, output := r.run(r.cfg(`exit 0`)); code != exitStopped || r.launches() != 0 {
+				t.Fatalf("inconsistent history allowed startup: code=%d launches=%d %s", code, r.launches(), output)
+			}
+		})
+	}
+}
+
+func TestResetWaitSurvivesABackwardClockStep(t *testing.T) {
+	// A refusal recorded at 00:08 ET with its deadline at 00:23; the clock steps back.
+	at := time.Date(2026, time.November, 1, 4, 8, 0, 0, time.UTC)
+	w := resetWait{at, at.Add(15 * time.Minute), []time.Time{at}}
+	t.Run("within skew the wait is kept to its deadline", func(t *testing.T) {
+		r := newRig(t)
+		if err := os.WriteFile(r.state, w.withAttempts(nil), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c := r.cfg(`echo 'IBC: Login has completed'`)
+		var delays []time.Duration
+		resetClock(r, &c, "2026-11-01T04:07:00Z", func(d time.Duration) { delays = append(delays, d) })
+		if code, output := r.run(c); code != 0 || len(delays) != 1 || delays[0] != 16*time.Minute {
+			t.Fatalf("code=%d delays=%v: %s", code, delays, output)
+		}
+	})
+	t.Run("beyond skew the start stops rather than launch", func(t *testing.T) {
+		r := newRig(t)
+		if err := os.WriteFile(r.state, w.withAttempts(nil), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c := r.cfg(`echo 'IBC: Login has completed'`)
+		resetClock(r, &c, "2026-11-01T04:00:00Z", nil)
+		if code, output := r.run(c); code != exitStopped || r.launches() != 0 || !strings.Contains(output, "ahead of the clock") {
+			t.Fatalf("code=%d launches=%d: %s", code, r.launches(), output)
+		}
+	})
+}
