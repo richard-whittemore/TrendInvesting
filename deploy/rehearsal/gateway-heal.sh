@@ -42,7 +42,9 @@ ExecStartPre=/bin/sh -c 'cat /var/lib/trend-investing/adapters/boost/pending.jso
 SANDBOX
   # gateway-start writes the provisional attempt before launch and settles it
   # durably before publishing the accepted line (server.md, Gateway healer).
-  cat >/run/heal-gateway-standin <<'GATEWAY'
+  # Not under /run: the container mounts it noexec (status 203 at start).
+  install -d -m 0755 /usr/local/libexec
+  cat >/usr/local/libexec/heal-gateway-standin <<'GATEWAY'
 #!/bin/sh
 set -eu
 echo start >>/run/heal-gateway-starts
@@ -54,13 +56,13 @@ sync /var/lib/ti-gateway/login-failures
 echo 'IBC: Login has completed'
 exec sleep infinity
 GATEWAY
-  chmod 0755 /run/heal-gateway-standin
+  chmod 0755 /usr/local/libexec/heal-gateway-standin
   cat >/etc/systemd/system/ti-gateway.service <<'UNIT'
 [Unit]
 Description=Gateway stand-in for the isolated recovery drill
 [Service]
 Type=simple
-ExecStart=/run/heal-gateway-standin
+ExecStart=/usr/local/libexec/heal-gateway-standin
 UNIT
   # Both real hooks are retained: recovery must coexist with today's page.
   {
