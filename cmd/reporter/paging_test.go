@@ -216,10 +216,10 @@ func TestPagingConfig(t *testing.T) {
 		return ""
 	}
 	p, err := loadPagingPolicy(get)
-	if err != nil || p.after != 30*time.Minute {
+	if err != nil || p.after != 0 {
 		t.Fatalf("default=%+v %v", p, err)
 	}
-	for _, value := range []string{"0", "45m", "-1m", "invalid"} {
+	for _, value := range []string{"session", "0", "45m", "-1m", "invalid"} {
 		if err := os.WriteFile(config, []byte("TI_ESCALATE_AFTER="+value+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}

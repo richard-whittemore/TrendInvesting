@@ -166,17 +166,10 @@ func (h *hostGateway) updateAdapterLosses(ev *gatewayEvidence, now time.Time) bo
 	// identifies an adapter-sourced outage, except one opened by the restart rule.
 	if h.Since != nil && len(h.Links) == 0 && ev.loggedIn && !h.RestartOnly && (h.Notice == "" || h.Notice == report.KindIBKRConnectivity) {
 		h.Notice = report.KindIBKRConnectivity
-		for unit, evidence := range ev.adapters {
-			if !evidence.previousLoss.IsZero() {
-				h.Links[unit] = adapterLoss{Since: *h.Since}
-			}
-		}
-		// When the old loss lines rotated away, ownership is unknown. Retain each
-		// configured candidate until its own recovery or process change is known.
-		if len(h.Links) == 0 {
-			for unit := range ev.adapters {
-				h.Links[unit] = adapterLoss{Since: *h.Since}
-			}
+		// Unknown ownership includes every configured candidate: a surviving
+		// unrelated loss must not exclude a unit whose journal rotated away.
+		for unit := range ev.adapters {
+			h.Links[unit] = adapterLoss{Since: *h.Since}
 		}
 	}
 	hadLoss := len(h.Links) > 0
@@ -198,7 +191,7 @@ func (h *hostGateway) updateAdapterLosses(ev *gatewayEvidence, now time.Time) bo
 		ev.out = true
 		ev.connectivity = ev.loggedIn || ev.silent && h.Notice == report.KindIBKRConnectivity
 	}
-	return hadLoss && len(h.Links) == 0 && !ev.silent
+	return hadLoss && len(h.Links) == 0
 }
 
 func loadHostGateway(path string) (hostGateway, error) {
@@ -343,6 +336,11 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		evidence := ev.adapters[unit]
 		a := report.AdapterSampleFault(host, unit, "", now)
 		if evidence.sampleErr != nil {
+			if seen[channelKey("resolving", a.Key)] {
+				// A recurring fault starts fresh while old receipts keep their own
+				// pending cancellations (alerts-and-dashboard.md, "Paging invariant").
+				forgetAlert(a.Key, nil, seen, sent, repeats)
+			}
 			a.Body += evidence.sampleErr.Error()
 			retErr = errors.Join(retErr, evidence.sampleErr, deliver(senders, a, seen, sent, repeats, now, gatewayRemindEvery, record, policies...))
 		} else {
@@ -357,6 +355,9 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 				}
 				forgetAlert(a.Key, keep, seen, sent, repeats)
 				retErr = errors.Join(retErr, resolveErr)
+				if deliveredAnywhere(seen, a.Key) {
+					seen[channelKey("resolving", a.Key)] = true
+				}
 			}
 			delete(sent, channelKey("observed", a.Key))
 			delete(sent, channelKey("escalation", a.Key))
@@ -447,8 +448,9 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	if h.Resolving {
 		// The new outage is due its page while an earlier recovery's resolution
 		// is still pending: the channel that never took that resolution holds a
-		// receipt for the old incident and would stay silent, so the receipts go
-		// now. Until here a recovery still retries the pending resolution.
+		// delivery record for the old incident and would stay silent. Reset that
+		// suppression; pending receipt cancellations remain scoped to the old page.
+		// Until here a recovery still retries the pending resolution.
 		forgetAlert(key, map[string]bool{"observed": true, "escalation": true}, seen, sent, repeats)
 		h.Resolving = false
 	}

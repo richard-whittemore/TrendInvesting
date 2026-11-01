@@ -13,6 +13,7 @@ import (
 // lives in the caller's locked durable record, shared by hooks and timer runs.
 type pagingPolicy struct {
 	bypass   bool
+	session  bool
 	after    time.Duration
 	schedule report.IBKRSchedule
 }
@@ -37,11 +38,15 @@ func loadPagingPolicy(getenv func(string) string) (*pagingPolicy, error) {
 	}
 	after := getenv("TI_ESCALATE_AFTER")
 	if after == "" {
-		after = "30m"
+		after = "session"
 	}
-	delay, err := time.ParseDuration(after)
-	if err != nil || delay < 0 {
-		return fallback, errors.New("reporter: TI_ESCALATE_AFTER must be a non-negative duration (default 30m, 0 is immediate)")
+	var delay time.Duration
+	if after != "session" {
+		var err error
+		delay, err = time.ParseDuration(after)
+		if err != nil || delay < 0 {
+			return fallback, errors.New("reporter: TI_ESCALATE_AFTER must be session (default) or a non-negative duration (0 is immediate)")
+		}
 	}
 	path = getenv("TI_IBKR_MAINTENANCE_FILE")
 	if path == "" {
@@ -49,7 +54,7 @@ func loadPagingPolicy(getenv func(string) string) (*pagingPolicy, error) {
 	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return &pagingPolicy{after: delay}, nil
+		return &pagingPolicy{after: delay, session: after == "session"}, nil
 	}
 	if err != nil {
 		return fallback, fmt.Errorf("reporter: IBKR schedule: %w", err)
@@ -58,7 +63,7 @@ func loadPagingPolicy(getenv func(string) string) (*pagingPolicy, error) {
 	if err != nil {
 		return fallback, fmt.Errorf("reporter: IBKR schedule: %w", err)
 	}
-	return &pagingPolicy{after: delay, schedule: schedule}, nil
+	return &pagingPolicy{after: delay, session: after == "session", schedule: schedule}, nil
 }
 
 func policyOf(policies []*pagingPolicy) *pagingPolicy {
@@ -125,7 +130,7 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 			a.PublicBody = "scheduled IBKR interruption. " + a.PublicBody
 		}
 	}
-	escalated := near || !quiet && now.Sub(sent[key]) >= p.after
+	escalated := near || !p.session && !quiet && now.Sub(sent[key]) >= p.after
 	var allowed []sender
 	for _, s := range senders {
 		if (s.name() == "pushover" || s.name() == "pagerduty") && !escalated {
@@ -142,8 +147,9 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 
 // routeAndCancel stops outstanding emergencies when routing enters a quiet
 // window (alerts-and-dashboard.md, "Paging invariant"). Callers persist seen
-// even when cancellation fails; pending cancels retry at every firing, including
-// after the window closes, until successful or the receipt expires (ADR 0019).
+// even when cancellation fails. Available senders retry only the requested
+// receipts whenever this route runs, even after eligibility returns (ADR 0019).
+// The Gateway explicit maintenance hold returns before routing.
 func (p *pagingPolicy) routeAndCancel(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, now time.Time, every time.Duration) ([]sender, report.Alert, time.Duration, error) {
 	allowed, routed, interval, err := p.route(senders, a, sent, now, every)
 	for _, s := range senders {
@@ -153,10 +159,11 @@ func (p *pagingPolicy) routeAndCancel(senders []sender, a report.Alert, seen map
 				eligible = true
 			}
 		}
-		if !eligible || seen[channelKey("cancel:"+s.name(), a.Key)] {
-			_, cancelErr := cancelReceipts([]sender{s}, a.Key, seen, now)
-			err = errors.Join(err, cancelErr)
+		if !eligible {
+			queueReceiptCancellations(seen, a.Key, s.name()+":")
 		}
+		_, cancelErr := retryReceiptCancellations([]sender{s}, a.Key, seen, now)
+		err = errors.Join(err, cancelErr)
 	}
 	return allowed, routed, interval, err
 }

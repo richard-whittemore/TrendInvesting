@@ -774,11 +774,14 @@ adapter or link evidence from before its last start does not establish a current
 loss; the Gateway’s own login state then decides.
 
 Both are **operational**, following the [paging invariant](alerts-and-dashboard.md#paging-invariant):
-ntfy and an alerts issue first, Pushover after `TI_ESCALATE_AFTER` (default 30m)
-if still open, immediately near a session once detection grace has passed.
+ntfy and an alerts issue first; with `TI_ESCALATE_AFTER` at its default `session`,
+Pushover only when a session is near (weekdays 05:30–16:00 ET on an NYSE session
+day), once detection grace has passed. An incident still open when the next
+session-near period starts pages then. A duration such as `30m` retains delayed
+escalation outside session-near; `0` keeps immediate delivery after grace.
 A connectivity loss is observed at the next firing; there is no three-hour blind interval. Outside session-near,
-the shared IBKR schedule holds Pushover until its window ends and the delay
-then expires. If loss outlasts maintenance, the notice asks for
+the shared IBKR schedule holds Pushover through its window; a duration setting
+counts its delay from the window's end, while `session` waits for session-near. If loss outlasts maintenance, the notice asks for
 `sudo systemctl restart ti-gateway`; the reporter never runs that command.
 
 The newest `gateway-start:` line being `gateway-start: reset wait: login refused at`

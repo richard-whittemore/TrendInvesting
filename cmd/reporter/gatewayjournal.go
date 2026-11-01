@@ -46,9 +46,9 @@ type gatewayEvidence struct {
 // adapterEvidence keeps link and process observations together by unit (ADR 0019,
 // "Alerting"). A failed sample cannot invalidate that unit's journal evidence.
 type adapterEvidence struct {
-	active                                bool
-	started, lost, restored, previousLoss time.Time
-	sampleErr                             error
+	active                  bool
+	started, lost, restored time.Time
+	sampleErr               error
 }
 
 // gatewayChecker reads the evidence as of now.
@@ -170,19 +170,21 @@ func gatewayJournalChecker(journalctl string, adapters []string, systemctl strin
 		connectivity := false
 		adaptersSeen := map[string]adapterEvidence{}
 		for _, unit := range adapters {
-			// IBC's own logout evidence needs no adapter corroboration
-			// (server.md, "The Gateway is logged out").
+			// Sampling incidents have their own lifecycle regardless of IBC login
+			// state (alerts-and-dashboard.md, "Paging invariant"; ADR 0019).
+			active, started, err := adapterStart(systemctl, unit)
+			evidence := adapterEvidence{active: active, started: started, sampleErr: err}
 			if loggedOut {
+				// IBC's logout needs no link corroboration (server.md, "The Gateway
+				// is logged out"), but its adapters still own their sampling incidents.
+				adaptersSeen[unit] = evidence
 				continue
 			}
 			lines, err := journalQuery(journalctl, unit, linkEvent)
 			if err != nil {
 				return gatewayEvidence{}, err
 			}
-			active, started, err := adapterStart(systemctl, unit)
-			evidence := adapterEvidence{active: active, started: started, sampleErr: err}
-			evidence.previousLoss, _, _, err = lostSince(lines)
-			if err != nil {
+			if _, _, _, err := lostSince(lines); err != nil {
 				return gatewayEvidence{}, fmt.Errorf("reporter: %s link events: %w", unit, err)
 			}
 			if evidence.sampleErr == nil && !active {

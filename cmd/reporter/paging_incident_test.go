@@ -123,6 +123,9 @@ func TestPagingPreviousBuildStateClassification(t *testing.T) {
 				t.Fatal(err)
 			}
 			g.write(adapterA, stamp(start.Add(-time.Minute), linkLost))
+			// Unknown legacy ownership includes B until its own invalidation
+			// (alerts-and-dashboard.md, "Paging invariant").
+			adapterSample(t, g, adapterB, "inactive", start.Add(-time.Hour))
 			if state == "inactive" {
 				adapterSample(t, g, adapterA, "inactive", start.Add(-time.Hour))
 			}

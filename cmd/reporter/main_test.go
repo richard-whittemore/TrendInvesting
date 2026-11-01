@@ -114,7 +114,7 @@ func writeDurableLog(t *testing.T, dir string) string {
 }
 
 // env keeps existing delivery-mechanism tests on the owner's immediate mode.
-// Paging tests inject their own configuration to exercise the 30-minute default.
+// Paging tests inject their own configuration to exercise the session default and duration modes.
 func env(m map[string]string) func(string) string {
 	return func(k string) string {
 		if k == "TI_ESCALATE_AFTER" && m[k] == "" {

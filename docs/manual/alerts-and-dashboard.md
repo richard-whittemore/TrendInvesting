@@ -35,30 +35,47 @@ missing mark, and a failed trading unit while a session is near. The outside
 Healthchecks heartbeat is capital-safety and remains outside the reporter.
 
 **Operational** incidents include failed units outside that trading exception,
-Gateway logout, IBKR connectivity loss, data jobs, Flex and memory. Session near
-means weekdays 05:30–09:30 New York time, plus 09:30–16:00 on an NYSE session
-day. Operational incidents page immediately then once their detection grace passes.
-Gateway logout and connectivity retain their ten-minute detection grace; reset waits
-are noticed immediately. The escalation clock starts at first observation, before grace. Otherwise the alerts
-repository and ntfy receive the incident immediately; Pushover receives it
-only if it remains unresolved after `TI_ESCALATE_AFTER` (default `30m`; `0`
-keeps immediate delivery). Recovery before the delay sends no Pushover message.
-An incident is open while the reporter still observes its cause; manually
-closing a GitHub issue is not proof of recovery.
+Gateway logout, IBKR connectivity loss, adapter sampling faults, data jobs, Flex
+and memory. The rule is **a page only when it makes sense**: the orchestrator acts on operational alerts first.
+With `TI_ESCALATE_AFTER` at its default `session`, an operational incident reaches
+Pushover only when a session is near: weekdays 05:30–16:00 ET on an NYSE session
+day. Outside that period it stays on the alerts repository and ntfy. An incident
+still open at the next session-near period pages then, once, followed by the
+hourly reminder. Weekends and NYSE holidays are skipped. This is both the shipped
+setting and the built-in default when `reporter.env` is missing.
+
+Detection grace still applies: Gateway logout and connectivity retain their
+ten-minute detection grace; reset waits are noticed immediately. Near a session,
+operational incidents page after that existing grace. A duration such as `30m`
+keeps the delay behaviour outside session-near: its clock starts at first
+observation, before grace. `0` keeps immediate delivery after detection grace,
+subject to scheduled windows. Recovery before eligibility sends no Pushover
+message. An incident is open while the reporter still observes its cause;
+manually closing a GitHub issue is not proof of recovery.
 
 The reporter reads the adapter's `/etc/trend-investing/ibkr-maintenance.json`.
 A missing file means no windows. Outside session-near, an operational incident
 inside a window is marked **scheduled IBKR interruption**, reaches only the
 alerts repository and ntfy, and never reaches Pushover while the window lasts.
-If still open, its escalation delay starts at the window's exact end. Overlapping
+With a duration setting, an open incident's escalation delay starts at the
+window's exact end; `session` waits for session-near. Overlapping
 windows form one continuous window. Capital-safety is never quieted by this rule.
 Operational reminders are never shorter than the existing hourly interval;
 a longer escalation period lengthens that interval. The escalation delay governs
 only the first Pushover. Resolution clears the incident's escalation clock.
 On entry to a quiet window or on recovery, the reporter cancels outstanding
 Pushover emergencies through the receipt cancel API. Failed cancellations are
-retried on every later firing, even after the window closes or escalation becomes
-eligible, until successful or expired; a missing receipt cannot be cancelled and expires on Pushover's timer.
+retried when that incident's delivery or recovery processing runs and its channel
+is configured and available, even after the window closes or escalation becomes
+eligible. An explicit maintenance hold on the Gateway returns before its delivery
+routing, so pending Gateway cancellations wait through those held outage firings.
+A channel set aside waits until it is available again. Each retry cancels only the receipts
+captured for that incident when cancellation was requested; a new incident's
+emergency is never added to an older request. Retries stop after success or receipt
+expiry; a missing receipt cannot be cancelled and expires on Pushover's timer.
+Older channel-wide cancellation markers lack receipt ownership and are not
+replayed: their receipts remain for a later observed recovery or normal expiry,
+so an upgrade cannot guess away a newer incident's emergency.
 
 A newest `gateway-start: reset wait: login refused at` line counts only from
 23:40 to the same night's first 01:00 ET, and only on the night it was written.
@@ -70,7 +87,14 @@ newer than its last start. Each outstanding loss retains its adapter unit and
 process start; another adapter's obsolete or restored line cannot clear it.
 Even an empty adapter journal is sampled, so stopping that adapter ends its
 connectivity incident. A failed unit-state sample gets its own operational
-notice and leaves the journal evidence available for routing. Otherwise the Gateway's own login state decides.
+notice and leaves the journal evidence available for routing. Sampling incidents
+continue detection, reminders, recovery and cancellation retries even while IBC
+reports a logout. A recurring sampling fault starts a new incident with fresh
+escalation and delivery state, retaining only old receipts awaiting cancellation.
+A current restoration from the final owning adapter closes its loss even when
+IBC's journal has no login event; journal silence alone never does. Legacy state
+with unknown ownership retains every plausible configured adapter until its own
+recovery or process invalidation. Otherwise the Gateway's own login state decides.
 A logged-in Gateway with such 1100/2110 evidence and no later restoration gets
 a connectivity notice. Inside a scheduled window it follows the quiet rule;
 only if the Gateway is logged in and the loss outlasts its window does the

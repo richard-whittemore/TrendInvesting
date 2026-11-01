@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,5 +24,34 @@ func TestPagingRuleCommentsCiteADR(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestPagingManualSessionAndCancellationContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "manual", "alerts-and-dashboard.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{"a page only when it makes sense", "orchestrator acts on operational alerts first", "default `session`", "configured and available", "explicit maintenance hold", "only the receipts", "new incident"} {
+		if !strings.Contains(string(raw), phrase) {
+			t.Errorf("manual missing paging contract: %s", phrase)
+		}
+	}
+	raw, err = os.ReadFile(filepath.Join(repoRoot(t), "deploy", "etc", "reporter.env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "TI_ESCALATE_AFTER=session\n") {
+		t.Error("shipped paging default is not session")
+	}
+}
+
+func TestPagingServerManualUsesSessionDefault(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "manual", "server.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "default 30m") || !strings.Contains(string(raw), "default `session`") {
+		t.Error("server manual still promises duration default instead of session")
 	}
 }

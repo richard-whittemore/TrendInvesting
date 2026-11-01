@@ -46,10 +46,7 @@ func SessionNear(now time.Time) (bool, error) {
 	if t.Weekday() == time.Saturday || t.Weekday() == time.Sunday {
 		return false, nil
 	}
-	if mins >= 330 && mins < 570 {
-		return true, nil
-	}
-	if mins < 570 || mins >= 960 {
+	if mins < 330 || mins >= 960 {
 		return false, nil
 	}
 	return nysecalendar.IsTradingDay(t)
