@@ -27,6 +27,8 @@ import (
 )
 
 type rig struct {
+	onGlobalLock                                                              func() (func(), error)
+	globalLocked                                                              bool
 	onRead                                                                    func()
 	onSave                                                                    func()
 	onStatus                                                                  func(string)
@@ -224,7 +226,7 @@ func TestIncidentCannotRestartAgainAfterTwoHours(t *testing.T) {
 	}
 	r.at = r.at.Add(3 * time.Hour)
 	r.calls = nil
-	assertRun(t, r, "same-incident")
+	assertRun(t, r, "already-restarted", "start "+AdapterUnits[0])
 }
 func TestInFlightOrderPreventsRestart(t *testing.T) {
 	r := fixture()
@@ -475,3 +477,23 @@ func TestCounterChangingDuringEvidenceReadPreventsRestart(t *testing.T) {
 }
 
 func (r *rig) Loss(_, _ string) (time.Time, error) { return r.loss, nil }
+
+func (r *rig) Lock() (func(), error) {
+	if r.onGlobalLock != nil {
+		return r.onGlobalLock()
+	}
+	r.globalLocked = true
+	return func() { r.globalLocked = false }, nil
+}
+func TestGatewayHoldsGlobalLockUntilMutationReturns(t *testing.T) {
+	r := fixture()
+	r.onAct = func(_, _ string) {
+		if !r.globalLocked {
+			t.Error("systemd mutation ran without global lock")
+		}
+	}
+	assertRun(t, r, "eligible", "restart "+GatewayUnit, "start "+AdapterUnits[0])
+	if r.globalLocked {
+		t.Fatal("global lock leaked")
+	}
+}

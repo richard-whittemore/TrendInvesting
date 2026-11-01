@@ -38,6 +38,7 @@ type Clock interface {
 }
 type Reader interface{ Read() (Inputs, error) }
 type Store interface {
+	Lock() (func(), error)
 	Load() (State, error)
 	Save(State) error
 }
@@ -56,6 +57,10 @@ type Guard interface {
 	Acquire() (release func(), err error)
 }
 
+// ErrAnotherHealer requests a bounded wait for the global recovery lock
+// (docs/manual/server.md, Gateway healer).
+var ErrAnotherHealer = errors.New("another healer is running")
+
 // ErrOrderBusy is the guard's report that an adapter holds its hand-over lock
 // or has a hand-over without its journal record (ADR 0026 point 8). Any other
 // guard error means the check itself could not be made; both stop recovery.
@@ -69,7 +74,7 @@ func (h healer) say(row, step string) error {
 
 // Run reserves a restart durably before issuing it and never clears that
 // reservation, including after a failed command (server.md, Gateway healer).
-// The caller must serialize Load through Save across all healer instances.
+// Store.Lock serializes recovery across accounts, including adapter starts.
 func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, ctl Systemctl, guard Guard, log func(string) error) error {
 	h := healer{log: log}
 	if !AllowedAdapter(unit) {
@@ -89,16 +94,6 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	if !hasRemedy(lines) {
 		return h.say("no-remedy", "no-action")
 	}
-	prior, err := store.Load()
-	if err != nil {
-		return err
-	}
-	if prior.Incident == failed.Invocation || (!prior.LastRestart.IsZero() && !failed.Finished.After(prior.LastRestart)) {
-		return h.say("same-incident", "no-action")
-	}
-	if !prior.LastRestart.IsZero() && clock.Now().Sub(prior.LastRestart) < 2*time.Hour {
-		return h.say("rate-limit", "no-action")
-	}
 	input, err := reader.Read()
 	if err != nil {
 		return err
@@ -115,6 +110,49 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 			return err
 		}
 	}
+	// Maintenance waits may span days; serialization and recovery share one
+	// ten-minute budget after that wait (server.md, Gateway healer).
+	deadline := clock.Now().Add(10 * time.Minute)
+	if bounded, ok := ctl.(interface{ SetDeadline(time.Time) }); ok {
+		bounded.SetDeadline(deadline)
+	}
+	unlock, err := h.serialize(clock, store, deadline)
+	if err != nil {
+		return err
+	}
+	if unlock == nil {
+		return nil
+	}
+	defer unlock()
+	prior, err := store.Load()
+	if err != nil {
+		return err
+	}
+	gateway, err := ctl.Status(GatewayUnit)
+	if err != nil {
+		return err
+	}
+	loss, err := journal.Loss(unit, failed.Invocation)
+	if err != nil {
+		return err
+	}
+	if loss.IsZero() || !failed.Finished.After(loss) {
+		return h.say("no-remedy", "missing-incident-loss")
+	}
+	checks := actionChecks{clock: clock, reader: reader, journal: journal, ctl: ctl, deadline: deadline}
+	// A newer, logged-in invocation can recover this account even while another
+	// account is already running. Only a restart needs relay exclusion and the
+	// two-hour allowance (server.md, Gateway healer).
+	if gateway.Started.After(loss) {
+		return checks.startAdapter(h, "already-restarted", unit, failed, gateway)
+	}
+	if prior.Incident == failed.Invocation || (!prior.LastRestart.IsZero() && !failed.Finished.After(prior.LastRestart)) {
+		return h.say("same-incident", "no-action")
+	}
+	if !prior.LastRestart.IsZero() && clock.Now().Sub(prior.LastRestart) < 2*time.Hour {
+		return h.say("rate-limit", "no-action")
+	}
+	checks.priorRestart = prior.LastRestart
 	release, err := guard.Acquire()
 	if errors.Is(err, ErrOrderBusy) {
 		return h.say("order-busy", "no-action")
@@ -127,11 +165,6 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 			release()
 		}
 	}()
-	gateway, err := ctl.Status(GatewayUnit)
-	if err != nil {
-		return err
-	}
-	checks := actionChecks{clock: clock, reader: reader, journal: journal, ctl: ctl, priorRestart: prior.LastRestart}
 	row, err := checks.check(unit, failed, gateway)
 	if err != nil {
 		return err
@@ -139,21 +172,7 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	if row != "" {
 		return h.say(row, "no-action")
 	}
-	loss, err := journal.Loss(unit, failed.Invocation)
-	if err != nil {
-		return err
-	}
-	if loss.IsZero() || !failed.Finished.After(loss) {
-		return h.say("no-remedy", "missing-incident-loss")
-	}
 	started := clock.Now()
-	if !prior.LastRestart.IsZero() && started.Sub(prior.LastRestart) < 2*time.Hour {
-		return h.say("rate-limit", "no-action")
-	}
-	checks.deadline = started.Add(10 * time.Minute)
-	if bounded, ok := ctl.(interface{ SetDeadline(time.Time) }); ok {
-		bounded.SetDeadline(checks.deadline)
-	}
 	if err := h.say("eligible", "reserve-restart"); err != nil {
 		return err
 	}
@@ -217,7 +236,7 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 			release()
 			release = nil
 			checks.priorRestart = time.Time{}
-			return checks.startAdapters(h, unit, failed, restarted, loss)
+			return checks.startAdapter(h, "eligible", unit, failed, restarted)
 		}
 		remaining := checks.deadline.Sub(clock.Now())
 		if remaining <= 0 {
@@ -275,14 +294,7 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	if len(input.Counter) != 0 {
 		return "login-problem", nil
 	}
-	current, err := c.ctl.Status(unit)
-	if err != nil {
-		return "", err
-	}
-	if current.Active != "failed" || current != failed {
-		return "owner-stopped", nil
-	}
-	current, err = c.ctl.Status(GatewayUnit)
+	current, err := c.ctl.Status(GatewayUnit)
 	if err != nil {
 		return "", err
 	}
@@ -293,6 +305,15 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	input, err = c.reader.Read()
 	if err != nil {
 		return "", err
+	}
+	// Check the owner's reset-failed veto after the other evidence reads,
+	// immediately before the clock gates and mutation (server.md, Gateway healer).
+	current, err = c.ctl.Status(unit)
+	if err != nil {
+		return "", err
+	}
+	if current.Active != "failed" || current != failed {
+		return "owner-stopped", nil
 	}
 	// Status queries can cross a window too. Evaluate the clock last.
 	if !c.priorRestart.IsZero() && c.clock.Now().Sub(c.priorRestart) < 2*time.Hour {
@@ -314,47 +335,48 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	return "", nil
 }
 
-func (c actionChecks) startAdapters(h healer, trigger string, failed, gateway Status, loss time.Time) error {
-	for _, unit := range AdapterUnits {
-		candidate := failed
-		if unit != trigger {
-			var err error
-			candidate, err = c.ctl.Status(unit)
-			if err != nil {
-				return err
-			}
-			if !eligibleFailure(candidate) || !candidate.Finished.After(loss) {
-				continue
-			}
+// serialize waits for an account's predecessor without extending the recovery
+// deadline (server.md, Gateway healer). The caller holds the lock until every
+// submitted systemd mutation has returned.
+func (h healer) serialize(clock Clock, store Store, deadline time.Time) (func(), error) {
+	for clock.Now().Before(deadline) {
+		release, err := store.Lock()
+		if !errors.Is(err, ErrAnotherHealer) {
+			return release, err
 		}
-		lines, err := c.journal.Lines(unit, candidate.Invocation)
-		if err != nil {
-			return err
+		if err := h.say("another-healer", "wait"); err != nil {
+			return nil, err
 		}
-		if !hasRemedy(lines) {
-			continue
+		remaining := deadline.Sub(clock.Now())
+		if remaining <= 0 {
+			break
 		}
-		if err := h.say("eligible", "adapter-start"); err != nil {
-			return err
-		}
-		row, err := c.check(unit, candidate, gateway)
-		if err != nil {
-			return err
-		}
-		if row != "" {
-			if err := h.say(row, "before-adapter-start"); err != nil {
-				return err
-			}
-			if row == "owner-stopped" || row == "same-incident" {
-				continue
-			}
-			return nil
-		}
-		if err := c.ctl.Act("start", unit); err != nil {
-			return err
+		if err := clock.Wait(min(time.Second, remaining)); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return nil, h.say("login-timeout", "waiting-for-healer")
+}
+
+func (c actionChecks) startAdapter(h healer, decision, unit string, failed, gateway Status) error {
+	lines, err := c.journal.Lines(unit, failed.Invocation)
+	if err != nil {
+		return err
+	}
+	if !hasRemedy(lines) {
+		return h.say("no-remedy", "before-adapter-start")
+	}
+	if err := h.say(decision, "adapter-start"); err != nil {
+		return err
+	}
+	row, err := c.check(unit, failed, gateway)
+	if err != nil {
+		return err
+	}
+	if row != "" {
+		return h.say(row, "before-adapter-start")
+	}
+	return c.ctl.Act("start", unit)
 }
 func AllowedAdapter(unit string) bool {
 	for _, name := range AdapterUnits {

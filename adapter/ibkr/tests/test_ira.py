@@ -566,10 +566,10 @@ class AdapterTemplateTests(unittest.TestCase):
 
     def test_boosts_unit_and_configuration_are_byte_identical(self):
         import hashlib
-        # Re-pinned deliberately when the unit gained the Gateway healer's
-        # OnFailure entry (docs/manual/server.md, "Gateway healer").
+        # Re-pinned deliberately for the Gateway healer's veto and job bounds
+        # (docs/manual/server.md, "Gateway healer").
         pins = {"deploy/systemd/ti-adapter-boost.service":
-                "a4803f2eca84bd9061c4303e0a8b233e5ce8d16f0b775e4b284635b6dcac16c8",
+                "530f823f4c41af88ac9084d0246bd50bc07eca0f20c85e0356013ff07c846eaf",
                 "deploy/etc/adapters/boost.json.example":
                 "934f66330c46920a018ea6828dc6cbab16daca091c287ab6d74459e636ea3253"}
         for path, digest in pins.items():

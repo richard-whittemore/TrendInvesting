@@ -120,8 +120,8 @@ func TestIncidentLossReadRechecksRateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSafetyTrace(t, r.rig, []string{"gateway-heal: row=rate-limit step=no-action"}, nil)
-	if r.state != prior || len(r.deadlines) != 0 {
-		t.Fatal("rate-limited incident reserved a restart or command deadline")
+	if r.state != prior {
+		t.Fatal("rate-limited incident reserved a restart")
 	}
 }
 
@@ -151,7 +151,6 @@ func TestLateEvidenceFailuresPreserveTraceAndStopActions(t *testing.T) {
 		{"login-status", "status", 8, 3, []string{"restart " + GatewayUnit}},
 		{"login-journal", "journal", 4, 3, []string{"restart " + GatewayUnit}},
 		{"login-counter", "read", 6, 3, []string{"restart " + GatewayUnit}},
-		{"peer-status", "status", 11, 5, []string{"restart " + GatewayUnit, "start " + AdapterUnits[0]}},
 		{"adapter-remedy", "journal", 5, 4, []string{"restart " + GatewayUnit}},
 		{"adapter-recheck", "read", 7, 5, []string{"restart " + GatewayUnit}},
 	} {
@@ -241,29 +240,20 @@ func allFailedRig() *rig {
 	return r
 }
 
-func TestEachTriggerStartsEveryEligibleFailedAdapter(t *testing.T) {
+func TestGatewayEachTriggerStartsOnlyOwnAdapter(t *testing.T) {
 	for _, trigger := range AdapterUnits {
 		t.Run(trigger, func(t *testing.T) {
 			r := allFailedRig()
 			if err := Run(trigger, r, r, r, r, r, r, r.Log); err != nil {
 				t.Fatal(err)
 			}
-			assertSafetyTrace(t, r, eligibleRows("reserve-restart", "restart", "wait-login", "login-completed", "adapter-start", "adapter-start", "adapter-start"), []string{"restart " + GatewayUnit, "start " + AdapterUnits[0], "start " + AdapterUnits[1], "start " + AdapterUnits[2]})
+			assertSafetyTrace(t, r, eligibleRows("reserve-restart", "restart", "wait-login", "login-completed", "adapter-start"), []string{"restart " + GatewayUnit, "start " + trigger})
 		})
 	}
 }
 
-func TestMissingPeerRemedySkipsOnlyThatAdapter(t *testing.T) {
-	r := allFailedRig()
-	r.journals[r.statuses[AdapterUnits[1]].Invocation] = []string{"unrelated failure"}
-	if err := r.run(); err != nil {
-		t.Fatal(err)
-	}
-	assertSafetyTrace(t, r, eligibleRows("reserve-restart", "restart", "wait-login", "login-completed", "adapter-start", "adapter-start"), []string{"restart " + GatewayUnit, "start " + AdapterUnits[0], "start " + AdapterUnits[2]})
-}
-
 func TestEveryMutationRechecksAfterItsAuditWrite(t *testing.T) {
-	for target := -1; target < len(AdapterUnits); target++ {
+	for target := -1; target < 1; target++ {
 		for _, change := range []string{"deadline", "counter", "gateway", "owner", "window", "audit-error"} {
 			t.Run(fmt.Sprintf("target-%d/%s", target, change), func(t *testing.T) {
 				r := allFailedRig()
@@ -309,12 +299,6 @@ func TestEveryMutationRechecksAfterItsAuditWrite(t *testing.T) {
 					r.failAt = map[string]int{"log": targetLog + 1}
 				}
 				rows = append(rows, "gateway-heal: row="+row+" step="+step)
-				if change == "owner" && target >= 0 {
-					for i := target + 1; i < len(AdapterUnits); i++ {
-						rows = append(rows, eligibleRows("adapter-start")...)
-						calls = append(calls, "start "+AdapterUnits[i])
-					}
-				}
 				err := Run(AdapterUnits[0], r, r, r, r, r, r, log)
 				if change == "audit-error" {
 					if err == nil || err.Error() != "synthetic boundary failure" {

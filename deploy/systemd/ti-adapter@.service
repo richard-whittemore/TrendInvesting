@@ -58,11 +58,13 @@ ExecStartPre=/bin/sh -c 'test "%i" != boost || { echo "ti-adapter@boost: the Boo
 LoadCredential=account:/run/trend-investing/secrets/accounts/%i.env
 WorkingDirectory=/opt/trend-investing/adapter
 ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/%i.json --client-id ${TI_ADAPTER_CLIENT_ID} --secrets %d/account --account-key ${TI_ADAPTER_ACCOUNT_KEY} --pending /var/lib/trend-investing/adapters/%i/pending.json --engine-log /var/lib/trend-investing/engines/%i/${TI_RUN}.log --socket /run/ti-engine-%i/engine.sock --streams /var/lib/trend-investing/data/streams/%i --cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
-# To veto recovery of a failed unit, reset-failed it or stop its healer
+# To veto recovery of a failed unit, use sudo systemctl reset-failed <adapter>
 # (docs/manual/server.md, Gateway healer). Only the exit-3 Gateway remedy can
 # start this adapter through the bounded healer (docs/manual/server.md,
 # Gateway healer; ADR 0025). SIGTERM stops it cleanly.
 Restart=no
+# Bound submitted healer jobs in systemd (docs/manual/server.md, Gateway healer).
+TimeoutStartSec=90
 TimeoutStopSec=60
 NoNewPrivileges=true
 PrivateTmp=true

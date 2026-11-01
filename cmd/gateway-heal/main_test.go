@@ -49,12 +49,12 @@ func TestStateIsDurablePrivateAndSerialized(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := diskState{dir: dir, uid: uint32(os.Getuid())}
-	unlock, err := store.lock()
+	unlock, err := store.Lock()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer unlock()
-	if _, err = store.lock(); err == nil || strings.Contains(err.Error(), "order") || !strings.Contains(err.Error(), "another healer") {
+	if _, err = store.Lock(); err == nil || strings.Contains(err.Error(), "order") || !strings.Contains(err.Error(), "another healer") {
 		t.Fatalf("parallel healer did not report its own collision: %v", err)
 	}
 	state := gatewayheal.State{LastRestart: time.Date(2026, 11, 2, 15, 0, 0, 0, time.UTC), Incident: "synthetic"}
@@ -342,5 +342,72 @@ func TestSystemdTimestampsPreserveFailureAfterLossWithinSecond(t *testing.T) {
 	got, err := s.Status(gatewayheal.AdapterUnits[0])
 	if err != nil || got.Finished.Nanosecond() != 654321000 || got.Started.Nanosecond() != 123456000 {
 		t.Fatal(got, err)
+	}
+}
+
+// Submitted jobs keep exclusion until systemctl returns (server.md, Gateway healer).
+func TestGatewayMutationWaitsForManagerWithoutClientDeadline(t *testing.T) {
+	for _, action := range []string{"restart", "start"} {
+		t.Run(action, func(t *testing.T) {
+			now := time.Now()
+			r := commandRunner{now: func() time.Time { return now }, deadline: now.Add(time.Second)}
+			r.execute = func(ctx context.Context, name string, args []string, _ io.Writer) error {
+				if _, bounded := ctx.Deadline(); bounded {
+					t.Error("submitted systemd mutation has a client deadline")
+				}
+				if !containsArg(args, "--job-mode=fail") {
+					t.Error("mutation can replace an existing systemd job")
+				}
+				now = now.Add(time.Hour)
+				return nil
+			}
+			unit := gatewayheal.GatewayUnit
+			if action == "start" {
+				unit = gatewayheal.AdapterUnits[0]
+			}
+			s := systemd{run: r.run}
+			if err := s.Act(action, unit); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// The harmless client stand-in records completion after the policy deadline;
+// it never signals a process (server.md, Gateway healer).
+func TestGatewayMutationClientReturnsAfterPolicyDeadline(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$HEAL_CALLS\"\nsleep 0.1\nprintf 'returned\\n' >>\"$HEAL_CALLS\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("HEAL_CALLS", calls)
+	runner := commandRunner{now: time.Now, deadline: time.Now().Add(50 * time.Millisecond), execute: executeCommand}
+	ctl := systemd{run: runner.run}
+	if err := ctl.Act("restart", gatewayheal.GatewayUnit); err != nil {
+		t.Fatal("abandoned submitted mutation", err)
+	}
+	raw, err := os.ReadFile(calls)
+	if err != nil || string(raw) != "--job-mode=fail restart ti-gateway.service\nreturned\n" {
+		t.Fatalf("client did not return: %q %v", raw, err)
+	}
+	if time.Now().Before(runner.deadline) {
+		t.Fatal("stand-in did not outlive recovery deadline")
+	}
+}
+
+func TestGatewayUnitMutationTimeoutsAreOwnedBySystemd(t *testing.T) {
+	for _, unit := range []string{"ti-gateway.service", "ti-adapter-boost.service", "ti-adapter@.service"} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "systemd", unit))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, bound := range []string{"TimeoutStartSec=90", "TimeoutStopSec=60"} {
+			if !strings.Contains(string(raw), bound) {
+				t.Errorf("%s missing manager job bound %s", unit, bound)
+			}
+		}
 	}
 }

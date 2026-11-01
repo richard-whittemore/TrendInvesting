@@ -37,6 +37,8 @@ RestartSec=30
 # another try risks IBKR locking the login. None
 # fixes itself, so do not loop on them. 75 (one refused login) restarts.
 RestartPreventExitStatus=64 65 77 78
+# Bound submitted healer jobs in systemd (docs/manual/server.md, Gateway healer).
+TimeoutStartSec=90
 TimeoutStopSec=60
 # ti-gateway-start stops only xvfb-run, its own child, after a refused login;
 # this default, stated so it cannot be dropped, is what ends IBC's java and

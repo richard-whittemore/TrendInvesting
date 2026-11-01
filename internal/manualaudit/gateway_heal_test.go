@@ -29,12 +29,25 @@ func TestGatewayHealerVetoRecoveryAndLoginContract(t *testing.T) {
 	text := strings.Join(strings.Fields(string(raw)), " ")
 	for _, want := range []string{
 		"contains the exact", "sudo systemctl reset-failed <adapter>", "owner-stopped", "another-healer", "evidence-error",
-		"every eligible failed adapter", "same unattended login", "every nightly and Sunday restart", "phone approval", "existing page stands",
+		"only its own adapter", "already-restarted", "same unattended login", "every nightly and Sunday restart", "phone approval", "existing page stands",
 		"10-minute margin", "/etc/trend-investing/gateway.env", "/var/lib/ti-gateway-heal/last-restart.json", "provisional attempt", "before publishing",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("manual lacks %q", want)
 		}
+	}
+	for _, path := range []string{"docs/manual/server.md", "deploy/systemd/ti-adapter-boost.service", "deploy/systemd/ti-adapter@.service"} {
+		raw, err := os.ReadFile(filepath.Join(repoRoot(t), path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "stop its healer") || strings.Contains(string(raw), "Alternatively stop the healer") {
+			t.Errorf("%s documents stopping a healer as a veto", path)
+		}
+	}
+
+	if strings.Contains(text, "every eligible failed adapter") {
+		t.Error("manual still promises cross-account recovery")
 	}
 	if strings.Contains(text, "invocation journal ends with") {
 		t.Error("manual still requires terminal remedy")
@@ -83,7 +96,7 @@ func TestGatewayHealerRehearsalProvidesReadSearchCapability(t *testing.T) {
 	}
 }
 
-func TestProvisionedRelayLockPreservesInodeAndBytes(t *testing.T) {
+func TestGatewayProvisionedRelayLockPreservesInodeAndBytes(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "provision.sh"))
 	if err != nil {
 		t.Fatal(err)
@@ -96,11 +109,26 @@ func TestProvisionedRelayLockPreservesInodeAndBytes(t *testing.T) {
 	if !ok {
 		t.Fatal("missing function end")
 	}
-	script := "install_adapter_lock() {" + body + "\n}\nrecord=$2; chown() { printf '%s\\n' \"$*\" >>\"$record\"; }; install() { local p=\"${@: -1}\"; : >\"$p\"; chmod 0600 \"$p\"; }; log() { :; }; install_adapter_lock \"$1\""
+
+	// Run the actual embedded Python as the current unprivileged test user.
+	// The runuser stand-in checks the requested identity; root metadata tools
+	// only record forbidden calls (server.md, Gateway healer).
+	script := `install_adapter_lock() {` + body + `
+}
+record=$2
+runuser() { printf 'runuser %s\n' "$*" >>"$record"; test "$1 $2 $3" = '-u ti-trader --' || return 1; shift 3; "$@"; }
+python3() { printf 'python3\n' >>"$record"; command python3 "$@"; }
+chown() { printf 'FORBIDDEN chown\n' >>"$record"; return 1; }
+chmod() { printf 'FORBIDDEN chmod\n' >>"$record"; return 1; }
+install() { printf 'FORBIDDEN install\n' >>"$record"; return 1; }
+log() { :; }
+install_adapter_lock "$1"
+`
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pending.json.lock")
-	record := filepath.Join(dir, "chown-calls")
+	record := filepath.Join(dir, "calls")
 	run := func() error { return exec.Command("bash", "-c", script, "lock-test", path, record).Run() }
+
 	if err := run(); err != nil {
 		t.Fatal(err)
 	}
@@ -122,10 +150,41 @@ func TestProvisionedRelayLockPreservesInodeAndBytes(t *testing.T) {
 	if err != nil || !os.SameFile(before, after) || string(got) != "synthetic retained evidence" || after.Mode().Perm() != 0o600 {
 		t.Fatalf("provision replaced/truncated lock: %q %v", got, err)
 	}
-	owners, err := os.ReadFile(record)
-	if err != nil || string(owners) != strings.Repeat("ti-trader:ti-trader "+path+"\n", 2) {
-		t.Fatalf("ownership calls: %q %v", owners, err)
+
+	calls, err := os.ReadFile(record)
+	if err != nil || strings.Contains(string(calls), "FORBIDDEN") || strings.Count(string(calls), "runuser -u ti-trader -- python3") != 2 || strings.Count(string(calls), "\npython3\n") != 2 {
+		t.Fatalf("unsafe creation calls: %q %v", calls, err)
 	}
+	// Concurrent provisioners must observe the same existing inode and bytes.
+	commands := make([]*exec.Cmd, 8)
+	for i := range commands {
+		commands[i] = exec.Command("bash", "-c", script, "lock-test", path, record)
+		if err := commands[i].Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, cmd := range commands {
+		if err := cmd.Wait(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err = os.Stat(path)
+	got, readErr := os.ReadFile(path)
+	if err != nil || readErr != nil || !os.SameFile(before, after) || string(got) != "synthetic retained evidence" {
+		t.Fatal("concurrent provisioning replaced the lock")
+	}
+
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(); err == nil {
+		t.Fatal("provision repaired or accepted unsafe lock permissions")
+	}
+	after, err = os.Lstat(path)
+	if err != nil || after.Mode().Perm() != 0o640 || !os.SameFile(before, after) {
+		t.Fatal("refusal mutated lock", err)
+	}
+
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +194,41 @@ func TestProvisionedRelayLockPreservesInodeAndBytes(t *testing.T) {
 	if err := run(); err == nil {
 		t.Fatal("provision accepted a symlink lock")
 	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "protected")
+	if err := os.WriteFile(target, []byte("retained target"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	targetBefore, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(); err == nil {
+		t.Fatal("provision accepted a link to an existing file")
+	}
+	targetAfter, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(target)
+	if err != nil || !os.SameFile(targetBefore, targetAfter) || targetAfter.Mode() != targetBefore.Mode() || string(got) != "retained target" {
+		t.Fatal("symlink target changed", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(); err == nil {
+		t.Fatal("provision accepted a directory lock")
+	}
+
 }
 
 func TestGatewayHealerCaseTableNamesNonemptyCounter(t *testing.T) {

@@ -635,17 +635,27 @@ install_adapter_settings() {
 # under its sandbox (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
 install_adapter_lock() {
   local path=$1
-  # Created only when absent, so an existing lock keeps its inode; through
-  # install(1) like every other path this script lays down.
-  if test ! -e "$path" && test ! -L "$path"; then
-    install -m 0600 -o ti-trader -g ti-trader /dev/null "$path" || return 1
-  fi
-  if test -L "$path" || test ! -f "$path"; then
-    log "refusing nonregular adapter lock: $path"
-    return 1
-  fi
-  chown ti-trader:ti-trader "$path"
-  chmod 0600 "$path"
+  # Exclusive creation as the adapter user cannot replace a live lock inode
+  # or grant root metadata authority over an adapter-controlled path
+  # (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
+  runuser -u ti-trader -- python3 -I -c '
+import errno, os, stat, sys
+path = sys.argv[1]
+try:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+except OSError as exc:
+    if exc.errno != errno.EEXIST:
+        raise
+else:
+    os.close(fd)
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise SystemExit("refusing unsafe adapter lock: " + path)
+finally:
+    os.close(fd)
+' "$path"
 }
 
 step_services() {
@@ -728,7 +738,8 @@ CONF
     # can (ADR 0026, kill-switch amendment; docs/manual/operator.md).
     install -d -o ti-operator -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
-    install_adapter_lock "/var/lib/trend-investing/adapters/$a/pending.json.lock"
+    # Only where a Linux Gateway runs: the lock serves the Gateway healer.
+    mac_mini || install_adapter_lock "/var/lib/trend-investing/adapters/$a/pending.json.lock"
     # The Flex reader's ledger of cash movements and its status file
     # (ti-flex@<instance>.service; docs/manual/reconciliation.md).
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/flex/$a"

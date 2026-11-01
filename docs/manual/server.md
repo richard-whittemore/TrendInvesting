@@ -51,7 +51,7 @@ Times below are New York time unless marked UTC (the memory timer uses UTC).
 | Unit | What it does | When it runs | Today |
 | --- | --- | --- | --- |
 | `ti-gateway.service` | IB Gateway under IBC, logged in to IBKR | Starts at boot (enabled). Restarts itself 30 seconds after IBC exits (for example when the weekly phone approval times out), except when the login file is empty or malformed, or after 3 login attempts of any kind within 24 hours ("The Gateway is logged out"). IBC restarts the Gateway nightly at 11:45 PM and logs in again from cold every Sunday at 09:00 (`/etc/trend-investing/gateway.env`) | Installed; not yet run against a real IBKR login |
-| `ti-gateway-heal@.service` | Root-owned, bounded Gateway link recovery | Adapter OnFailure hook; once per incident, no more than once in two hours; waits for the same unattended login as nightly and Sunday restarts, then starts every eligible failed adapter; if IBKR ever requires phone approval, login times out and the existing page stands | Install with the owner's yes; see Gateway healer below |
+| `ti-gateway-heal@.service` | Root-owned, bounded Gateway link recovery | Adapter OnFailure hook; once per incident, no more than once in two hours; waits for the same unattended login as nightly and Sunday restarts, then starts only its own adapter; if IBKR ever requires phone approval, login times out and the existing page stands | Install with the owner's yes; see Gateway healer below |
 | `ti-data.timer` and `ti-data.service` | The daily data job: records the day's market data from Massive and writes the Boost engine's input ([market data](market-data.md), "The daily data job") | Monday to Friday at 06:05, 07:05 and 08:05, for the previous session: Massive's free plan serves a session's prices only the next morning, and the adapter's morning reading stands for the session's close only with the Flex reader's executions proof, else the session is withheld ([market data](market-data.md), "The free plan's timing"; [reconciliation](reconciliation.md), "The executions proof"). A 403 at the first two firings is a quiet wait; one that persists at 08:05 fails the unit and pages you ("The free plan's timing" in [market data](market-data.md)). A firing missed while the server was off runs when it starts again. A run is stopped after an hour | Built and installed by `provision.sh services` when `dist/ti-data` is beside `deploy/`. Until the Boost engine has been started once (no `run.env` and no run log in its folder) a firing waits quietly and succeeds; it refuses, and the unit fails, for a real fault, including a `run.env` lost after a run (a run log or a run stream folder is the sign) ("The reporter before the first run", below) |
 | `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. `@trad-ira` starts in dry-run once you name its account and birth month ([momentum](momentum.md), "Starting the Traditional IRA's engine in dry-run"); `@roth-ira` has its configuration and starts in dry-run once you name its account and birth month |
 | `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; Boost's and both IRA reporter timers are enabled | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, until the engine has been started once it logs that it is waiting for the account's first run, skips only the reading of the log, and otherwise runs as usual ("The reporter before the first run", below); it fails, with a message, until the `secrets.env` entries below are filled in |
@@ -768,19 +768,20 @@ cannot qualify; its Gateway remains the owner's macOS app.
 
 | Case | Healer action / journal row |
 |---|---|
-| Exit 3 with the remedy, outside windows, logged in, no recent restart | `eligible`: reserve the restart, restart `ti-gateway.service` once, wait at most ten minutes for “Login has completed” in the new invocation, then start every eligible failed adapter by unit name; this is the same unattended login as the scheduled restarts |
-| Restart in the last two hours | `rate-limit`: nothing; the existing operational page stands |
+| Exit 3 with the remedy, outside windows, logged in, no recent restart | `eligible`: reserve the restart, restart `ti-gateway.service` once, wait at most ten minutes for “Login has completed” in the new invocation, then start only its own adapter by unit name; this is the same unattended login as the scheduled restarts |
+| A Gateway invocation newer than this adapter’s loss has completed login | `already-restarted`: re-check the gates and start only its own adapter, without another restart |
+| Restart needed, but one occurred in the last two hours | `rate-limit`: nothing; the existing operational page stands |
 | Inside the adapter schedule, 23:40–01:00 ET, or the Sunday cold restart with a 10-minute margin either side | `window`: wait for the union to end, then re-check once; a changed schedule can still refuse recovery |
 | Login counter nonempty before restart, or refused-login/retries-stopped/reset-wait evidence | `login-problem`: nothing; leave login recovery to the existing handling |
 | Gateway shows LOGGED_OUT, is inactive, or lacks current login evidence | `logged-out`: nothing |
 | Owner resets the adapter's failed state, or its invocation changes | `owner-stopped`: nothing; recovery requires the same invocation still in `failed` state at every re-check |
-| Another healer holds the shared lock | `another-healer`: exit successfully; the winner recovers every eligible failed adapter |
+| Another healer holds the shared lock | `another-healer`: wait for the lock within the same ten-minute recovery deadline |
 | Evidence cannot be read or validated, including the restart ledger | `evidence-error`: stop without another action; fix the named evidence fault |
 | Exact remedy absent, or incident-loss evidence missing or unusable | `no-remedy`: nothing; the invocation cannot establish this recovery incident |
 | Any other adapter exit | `other-exit`: nothing |
 | Restarted but no login within ten minutes | `login-timeout`: stop; the existing failed-unit hook and reporter still page |
-| Same failed invocation, or a failure predating the last restart | `same-incident`: nothing, even after two hours |
-| Any relay active, or an unresolved hand-over | `order-busy`: nothing; read and settle the adapter's evidence through the existing procedure |
+| Same failed invocation, or a failure predating the last restart, without a newer logged-in Gateway invocation | `same-incident`: nothing, even after two hours |
+| A restart is needed, but a relay is active or a hand-over is unresolved | `order-busy`: nothing; read and settle the adapter's evidence through the existing procedure |
 | The busy-order check itself cannot be made (a missing adapter folder, a permission or file fault) | `guard-unreadable`: nothing; the journal line names the fault, which is a server problem to fix, not an order |
 
 The invariant is no login attempt that gateway-start would refuse, no action
@@ -806,8 +807,11 @@ shared schedule parser's later end.
 It takes every adapter's `pending.json.lock` for Boost and both IRAs and checks
 `pending.json.handover` under those locks. An active adapter on another account
 therefore blocks automatic recovery too. The locks remain held through login
-and are released before starting adapters. Provisioning creates these locks
-owned by the adapter user, mode 0600. The healer opens them read-only; the
+and are released before starting the adapter. Provisioning creates these locks
+exclusively as the adapter user, mode 0600,
+without following links or replacing existing files. A non-following descriptor
+check refuses nonregular files, wrong ownership or modes; no root chown/chmod
+is performed on these paths. The healer opens them read-only; the
 adapter directories are read-only in its sandbox and its only capability is
 `CAP_DAC_READ_SEARCH`. A missing lock refuses recovery. An abandoned `handing-over`
 mark also refuses recovery; the healer never edits order records or restarts an
@@ -817,22 +821,29 @@ The reservation is `/var/lib/ti-gateway-heal/last-restart.json`, root-owned mode
 0600 in a root-owned 0700 directory directly under root-owned `/var/lib`. A shared lock serializes healer instances;
 the file and its directory are synced before the restart. A command failure or
 a crash consumes the allowance rather than risking a duplicate. Never delete
-this state to force a retry. After one successful restart, the winner checks all three account adapters and
-starts every eligible failed adapter: its invocation must have ended after the
-incident's loss, still be failed with exit 3, and contain the exact remedy.
-Every unit is re-checked immediately before its start; a simultaneous loser
-exits 0 with `another-healer`, not `order-busy`. Only
-`systemctl restart ti-gateway.service` and `systemctl start <adapter unit>` are
-mutation commands; no PID or process group is signalled.
+this state to force a retry. Each healer starts only its own adapter.
+Contending healers wait for the
+shared lock within the same ten-minute deadline used for recovery, after any
+maintenance-window wait. Once serialized, a Gateway invocation newer than this
+adapter's loss, active and logged in, permits an `already-restarted` adapter start
+without consuming or bypassing the two-hour limit on restarts. Every start
+rechecks the shared gates and the same failed adapter invocation.
+Only `systemctl --job-mode=fail restart ti-gateway.service` and
+`systemctl --job-mode=fail start <adapter unit>` are mutation commands; no PID or
+process group is signalled. Reads retain their deadlines. Submitted mutations
+have no client timeout: the healer holds its global lock, and its relay locks
+for a restart, until systemctl returns. Systemd rejects conflicting jobs and
+bounds target starts to 90 seconds and stops to 60 seconds. A submitted job may
+finish after the recovery deadline; subsequent evidence reads and actions then
+stop. Relay locks are released before starting the adapter so its relay can run.
 
 To veto a waiting healer for one account, run `sudo systemctl reset-failed <adapter>`
 (for example `sudo systemctl reset-failed ti-adapter@trad-ira.service`). This
 makes the adapter inactive, so the healer stands down with `owner-stopped`.
-Alternatively stop the healer unit itself:
-`sudo systemctl stop 'ti-gateway-heal@<adapter unit>.service'`.
 Stopping an already failed adapter does not clear its failed state and is not
 this veto. The healer requires the same failed invocation at every re-check,
-including after a weekend window wait.
+including after a weekend window wait and immediately before starting the adapter.
+`reset-failed` is the only supported account-specific veto.
 
 The paper login has run unattended at every nightly and Sunday restart so far.
 A healer restart uses that same unattended login. If IBKR ever requires a phone

@@ -37,24 +37,15 @@ func run(unit string) error {
 		return fmt.Errorf("root is required")
 	}
 	store := diskState{dir: "/var/lib/ti-gateway-heal", uid: 0}
-	unlock, err := store.lock()
-	if errors.Is(err, ErrAnotherHealer) {
-		_, err = fmt.Fprintln(os.Stdout, "gateway-heal: row=another-healer step=no-action")
-		return err
-	}
-	if err != nil {
-		return fmt.Errorf("healer serialization: %w", err)
-	}
-	defer unlock()
 	runner := &commandRunner{now: clockForRun.Now, execute: executeCommand}
 	ctl := systemd{run: runner.run, setDeadline: func(at time.Time) { runner.deadline = at }}
 	log := func(s string) error { _, err := fmt.Fprintln(os.Stdout, s); return err }
 	return gatewayheal.Run(unit, clockForRun, files{schedule: "/etc/trend-investing/ibkr-maintenance.json", counter: "/var/lib/ti-gateway/login-failures", gatewayEnv: "/etc/trend-investing/gateway.env"}, store, ctl, ctl, relayGuard{root: "/var/lib/trend-investing/adapters"}, log)
 }
 
-// commandRunner bounds every external read and mutation, including pipe drain,
-// by the remaining recovery time (server.md, Gateway healer). Before recovery
-// starts, each command still has a thirty-second deadline.
+// commandRunner bounds reads, including pipe drain, by remaining recovery time.
+// Mutations wait for systemd's job result without killing the client, so locks
+// outlive every submitted job (server.md, Gateway healer).
 type commandRunner struct {
 	now      func() time.Time
 	deadline time.Time
@@ -69,8 +60,12 @@ func (r *commandRunner) run(name string, args ...string) ([]byte, error) {
 	if bound <= 0 {
 		return nil, context.DeadlineExceeded
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), bound/2)
-	defer cancel()
+	ctx := context.Background()
+	if name != "systemctl" || (!containsArg(args, "restart") && !containsArg(args, "start")) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, bound/2)
+		defer cancel()
+	}
 	var out io.Writer
 	reduced := &journalReduction{}
 	bounded := &boundedOutput{}
@@ -114,8 +109,9 @@ func executeCommand(ctx context.Context, name string, args []string, out io.Writ
 	cmd.Stdout = out
 	// The command context reserves half the total bound for pipe drain.
 	// WaitDelay cannot extend the total command budget (server.md, Gateway healer).
-	deadline, _ := ctx.Deadline()
-	cmd.WaitDelay = min(time.Second, time.Until(deadline))
+	if deadline, bounded := ctx.Deadline(); bounded {
+		cmd.WaitDelay = min(time.Second, time.Until(deadline))
+	}
 	return cmd.Run()
 }
 

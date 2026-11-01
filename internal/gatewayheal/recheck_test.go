@@ -1,6 +1,7 @@
 package gatewayheal
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -61,30 +62,6 @@ func TestGatewayNeverStartedSkipsJournal(t *testing.T) {
 	}
 	assertRun(t, r, "logged-out")
 }
-func TestWinnerRecoversAllEligibleAccountsAfterIncidentLoss(t *testing.T) {
-	r := fixture()
-	for i, unit := range AdapterUnits[1:] {
-		id := unit + "-failure"
-		r.statuses[unit] = Status{Active: "failed", Code: 1, Exit: 3, Invocation: id, Finished: r.loss.Add(time.Duration(i+1) * time.Minute)}
-		r.journals[id] = []string{Remedy, "later diagnostic"}
-	}
-	assertRun(t, r, "eligible", "restart "+GatewayUnit, "start "+AdapterUnits[0], "start "+AdapterUnits[1], "start "+AdapterUnits[2])
-}
-func TestPeersPredatingLossOrOwnerVetoRemainDown(t *testing.T) {
-	r := fixture()
-	r.statuses[AdapterUnits[1]] = Status{Active: "failed", Code: 1, Exit: 3, Invocation: "stale", Finished: r.loss.Add(-time.Second)}
-	r.journals["stale"] = []string{Remedy}
-	r.statuses[AdapterUnits[2]] = Status{Active: "failed", Code: 1, Exit: 3, Invocation: "veto", Finished: r.loss.Add(time.Second)}
-	r.journals["veto"] = []string{Remedy}
-	r.onLines = func(id string) {
-		if id == "veto" {
-			s := r.statuses[AdapterUnits[2]]
-			s.Active = "inactive"
-			r.statuses[AdapterUnits[2]] = s
-		}
-	}
-	assertRun(t, r, "eligible", "restart "+GatewayUnit, "start "+AdapterUnits[0])
-}
 func TestGatewayLaunchProvisionalCounterSettlesBeforeLogin(t *testing.T) {
 	r := fixture()
 	r.onAct = func(action, _ string) {
@@ -136,18 +113,6 @@ func TestUnreadableColdScheduleFailsClosed(t *testing.T) {
 			t.Errorf("accepted %q: %v", raw, r.calls)
 		}
 	}
-}
-func TestEveryStartRechecksGatewayAndWindow(t *testing.T) {
-	r := fixture()
-	unit := AdapterUnits[1]
-	r.statuses[unit] = Status{Active: "failed", Code: 1, Exit: 3, Invocation: "peer", Finished: r.loss.Add(time.Minute)}
-	r.journals["peer"] = []string{Remedy}
-	r.onAct = func(action, _ string) {
-		if action == "start" {
-			r.journals["new-login"] = []string{"LOGGED_OUT"}
-		}
-	}
-	assertRun(t, r, "logged-out", "restart "+GatewayUnit, "start "+AdapterUnits[0])
 }
 func TestCaseTableSaysAnyNonemptyCounter(t *testing.T) {
 	// The gate includes reset metadata; server.md forbids reinterpreting it.
@@ -205,14 +170,178 @@ func TestSystemdSecondPrecisionStartStillQualifies(t *testing.T) {
 	}
 	assertRun(t, r, "eligible", "restart "+GatewayUnit, "start "+AdapterUnits[0])
 }
-func TestPeerFinishingDuringRestartIsRecovered(t *testing.T) {
+
+func TestGatewayAlreadyRestartedRecoversOnlyOwnAdapter(t *testing.T) {
+	for _, unit := range AdapterUnits {
+		r := allFailedRig()
+		r.state = State{LastRestart: r.at.Add(-time.Minute), Incident: "failed-run"}
+		r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.loss.Add(time.Second)}
+		prior := r.state
+		if err := Run(unit, r, r, r, r, r, r, r.Log); err != nil {
+			t.Fatal(err)
+		}
+		assertSafetyTrace(t, r, []string{"gateway-heal: row=already-restarted step=adapter-start"}, []string{"start " + unit})
+		if r.state != prior {
+			t.Fatal("adapter-only recovery changed restart reservation")
+		}
+	}
+}
+func TestGatewayResetFailedImmediatelyBeforeStartVetoes(t *testing.T) {
+	r := fixture()
+	r.onRead = func() {
+		if r.reads == 8 {
+			s := r.statuses[AdapterUnits[0]]
+			s.Active = "inactive"
+			r.statuses[AdapterUnits[0]] = s
+		}
+	}
+	assertRun(t, r, "owner-stopped", "restart "+GatewayUnit)
+}
+
+func TestGatewayWaitsForGlobalLockWithinRecoveryDeadline(t *testing.T) {
+	r := fixture()
+	attempts := 0
+	r.onGlobalLock = func() (func(), error) {
+		attempts++
+		if attempts == 1 {
+			return nil, ErrAnotherHealer
+		}
+		r.state = State{LastRestart: r.at.Add(-time.Second), Incident: "peer"}
+		r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.at.Add(-time.Second)}
+		return func() {}, nil
+	}
+	assertRun(t, r, "already-restarted", "start "+AdapterUnits[0])
+	if attempts != 2 || len(r.waits) != 1 {
+		t.Fatalf("attempts=%d waits=%v", attempts, r.waits)
+	}
+}
+func TestGatewayGlobalLockWaitDoesNotResetDeadline(t *testing.T) {
+	r := fixture()
+	start := r.at
+	r.onGlobalLock = func() (func(), error) { return nil, ErrAnotherHealer }
+	assertRun(t, r, "login-timeout")
+	if r.at.Sub(start) != 10*time.Minute {
+		t.Fatalf("wait=%s", r.at.Sub(start))
+	}
+}
+
+func TestGatewaySerializationFailuresStopBeforeMutation(t *testing.T) {
+	for _, kind := range []string{"lock", "log", "wait", "slow-lock"} {
+		t.Run(kind, func(t *testing.T) {
+			r := fixture()
+			r.onGlobalLock = func() (func(), error) {
+				if kind == "lock" {
+					return nil, fmt.Errorf("synthetic lock failure")
+				}
+				if kind == "slow-lock" {
+					r.at = r.at.Add(10 * time.Minute)
+				}
+				return nil, ErrAnotherHealer
+			}
+			if kind == "log" {
+				r.failAt = map[string]int{"log": 1}
+			}
+			if kind == "wait" {
+				r.failAt = map[string]int{"wait": 1}
+			}
+			err := r.run()
+			if (err != nil) != (kind != "slow-lock") || len(r.calls) != 0 || r.globalLocked {
+				t.Fatalf("err=%v calls=%v", err, r.calls)
+			}
+			if kind == "slow-lock" && len(r.waits) != 0 {
+				t.Fatal("waited after deadline")
+			}
+		})
+	}
+}
+func TestGatewayLockWaitConsumesLoginBudget(t *testing.T) {
+	r := fixture()
+	start := r.at
+	attempts := 0
+	r.onGlobalLock = func() (func(), error) {
+		attempts++
+		if attempts == 1 {
+			r.at = r.at.Add(9 * time.Minute)
+			return nil, ErrAnotherHealer
+		}
+		return func() {}, nil
+	}
+	r.login = false
+	assertRun(t, r, "login-timeout", "restart "+GatewayUnit)
+	if r.at.Sub(start) != 10*time.Minute {
+		t.Fatalf("recovery renewed deadline: %s", r.at.Sub(start))
+	}
+}
+func TestGatewayOwnRemedyWithdrawnBeforeStart(t *testing.T) {
 	r := fixture()
 	r.onAct = func(action, _ string) {
 		if action == "restart" {
-			r.at = r.at.Add(time.Second)
-			r.statuses[AdapterUnits[1]] = Status{Active: "failed", Code: 1, Exit: 3, Invocation: "peer", Finished: r.at}
-			r.journals["peer"] = []string{Remedy}
+			r.journals["failed-run"] = nil
 		}
 	}
-	assertRun(t, r, "eligible", "restart "+GatewayUnit, "start "+AdapterUnits[0], "start "+AdapterUnits[1])
+	assertRun(t, r, "no-remedy", "restart "+GatewayUnit)
+}
+func TestGatewayAlreadyRestartedStillRequiresFreshGates(t *testing.T) {
+	for _, kind := range []string{"logged-out", "inactive", "counter", "owner", "replacement", "deadline", "window", "loss-equal", "loss-after"} {
+		t.Run(kind, func(t *testing.T) {
+			r := fixture()
+			r.state = State{LastRestart: r.at.Add(-time.Minute), Incident: "peer"}
+			prior := r.state
+			gateway := Status{Active: "active", Invocation: "new-login", Started: r.loss.Add(time.Second)}
+			row := "logged-out"
+			switch kind {
+			case "logged-out":
+				r.journals["new-login"] = []string{"LOGGED_OUT"}
+			case "inactive":
+				gateway.Active = "inactive"
+			case "counter":
+				r.input.Counter = []byte("retained metadata")
+				row = "login-problem"
+			case "loss-equal":
+				gateway.Started = r.loss
+				row = "same-incident"
+			case "loss-after":
+				gateway.Started = r.loss.Add(-time.Second)
+				row = "same-incident"
+			case "owner", "replacement", "deadline", "window":
+				r.onLines = func(id string) {
+					if id != "new-login" {
+						return
+					}
+					switch kind {
+					case "owner":
+						s := r.statuses[AdapterUnits[0]]
+						s.Active = "inactive"
+						r.statuses[AdapterUnits[0]] = s
+					case "replacement":
+						s := r.statuses[GatewayUnit]
+						s.Invocation = "replacement"
+						r.statuses[GatewayUnit] = s
+					case "deadline":
+						r.at = r.at.Add(10 * time.Minute)
+					case "window":
+						r.input.Schedule = []byte(`{"windows":[{"days":["Mon"],"start":"15:00","end":"16:00","zone":"UTC"}]}`)
+					}
+				}
+				row = map[string]string{"owner": "owner-stopped", "replacement": "logged-out", "deadline": "login-timeout", "window": "window"}[kind]
+			}
+			r.statuses[GatewayUnit] = gateway
+			// Already recovered accounts can hold relay locks; an adapter-only start
+			// must not acquire them (server.md, Gateway healer).
+			r.lockErr = ErrOrderBusy
+			assertRun(t, r, row)
+			if r.state != prior {
+				t.Fatal("gate refusal changed restart reservation")
+			}
+		})
+	}
+}
+func TestGatewayAlreadyRestartedDoesNotNeedRelayExclusion(t *testing.T) {
+	r := fixture()
+	r.lockErr = ErrOrderBusy
+	r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.loss.Add(time.Second)}
+	assertRun(t, r, "already-restarted", "start "+AdapterUnits[0])
+	if r.state != (State{}) {
+		t.Fatal("adapter start reserved a restart")
+	}
 }

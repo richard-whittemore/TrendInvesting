@@ -33,7 +33,7 @@ func (s systemd) Act(action, unit string) error {
 	if err := gatewayheal.ValidateAction(action, unit); err != nil {
 		return err
 	}
-	_, err := s.run("systemctl", action, unit)
+	_, err := s.run("systemctl", "--job-mode=fail", action, unit)
 	return err
 }
 func (s systemd) Status(unit string) (gatewayheal.Status, error) {
@@ -134,7 +134,7 @@ type diskState struct {
 	uid uint32
 }
 
-func (s diskState) lock() (func(), error) {
+func (s diskState) Lock() (func(), error) {
 	info, err := os.Lstat(s.dir)
 	if err != nil {
 		return nil, err
@@ -143,7 +143,7 @@ func (s diskState) lock() (func(), error) {
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0o700 || stat.Uid != s.uid {
 		return nil, errors.New("healer directory must be root-owned mode 0o700")
 	}
-	return lockFile(filepath.Join(s.dir, "lock"), s.uid, true, ErrAnotherHealer)
+	return lockFile(filepath.Join(s.dir, "lock"), s.uid, true, gatewayheal.ErrAnotherHealer)
 }
 func (s diskState) Load() (gatewayheal.State, error) {
 	var state gatewayheal.State
@@ -234,7 +234,7 @@ func (s diskState) Save(state gatewayheal.State) error {
 
 // relayGuard holds the same flock inodes as adapter/ibkr/relay.py across the
 // Gateway restart and login. A running relay, even another account's, blocks
-// recovery (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
+// restarting Gateway (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
 type relayGuard struct{ root string }
 
 func (g relayGuard) Acquire() (func(), error) {
@@ -275,8 +275,6 @@ func (g relayGuard) Acquire() (func(), error) {
 	}
 	return release, nil
 }
-
-var ErrAnotherHealer = errors.New("another healer is running")
 
 func lockFile(path string, uid uint32, create bool, busy error) (func(), error) {
 	flags := syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
