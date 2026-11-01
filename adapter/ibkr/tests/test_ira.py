@@ -569,7 +569,7 @@ class AdapterTemplateTests(unittest.TestCase):
         # Re-pinned deliberately for the Gateway healer's veto and job bounds
         # (docs/manual/server.md, "Gateway healer").
         pins = {"deploy/systemd/ti-adapter-boost.service":
-                "530f823f4c41af88ac9084d0246bd50bc07eca0f20c85e0356013ff07c846eaf",
+                "20e42d8f0a7026d6a059a2be44f3c9f0aa8ad6448831f5c92abc9e93d698384c",
                 "deploy/etc/adapters/boost.json.example":
                 "934f66330c46920a018ea6828dc6cbab16daca091c287ab6d74459e636ea3253"}
         for path, digest in pins.items():

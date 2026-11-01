@@ -833,7 +833,8 @@ Only `systemctl --job-mode=fail restart ti-gateway.service` and
 process group is signalled. Reads retain their deadlines. Submitted mutations
 have no client timeout: the healer holds its global lock, and its relay locks
 for a restart, until systemctl returns. Systemd rejects conflicting jobs and
-bounds target starts to 90 seconds and stops to 60 seconds. A submitted job may
+bounds target starts by its default start timeout (90 seconds) and stops by
+each unit's 60 seconds. A submitted job may
 finish after the recovery deadline; subsequent evidence reads and actions then
 stop. Relay locks are released before starting the adapter so its relay can run.
 

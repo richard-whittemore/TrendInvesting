@@ -398,15 +398,21 @@ func TestGatewayMutationClientReturnsAfterPolicyDeadline(t *testing.T) {
 	}
 }
 
+// The healer's submitted jobs are bounded by systemd, not by a client timeout:
+// each target unit keeps its stop bound, and no unit overrides systemd's
+// default start timeout to unbounded (docs/manual/server.md, Gateway healer).
 func TestGatewayUnitMutationTimeoutsAreOwnedBySystemd(t *testing.T) {
 	for _, unit := range []string{"ti-gateway.service", "ti-adapter-boost.service", "ti-adapter@.service"} {
 		raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "systemd", unit))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, bound := range []string{"TimeoutStartSec=90", "TimeoutStopSec=60"} {
-			if !strings.Contains(string(raw), bound) {
-				t.Errorf("%s missing manager job bound %s", unit, bound)
+		if !strings.Contains(string(raw), "TimeoutStopSec=60") {
+			t.Errorf("%s missing its stop bound TimeoutStopSec=60", unit)
+		}
+		for _, unbounded := range []string{"TimeoutStartSec=infinity", "TimeoutStartSec=0", "TimeoutSec=infinity", "TimeoutSec=0"} {
+			if strings.Contains(string(raw), unbounded) {
+				t.Errorf("%s makes its start unbounded (%s)", unit, unbounded)
 			}
 		}
 	}

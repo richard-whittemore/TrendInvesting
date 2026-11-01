@@ -63,8 +63,6 @@ ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --co
 # start this adapter through the bounded healer (docs/manual/server.md,
 # Gateway healer; ADR 0025). SIGTERM stops it cleanly.
 Restart=no
-# Bound submitted healer jobs in systemd (docs/manual/server.md, Gateway healer).
-TimeoutStartSec=90
 TimeoutStopSec=60
 NoNewPrivileges=true
 PrivateTmp=true
