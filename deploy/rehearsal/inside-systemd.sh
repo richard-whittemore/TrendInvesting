@@ -255,6 +255,13 @@ wait_hook() {
 fail_engine() { systemctl start "$engine" 2>/dev/null || true; }
 run_of() { systemctl show -p InvocationID --value "$engine"; }
 
+# The paging steps below check immediate pages: no escalation delay and no IBKR
+# schedule, whatever day the rehearsal runs (the provisioned weekend window
+# would correctly hold an operational page; the reporter's tests cover the
+# delayed and held cases; docs/manual/alerts-and-dashboard.md, "Paging invariant").
+printf 'TI_ESCALATE_AFTER=0\nTI_IBKR_MAINTENANCE_FILE=/nonexistent/ibkr-maintenance.json\n' >/etc/trend-investing/reporter.env
+chmod 0644 /etc/trend-investing/reporter.env
+
 # Run 1: the engine starts, writes its own line, and fails.
 touch "$probe/engine.env"
 fail_engine
