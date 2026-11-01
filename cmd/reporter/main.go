@@ -474,7 +474,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 		if sched, err := gatewayScheduleFrom(getenv); err != nil {
 			failures = append(failures, err)
-		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, senders, setAside, now, policy); err != nil {
+		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters), *systemctl), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, senders, setAside, now, policy); err != nil {
 			failures = append(failures, err)
 		}
 	}

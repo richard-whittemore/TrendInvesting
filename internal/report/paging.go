@@ -71,7 +71,7 @@ type ibkrInterval struct{ start, end time.Time }
 func ParseIBKRSchedule(raw []byte) (IBKRSchedule, error) {
 	var out IBKRSchedule
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	if err := uniqueJSON(dec); err != nil {
+	if err := uniqueJSON(dec, 0); err != nil {
 		return out, err
 	}
 	if _, err := dec.Token(); err != io.EOF {
@@ -153,9 +153,9 @@ func clockMinutes(s string, end bool) (int, error) {
 	return t.Hour()*60 + t.Minute(), nil
 }
 
-// uniqueJSON refuses duplicate fields instead of accepting a different
+// uniqueJSON refuses duplicate and non-schema field names instead of accepting a different
 // schedule from the adapter (ADR 0025, scheduled interruptions).
-func uniqueJSON(d *json.Decoder) error {
+func uniqueJSON(d *json.Decoder, depth int) error {
 	tok, err := d.Token()
 	if err != nil {
 		return err
@@ -175,9 +175,13 @@ func uniqueJSON(d *json.Decoder) error {
 			if !ok || fields[name] {
 				return errors.New("maintenance schedule: duplicate field")
 			}
+			knownField := depth == 0 && name == "windows" || depth == 2 && (name == "days" || name == "start" || name == "end" || name == "zone")
+			if !knownField {
+				return fmt.Errorf("maintenance schedule: unknown field %q", name)
+			}
 			fields[name] = true
 		}
-		if err := uniqueJSON(d); err != nil {
+		if err := uniqueJSON(d, depth+1); err != nil {
 			return err
 		}
 	}
@@ -258,19 +262,22 @@ func (s IBKRSchedule) WindowEnd(now time.Time) time.Time {
 	return time.Time{}
 }
 
-// IBKRNotice distinguishes server connectivity and deliberate reset waits
-// from password failures (server.md, "The Gateway is logged out").
+// KindIBKRConnectivity and KindGatewayResetWait distinguish connectivity
+// loss and reset waiting (server.md, "The Gateway is logged out").
 const (
 	KindIBKRConnectivity Kind = "ibkr-connectivity"
 	KindGatewayResetWait Kind = "gateway-reset-wait"
 )
 
+// IBKRNotice selects the reset-wait kind when reset is true, otherwise connectivity
+// loss, per server.md, "The Gateway is logged out". Callers must establish the
+// corresponding current journal evidence; all notices share GatewayKey(host).
 func IBKRNotice(host string, now time.Time, reset bool, said string) Alert {
 	kind := KindIBKRConnectivity
-	body := "The Gateway is logged in, but IBKR's servers are unreachable (1100/2110 without restoration). IBKR maintenance is a usual cause. If the loss persists after scheduled maintenance, outside weekday 05:30–09:30 ET, restart the Gateway by name: sudo systemctl restart ti-gateway. Confirm Login has completed and IBKR restoration (1102). "
+	body := "The Gateway is logged in, but IBKR's servers are unreachable (1100/2110 without restoration). IBKR maintenance is a usual cause. Confirm the adapter's current link state and IBKR restoration (1102). "
 	if reset {
 		kind = KindGatewayResetWait
-		body = "The Gateway start program is deliberately waiting out IBKR's nightly reset before 01:00 ET. This is a reset wait, not a password failure. "
+		body = "The Gateway start program is waiting out IBKR's reset hour after a refused login; a refusal after 01:00 ET pages as a logout. "
 	}
 	return Alert{Key: GatewayKey(host), Kind: kind, Severity: Urgent, AccountID: host, At: now, Repeat: true, Title: fmt.Sprintf(ibkrNoticeTitle(reset), host), Body: body + said}
 }

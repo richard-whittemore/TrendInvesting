@@ -1,6 +1,7 @@
 package report
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -130,7 +131,7 @@ func TestPagingNoticeClassesAndRemedies(t *testing.T) {
 		if reset && !strings.Contains(a.Title, "reset wait") {
 			t.Fatal(a.Title)
 		}
-		if !reset && (!strings.Contains(a.Body, "sudo systemctl restart ti-gateway") || !strings.Contains(a.Title, "connectivity lost")) {
+		if !reset && (strings.Contains(a.Body, "sudo systemctl restart ti-gateway") || !strings.Contains(a.Title, "connectivity lost")) {
 			t.Fatal(a.Body)
 		}
 	}
@@ -146,5 +147,56 @@ func TestPagingNoticeTextUsesConfiguredReminderPolicy(t *testing.T) {
 		if strings.Contains(a.Body, "once an hour") || strings.Contains(a.Body, "reminded hourly") {
 			t.Errorf("notice promises a fixed interval: %s", a.Title)
 		}
+	}
+}
+
+func TestIBKRScheduleExactFields(t *testing.T) {
+	for _, raw := range []string{
+		`{"Windows":[]}`, `{"windows":[],"Windows":[]}`,
+		`{"windows":[{"Days":["Sat"],"start":"00:00","end":"12:00","zone":"UTC"}]}`,
+		`{"windows":[{"days":["Sat"],"Start":"00:00","end":"12:00","zone":"UTC"}]}`,
+		`{"windows":[{"days":["Sat"],"start":"00:00","End":"12:00","zone":"UTC"}]}`,
+		`{"windows":[{"days":["Sat"],"start":"00:00","end":"12:00","Zone":"UTC"}]}`,
+		`{"windows":[{"days":["Sat"],"start":"00:00","end":"12:00","zone":"UTC","days":["Sun"]}]}`,
+	} {
+		if _, err := ParseIBKRSchedule([]byte(raw)); err == nil {
+			t.Errorf("accepted alias or duplicate: %s", raw)
+		}
+	}
+}
+
+func TestIBKRScheduleShippedExample(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/etc/ibkr-maintenance.json.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ParseIBKRSchedule(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.windows) != 3 {
+		t.Fatalf("windows=%d", len(s.windows))
+	}
+	for _, tc := range []struct{ at, end string }{
+		{"2026-10-29T23:39:59-04:00", ""},
+		{"2026-10-29T23:40:00-04:00", "2026-10-30T01:00:00-04:00"},
+		{"2026-10-30T01:00:00-04:00", ""},
+		{"2026-10-30T23:40:00-04:00", "2026-11-01T14:00:00-05:00"},
+		{"2026-10-31T12:00:00-04:00", "2026-11-01T14:00:00-05:00"},
+		{"2026-11-01T13:59:59-05:00", "2026-11-01T14:00:00-05:00"},
+		{"2026-11-01T14:00:00-05:00", ""},
+	} {
+		at, _ := time.Parse(time.RFC3339, tc.at)
+		end, _ := time.Parse(time.RFC3339, tc.end)
+		if got := s.WindowEnd(at); !got.Equal(end) {
+			t.Errorf("%s end=%s want=%s", tc.at, got, end)
+		}
+	}
+}
+
+func TestIBKRResetNoticeExplainsRefusal(t *testing.T) {
+	a := IBKRNotice("synthetic", time.Time{}, true, "synthetic evidence")
+	if strings.Contains(a.Body, "not a password failure") || !strings.Contains(a.Body, "refusal after 01:00 ET pages") {
+		t.Fatal(a.Body)
 	}
 }

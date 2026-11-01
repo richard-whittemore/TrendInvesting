@@ -12,6 +12,7 @@ import (
 // pagingPolicy implements alerts-and-dashboard.md's Paging invariant. State
 // lives in the caller's locked durable record, shared by hooks and timer runs.
 type pagingPolicy struct {
+	bypass   bool
 	after    time.Duration
 	schedule report.IBKRSchedule
 }
@@ -20,7 +21,7 @@ type pagingPolicy struct {
 // Invalid configuration fails the firing but leaves delivery immediate, so
 // a configuration fault cannot hide capital-safety alerts (ADR 0019).
 func loadPagingPolicy(getenv func(string) string) (*pagingPolicy, error) {
-	fallback := &pagingPolicy{}
+	fallback := &pagingPolicy{bypass: true}
 	path := getenv("TI_REPORTER_CONFIG")
 	if path == "" {
 		path = "/etc/trend-investing/reporter.env"
@@ -29,10 +30,10 @@ func loadPagingPolicy(getenv func(string) string) (*pagingPolicy, error) {
 		var e error
 		getenv, e = withSecretsFile(getenv, path)
 		if e != nil {
-			return fallback, e
+			return fallback, fmt.Errorf("reporter: %s: %w", path, e)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fallback, err
+		return fallback, fmt.Errorf("reporter: %s: %w", path, err)
 	}
 	after := getenv("TI_ESCALATE_AFTER")
 	if after == "" {
@@ -71,7 +72,7 @@ func policyOf(policies []*pagingPolicy) *pagingPolicy {
 // at observation, or at the end of the last quiet window, never at delivery.
 // Only caller-observed open incidents reach here; recovery forgets their clock.
 func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]time.Time, now time.Time, every time.Duration) ([]sender, report.Alert, time.Duration, error) {
-	if p == nil || a.Kind == kindSummary {
+	if p == nil || p.bypass || a.Kind == kindSummary {
 		return senders, a, every, nil
 	}
 	near, err := report.SessionNear(now)
@@ -84,7 +85,7 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 	if a.Class(near) == report.CapitalSafety {
 		return senders, a, every, err
 	}
-	if p.after > 0 && (!near || p.after > every) {
+	if p.after > every {
 		every = p.after
 	}
 	observed := channelKey("observed", a.Key)
@@ -93,7 +94,7 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 	}
 	key := channelKey("escalation", a.Key)
 	if sent[key].IsZero() {
-		sent[key] = now
+		sent[key] = sent[observed]
 	}
 	if end := p.schedule.ClosedSince(sent[key], now); end.After(sent[key]) {
 		sent[key] = end
@@ -104,17 +105,17 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 		if e != nil {
 			return senders, a, every, e
 		}
-		local := now.In(loc)
-		if local.Hour() < 1 {
-			if end := time.Date(local.Year(), local.Month(), local.Day(), 1, 0, 0, 0, loc); end.After(until) {
-				until = end
-			}
+		if end := resetNightEnd(now.In(loc)); end.After(until) {
+			until = end
 		}
 	}
 	// A reset wait superseded by another start state (or a removed schedule)
 	// ends its hold now; an old future deadline cannot extend it.
 	if until.IsZero() && sent[key].After(now) {
 		sent[key] = now
+	}
+	if a.Kind == report.KindIBKRConnectivity && until.IsZero() {
+		a.Body += " If the Gateway remains logged in and connectivity is still lost after maintenance, outside weekday 05:30–09:30 ET, restart it by name: sudo systemctl restart ti-gateway."
 	}
 	quiet := !near && !until.IsZero()
 	if quiet {
@@ -137,4 +138,26 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 		a.Repeat = false
 	}
 	return allowed, a, every, err
+}
+
+// routeAndCancel stops outstanding emergencies when routing enters a quiet
+// window (alerts-and-dashboard.md, "Paging invariant"). Callers persist seen
+// even when cancellation fails; failed receipts remain available for retry.
+func (p *pagingPolicy) routeAndCancel(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, now time.Time, every time.Duration) ([]sender, report.Alert, time.Duration, error) {
+	allowed, routed, interval, err := p.route(senders, a, sent, now, every)
+	if sent[channelKey("escalation", a.Key)].After(now) {
+		for _, s := range senders {
+			eligible := false
+			for _, next := range allowed {
+				if next.name() == s.name() {
+					eligible = true
+				}
+			}
+			if !eligible {
+				_, cancelErr := cancelReceipts([]sender{s}, a.Key, seen, now)
+				err = errors.Join(err, cancelErr)
+			}
+		}
+	}
+	return allowed, routed, interval, err
 }

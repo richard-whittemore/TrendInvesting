@@ -210,7 +210,13 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 		if handledRun(u, unit, run) {
 			return nil
 		}
-		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, at, time.Time{}, *repeat, policy)
+		// Preserve observation before lock contention; eligibility uses the clock
+		// under the lock (alerts-and-dashboard.md, "Paging invariant").
+		routedAt := now()
+		if len(unitRecords(u, unit)) == 0 {
+			u.sent[channelKey("observed", report.UnitFailedKey(unit, run))] = at
+		}
+		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, routedAt, time.Time{}, *repeat, policy)
 	})
 	return errors.Join(append(failures, err)...)
 }
@@ -440,10 +446,19 @@ func remindRun(u *unitState, unit, episode, run string, senders []sender, at tim
 // pageRun pages the failed run of unit on each channel that has not taken it.
 func pageRun(u *unitState, unit, invocation, journalctl string, secrets []string, senders []sender, at time.Time, every time.Duration, policies ...*pagingPolicy) error {
 	key := report.UnitFailedKey(unit, invocation)
-	if policyOf(policies) == nil && allTook(senders, key, u.seen) {
-		return nil
+	a := report.UnitFailedAlert(hostName(), unit, invocation, "", at)
+	base := a
+	var policyErr error
+	if p := policyOf(policies); p != nil {
+		senders, a, every, policyErr = p.routeAndCancel(senders, a, u.seen, u.sent, at, every)
+		policyErr = errors.Join(policyErr, u.record())
 	}
-	a := report.UnitFailedAlert(hostName(), unit, invocation, unitReason(journalctl, unit, invocation, secrets), at)
+	if allTook(senders, key, u.seen) {
+		return errors.Join(policyErr, u.record())
+	}
+	full := report.UnitFailedAlert(hostName(), unit, invocation, unitReason(journalctl, unit, invocation, secrets), at)
+	a.Body = strings.Replace(a.Body, base.Body, full.Body, 1)
+	a.PublicBody = strings.Replace(a.PublicBody, base.PublicBody, full.PublicBody, 1)
 	// Each channel's taking is stamped with the page's time, which deliver
 	// keeps only for a repeating alert: a firing resolves no page stamped at
 	// or after its own sample of systemd.
@@ -455,7 +470,7 @@ func pageRun(u *unitState, unit, invocation, journalctl string, secrets []string
 		}
 		return u.record()
 	}
-	return deliver(senders, a, u.seen, u.sent, u.repeats, at, every, record, policies...)
+	return errors.Join(policyErr, deliver(senders, a, u.seen, u.sent, u.repeats, at, every, record), u.record())
 }
 
 // unitReason is the failed run's own last journal line

@@ -75,6 +75,7 @@ d='` + g.dir + `'
 if [ -e "$d/systemctl-fail" ]; then echo "Failed to connect to bus" >&2; exit 1; fi
 echo "$@" >>"$d/systemctl-argv"
 if [ -e "$d/systemctl-raw" ]; then cat "$d/systemctl-raw"; exit 0; fi
+echo "ExecMainStartTimestamp=@946684800"
 echo "NRestarts=$(cat "$d/nrestarts" 2>/dev/null || echo 0)"
 echo "ActiveState=$(cat "$d/activestate" 2>/dev/null || echo active)"
 echo "SubState=$(cat "$d/substate" 2>/dev/null || echo running)"

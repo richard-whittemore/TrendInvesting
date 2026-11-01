@@ -262,8 +262,9 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 		key := channelKey("escalation", a.Key)
 		before := sent[key]
 		observed := sent[channelKey("observed", a.Key)]
-		senders, a, every, policyErr = p.route(senders, a, sent, now, every)
-		if !before.Equal(sent[key]) || !observed.Equal(sent[channelKey("observed", a.Key)]) {
+		receiptsBefore := len(seen)
+		senders, a, every, policyErr = p.routeAndCancel(senders, a, seen, sent, now, every)
+		if !before.Equal(sent[key]) || !observed.Equal(sent[channelKey("observed", a.Key)]) || receiptsBefore != len(seen) {
 			policyErr = errors.Join(policyErr, record())
 		}
 	}

@@ -251,7 +251,8 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	open := h.Since != nil || (deliveredAnywhere(seen, key) && !h.Resolving)
 	// An equal time counts as newer: the journal's times are to the
 	// microsecond, and a login in the same instant as the firing is a login.
-	if !out && open && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
+	obsoleteLink := h.Notice == report.KindIBKRConnectivity && ev.linkObsolete && !ev.silent
+	if !out && open && !obsoleteLink && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
 		out = true
 		ev.connectivity = h.Notice == report.KindIBKRConnectivity
 		said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as unavailable. " + said
@@ -302,6 +303,12 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		h.Since = &t
 		h.RestartOnly = !ev.out && restartOut
 	}
+	if sent[channelKey("observed", key)].IsZero() {
+		sent[channelKey("observed", key)] = *h.Since
+	}
+	if sent[channelKey("escalation", key)].IsZero() {
+		sent[channelKey("escalation", key)] = *h.Since
+	}
 	if err := record(); err != nil {
 		return errors.Join(retErr, err)
 	}
@@ -319,7 +326,15 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	}
 	// Past a window an outage not yet ten minutes old keeps its hold: if it
 	// logs in before it pages, the window's hold is handled and said then.
-	if !ev.resetWait && !ev.connectivity && (sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter) {
+	a := report.GatewayLoggedOutAlert(host, *h.Since, now, said)
+	if ev.resetWait || ev.connectivity {
+		a = report.IBKRNotice(host, now, ev.resetWait, said)
+	}
+	if !ev.resetWait && (sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter) {
+		if p := policyOf(policies); p != nil {
+			_, _, _, policyErr := p.routeAndCancel(senders, a, seen, sent, now, gatewayRemindEvery)
+			retErr = errors.Join(retErr, policyErr)
+		}
 		return errors.Join(retErr, record())
 	}
 	// It pages. The hold is forgotten only now, immediately before the page,
@@ -334,10 +349,6 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		// now. Until here a recovery still retries the pending resolution.
 		forgetAlert(key, map[string]bool{}, seen, sent, repeats)
 		h.Resolving = false
-	}
-	a := report.GatewayLoggedOutAlert(host, *h.Since, now, said)
-	if ev.resetWait || ev.connectivity {
-		a = report.IBKRNotice(host, now, ev.resetWait, said)
 	}
 	err = deliver(senders, a, seen, sent, repeats, now, gatewayRemindEvery, record, policies...)
 	return errors.Join(retErr, err, record())
