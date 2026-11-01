@@ -399,6 +399,8 @@ echo ActiveState=active
 echo NRestarts=0
 echo SubState=running
 echo InvocationID=0123456789abcdef0123456789abcdef
+# As systemd answers "show --timestamp=unix": an active unit's start, in seconds.
+echo ExecMainStartTimestamp=@1700000000
 SH
 chmod 0755 "$sysd/systemctl"
 # Nor does a journal: the Gateway check reads ti-gateway's and the adapter's,
@@ -455,7 +457,12 @@ case $hook in *'$'* | *%*) fail "the hook's ExecStart has a variable the rehears
 before=$(alerts_sent)
 failed_run=(MONITOR_UNIT=ti-engine@boost.service MONITOR_INVOCATION_ID=0123456789abcdef0123456789abcdef)
 # shellcheck disable=SC2086
-sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook, run as its unit runs it (as ti-trader), failed"
+# An escalation delay of 0 and no IBKR schedule keep the immediate page this
+# step checks whatever day the rehearsal runs (the provisioned schedule's
+# weekend window would hold an operational page); the delayed and held cases
+# are covered by the reporter's tests (docs/manual/alerts-and-dashboard.md,
+# "Paging invariant").
+sudo -u ti-trader env -i PATH=/usr/bin:/bin TI_ESCALATE_AFTER=0 TI_IBKR_MAINTENANCE_FILE=/nonexistent/ibkr-maintenance.json "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook, run as its unit runs it (as ti-trader), failed"
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook did not page both channels once"
 test "$(issues_opened)" = "$((opened + 1))" || fail "the failed-unit hook did not open one issue in the alerts repository"
 hook_comments=$(comments_posted)
@@ -463,7 +470,7 @@ grep -q 'ti-engine%40boost.service+failed' "$rep/posts.bodies" || fail "the hook
 test -s "$rep/reports/unit-failures.json" || fail "the hook wrote no record of the page"
 grep -q 'unit-failed:ti-engine@boost.service/0123456789abcdef0123456789abcdef' "$rep/reports/unit-failures.json" || fail "the hook's record is not keyed by the failed run"
 # shellcheck disable=SC2086
-sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook's second run failed"
+sudo -u ti-trader env -i PATH=/usr/bin:/bin TI_ESCALATE_AFTER=0 TI_IBKR_MAINTENANCE_FILE=/nonexistent/ibkr-maintenance.json "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook's second run failed"
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook paged again for the same failure"
 test "$(issues_opened)" = "$((opened + 1))" || fail "the failed-unit hook opened another issue for the same failure"
 test "$(comments_posted)" = "$hook_comments" || fail "the failed-unit hook commented on an issue again for the same failure"

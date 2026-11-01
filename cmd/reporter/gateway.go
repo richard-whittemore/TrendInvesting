@@ -164,7 +164,7 @@ func loadHostGateway(path string) (hostGateway, error) {
 // seen in; it pages once the time passes gatewayPagesAfter outside a window,
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
-func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, window func() time.Time, unitState string, note func(string), senders []sender, setAside []channelFault, clock func() time.Time) (retErr error) {
+func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, window func() time.Time, unitState string, note func(string), senders []sender, setAside []channelFault, clock func() time.Time, policies ...*pagingPolicy) (retErr error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -234,12 +234,23 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		}
 		return writeAtomic(path, raw)
 	}
+	key := report.GatewayKey(host)
+	observed, escalation := sent[channelKey("observed", key)], sent[channelKey("escalation", key)]
 	if pruneReceipts(seen, sent, repeats, now) {
+		// Expiring an earlier receipt cannot erase an open incident's clocks
+		// (ADR 0019; alerts-and-dashboard.md, "Paging invariant").
+		if h.Since != nil {
+			if !observed.IsZero() {
+				sent[channelKey("observed", key)] = observed
+			}
+			if !escalation.IsZero() {
+				sent[channelKey("escalation", key)] = escalation
+			}
+		}
 		if err := record(); err != nil {
 			return err
 		}
 	}
-	key := report.GatewayKey(host)
 	// An open outage is closed only by a completed login or a restored link
 	// NEWER than its start. Silence in the journals, or events older than the
 	// outage that remain once the evidence of it has rotated away, prove
@@ -268,6 +279,8 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 			h.Held = nil
 		}
 		h.Since, h.RestartOnly = nil, false
+		delete(sent, channelKey("escalation", key))
+		delete(sent, channelKey("observed", key))
 		if !deliveredAnywhere(seen, key) {
 			h.Resolving = false
 			return errors.Join(retErr, record())
@@ -289,6 +302,12 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		h.Since = &t
 		h.RestartOnly = !ev.out && restartOut
 	}
+	if sent[channelKey("observed", key)].IsZero() {
+		sent[channelKey("observed", key)] = *h.Since
+	}
+	if sent[channelKey("escalation", key)].IsZero() {
+		sent[channelKey("escalation", key)] = *h.Since
+	}
 	if err := record(); err != nil {
 		return errors.Join(retErr, err)
 	}
@@ -306,7 +325,15 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	}
 	// Past a window an outage not yet ten minutes old keeps its hold: if it
 	// logs in before it pages, the window's hold is handled and said then.
-	if sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter {
+	a := report.GatewayLoggedOutAlert(host, *h.Since, now, said)
+	if ev.resetWait {
+		a = report.GatewayResetWaitAlert(host, now, said)
+	}
+	if !ev.resetWait && (sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter) {
+		if p := policyOf(policies); p != nil {
+			_, _, _, policyErr := p.routeAndCancel(senders, a, seen, sent, now, gatewayRemindEvery)
+			retErr = errors.Join(retErr, policyErr)
+		}
 		return errors.Join(retErr, record())
 	}
 	// It pages. The hold is forgotten only now, immediately before the page,
@@ -317,12 +344,13 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	if h.Resolving {
 		// The new outage is due its page while an earlier recovery's resolution
 		// is still pending: the channel that never took that resolution holds a
-		// receipt for the old incident and would stay silent, so the receipts go
-		// now. Until here a recovery still retries the pending resolution.
-		forgetAlert(key, map[string]bool{}, seen, sent, repeats)
+		// delivery record for the old incident and would stay silent. Reset that
+		// suppression; pending receipt cancellations remain scoped to the old page.
+		// Until here a recovery still retries the pending resolution.
+		forgetAlert(key, map[string]bool{"observed": true, "escalation": true}, seen, sent, repeats)
 		h.Resolving = false
 	}
-	err = deliver(senders, report.GatewayLoggedOutAlert(host, *h.Since, now, said), seen, sent, repeats, now, gatewayRemindEvery, record)
+	err = deliver(senders, a, seen, sent, repeats, now, gatewayRemindEvery, record, policies...)
 	return errors.Join(retErr, err, record())
 }
 

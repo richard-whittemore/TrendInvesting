@@ -181,6 +181,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			failures = append(failures, secretsErr)
 		}
 	}
+	policy, policyErr := loadPagingPolicy(getenv)
+	if policyErr != nil {
+		failures = append(failures, policyErr)
+	}
 	heartbeatEnv := getenv
 	// run.env missing or empty means no settings, and so no log path: the
 	// journal step alone is skipped for it. Whether that is a quiet wait or a
@@ -382,6 +386,12 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// A failed trading unit is part of the standing told to a new channel,
 	// unless a window holds it: it is then paged at the window's close.
 	stateAtStartUnits := sortedUnits(tradingUnits, failedNow)
+	// Operational unit incidents have their own durable escalation clock;
+	// the capital-safety standing must not bypass it (alerts-and-dashboard.md,
+	// "Paging invariant").
+	if near, err := report.SessionNear(at); err == nil && !near && (policy.session || policy.after > 0 || !policy.schedule.WindowEnd(at).IsZero()) {
+		stateAtStartUnits = nil
+	}
 	if !windowNow().IsZero() {
 		stateAtStartUnits = nil
 	}
@@ -400,13 +410,13 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 				continue
 			}
 			current, starting := sendersFor(group, a, baselines, seen)
-			if err := deliver(current, a, seen, sent, repeats, at, *repeat, record); err != nil {
+			if err := deliver(current, a, seen, sent, repeats, at, *repeat, record, policy); err != nil {
 				failures = append(failures, err)
 			}
 			if len(starting) > 0 {
 				marked := a
 				marked.Title = report.StateAtStartTitle + a.Title
-				if err := deliver(starting, marked, seen, sent, repeats, at, *repeat, record); err != nil {
+				if err := deliver(starting, marked, seen, sent, repeats, at, *repeat, record, policy); err != nil {
 					failures = append(failures, err)
 				}
 			}
@@ -431,7 +441,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		soft, hard := unitStep(unitStatePath, tradingUnits, resolveOnly, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat, windowNow, func(unit string) (unitSample, error) {
 			samples, err := sampleUnitsFor(*systemctl, []string{unit}, "the trading units were checked; only the data job's resolve and backup page are skipped at this firing")
 			return samples[unit], err
-		}, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) })
+		}, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, policy)
 		if soft != nil {
 			_, _ = fmt.Fprintln(out, "reporter: the data job's page or resolve could not be completed and is retried at the next firing: "+soft.Error())
 		}
@@ -464,7 +474,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 		if sched, err := gatewayScheduleFrom(getenv); err != nil {
 			failures = append(failures, err)
-		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, senders, setAside, now); err != nil {
+		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, senders, setAside, now, policy); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -490,7 +500,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
 		case due:
 			a.Body += notDelivering(setAside)
-			if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
+			if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record, policy); err != nil {
 				failures = append(failures, err)
 			}
 		}
@@ -795,6 +805,11 @@ func restoredLogNewer(path string) (restored, current string, examined bool) {
 // alerts whose keys begin with prefix, except an issue tracker's: its record
 // is dropped once closeForgotten has closed the alert's issue.
 func forget(prefix string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) {
+	for k := range sent {
+		if ch, key, ok := strings.Cut(k, "|"); ok && (ch == "escalation" || ch == "observed") && strings.HasPrefix(key, prefix) {
+			delete(sent, k)
+		}
+	}
 	for k := range seen {
 		if ch, key, ok := strings.Cut(k, "|"); ok && ch != issuesChannel && strings.HasPrefix(key, prefix) {
 			delete(seen, k)

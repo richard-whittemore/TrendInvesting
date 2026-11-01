@@ -41,6 +41,7 @@ const (
 // hold no login event at all (silent), or neither (logged in).
 type gatewayEvidence struct {
 	out, silent bool
+	resetWait   bool
 	said        string
 	// recoveredAt is the time of the newest positive event the journals show:
 	// IBC's completed login when it is IBC's newest login event, or the
@@ -61,6 +62,9 @@ var (
 	// until a new "Login has completed"; IBC's own login screen after its
 	// restart is "LoginState is LOGGED_OUT".
 	ibcEvent = regexp.MustCompile(`Unrecognized Username or Password|LoginState is LOGGED_OUT|Login has completed|login retries stopped|gateway-start: starting IBC|gateway-start: cannot start IBC`)
+	// resetWaitEvent reads reset-wait evidence separately from login events
+	// (ADR 0019, "Alerting"); other start-script messages cannot imply logout.
+	resetWaitEvent = regexp.MustCompile(`gateway-start: reset wait:`)
 	// The adapter's link lines (adapter/ibkr/connection.py _report and
 	// loop.py): connectivity-lost is code 1100/2110; "connected reason=restored"
 	// is IBKR's restoration (1101/1102); "reconciled" is a successful read of the
@@ -131,8 +135,70 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		if err != nil {
 			return gatewayEvidence{}, err
 		}
+		resets, err := journalQuery(journalctl, gatewayUnit, resetWaitEvent)
+		if err != nil {
+			return gatewayEvidence{}, err
+		}
+		// A reset wait must be strictly newer than every completed-login
+		// timestamp (ADR 0019, "Alerting"). Login events retain journal order;
+		// wall-clock changes must not let an older reset override a login.
+		var newestLogin time.Time
+		for _, line := range ibc {
+			if strings.Contains(line, "Login has completed") {
+				at, err := lineTime(line)
+				if err != nil {
+					return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
+				}
+				if at.After(newestLogin) {
+					newestLogin = at
+				}
+			}
+		}
+		// Insert qualifying reset evidence by timestamp; unrelated
+		// gateway-start diagnostics never participate in login state.
+		for _, reset := range resets {
+			at, err := lineTime(reset)
+			if err != nil {
+				return gatewayEvidence{}, fmt.Errorf("reporter: reset wait time: %w", err)
+			}
+			if !at.After(newestLogin) {
+				continue
+			}
+			i := len(ibc)
+			for i > 0 {
+				previous, err := lineTime(ibc[i-1])
+				if err != nil {
+					return gatewayEvidence{}, err
+				}
+				if !previous.After(at) {
+					break
+				}
+				i--
+			}
+			ibc = append(ibc, "")
+			copy(ibc[i+1:], ibc[i:])
+			ibc[i] = reset
+		}
 		var reasons []string
 		var recovered time.Time
+		resetWait := false
+		for i := len(ibc) - 1; i >= 0; i-- {
+			if strings.Contains(ibc[i], "gateway-start:") {
+				loc, err := loadNewYork()
+				if err != nil {
+					return gatewayEvidence{}, err
+				}
+				if strings.Contains(ibc[i], "gateway-start: reset wait: login refused at") {
+					at, err := lineTime(ibc[i])
+					if err != nil {
+						return gatewayEvidence{}, fmt.Errorf("reporter: reset wait time: %w", err)
+					}
+					end := resetNightEnd(at.In(loc))
+					resetWait = !now.Before(at) && now.Before(end)
+				}
+				break
+			}
+		}
 		if n := len(ibc); n > 0 {
 			if strings.Contains(ibc[n-1], "Login has completed") {
 				at, err := lineTime(ibc[n-1])
@@ -140,6 +206,7 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 					return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
 				}
 				recovered = at
+				resetWait = false
 			} else {
 				reasons = append(reasons, "IBC's newest login event: "+ibc[n-1])
 			}
@@ -162,7 +229,7 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		}
 		switch {
 		case len(reasons) > 0:
-			return gatewayEvidence{out: true, said: "gateway: logged out: " + strings.Join(reasons, "; "), recoveredAt: recovered}, nil
+			return gatewayEvidence{out: true, resetWait: resetWait, said: "gateway: logged out: " + strings.Join(reasons, "; "), recoveredAt: recovered}, nil
 		case len(ibc) == 0:
 			return gatewayEvidence{silent: true, said: "gateway: no login evidence: the ti-gateway journal holds no login event in the last 14 days", recoveredAt: recovered}, nil
 		}
@@ -251,4 +318,18 @@ func gatewayUnitSampler(systemctl string) func() (gatewayUnitSample, error) {
 		s.active = state == "active"
 		return s, nil
 	}
+}
+
+// resetNightEnd bounds a wait to its written night (ADR 0019, "Alerting";
+// server.md, "The retry is bounded"). The caller supplies America/New_York time; the first 01:00 ends it.
+func resetNightEnd(at time.Time) time.Time {
+	mins := at.Hour()*60 + at.Minute()
+	if mins >= 60 && mins < 23*60+40 {
+		return time.Time{}
+	}
+	day := at.Day()
+	if mins >= 23*60+40 {
+		day++
+	}
+	return time.Date(at.Year(), at.Month(), day, 1, 0, 0, 0, at.Location())
 }

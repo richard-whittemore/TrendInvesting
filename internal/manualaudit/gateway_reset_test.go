@@ -24,3 +24,21 @@ func TestGatewayResetManualStatesDurableBoundAndActualWait(t *testing.T) {
 		}
 	}
 }
+
+func TestPagingManualWindowsAndReminders(t *testing.T) {
+	for file, wants := range map[string][]string{
+		"server.md":               {"daily 23:40–01:00", "Saturday 00:00–24:00", "Sunday 00:00–14:00", "Friday 23:40 to Sunday 14:00"},
+		"alerts-and-dashboard.md": {"never shorter than the existing hourly interval", "receipt cancel API", "same night's", "three continuous hours", "timer-job failures do not repeat", "ten-minute"},
+	} {
+		raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "manual", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Join(strings.Fields(string(raw)), " ")
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s lacks %q", file, want)
+			}
+		}
+	}
+}

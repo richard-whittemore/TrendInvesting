@@ -51,7 +51,7 @@ func newStandInSystemd(t *testing.T) standInSystemd {
 		"case $1 in show) ;; *) exit 2 ;; esac\n" +
 		"if grep -qx \"$unit\" " + d + "/broken 2>/dev/null; then exit 1; fi\n" +
 		"if grep -qx \"$unit\" " + d + "/failed; then echo ActiveState=failed; elif grep -q \"^$unit=\" " + d + "/states; then grep \"^$unit=\" " + d + "/states | sed 's/^[^=]*=/ActiveState=/'; else echo ActiveState=active; fi\n" +
-		"echo NRestarts=0\necho SubState=running\necho InvocationID=$(cat " + d + "/invocation)\n"
+		"echo ExecMainStartTimestamp=@946684800\necho NRestarts=0\necho SubState=running\necho InvocationID=$(cat " + d + "/invocation)\n"
 	journalctl := "#!/bin/sh\necho \"$@\" >>" + d + "/journalctl-calls\nf=unit-wide\nq=\n" +
 		"for a; do case $a in -q) q=1 ;; _SYSTEMD_INVOCATION_ID=*) f=own-${a#*=} ;; INVOCATION_ID=*) f=systemd-${a#*=} ;; esac; done\n" +
 		"if test -e " + d + "/$f; then cat " + d + "/$f\nelif test -z \"$q\" || test -e " + d + "/noisy; then echo '-- No entries --'; fi\nexit 0\n"

@@ -97,7 +97,7 @@ func episodeSentence(unit string) string {
 	if isTimerJob(unit) {
 		return "You are told once for this failure; a run that fails again is the same failure and is not paged again, and the incident is resolved when a run ends well."
 	}
-	return "You are told once for this failure; a run that fails again before the unit is seen well is not paged again, only reminded at most once an hour, and the incident is resolved when the unit is seen well."
+	return "You are told once for this failure; a run that fails again before the unit is seen well is not paged again, only reminded under the configured paging policy, and the incident is resolved when the unit is seen well."
 }
 
 // UnitFailedAlert is the urgent page for a failed run of a unit: its name,
@@ -121,15 +121,15 @@ func UnitFailedAlert(host, unit, invocation, reason string, at time.Time) Alert 
 // the episode's failed runs known, its first included (1 plus the later runs
 // counted); the count is shown from two, and below two no later run was
 // counted, so it is left out rather than said wrong.
-// It is sent under the episode's key, at most once an hour (the caller's
-// interval), and carries no journal line.
+// It is sent under the episode's key at the caller's paging interval
+// (alerts-and-dashboard.md, "Paging invariant") and carries no journal line.
 func UnitStillFailedAlert(host, unit, invocation string, since time.Time, runs int, at time.Time) Alert {
 	count := ""
 	if runs >= 2 {
 		count = fmt.Sprintf(", %d failed runs", runs)
 	}
 	body := fmt.Sprintf("The unit %s is still failing since %s%s, as of %s. Read %s, then `journalctl -u %s` on the server. "+
-		"This reminder comes at most once an hour while the unit keeps failing; the incident is resolved when the unit is seen well.",
+		"This reminder follows the configured paging policy while the unit keeps failing; the incident is resolved when the unit is seen well.",
 		unit, since.UTC().Format(time.RFC3339), count, at.UTC().Format(time.RFC3339), UnitManualRow(unit), unit)
 	return Alert{
 		Key: UnitFailedKey(unit, invocation), Kind: KindUnitFailed, Severity: Urgent, AccountID: host, At: at,

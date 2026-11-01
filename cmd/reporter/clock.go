@@ -289,6 +289,9 @@ func forgetAlert(key string, keep, seen map[string]bool, sent map[string]time.Ti
 		// A receipt is dropped only by its cancel, or when its emergency is
 		// over (pruneReceipts): a channel set aside while the incident
 		// recovers still has the emergency to cancel when it returns.
+		if receipt, pending := strings.CutPrefix(ch, "cancel:"); pending && seen[channelKey(receipt, key)] {
+			return false
+		}
 		return strings.HasSuffix(k, suffix) && !keep[ch] && !strings.HasPrefix(ch, "receipt:")
 	}
 	for k := range seen {

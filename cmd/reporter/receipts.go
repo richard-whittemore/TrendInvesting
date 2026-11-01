@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 // receiptMargin is how long past an emergency's expire time its receipt is
@@ -47,26 +49,53 @@ func receiptChannel(channel, receipt string, at time.Time) string {
 }
 
 // keepReceipt records, in seen, the receipt of the emergency the send of
-// alert key just opened on s, if it opened one.
-func keepReceipt(s sender, key string, seen map[string]bool, at time.Time) {
+// alert just opened on s, with its send-time class (ADR 0019, "Alerting";
+// alerts-and-dashboard.md, "Paging invariant"). Calendar uncertainty preserves capital-safety.
+func keepReceipt(s sender, a report.Alert, seen map[string]bool, at time.Time) {
 	r, ok := s.(receipter)
 	if !ok {
 		return
 	}
 	if receipt := r.takeReceipt(); receipt != "" {
-		seen[channelKey(receiptChannel(s.name(), receipt, at), key)] = true
+		near, err := report.SessionNear(at)
+		if err != nil {
+			near = true
+		}
+		ch := receiptChannel(s.name(), receipt, at) + ":" + string(a.Class(near))
+		seen[channelKey(ch, a.Key)] = true
 	}
 }
 
-// cancelReceipts cancels every emergency recorded for the alert keyed key on
-// every channel that can cancel one, and forgets each that is cancelled. It
-// returns the pseudo-channel names of the receipts whose cancel failed, which
-// the caller keeps (as it keeps a failed resolve) so the next firing tries
-// again, and the joined error. A receipt older than its emergency's life
-// and the margin is dropped without a cancel (receiptOver): the channel has
-// stopped it. A receipt recorded as noReceipt has nothing to cancel and is
-// dropped. The error names the channel, never a receipt.
+// queueReceiptCancellations snapshots the emergencies a recovery or quiet route
+// must cancel (ADR 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Each marker owns
+// one receipt and alert key; a later incident's receipts cannot join its retry.
+// An unavailable channel retains the same snapshot until it can cancel. Quiet
+// windows select only receipts recorded as operational; legacy unclassified
+// receipts and capital-safety receipts require recovery.
+func queueReceiptCancellations(seen map[string]bool, key, channel string, operationalOnly bool) {
+	for k := range seen {
+		ch, alert, _ := strings.Cut(k, "|")
+		if alert == key && strings.HasPrefix(ch, "receipt:"+channel) && (!operationalOnly || strings.HasSuffix(ch, ":"+string(report.Operational))) {
+			seen["cancel:"+k] = true
+		}
+	}
+}
+
+// cancelReceipts requests cancellation of the alert's current emergencies,
+// including unavailable channels, then attempts available senders (ADR 0019,
+// "Alerting"). Retry paths use retryReceiptCancellations without a new snapshot.
 func cancelReceipts(senders []sender, key string, seen map[string]bool, now time.Time) ([]string, error) {
+	queueReceiptCancellations(seen, key, "", false)
+	return retryReceiptCancellations(senders, key, seen, now, true)
+}
+
+// retryReceiptCancellations attempts only previously requested receipts
+// (ADR 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Errors name the channel and
+// alert, never a receipt. Expired or missing receipts need no remote cancel.
+// Unless the alert has recovered, only receipts recorded operational may be
+// cancelled; a pending marker alone never authorizes other receipt classes.
+func retryReceiptCancellations(senders []sender, key string, seen map[string]bool, now time.Time, recovered bool) ([]string, error) {
+	discardUnscopedCancellations(seen)
 	var kept []string
 	var failures []error
 	for _, s := range senders {
@@ -78,23 +107,43 @@ func cancelReceipts(senders []sender, key string, seen map[string]bool, now time
 		for k := range seen {
 			ch, alert, found := strings.Cut(k, "|")
 			rest, mine := strings.CutPrefix(ch, prefix)
-			if !found || !mine || alert != key {
+			pending := "cancel:" + k
+			if !found || !mine || alert != key || !seen[pending] {
+				continue
+			}
+			if !recovered && !strings.HasSuffix(ch, ":"+string(report.Operational)) {
 				continue
 			}
 			receipt, stamp, _ := strings.Cut(rest, ":")
-			if receipt == noReceipt || receiptOver(stamp, r.expiry(), now) {
-				delete(seen, k)
-				continue
-			}
-			if err := r.cancel(receipt); err != nil {
-				kept = append(kept, ch)
-				failures = append(failures, fmt.Errorf("%s: cancel the page of %s: %w", s.name(), key, err))
-				continue
+			if receipt != noReceipt && !receiptOver(stamp, r.expiry(), now) {
+				if err := r.cancel(receipt); err != nil {
+					kept = append(kept, ch)
+					failures = append(failures, fmt.Errorf("%s: cancel the page of %s: %w", s.name(), key, err))
+					continue
+				}
 			}
 			delete(seen, k)
+			delete(seen, pending)
 		}
 	}
 	return kept, errors.Join(failures...)
+}
+
+// discardUnscopedCancellations removes legacy requests whose receipt ownership
+// is unknowable (ADR 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Never guess that
+// a newer incident's emergency belongs to an old request. Keep the receipts for
+// a later observed recovery or normal expiry, which still bounds their lifetime.
+func discardUnscopedCancellations(seen map[string]bool) bool {
+	changed := false
+	for k := range seen {
+		ch, _, _ := strings.Cut(k, "|")
+		target, pending := strings.CutPrefix(ch, "cancel:")
+		if pending && !strings.HasPrefix(target, "receipt:") {
+			delete(seen, k)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // receiptOver reports whether a receipt sent at stamp (Unix seconds) is past
@@ -110,6 +159,7 @@ func cancelReceipts(senders []sender, key string, seen map[string]bool, now time
 // check pages only a drift that persists over its consecutive checks, and a
 // clock put right between two checks passes the next one unremarked.
 func receiptOver(stamp string, life time.Duration, now time.Time) bool {
+	stamp, _, _ = strings.Cut(stamp, ":")
 	unix, err := strconv.ParseInt(stamp, 10, 64)
 	return err == nil && now.After(time.Unix(unix, 0).Add(life+receiptMargin))
 }
@@ -126,6 +176,7 @@ func receiptOver(stamp string, life time.Duration, now time.Time) bool {
 // is left behind. It reports whether it changed anything, for the caller to
 // save.
 func pruneReceipts(seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time) bool {
+	changed := discardUnscopedCancellations(seen)
 	alerts := map[string]bool{}
 	for k := range seen {
 		ch, alert, found := strings.Cut(k, "|")
@@ -140,10 +191,16 @@ func pruneReceipts(seen map[string]bool, sent map[string]time.Time, repeats map[
 			alerts[alert] = true
 		}
 	}
+	for k := range seen {
+		ch, alert, _ := strings.Cut(k, "|")
+		if receipt, pending := strings.CutPrefix(ch, "cancel:"); pending && !seen[channelKey(receipt, alert)] {
+			delete(seen, k)
+		}
+	}
 	for alert := range alerts {
 		if !deliveredAnywhere(seen, alert) {
 			forgetAlert(alert, nil, seen, sent, repeats)
 		}
 	}
-	return len(alerts) > 0
+	return changed || len(alerts) > 0
 }

@@ -664,8 +664,10 @@ func TestTheJournalIsAskedForShortISOTimesWithoutAPagerFourteenDaysBack(t *testi
 	}
 	raw, _ := os.ReadFile(filepath.Join(g.dir, "argv"))
 	calls := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(calls) != 2 {
-		t.Fatalf("%d journal queries, want 2 (IBC and the adapter): %q", len(calls), calls)
+	// IBC's login events, the start program's reset-wait lines (read apart so no
+	// other line can count as a login event), and the adapter's link lines.
+	if len(calls) != 3 {
+		t.Fatalf("%d journal queries, want 3 (IBC, the reset wait and the adapter): %q", len(calls), calls)
 	}
 	for _, c := range calls {
 		for _, want := range []string{"-o short-iso-precise", "--no-pager", "--since=-14d", "-g "} {
