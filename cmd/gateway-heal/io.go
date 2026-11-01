@@ -113,7 +113,9 @@ func (f files) Read() (gatewayheal.Inputs, error) {
 func regularRead(path string) ([]byte, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, err
+		// Name the file: a journal line that says only "no such file" cannot
+		// be acted on. errors.Is(err, os.ErrNotExist) still holds.
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	f := os.NewFile(uintptr(fd), path)
 	defer func() { _ = f.Close() }()

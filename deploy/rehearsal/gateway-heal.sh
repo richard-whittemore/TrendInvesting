@@ -6,6 +6,13 @@ rehearse_gateway_heal() {
   local hook=ti-gateway-heal@ti-adapter-boost.service.service n said page_hook=ti-unit-failed@ti-adapter-boost.service.service page_before failed_invocation
   page_before=$(instances)
   install -d -m 0700 /var/lib/ti-gateway-heal
+  # The files the healer reads on the server, as provisioning lays them down:
+  # the Gateway's restart times and IBKR's schedule (a missing one fails closed).
+  install -d -m 0755 /etc/trend-investing
+  test -e /etc/trend-investing/gateway.env ||
+    printf 'GATEWAY_MAJOR=1050\nTI_GATEWAY_RESTART_TIME=11:45 PM\nTI_GATEWAY_COLD_RESTART=09:00\n' >/etc/trend-investing/gateway.env
+  test -e /etc/trend-investing/ibkr-maintenance.json ||
+    install -m 0644 /deploy/etc/ibkr-maintenance.json.example /etc/trend-investing/ibkr-maintenance.json
   for n in boost trad-ira roth-ira; do
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$n"
     install -o ti-trader -g ti-trader -m 0600 /dev/null "/var/lib/trend-investing/adapters/$n/pending.json.lock"
