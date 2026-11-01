@@ -96,7 +96,7 @@ func TestProvisionedRelayLockPreservesInodeAndBytes(t *testing.T) {
 	if !ok {
 		t.Fatal("missing function end")
 	}
-	script := "install_adapter_lock() {" + body + "\n}\nrecord=$2; chown() { printf '%s\\n' \"$*\" >>\"$record\"; }; log() { :; }; install_adapter_lock \"$1\""
+	script := "install_adapter_lock() {" + body + "\n}\nrecord=$2; chown() { printf '%s\\n' \"$*\" >>\"$record\"; }; install() { local p=\"${@: -1}\"; : >\"$p\"; chmod 0600 \"$p\"; }; log() { :; }; install_adapter_lock \"$1\""
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pending.json.lock")
 	record := filepath.Join(dir, "chown-calls")
