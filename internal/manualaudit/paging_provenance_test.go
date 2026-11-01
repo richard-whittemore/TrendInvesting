@@ -11,7 +11,7 @@ import (
 )
 
 func TestPagingRuleCommentsCiteADR(t *testing.T) {
-	for file, names := range map[string][]string{"internal/report/paging.go": {"GatewayResetWaitAlert"}, "cmd/reporter/gatewayjournal.go": {"resetNightEnd"}, "cmd/reporter/receipts.go": {"queueReceiptCancellations", "retryReceiptCancellations", "discardUnscopedCancellations"}} {
+	for file, names := range map[string][]string{"internal/report/paging.go": {"GatewayResetWaitAlert"}, "cmd/reporter/gatewayjournal.go": {"resetNightEnd"}, "cmd/reporter/receipts.go": {"keepReceipt", "queueReceiptCancellations", "retryReceiptCancellations", "discardUnscopedCancellations"}} {
 		f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(repoRoot(t), file), nil, parser.ParseComments)
 		if err != nil {
 			t.Fatal(err)
@@ -70,6 +70,28 @@ func TestPagingManualReceiptClassAndChapterIndex(t *testing.T) {
 	} {
 		if !strings.Contains(text, phrase) {
 			t.Errorf("manual missing receipt/class contract: %s", phrase)
+		}
+	}
+}
+
+func TestPagingServerManualDescribesFilteredResetEvidence(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "manual", "server.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	for _, obsolete := range []string{"The newest `gateway-start:` line being", "The newest gateway-start line records"} {
+		if strings.Contains(text, obsolete) {
+			t.Errorf("manual still uses unfiltered reset evidence: %s", obsolete)
+		}
+	}
+	for _, want := range []string{
+		"Only matching login, reset-wait and start-state evidence participates",
+		"Unrelated `gateway-start:` diagnostics do not change the state",
+		"strictly newer than the newest completed-login timestamp",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("manual missing filtered reset rule: %s", want)
 		}
 	}
 }

@@ -49,8 +49,8 @@ func receiptChannel(channel, receipt string, at time.Time) string {
 }
 
 // keepReceipt records, in seen, the receipt of the emergency the send of
-// alert just opened on s, with its send-time class (alerts-and-dashboard.md,
-// "Paging invariant"). Calendar uncertainty preserves capital-safety.
+// alert just opened on s, with its send-time class (ADR 0019, "Alerting";
+// alerts-and-dashboard.md, "Paging invariant"). Calendar uncertainty preserves capital-safety.
 func keepReceipt(s sender, a report.Alert, seen map[string]bool, at time.Time) {
 	r, ok := s.(receipter)
 	if !ok {
@@ -86,13 +86,15 @@ func queueReceiptCancellations(seen map[string]bool, key, channel string, operat
 // "Alerting"). Retry paths use retryReceiptCancellations without a new snapshot.
 func cancelReceipts(senders []sender, key string, seen map[string]bool, now time.Time) ([]string, error) {
 	queueReceiptCancellations(seen, key, "", false)
-	return retryReceiptCancellations(senders, key, seen, now)
+	return retryReceiptCancellations(senders, key, seen, now, true)
 }
 
 // retryReceiptCancellations attempts only previously requested receipts
 // (ADR 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Errors name the channel and
 // alert, never a receipt. Expired or missing receipts need no remote cancel.
-func retryReceiptCancellations(senders []sender, key string, seen map[string]bool, now time.Time) ([]string, error) {
+// Unless the alert has recovered, only receipts recorded operational may be
+// cancelled; a pending marker alone never authorizes other receipt classes.
+func retryReceiptCancellations(senders []sender, key string, seen map[string]bool, now time.Time, recovered bool) ([]string, error) {
 	discardUnscopedCancellations(seen)
 	var kept []string
 	var failures []error
@@ -107,6 +109,9 @@ func retryReceiptCancellations(senders []sender, key string, seen map[string]boo
 			rest, mine := strings.CutPrefix(ch, prefix)
 			pending := "cancel:" + k
 			if !found || !mine || alert != key || !seen[pending] {
+				continue
+			}
+			if !recovered && !strings.HasSuffix(ch, ":"+string(report.Operational)) {
 				continue
 			}
 			receipt, stamp, _ := strings.Cut(rest, ":")

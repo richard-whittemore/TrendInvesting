@@ -139,12 +139,30 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		if err != nil {
 			return gatewayEvidence{}, err
 		}
-		// Merge only reset-wait evidence with login events in journal order;
-		// arbitrary gateway-start messages are not login state (ADR 0019).
+		// A reset wait must be strictly newer than every completed-login
+		// timestamp (ADR 0019, "Alerting"). Login events retain journal order;
+		// wall-clock changes must not let an older reset override a login.
+		var newestLogin time.Time
+		for _, line := range ibc {
+			if strings.Contains(line, "Login has completed") {
+				at, err := lineTime(line)
+				if err != nil {
+					return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
+				}
+				if at.After(newestLogin) {
+					newestLogin = at
+				}
+			}
+		}
+		// Insert qualifying reset evidence by timestamp; unrelated
+		// gateway-start diagnostics never participate in login state.
 		for _, reset := range resets {
 			at, err := lineTime(reset)
 			if err != nil {
 				return gatewayEvidence{}, fmt.Errorf("reporter: reset wait time: %w", err)
+			}
+			if !at.After(newestLogin) {
+				continue
 			}
 			i := len(ibc)
 			for i > 0 {

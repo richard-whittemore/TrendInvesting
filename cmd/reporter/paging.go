@@ -152,7 +152,7 @@ func (p *pagingPolicy) routeAndCancel(senders []sender, a report.Alert, seen map
 	if quiet {
 		queueReceiptCancellations(seen, a.Key, "", true)
 	}
-	_, cancelErr := retryReceiptCancellations(senders, a.Key, seen, now)
+	_, cancelErr := retryReceiptCancellations(senders, a.Key, seen, now, false)
 	err = errors.Join(err, cancelErr)
 	return allowed, routed, interval, err
 }
