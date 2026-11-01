@@ -529,12 +529,29 @@ func TestAStalledPortsReadBeforeTheSessionsCommandIsAGateOutage(t *testing.T) {
 	}
 	defer w.Remove(ctx, dir)
 	w.gate.stepTimeout = 600 * time.Millisecond
+	session, expireSession := controlledDeadline(ctx, time.Now().Add(150*time.Millisecond))
+	defer expireSession()
+	var expireStep context.CancelFunc
+	w.gate.withDeadline = func(ctx context.Context, end time.Time) (context.Context, context.CancelFunc) {
+		step, expire := controlledDeadline(ctx, end)
+		expireStep = expire
+		return step, expire
+	}
 	var calls int
 	w.gate.listening = func(ctx context.Context) ([]int, error) {
 		calls++
 		if calls == 1 { // the copy's
 			return nil, nil
 		}
+		// The gate-side limit is independent of the session's deadline
+		// (docs/manual/alerts-and-dashboard.md, "What the session and the
+		// gate can and cannot do"). Expire the session first, only once
+		// the command's ports read has actually started.
+		expireSession()
+		if ctx.Err() != nil {
+			t.Fatalf("the session's deadline ended the ports read: %v", ctx.Err())
+		}
+		expireStep()
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -542,17 +559,40 @@ func TestAStalledPortsReadBeforeTheSessionsCommandIsAGateOutage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
-	defer cancel()
 	if out, code := run(session, "gofmt"); code != toolExitUnavailable {
 		t.Errorf("exit %d, %q; want %d", code, out, toolExitUnavailable)
 	}
 	if calls != 2 {
 		t.Fatalf("the ports were read %d times, want the copy's and the command's", calls)
 	}
-	if err := done(); !errors.Is(err, errGateStalled) {
+	if !errors.Is(session.Err(), context.DeadlineExceeded) {
+		t.Fatalf("session = %v, want its deadline exceeded first", session.Err())
+	}
+	err = done()
+	var step *errGateStep
+	if !errors.Is(err, errGateStalled) || !errors.Is(err, errGateUnavailable) || !errors.As(err, &step) {
 		t.Fatalf("done = %v, want the stalled ports read kept as the gate's failure", err)
 	}
+}
+
+// controlledDeadline supplies a deadline that expires explicitly, so the
+// gate/session ordering does not depend on scheduling or subprocess latency.
+func controlledDeadline(parent context.Context, end time.Time) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	return controlledDeadlineContext{Context: ctx, end: end}, func() { cancel(context.DeadlineExceeded) }
+}
+
+type controlledDeadlineContext struct {
+	context.Context
+	end time.Time
+}
+
+func (c controlledDeadlineContext) Deadline() (time.Time, bool) { return c.end, true }
+func (c controlledDeadlineContext) Err() error {
+	if c.Context.Err() != nil {
+		return context.Cause(c.Context)
+	}
+	return nil
 }
 
 // TestAStepInsideAStepEndsWithIt: a gate-side step started inside another

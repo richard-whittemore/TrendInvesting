@@ -76,6 +76,11 @@ type gateBox struct {
 	endGateProcesses func(ctx context.Context) error
 	// stepTimeout is the time limit of each gate-side step (0: gateStepTimeout).
 	stepTimeout time.Duration
+	// withDeadline constructs a step's timed context (nil: context.WithDeadline;
+	// tests: deadlines expired explicitly). The enclosing limit and isolation
+	// from session cancellation still apply (docs/manual/alerts-and-dashboard.md,
+	// "What the session and the gate can and cannot do").
+	withDeadline func(context.Context, time.Time) (context.Context, context.CancelFunc)
 	// sockets is the folder each run's own socket folder is made in: the
 	// real path of /tmp ("" is it), where a socket's path is short enough.
 	sockets string
@@ -162,7 +167,11 @@ func (g *gateBox) stepContext(ctx context.Context) (context.Context, context.Can
 	if outer, ok := ctx.Value(stepDeadline{}).(time.Time); ok && outer.Before(end) {
 		end = outer
 	}
-	return context.WithDeadline(context.WithValue(context.WithoutCancel(ctx), stepDeadline{}, end), end)
+	withDeadline := g.withDeadline
+	if withDeadline == nil {
+		withDeadline = context.WithDeadline
+	}
+	return withDeadline(context.WithValue(context.WithoutCancel(ctx), stepDeadline{}, end), end)
 }
 
 // errProcessesLeft is a gate command after which the gate user's processes
