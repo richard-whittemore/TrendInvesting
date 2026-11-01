@@ -51,6 +51,7 @@ Times below are New York time unless marked UTC (the memory timer uses UTC).
 | Unit | What it does | When it runs | Today |
 | --- | --- | --- | --- |
 | `ti-gateway.service` | IB Gateway under IBC, logged in to IBKR | Starts at boot (enabled). Restarts itself 30 seconds after IBC exits (for example when the weekly phone approval times out), except when the login file is empty or malformed, or after 3 login attempts of any kind within 24 hours ("The Gateway is logged out"). IBC restarts the Gateway nightly at 11:45 PM and logs in again from cold every Sunday at 09:00 (`/etc/trend-investing/gateway.env`) | Installed; not yet run against a real IBKR login |
+| `ti-gateway-heal@.service` | Root-owned, bounded Gateway link recovery | Adapter OnFailure hook; once per incident, no more than once in two hours; waits for login before starting the failed adapter | Install with the owner's yes; see Gateway healer below |
 | `ti-data.timer` and `ti-data.service` | The daily data job: records the day's market data from Massive and writes the Boost engine's input ([market data](market-data.md), "The daily data job") | Monday to Friday at 06:05, 07:05 and 08:05, for the previous session: Massive's free plan serves a session's prices only the next morning, and the adapter's morning reading stands for the session's close only with the Flex reader's executions proof, else the session is withheld ([market data](market-data.md), "The free plan's timing"; [reconciliation](reconciliation.md), "The executions proof"). A 403 at the first two firings is a quiet wait; one that persists at 08:05 fails the unit and pages you ("The free plan's timing" in [market data](market-data.md)). A firing missed while the server was off runs when it starts again. A run is stopped after an hour | Built and installed by `provision.sh services` when `dist/ti-data` is beside `deploy/`. Until the Boost engine has been started once (no `run.env` and no run log in its folder) a firing waits quietly and succeeds; it refuses, and the unit fails, for a real fault, including a `run.env` lost after a run (a run log or a run stream folder is the sign) ("The reporter before the first run", below) |
 | `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. `@trad-ira` starts in dry-run once you name its account and birth month ([momentum](momentum.md), "Starting the Traditional IRA's engine in dry-run"); `@roth-ira` has its configuration and starts in dry-run once you name its account and birth month |
 | `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; Boost's and both IRA reporter timers are enabled | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, until the engine has been started once it logs that it is waiting for the account's first run, skips only the reading of the log, and otherwise runs as usual ("The reporter before the first run", below); it fails, with a message, until the `secrets.env` entries below are filled in |
@@ -61,7 +62,7 @@ Times below are New York time unless marked UTC (the memory timer uses UTC).
 | `ti-ntfy.service` | Your own ntfy server: the only place the daily summary goes ("Your own ntfy server", below). Listens on the server's Tailscale address, port 2586, and nowhere else | Starts at boot once `provision.sh ntfy` has enabled it; tried again every 10 seconds if the Tailscale address is not up yet | Installed by `provision.sh ntfy`, which you run after joining Tailscale. Not part of `provision.sh all` |
 | `tailscaled` | Tailscale | At boot | Installed by `provision.sh base` |
 
-`ti-adapter-boost.service` carries the IBKR adapter ([IBKR adapter](ibkr-adapter.md)): never started at boot or restarted by systemd (`Restart=no`), every start is yours, after the engine ([paper trading](paper-trading.md), "Starting the adapter"). It reads the same `run.env` as the engine, reads the engine's log, talks to the engine over its socket, and delivers the data job's stream for the run, so it refuses to start without the engine's log or that run's stream folder, which the data job's warm-up writes ([market data](market-data.md), "The one-time warm-up"). It is skipped, not failed, until `provision.sh twsapi` and `provision.sh adapter` have installed `ibapi` and the adapter's code, and `provision.sh services` has created its configuration (`/etc/trend-investing/adapters/boost.json`, created once and never overwritten, in dry-run with paper sending off). Its reason for stopping is in `journalctl -u ti-adapter-boost`. Each IRA's adapter is an instance of the template `ti-adapter@.service` (`ti-adapter@trad-ira`, client ID 12, configuration `/etc/trend-investing/adapters/trad-ira.json`, created once in dry-run with paper sending off), with the same rules: never started at boot, never restarted, started by you after its engine and its warm-up; skipped until the same installs and its configuration exist; the template refuses to run as `ti-adapter@boost` ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter").
+`ti-adapter-boost.service` carries the IBKR adapter ([IBKR adapter](ibkr-adapter.md)): never started at boot and keeps `Restart=no`; you start it after the engine, with the bounded exit-3 Gateway healer below as the only automatic recovery exception ([paper trading](paper-trading.md), "Starting the adapter"). It reads the same `run.env` as the engine, reads the engine's log, talks to the engine over its socket, and delivers the data job's stream for the run, so it refuses to start without the engine's log or that run's stream folder, which the data job's warm-up writes ([market data](market-data.md), "The one-time warm-up"). It is skipped, not failed, until `provision.sh twsapi` and `provision.sh adapter` have installed `ibapi` and the adapter's code, and `provision.sh services` has created its configuration (`/etc/trend-investing/adapters/boost.json`, created once and never overwritten, in dry-run with paper sending off). Its reason for stopping is in `journalctl -u ti-adapter-boost`. Each IRA's adapter is an instance of the template `ti-adapter@.service` (`ti-adapter@trad-ira`, client ID 12, configuration `/etc/trend-investing/adapters/trad-ira.json`, created once in dry-run with paper sending off), with the same rules: never started at boot, started by you after its engine and its warm-up except for that same bounded healer; skipped until the same installs and its configuration exist; the template refuses to run as `ti-adapter@boost` ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter").
 
 Updates: `unattended-upgrades` applies security updates only and never
 reboots by itself, because a reboot logs the Gateway out.
@@ -757,6 +758,53 @@ by hand is how you confirm the fix.
 
 ## The Gateway is logged out
 
+**Gateway healer.** When an adapter exits 3 and its own invocation journal
+ends with the exact “a Gateway restart is the remedy” diagnostic, the root
+oneshot `ti-gateway-heal@.service` applies these gates. Every decision and step
+has the stable journal prefix `gateway-heal:` and a `row=` label. Install the
+binary and hooks with `deploy/provision.sh services`; installation needs the
+owner's yes. It is not enabled as a boot job. The Mac mini's masked Gateway
+cannot qualify; its Gateway remains the owner's macOS app.
+
+| Case | Healer action / journal row |
+|---|---|
+| Exit 3 with the remedy, outside windows, logged in, no recent restart | `eligible`: reserve the restart, restart `ti-gateway.service` once, wait at most ten minutes for “Login has completed” in the new invocation, then start the failed adapter by unit name |
+| Restart in the last two hours | `rate-limit`: nothing; the existing operational page stands |
+| Inside the adapter schedule or 23:40–01:00 ET | `window`: wait for the union to end, then re-check once; a changed schedule can still refuse recovery |
+| Login counter nonempty, retries stopped, or reset-wait evidence | `login-problem`: nothing; leave login recovery to the existing handling |
+| Gateway shows LOGGED_OUT, is inactive, or lacks current login evidence | `logged-out`: nothing |
+| Any other adapter exit | `other-exit`: nothing |
+| Restarted but no login within ten minutes | `login-timeout`: stop; the existing failed-unit hook and reporter still page |
+| Same failed invocation, or a failure predating the last restart | `same-incident`: nothing, even after two hours |
+| Any relay active, or an unresolved hand-over | `order-busy`: nothing; read and settle the adapter's evidence through the existing procedure |
+
+The invariant is no login attempt that gateway-start would refuse, no action
+inside a scheduled window or the nightly reset hour, once per incident, and
+no restart between order hand-over and its journal record. The healer never
+clears `/var/lib/ti-gateway/login-failures`. It conservatively refuses **any
+nonempty counter file**, including retained reset allowances and old attempt
+lines; it does not reinterpret or erase gateway-start's accounting. Missing or
+malformed schedule, counter read errors, and unreadable journals fail closed.
+The schedule is `/etc/trend-investing/ibkr-maintenance.json`, as used by the
+installed adapters, plus the mandatory nightly hour even if removed from that
+file. Repeated DST boundaries use the shared schedule parser's later end.
+
+It takes every adapter's `pending.json.lock` for Boost and both IRAs and checks
+`pending.json.handover` under those locks. An active adapter on another account
+therefore blocks automatic recovery too. The locks remain held through login
+and are released before starting the failed adapter. An abandoned `handing-over`
+mark also refuses recovery; the healer never edits order records or restarts an
+engine. Units and their fixed pending paths must remain as provisioned.
+
+The reservation is `/var/lib/ti-gateway/heal/last-restart.json`, root-owned mode
+0600 in a root-owned 0700 directory. A shared lock serializes healer instances;
+the file and its directory are synced before the restart. A command failure or
+a crash consumes the allowance rather than risking a duplicate. Never delete
+this state to force a retry. A second adapter failing during a healer invocation
+may have its hook refused by the shared lock; the existing page stands. Only
+`systemctl restart ti-gateway.service` and `systemctl start <adapter unit>` are
+mutation commands; no PID or process group is signalled.
+
 IB Gateway can sit logged out of IBKR while its unit still shows `active`:
 the nightly restart at 11:45 PM logs in again, IBKR sometimes answers a login
 that worked minutes before with "Unrecognized Username or Password", and IBC
@@ -1222,7 +1270,7 @@ stop, not after two sessions of silence.
 | A page from Healthchecks (through Pushover) that your check `trend-investing-reporter` is down | The reporter has not finished a clean firing for 20 minutes (period 5 minutes plus 15 minutes' grace). Nothing on the server sent this page; it works even when the server is dead | Check the server is up and reachable over Tailscale (the dashboard, or `ssh`). If it is: `systemctl list-timers ti-reporter@boost.timer`, then `journalctl -u ti-reporter@boost -n 50` for the run's error. If the server is dead, start it from the Lightsail console, then read "After a reboot" |
 | The reporter's journal says "the heartbeat ping was not sent: ..." | The reporter's run is unaffected; it will ping again at the next firing. The reason is the kind of failure only (an address that is not an absolute URL, the service not reached or not answering in time, or the status it answered), never the address | If the pages from Healthchecks come anyway, check `TI_HEARTBEAT_URL` in `secrets.env` is the check's full ping address and that the server can reach the internet. A single line during a Healthchecks outage needs nothing |
 | No page from Healthchecks when you stop the timer (the test above) | The check is not wired: the address is missing or wrong, the period or grace is wrong, or the Pushover integration is not ticked on the check | Healthchecks' page for the check shows the last ping; fix the address, the 5-minute period, the 15-minute grace, or the integration |
-| A page from the server, titled with the unit's name and ending "failed", that a trading unit failed | The engine, the adapter or the reporter stopped and systemd does not restart them; or the data job failed, which its timer runs again at the next firing. See "A failed unit" below | Read the manual row the page names, then `journalctl -u <unit>` |
+| A page from the server, titled with the unit's name and ending "failed", that a trading unit failed | The engine, the adapter or the reporter stopped; only the adapter's exit-3 Gateway remedy may trigger the bounded healer. Otherwise systemd does not restart them; or the data job failed, which its timer runs again at the next firing. See "A failed unit" below | Read the manual row the page names, then `journalctl -u <unit>` |
 | `provision.sh firewall` printed "SKIPPED firewall: Tailscale is not signed in yet" | The firewall is not changed, so the public door is still open | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh firewall` again |
 | The disk fills | An engine that cannot write its log stops deciding and releases nothing more (ADR 0027); the data job writes nothing; the reporter cannot save its state | Free space, then resume or start as `docs/runbooks/durable-log.md` says |
 | The server's clock drifts behind IBKR's | The engine counts the account reading as stale and blocks every sell (`stale-broker-snapshot`); the sale back to 98% is withheld and you are alerted to that. The reporter's own clock check pages you first, within 10 minutes of the drift ("The server's clock failed its check") | Run the clock check ("The clock", above); fix the time syncing (or, on the Mac mini, the Mac's automatic date and time), then wait for the next close |

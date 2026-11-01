@@ -12,14 +12,14 @@
 #
 #   deploy/build-engine.sh            writes dist/ti-engine, dist/ti-gateway-start, dist/ti-reporter,
 #                                     dist/ti-dashboard, dist/operator,
-#                                     dist/journal-query and dist/universe-rank
+#                                     dist/journal-query, dist/ti-gateway-heal and dist/universe-rank
 #                                     for linux/amd64, and prints the platform
 #                                     and the stamp
 #   deploy/build-engine.sh --arch arm64
-#                                     the same seven for linux/arm64, from the
+#                                     the same eight for linux/arm64, from the
 #                                     same commit with the same stamp
 #   deploy/build-engine.sh ... --out DIR
-#                                     writes the seven into DIR instead of
+#                                     writes the eight into DIR instead of
 #                                     dist/, which is left as it was
 #
 # The architecture changes nothing but GOARCH: the default build is the one
@@ -34,8 +34,8 @@
 #
 # Install on the server (owner step, see docs/runbooks/lightsail-deployment.md):
 # with dist/ copied beside deploy/, `sudo deploy/provision.sh services`
-# refuses, installing nothing, if any of the seven is not built for the
-# server's architecture, and installs the other six; then
+# refuses, installing nothing, if any of the eight is not built for the
+# server's architecture, and installs the other seven; then
 #   sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine
 set -euo pipefail
 
@@ -69,9 +69,9 @@ out=$(cd "$out" && pwd)
 cd "$repo"
 GOOS=linux GOARCH=$goarch CGO_ENABLED=0 make --no-print-directory engine BUILD_STAMP="$stamp"
 mv bin/ti-engine "$out/ti-engine"
-for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query gateway-start:ti-gateway-start universe-rank:universe-rank; do
+for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query gateway-start:ti-gateway-start gateway-heal:ti-gateway-heal universe-rank:universe-rank; do
   GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
     -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$stamp" \
     -o "$out/${tool#*:}" "./cmd/${tool%%:*}"
 done
-printf 'build-engine: %s/ti-engine, ti-reporter, ti-dashboard, operator, journal-query, ti-gateway-start and universe-rank for linux/%s stamped %s\n' "$out" "$goarch" "$stamp"
+printf 'build-engine: %s/ti-engine, ti-reporter, ti-dashboard, operator, journal-query, ti-gateway-start, ti-gateway-heal and universe-rank for linux/%s stamped %s\n' "$out" "$goarch" "$stamp"

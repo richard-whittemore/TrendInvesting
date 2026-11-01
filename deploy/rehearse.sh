@@ -59,9 +59,13 @@ cp "$repo/cmd/engine/testdata/momentum-dry-run.json" "$dist/momentum-dry-run.jso
 (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
   -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=rehearsal" \
   -o "$dist/ti-engine" ./cmd/engine)
-for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query gateway-start:ti-gateway-start universe-rank:universe-rank; do
+for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query gateway-start:ti-gateway-start gateway-heal:ti-gateway-heal universe-rank:universe-rank; do
   (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build -o "$dist/${tool#*:}" "./cmd/${tool%%:*}")
 done
+# Compile-time clock injection only for the systemd healer drill. The normal
+# ti-gateway-heal binary above remains the one provisioning installs.
+(cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
+  -tags gateway_heal_rehearsal -o "$dist/ti-gateway-heal-rehearsal" ./cmd/gateway-heal)
 id=$(docker "${args[@]}" ubuntu:24.04 bash /deploy/rehearsal/inside.sh)
 sd=""
 trap 'docker rm -f "$id" ${sd:+"$sd"} >/dev/null 2>&1 || true; rm -rf "$dist"' EXIT

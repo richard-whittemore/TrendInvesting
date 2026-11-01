@@ -7,6 +7,7 @@ Wants=ti-gateway.service
 # manual row to read (ADR 0019, "Alerting"; docs/manual/server.md, "A failed
 # unit").
 OnFailure=ti-unit-failed@%n.service
+OnFailure=ti-gateway-heal@%n.service
 # Skipped, not failed, until ibapi is installed and recorded (provision.sh
 # twsapi), the adapter's code is installed (provision.sh adapter), and its
 # configuration exists (provision.sh services creates it from the example).
@@ -48,9 +49,9 @@ EnvironmentFile=/var/lib/trend-investing/engines/boost/run.env
 LoadCredential=account:/run/trend-investing/secrets/accounts/boost.env
 WorkingDirectory=/opt/trend-investing/adapter
 ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/boost.json --secrets %d/account --account-key IBKR_ACCOUNT_BOOST --pending /var/lib/trend-investing/adapters/boost/pending.json --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --socket /run/ti-engine-boost/engine.sock --streams /var/lib/trend-investing/data/streams/boost --cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
-# Never restarted by systemd: every stop is for a person to read (the reason
-# is in the journal: journalctl -u ti-adapter-boost), and every start is the
-# owner's. SIGTERM stops it cleanly.
+# Ordinary stops remain for the owner. Only the exit-3 Gateway remedy can
+# start this adapter through the bounded healer (docs/manual/server.md,
+# Gateway healer; ADR 0025). SIGTERM stops it cleanly.
 Restart=no
 TimeoutStopSec=60
 NoNewPrivileges=true

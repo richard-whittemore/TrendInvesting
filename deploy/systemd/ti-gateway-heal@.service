@@ -1,0 +1,26 @@
+[Unit]
+Description=Bounded Gateway link recovery for failed adapter %i
+# ADR 0025's scheduled-interruption remedy; docs/manual/server.md, Gateway
+# healer. The existing failed-unit hook remains the paging path.
+After=ti-gateway.service
+ConditionFileIsExecutable=/opt/trend-investing/bin/ti-gateway-heal
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/opt/trend-investing/bin/ti-gateway-heal -adapter %i
+# A weekend window can span days; the policy waits once and rechecks. Login
+# after restart has its own ten-minute bound (docs/manual/server.md).
+TimeoutStartSec=infinity
+Restart=no
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ti-gateway/heal
+# The adapters' hand-over records are read, never written (least privilege).
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
