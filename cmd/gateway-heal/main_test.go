@@ -19,7 +19,7 @@ func TestSystemctlAndJournalAreInvocationScoped(t *testing.T) {
 	var calls [][]string
 	run := func(name string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string{name}, args...))
-		return []byte("ActiveState=failed\nExecMainCode=1\nExecMainStatus=3\nInvocationID=abcdef\nExecMainExitTimestamp=Mon 2026-11-02 14:59:00 UTC\n"), nil
+		return []byte("ActiveState=failed\nExecMainCode=1\nExecMainStatus=3\nInvocationID=abcdef\nExecMainExitTimestamp=Mon 2026-11-02 14:59:00 UTC\nExecMainStartTimestamp=Mon 2026-11-02 14:58:00 UTC\n"), nil
 	}
 	s := systemd{run: run}
 	state, err := s.Status(gatewayheal.AdapterUnits[0])
@@ -342,6 +342,17 @@ func TestSystemdTimestampsPreserveFailureAfterLossWithinSecond(t *testing.T) {
 	got, err := s.Status(gatewayheal.AdapterUnits[0])
 	if err != nil || got.Finished.Nanosecond() != 654321000 || got.Started.Nanosecond() != 123456000 {
 		t.Fatal(got, err)
+	}
+}
+
+// A unit that has run reports when it started; a missing start time is
+// incomplete evidence, never time zero (server.md, Gateway healer).
+func TestSystemdStatusRefusesARunWithoutItsStartTime(t *testing.T) {
+	s := systemd{run: func(_ string, _ ...string) ([]byte, error) {
+		return []byte("ActiveState=active\nExecMainCode=0\nExecMainStatus=0\nInvocationID=abcdef\nExecMainExitTimestamp=\nExecMainStartTimestamp=\n"), nil
+	}}
+	if got, err := s.Status("ti-gateway.service"); err == nil {
+		t.Fatalf("a run without its start time was accepted: %+v", got)
 	}
 }
 
