@@ -200,3 +200,10 @@ func TestIBKRResetNoticeExplainsRefusal(t *testing.T) {
 		t.Fatal(a.Body)
 	}
 }
+
+func TestParseIBKRScheduleRefusesAWrongFieldType(t *testing.T) {
+	// Well-formed JSON with the right names but a wrong type is refused, not read as empty.
+	if _, err := ParseIBKRSchedule([]byte(`{"windows":[{"days":"Sat","start":"00:00","end":"24:00","zone":"UTC"}]}`)); err == nil {
+		t.Fatal("days given as a string was accepted")
+	}
+}
