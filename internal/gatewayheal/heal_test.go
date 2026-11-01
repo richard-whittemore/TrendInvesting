@@ -29,6 +29,7 @@ import (
 type rig struct {
 	onGlobalLock                                                              func() (func(), error)
 	globalLocked                                                              bool
+	onLog                                                                     func(string)
 	onRead                                                                    func()
 	onSave                                                                    func()
 	onStatus                                                                  func(string)
@@ -127,6 +128,9 @@ func (r *rig) Acquire() (func(), error) {
 }
 func (r *rig) Log(line string) error {
 	r.logs = append(r.logs, line)
+	if r.onLog != nil {
+		r.onLog(line)
+	}
 	return errors.Join(r.logErr, r.fault("log"))
 }
 func (r *rig) run() error { return Run(AdapterUnits[0], r, r, r, r, r, r, r.Log) }
@@ -360,7 +364,7 @@ func (r *rig) fault(boundary string) error {
 	return nil
 }
 func TestEveryEvidenceAndAuditFailureStopsRecovery(t *testing.T) {
-	for boundary, count := range map[string]int{"read": 4, "status": 5, "journal": 3, "log": 5, "load": 1, "save": 1, "act": 2} {
+	for boundary, count := range map[string]int{"status": 5, "journal": 3, "log": 5, "load": 1, "save": 1, "act": 2} {
 		for n := 1; n <= count; n++ {
 			t.Run(fmt.Sprintf("%s-%d", boundary, n), func(t *testing.T) {
 				r := fixture()
@@ -446,14 +450,14 @@ func TestChangingEvidenceAfterWaitOrRestartFailsClosed(t *testing.T) {
 }
 func TestTimeoutAlsoAppliesAfterFinalStatusRead(t *testing.T) {
 	r := fixture()
-	r.onLines = func(id string) {
-		if id == "new-login" {
+	r.onLog = func(line string) {
+		if line == "gateway-heal: row=eligible step=adapter-start" {
 			r.at = r.at.Add(9 * time.Minute)
-		}
-	}
-	r.onRead = func() {
-		if r.reads == 4 {
-			r.at = r.at.Add(time.Minute)
+			r.onStatus = func(unit string) {
+				if unit == AdapterUnits[0] {
+					r.at = r.at.Add(time.Minute)
+				}
+			}
 		}
 	}
 	assertRun(t, r, "login-timeout", "restart "+GatewayUnit)

@@ -142,21 +142,46 @@ func TestSystemctlReceivesTheSingleLoginDeadline(t *testing.T) {
 // (docs/manual/server.md, Gateway healer, unreadable evidence).
 func TestLateEvidenceFailuresPreserveTraceAndStopActions(t *testing.T) {
 	for _, tc := range []struct {
-		name, boundary string
-		n, steps       int
-		calls          []string
+		name, boundary, step string
+		steps                int
+		calls                []string
 	}{
-		{"incident-loss", "loss", 1, 0, nil},
-		{"restart-status", "status", 7, 2, []string{"restart " + GatewayUnit}},
-		{"login-status", "status", 8, 3, []string{"restart " + GatewayUnit}},
-		{"login-journal", "journal", 4, 3, []string{"restart " + GatewayUnit}},
-		{"login-counter", "read", 6, 3, []string{"restart " + GatewayUnit}},
-		{"adapter-remedy", "journal", 5, 4, []string{"restart " + GatewayUnit}},
-		{"adapter-recheck", "read", 7, 5, []string{"restart " + GatewayUnit}},
+		{"incident-loss", "loss", "", 0, nil},
+		{"restart-status", "status", "restart-action", 2, []string{"restart " + GatewayUnit}},
+		{"login-status", "status", "wait-login", 3, []string{"restart " + GatewayUnit}},
+		{"login-journal", "journal", "wait-login", 3, []string{"restart " + GatewayUnit}},
+		{"login-counter", "read", "wait-login", 3, []string{"restart " + GatewayUnit}},
+		{"adapter-remedy", "journal", "login-completed", 4, []string{"restart " + GatewayUnit}},
+		{"adapter-recheck", "read", "adapter-start", 5, []string{"restart " + GatewayUnit}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &safetyRig{rig: fixture()}
-			r.failAt = map[string]int{tc.boundary: tc.n}
+			arm := func() {
+				err := fmt.Errorf("synthetic boundary failure")
+				switch tc.boundary {
+				case "status":
+					r.statusErr = err
+				case "journal":
+					r.journalErr = err
+				case "read":
+					r.readErr = err
+				}
+			}
+			r.onLog = func(line string) {
+				if line == "gateway-heal: row=eligible step="+tc.step {
+					arm()
+				}
+			}
+			if tc.step == "restart-action" {
+				r.onAct = func(action, _ string) {
+					if action == "restart" {
+						arm()
+					}
+				}
+			}
+			if tc.boundary == "loss" {
+				r.failAt = map[string]int{"loss": 1}
+			}
 			err := Run(AdapterUnits[0], r, r, r, r, r, r, r.Log)
 			if err == nil || err.Error() != "synthetic boundary failure" {
 				t.Fatalf("error=%v, want injected evidence failure", err)
@@ -166,6 +191,27 @@ func TestLateEvidenceFailuresPreserveTraceAndStopActions(t *testing.T) {
 				rows = eligibleRows("reserve-restart", "restart", "wait-login", "login-completed", "adapter-start")[:tc.steps]
 			}
 			assertSafetyTrace(t, r.rig, rows, tc.calls)
+		})
+	}
+}
+
+func TestFreshReadAfterEachStatusFailureStopsRecovery(t *testing.T) {
+	for _, unit := range []string{GatewayUnit, AdapterUnits[0]} {
+		t.Run(unit, func(t *testing.T) {
+			r := fixture()
+			// Arm after relay exclusion so only the mutation's status recheck can
+			// make the subsequent counter/schedule read fail.
+			r.onAcquire = func() {
+				r.onStatus = func(current string) {
+					if current == unit {
+						r.readErr = fmt.Errorf("synthetic fresh-read failure")
+					}
+				}
+			}
+			if err := r.run(); err == nil || err.Error() != "synthetic fresh-read failure" {
+				t.Fatalf("error=%v, want fresh-read failure", err)
+			}
+			assertSafetyTrace(t, r, nil, nil)
 		})
 	}
 }
@@ -216,9 +262,9 @@ func TestRestartIdentityMustBeConfirmedAndRemainStable(t *testing.T) {
 func TestCounterReadAtDeadlineDoesNotWaitAgain(t *testing.T) {
 	r := fixture()
 	r.login = false
-	r.onRead = func() {
-		if r.reads == 6 {
-			r.at = r.at.Add(10 * time.Minute)
+	r.onLog = func(line string) {
+		if line == "gateway-heal: row=eligible step=wait-login" {
+			r.onRead = func() { r.at = r.at.Add(10 * time.Minute) }
 		}
 	}
 	if err := r.run(); err != nil {

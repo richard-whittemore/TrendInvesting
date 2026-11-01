@@ -287,13 +287,6 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	if !LoggedIn(lines) {
 		return "logged-out", nil
 	}
-	input, err := c.reader.Read()
-	if err != nil {
-		return "", err
-	}
-	if len(input.Counter) != 0 {
-		return "login-problem", nil
-	}
 	current, err := c.ctl.Status(GatewayUnit)
 	if err != nil {
 		return "", err
@@ -301,19 +294,31 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	if current != gateway {
 		return "logged-out", nil
 	}
-	// Status queries may block while a counter or schedule changes.
-	input, err = c.reader.Read()
+	// Status queries may block while the counter or schedule changes.
+	input, err := c.reader.Read()
 	if err != nil {
 		return "", err
 	}
-	// Check the owner's reset-failed veto after the other evidence reads,
-	// immediately before the clock gates and mutation (server.md, Gateway healer).
+	if len(input.Counter) != 0 {
+		return "login-problem", nil
+	}
+	// The owner's reset-failed veto (server.md, Gateway healer).
 	current, err = c.ctl.Status(unit)
 	if err != nil {
 		return "", err
 	}
 	if current.Active != "failed" || current != failed {
 		return "owner-stopped", nil
+	}
+	// Status queries may block while the login counter or the schedule
+	// changes, so both files are read again after every status query and
+	// checked here, immediately before the clock gates and the mutation.
+	input, err = c.reader.Read()
+	if err != nil {
+		return "", err
+	}
+	if len(input.Counter) != 0 {
+		return "login-problem", nil
 	}
 	// Status queries can cross a window too. Evaluate the clock last.
 	if !c.priorRestart.IsZero() && c.clock.Now().Sub(c.priorRestart) < 2*time.Hour {
@@ -328,9 +333,6 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	}
 	if !end.IsZero() {
 		return "window", nil
-	}
-	if len(input.Counter) != 0 {
-		return "login-problem", nil
 	}
 	return "", nil
 }

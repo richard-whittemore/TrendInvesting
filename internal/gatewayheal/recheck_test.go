@@ -2,6 +2,7 @@ package gatewayheal
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -188,11 +189,15 @@ func TestGatewayAlreadyRestartedRecoversOnlyOwnAdapter(t *testing.T) {
 }
 func TestGatewayResetFailedImmediatelyBeforeStartVetoes(t *testing.T) {
 	r := fixture()
-	r.onRead = func() {
-		if r.reads == 8 {
-			s := r.statuses[AdapterUnits[0]]
-			s.Active = "inactive"
-			r.statuses[AdapterUnits[0]] = s
+	r.onLog = func(line string) {
+		if line == "gateway-heal: row=eligible step=adapter-start" {
+			r.onStatus = func(unit string) {
+				if unit == AdapterUnits[0] {
+					s := r.statuses[unit]
+					s.Active = "inactive"
+					r.statuses[unit] = s
+				}
+			}
 		}
 	}
 	assertRun(t, r, "owner-stopped", "restart "+GatewayUnit)
@@ -343,5 +348,47 @@ func TestGatewayAlreadyRestartedDoesNotNeedRelayExclusion(t *testing.T) {
 	assertRun(t, r, "already-restarted", "start "+AdapterUnits[0])
 	if r.state != (State{}) {
 		t.Fatal("adapter start reserved a restart")
+	}
+}
+
+// The mutation gates follow server.md's fresh-evidence invariant: both status
+// queries precede a fresh counter/schedule read, with the owner veto last.
+func TestActionCheckEvidenceOrder(t *testing.T) {
+	r := fixture()
+	var steps []string
+	r.onLines = func(string) { steps = append(steps, "journal") }
+	r.onStatus = func(unit string) { steps = append(steps, "status "+unit) }
+	r.onRead = func() { steps = append(steps, "read") }
+	checks := actionChecks{clock: r, reader: r, journal: r, ctl: r}
+	row, err := checks.check(AdapterUnits[0], r.statuses[AdapterUnits[0]], r.statuses[GatewayUnit])
+	if err != nil || row != "" {
+		t.Fatalf("row=%q err=%v", row, err)
+	}
+	want := []string{"journal", "status " + GatewayUnit, "read", "status " + AdapterUnits[0], "read"}
+	if !reflect.DeepEqual(steps, want) {
+		t.Fatalf("evidence order=%v, want %v", steps, want)
+	}
+}
+
+func TestAdapterStatusCannotHideCounterOrScheduleChange(t *testing.T) {
+	for _, change := range []string{"counter", "schedule"} {
+		t.Run(change, func(t *testing.T) {
+			r := fixture()
+			r.onStatus = func(unit string) {
+				if unit == AdapterUnits[0] && !r.state.LastRestart.IsZero() {
+					if change == "counter" {
+						r.input.Counter = []byte("1\n")
+					} else {
+						r.input.Schedule = []byte(`{"windows":[{"days":["daily"],"start":"14:00","end":"16:00","zone":"UTC"}]}`)
+					}
+				}
+			}
+			row := "login-problem"
+			if change == "schedule" {
+				row = "window"
+			}
+			assertRun(t, r, row)
+			assertSafetyTrace(t, r, append(eligibleRows("reserve-restart", "restart"), "gateway-heal: row="+row+" step=before-restart"), nil)
+		})
 	}
 }
