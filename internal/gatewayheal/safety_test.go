@@ -195,16 +195,26 @@ func TestLateEvidenceFailuresPreserveTraceAndStopActions(t *testing.T) {
 	}
 }
 
-func TestFreshReadAfterEachStatusFailureStopsRecovery(t *testing.T) {
-	for _, unit := range []string{GatewayUnit, AdapterUnits[0]} {
-		t.Run(unit, func(t *testing.T) {
+func TestFreshReadAfterGatewayStatusOrJournalFailureStopsRecovery(t *testing.T) {
+	for _, evidence := range []string{"gateway-status", "journal"} {
+		t.Run(evidence, func(t *testing.T) {
 			r := fixture()
-			// Arm after relay exclusion so only the mutation's status recheck can
-			// make the subsequent counter/schedule read fail.
+			// Arm after relay exclusion: each fresh counter/schedule read must
+			// fail closed after its preceding evidence query (server.md,
+			// Gateway healer, "What the checks cannot close").
 			r.onAcquire = func() {
-				r.onStatus = func(current string) {
-					if current == unit {
-						r.readErr = fmt.Errorf("synthetic fresh-read failure")
+				failRead := func() { r.readErr = fmt.Errorf("synthetic fresh-read failure") }
+				if evidence == "gateway-status" {
+					r.onStatus = func(unit string) {
+						if unit == GatewayUnit {
+							failRead()
+						}
+					}
+				} else {
+					r.onLines = func(invocation string) {
+						if invocation == "old-login" {
+							failRead()
+						}
 					}
 				}
 			}

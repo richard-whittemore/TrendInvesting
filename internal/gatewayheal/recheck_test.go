@@ -351,8 +351,9 @@ func TestGatewayAlreadyRestartedDoesNotNeedRelayExclusion(t *testing.T) {
 	}
 }
 
-// The mutation gates follow server.md's fresh-evidence invariant: both status
-// queries precede a fresh counter/schedule read, then invocation login evidence.
+// The mutation gates follow docs/manual/server.md, "What the checks cannot
+// close": refresh inputs after Gateway status and journal, then read the owner's
+// veto last, before evaluating the clock gates and permitting mutation.
 func TestActionCheckEvidenceOrder(t *testing.T) {
 	r := fixture()
 	var steps []string
@@ -364,18 +365,24 @@ func TestActionCheckEvidenceOrder(t *testing.T) {
 	if err != nil || row != "" {
 		t.Fatalf("row=%q err=%v", row, err)
 	}
-	want := []string{"status " + GatewayUnit, "read", "status " + AdapterUnits[0], "read", "journal"}
+	want := []string{"status " + GatewayUnit, "read", "journal", "read", "status " + AdapterUnits[0]}
 	if !reflect.DeepEqual(steps, want) {
 		t.Fatalf("evidence order=%v, want %v", steps, want)
 	}
 }
 
-func TestAdapterStatusCannotHideCounterOrScheduleChange(t *testing.T) {
+func TestJournalReadCannotHideCounterOrScheduleChange(t *testing.T) {
 	for _, change := range []string{"counter", "schedule"} {
 		t.Run(change, func(t *testing.T) {
 			r := fixture()
-			r.onStatus = func(unit string) {
-				if unit == AdapterUnits[0] && !r.state.LastRestart.IsZero() {
+			r.onLog = func(line string) {
+				if line != "gateway-heal: row=eligible step=restart" {
+					return
+				}
+				r.onLines = func(invocation string) {
+					if invocation != "old-login" {
+						return
+					}
 					if change == "counter" {
 						r.input.Counter = []byte("1\n")
 					} else {
@@ -393,26 +400,110 @@ func TestAdapterStatusCannotHideCounterOrScheduleChange(t *testing.T) {
 	}
 }
 
-// A logout during the final status read withdraws permission for either
+// A logout during Gateway status or before its journal returns withdraws permission for either
 // mutation (docs/manual/server.md, Gateway healer; ADR 0019, Alerting).
-func TestFinalAdapterStatusLogoutPreventsMutation(t *testing.T) {
+func TestGatewayStatusOrJournalReadLogoutPreventsMutation(t *testing.T) {
+	for _, mutation := range []string{"restart", "start"} {
+		for _, evidence := range []string{"gateway-status", "journal"} {
+			t.Run(mutation+"/"+evidence, func(t *testing.T) {
+				r := fixture()
+				step := "gateway-heal: row=eligible step=restart"
+				rows := eligibleRows("reserve-restart", "restart")
+				refusal := "before-restart"
+				if mutation == "start" {
+					r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.loss.Add(time.Second)}
+					step = "gateway-heal: row=already-restarted step=adapter-start"
+					rows = []string{step}
+					refusal = "before-adapter-start"
+				}
+				gateway := r.statuses[GatewayUnit]
+				r.onLog = func(line string) {
+					if line != step {
+						return
+					}
+					logout := func() {
+						r.journals[gateway.Invocation] = append(r.journals[gateway.Invocation], "LOGGED_OUT")
+					}
+					if evidence == "gateway-status" {
+						r.onStatus = func(unit string) {
+							if unit == GatewayUnit {
+								logout()
+							}
+						}
+					} else {
+						r.onLines = func(invocation string) {
+							if invocation == gateway.Invocation {
+								logout()
+							}
+						}
+					}
+				}
+				assertRun(t, r, "logged-out")
+				assertSafetyTrace(t, r, append(rows, "gateway-heal: row=logged-out step="+refusal), nil)
+				if r.statuses[GatewayUnit] != gateway {
+					t.Fatal("logout changed systemd properties")
+				}
+			})
+		}
+	}
+}
+
+// The owner can reset-failed while the Gateway journal read blocks. Read the
+// veto afterwards because it has no other backstop (docs/manual/server.md,
+// "What the checks cannot close").
+func TestOwnerVetoDuringJournalReadIsHonoured(t *testing.T) {
 	for _, mutation := range []string{"restart", "start"} {
 		t.Run(mutation, func(t *testing.T) {
 			r := fixture()
+			step := "gateway-heal: row=eligible step=restart"
+			rows := eligibleRows("reserve-restart", "restart")
+			refusal := "before-restart"
 			if mutation == "start" {
 				r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.loss.Add(time.Second)}
+				step = "gateway-heal: row=already-restarted step=adapter-start"
+				rows = []string{step}
+				refusal = "before-adapter-start"
 			}
 			gateway := r.statuses[GatewayUnit]
-			r.onStatus = func(unit string) {
-				if unit == AdapterUnits[0] && (mutation == "start" && r.seen["status"] > 0 || mutation == "restart" && !r.state.LastRestart.IsZero()) {
-					r.journals[gateway.Invocation] = append(r.journals[gateway.Invocation], "LOGGED_OUT")
+			r.onLog = func(line string) {
+				if line != step {
+					return
+				}
+				r.onLines = func(invocation string) {
+					if invocation == gateway.Invocation {
+						s := r.statuses[AdapterUnits[0]]
+						s.Active = "inactive"
+						r.statuses[AdapterUnits[0]] = s
+					}
 				}
 			}
-			assertRun(t, r, "logged-out")
-			if r.statuses[GatewayUnit] != gateway {
-				t.Fatal("logout changed systemd properties")
-			}
+			assertRun(t, r, "owner-stopped")
+			assertSafetyTrace(t, r, append(rows, "gateway-heal: row=owner-stopped step="+refusal), nil)
 		})
+	}
+}
+
+// Accepted residual (docs/manual/server.md, "What the checks cannot close"):
+// a logout during the final adapter-status query misses the journal check.
+// The owner's veto is read last because it has no other backstop; gateway-start
+// still caps login attempts, and starting against a logged-out Gateway only fails.
+func TestLogoutDuringFinalAdapterStatusDoesNotPreventStart(t *testing.T) {
+	r := fixture()
+	r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.loss.Add(time.Second)}
+	r.onLog = func(line string) {
+		if line != "gateway-heal: row=already-restarted step=adapter-start" {
+			return
+		}
+		r.onStatus = func(unit string) {
+			if unit == AdapterUnits[0] {
+				r.journals["new-login"] = append(r.journals["new-login"], "LOGGED_OUT")
+			}
+		}
+	}
+	assertRun(t, r, "already-restarted", "start "+AdapterUnits[0])
+	assertSafetyTrace(t, r, []string{"gateway-heal: row=already-restarted step=adapter-start"}, []string{"start " + AdapterUnits[0]})
+	if LoggedIn(r.journals["new-login"]) {
+		t.Fatal("logout was not injected during the final adapter-status query")
 	}
 }
 

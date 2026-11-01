@@ -299,26 +299,8 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	if len(input.Counter) != 0 {
 		return "login-problem", nil
 	}
-	// The owner's reset-failed veto (server.md, Gateway healer).
-	current, err = c.ctl.Status(unit)
-	if err != nil {
-		return "", err
-	}
-	if current.Active != "failed" || current != failed {
-		return "owner-stopped", nil
-	}
-	// Status queries may block while the login counter or the schedule
-	// changes, so both files are read again after every status query and
-	// checked before the final login evidence and clock gates.
-	input, err = c.reader.Read()
-	if err != nil {
-		return "", err
-	}
-	if len(input.Counter) != 0 {
-		return "login-problem", nil
-	}
-	// Read invocation login evidence last: a logout during a blocking status
-	// query withdraws permission (ADR 0019, Alerting; server.md, Gateway healer).
+	// Login evidence for this invocation: a logout or refusal withdraws
+	// permission (ADR 0019, Alerting; server.md, Gateway healer).
 	lines, err := c.journal.Lines(GatewayUnit, gateway.Invocation)
 	if err != nil {
 		return "", err
@@ -328,6 +310,25 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	}
 	if !LoggedIn(lines) {
 		return "logged-out", nil
+	}
+	// The journal read may block while the counter or schedule changes.
+	input, err = c.reader.Read()
+	if err != nil {
+		return "", err
+	}
+	if len(input.Counter) != 0 {
+		return "login-problem", nil
+	}
+	// The owner's reset-failed veto is the LAST status query: it has no other
+	// backstop, while a login missed in the remaining window is still capped
+	// by the Gateway's start program (server.md, Gateway healer, "What the
+	// checks cannot close").
+	current, err = c.ctl.Status(unit)
+	if err != nil {
+		return "", err
+	}
+	if current.Active != "failed" || current != failed {
+		return "owner-stopped", nil
 	}
 	// Evidence queries can cross a window too. Evaluate the clock last.
 	if !c.priorRestart.IsZero() && c.clock.Now().Sub(c.priorRestart) < 2*time.Hour {

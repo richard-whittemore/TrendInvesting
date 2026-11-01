@@ -848,14 +848,20 @@ this veto. The healer requires the same failed invocation at every re-check,
 including after a weekend window wait and immediately before starting the adapter.
 `reset-failed` is the only supported account-specific veto.
 
-**What the checks cannot close.** The healer reads its evidence (the Gateway's
-status and login lines, the adapter's status, the login counter and the
-schedule) one after another, and acts after the last read. Whichever is read
-first can change while the rest are read, and nothing can be read in the
-instant between the last read and the restart. Login safety does not rest on
-this: the Gateway's own start program counts and caps login attempts whatever
-the healer does, and the healer restarts only a Gateway its own journal showed
-logged in during the same check.
+**What the checks cannot close.** Before each mutation, the healer reads the
+Gateway's status and confirms the unchanged invocation, reads the counter and
+schedule and checks the counter, reads that invocation's journal for login
+problems and logged-in evidence, then reads the counter and schedule again and
+checks the counter again. It reads the adapter's status last to honour the
+owner's `reset-failed` veto, then evaluates the rate limit, deadline and window
+using the last schedule read before acting. The owner's veto has no other
+backstop, so it takes priority over another login or counter read. Evidence can
+still change during the final adapter-status query or between that query and
+the mutation. A missed logout or counter change is accepted because
+`gateway-start`, the Gateway's own start program, counts and caps login attempts
+whatever the healer does; an adapter started against a logged-out Gateway only
+fails. The healer restarts only a Gateway its own journal showed logged in
+during the same check. These sequential checks cannot form an atomic snapshot.
 
 A second failure of the same adapter during a healer's wait is not recovered
 automatically. Starting the already-waiting healer does not queue another run;
