@@ -569,7 +569,7 @@ class AdapterTemplateTests(unittest.TestCase):
         # Re-pinned deliberately when the unit gained the Gateway healer's
         # OnFailure entry (docs/manual/server.md, "Gateway healer").
         pins = {"deploy/systemd/ti-adapter-boost.service":
-                "657681cc39bdc688289352bd9f2c5fce5a05a354d96759a339c8da785d2a541f",
+                "a4803f2eca84bd9061c4303e0a8b233e5ce8d16f0b775e4b284635b6dcac16c8",
                 "deploy/etc/adapters/boost.json.example":
                 "934f66330c46920a018ea6828dc6cbab16daca091c287ab6d74459e636ea3253"}
         for path, digest in pins.items():
