@@ -694,9 +694,13 @@ func (r BoostReplan) validate() []error {
 // a restart recovers it from the last decision of either outcome (ADR 0026,
 // point 5).
 type TargetsDecidedPayload struct {
-	QuantityScale int64  `json:"quantity_scale,omitempty"`
-	AccountID     string `json:"account_id"`
-	StrategyID    string `json:"strategy_id"`
+	// CashBuffer is the IRA reserve in dollars at the decision snapshot's
+	// net liquidation (ADR 0026, owner decision 2026-10-31). Historical
+	// absence reads as zero and encodes unchanged (ADR 0015).
+	CashBuffer    float64 `json:"cash_buffer,omitempty"`
+	QuantityScale int64   `json:"quantity_scale,omitempty"`
+	AccountID     string  `json:"account_id"`
+	StrategyID    string  `json:"strategy_id"`
 	// DecisionTime is when the decision was taken; SessionPeriodEnd is the
 	// session whose closes it used. A decision never precedes its session.
 	DecisionTime     time.Time `json:"decision_time"`
@@ -823,6 +827,9 @@ type MomentumName struct {
 // Validate checks the identity, the outcome and its reason, the targets and
 // the Boost figures.
 func (p TargetsDecidedPayload) Validate() error {
+	if !isFinite(p.CashBuffer) || p.CashBuffer < 0 || p.CashBuffer != 0 && (p.StrategyID != TargetWeightStrategyMomentum || p.Outcome != TargetsOutcomeDecided) {
+		return errors.New("cash buffer must be finite, nonnegative and only on a decided IRA")
+	}
 	// ADR 0026: minimum-lot substitutions belong only to D7-L; interpreting
 	// their whole-share holding evidence as fractional ticks changes its value.
 	if p.QuantityScale == FractionalQuantityScale && (p.Momentum.MinimumLot != (MinimumLotFigures{}) || p.WithheldReason == WithheldAllUnaffordable) {

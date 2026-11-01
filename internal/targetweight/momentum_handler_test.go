@@ -3,6 +3,9 @@ package targetweight_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -243,6 +246,12 @@ func TestMomentumJournalIsByteIdenticalAndReplays(t *testing.T) {
 		return buf.Bytes()
 	}
 	first := write(simulateMomentum(t, momentumOptions{}))
+	// ADR 0017: the synthetic journal recorded before the optional reserve
+	// must remain byte-identical, including its chain and absent fields.
+	const historical = "8fe717b2dbb51134fb7f89f3e594fcf572f54666f3b3545df32ffe93cc9b271f"
+	if got := fmt.Sprintf("%x", sha256.Sum256(first)); got != historical {
+		t.Fatalf("historical journal digest %s, want %s", got, historical)
+	}
 	if !bytes.Equal(first, write(simulateMomentum(t, momentumOptions{}))) {
 		t.Fatal("rerunning the same inputs must write a byte-identical journal")
 	}
@@ -414,5 +423,102 @@ func TestBuysAreBudgetedFromNoMoreCashThanALaterSnapshotExplains(t *testing.T) {
 		if got, want := buys[0].Figures.CashAvailable, base[0].Figures.CashAvailable-withdrawn; math.Abs(got-want) > 1e-6 {
 			t.Errorf("withdrawn %v as AAA filled: first buy checked against %v, want %v", withdrawn, got, want)
 		}
+	}
+}
+
+// ADR 0026, owner decision 2026-10-31: record the reserve at the decision;
+// holding it must never delay the sell phase. Prices and account are synthetic.
+func TestCashBufferDecisionAndSells(t *testing.T) {
+	run := func(fraction string) momentumResult {
+		return simulateMomentum(t, momentumOptions{held: map[string]int64{"AAA": 100000}, stopAfter: "2025-02-03", mutate: func(c *event.TargetWeightConfigurationPayload) {
+			if err := json.Unmarshal([]byte(`{"cash_buffer_fraction":`+fraction+`}`), &c.Execution); err != nil {
+				t.Fatal(err)
+			}
+		}})
+	}
+	baseline, buffered := run("0"), run("0.01")
+	sells := func(r momentumResult) []event.Envelope {
+		var out []event.Envelope
+		for _, e := range r.decisions {
+			if e.Type == event.OrderPlannedEventType || e.Type == event.OrderReleasedEventType {
+				var p struct {
+					Side string `json:"side"`
+				}
+				decode(t, e, &p)
+				if p.Side == event.OrderSideSell {
+					out = append(out, e)
+				}
+			}
+		}
+		return out
+	}
+	a, b := sells(baseline), sells(buffered)
+	if len(a) == 0 || len(a) != len(b) {
+		t.Fatalf("sell count %d/%d", len(a), len(b))
+	}
+	for i := range a {
+		if !a[i].EventTime.Equal(b[i].EventTime) || !bytes.Equal(a[i].Payload, b[i].Payload) {
+			t.Fatalf("buffer changed or delayed sell %d", i)
+		}
+	}
+	found := false
+	for _, e := range ofType(buffered.decisions, event.TargetsDecidedEventType) {
+		var p event.TargetsDecidedPayload
+		decode(t, e, &p)
+		if p.Outcome != event.TargetsOutcomeDecided {
+			continue
+		}
+		found = true
+		want := float64(0.01 * p.Momentum.MinimumLot.NetLiquidation)
+		if p.CashBuffer != want {
+			t.Errorf("recorded reserve %v, want %v", p.CashBuffer, want)
+		}
+		if p.CashBuffer <= 10000 {
+			t.Fatalf("reserve should exceed starting cash, with sells still released: %s", e.Payload)
+		}
+	}
+	if !found {
+		t.Fatal("fixture made no decision")
+	}
+}
+
+func TestCashBufferZeroAndHistoricalReplay(t *testing.T) {
+	old := simulateMomentum(t, momentumOptions{})
+	zero := simulateMomentum(t, momentumOptions{mutate: func(c *event.TargetWeightConfigurationPayload) {
+		if err := json.Unmarshal([]byte(`{"cash_buffer_fraction":0}`), &c.Execution); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	// The explicit rule is a new configuration identity (ADR 0016), while
+	// every decision payload, order and timing must be identical.
+	for i := range zero.decisions {
+		zero.decisions[i].ConfigurationHash = old.hash
+	}
+	if d := replay.Equivalent(old.decisions, zero.decisions); d != nil {
+		t.Fatalf("zero buffer changes historical plan: %+v", d)
+	}
+	for _, e := range old.decisions {
+		if bytes.Contains(e.Payload, []byte(`"cash_buffer"`)) {
+			t.Fatal("historical fixture unexpectedly carries buffer")
+		}
+	}
+	TestMomentumJournalIsByteIdenticalAndReplays(t)
+}
+
+// ADR 0026 confines the reserve to momentum: even a newly loaded Boost
+// configuration must reproduce its pre-reserve synthetic journal exactly.
+func TestCashBufferBoostJournalUnchanged(t *testing.T) {
+	r := simulate(t, options{mutate: func(c *event.TargetWeightConfigurationPayload) { c.DefaultCashBuffer() }})
+	header, err := r.recorder.Header(r.hash, strategyVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := journal.Write(&buf, header, r.entries); err != nil {
+		t.Fatal(err)
+	}
+	const historical = "1a843f057f3becb2d052ceac719910c00f47a4008b29a3c46660a76ef9c046ba"
+	if got := fmt.Sprintf("%x", sha256.Sum256(buf.Bytes())); got != historical {
+		t.Fatalf("Boost journal digest %s, want %s", got, historical)
 	}
 }

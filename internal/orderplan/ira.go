@@ -207,6 +207,18 @@ func BuyCost(o event.OrderPlannedPayload, maxFees float64) float64 {
 	return value
 }
 
+// CashBuffer is the IRA reserve withheld from the buy budget before ScaleBuys
+// (ADR 0026, owner decision 2026-10-31): fraction × net liquidation. Inputs
+// are a positive net liquidation and a finite fraction in [0, 0.05]; the
+// budget's own floor at zero is applied where the reserve is withheld.
+// Sells never consume it. The explicit conversion rounds the product before
+// any caller subtracts it, so no platform may fuse the two into one
+// operation (The Go Programming Language Specification, "Floating-point
+// operators"; determinism, docs/development.md).
+func CashBuffer(netLiquidation, fraction float64) float64 {
+	return float64(fraction * netLiquidation)
+}
+
 // ScaleBuys fits buys to budget (ADR 0026, point 2, "Scaling"): when their
 // worst-case total exceeds it, every buy's quantity is scaled by
 // budget / total and rounded down to its increment again; a buy with no increment is
@@ -273,15 +285,18 @@ func scaled(buys []event.OrderPlannedPayload, scale, maxFees float64) (kept []ev
 // Budget is the cash an IRA's buy phase may still commit (ADR 0026, point 2,
 // "Budget" and "Carried forward"): the starting cash under the D5 rule, plus
 // the sell proceeds that rule counts, minus cash a newer snapshot shows gone,
-// minus what each released buy commits.
+// minus the configured cash buffer and what each released buy commits.
+// A positive buffer floors the available buy budget at zero, while retaining
+// the full reserve shortfall against any later proceeds.
 // A working buy commits its worst-case cost, or what its fills have spent if
 // that is more; once it is terminal it commits only what it spent, so a
 // partial fill releases its unspent part only when the rest is cancelled.
 type Budget struct {
-	start    float64
-	proceeds float64
-	removed  float64
-	buys     []*committedBuy // in release order, so the sum is deterministic
+	start      float64
+	proceeds   float64
+	removed    float64
+	cashBuffer float64
+	buys       []*committedBuy // in release order, so the sum is deterministic
 }
 
 type committedBuy struct {
@@ -297,6 +312,9 @@ func NewBudget(cash float64) *Budget { return &Budget{start: cash} }
 // Remaining is the cash still uncommitted.
 func (b *Budget) Remaining() float64 {
 	remaining := b.start + b.proceeds - b.removed
+	if b.cashBuffer > 0 {
+		remaining -= b.cashBuffer
+	}
 	for _, c := range b.buys {
 		committed := c.spent
 		if !c.terminal {
@@ -304,8 +322,16 @@ func (b *Budget) Remaining() float64 {
 		}
 		remaining -= committed
 	}
+	if b.cashBuffer > 0 {
+		return max(0, remaining)
+	}
 	return remaining
 }
+
+// WithholdCashBuffer holds the validated reserve aside from available cash
+// without accumulating a second charge on reevaluation (ADR 0026, owner
+// decision 2026-10-31). It never changes sale proceeds or buy commitments.
+func (b *Budget) WithholdCashBuffer(amount float64) { b.cashBuffer = amount }
 
 // AddProceeds counts a sell's realised proceeds, net of its commission.
 func (b *Budget) AddProceeds(amount float64) { b.proceeds += amount }
