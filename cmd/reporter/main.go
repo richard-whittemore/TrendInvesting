@@ -389,7 +389,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// Operational unit incidents have their own durable escalation clock;
 	// the capital-safety standing must not bypass it (alerts-and-dashboard.md,
 	// "Paging invariant").
-	if near, err := report.SessionNear(at); err == nil && !near && (policy.after > 0 || !policy.schedule.WindowEnd(at).IsZero()) {
+	if near, err := report.SessionNear(at); err == nil && !near && (policy.session || policy.after > 0 || !policy.schedule.WindowEnd(at).IsZero()) {
 		stateAtStartUnits = nil
 	}
 	if !windowNow().IsZero() {
@@ -474,7 +474,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 		if sched, err := gatewayScheduleFrom(getenv); err != nil {
 			failures = append(failures, err)
-		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters), *systemctl), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, senders, setAside, now, policy); err != nil {
+		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, senders, setAside, now, policy); err != nil {
 			failures = append(failures, err)
 		}
 	}

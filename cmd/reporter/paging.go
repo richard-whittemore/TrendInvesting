@@ -119,9 +119,6 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 	if until.IsZero() && sent[key].After(now) {
 		sent[key] = now
 	}
-	if a.Kind == report.KindIBKRConnectivity && until.IsZero() {
-		a.Body += " If the Gateway remains logged in and connectivity is still lost after maintenance, outside weekday 05:30–09:30 ET, restart it by name: sudo systemctl restart ti-gateway."
-	}
 	quiet := !near && !until.IsZero()
 	if quiet {
 		sent[key] = until

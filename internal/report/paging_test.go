@@ -119,21 +119,9 @@ func TestIBKRScheduleSchemaAndDSTGap(t *testing.T) {
 }
 
 func TestPagingNoticeClassesAndRemedies(t *testing.T) {
-	for _, reset := range []bool{false, true} {
-		a := IBKRNotice("synthetic-host", time.Date(2026, 10, 31, 0, 40, 0, 0, time.UTC), reset, "synthetic evidence")
-		want := KindIBKRConnectivity
-		if reset {
-			want = KindGatewayResetWait
-		}
-		if a.Kind != want || a.Class(false) != Operational || !a.Repeat || a.Key != GatewayKey("synthetic-host") {
-			t.Fatalf("notice=%+v", a)
-		}
-		if reset && !strings.Contains(a.Title, "reset wait") {
-			t.Fatal(a.Title)
-		}
-		if !reset && (strings.Contains(a.Body, "sudo systemctl restart ti-gateway") || !strings.Contains(a.Title, "connectivity lost")) {
-			t.Fatal(a.Body)
-		}
+	a := GatewayResetWaitAlert("synthetic-host", time.Time{}, "synthetic evidence")
+	if a.Kind != KindGatewayResetWait || a.Class(false) != Operational || !a.Repeat || a.Key != GatewayKey("synthetic-host") || !strings.Contains(a.Title, "reset wait") {
+		t.Fatalf("notice=%+v", a)
 	}
 	for _, kind := range []Kind{KindGatewayLoggedOut, KindHistoryUnavailable, KindRestoredLogNewer} {
 		if (Alert{Kind: kind}).Class(false) != Operational {
@@ -195,7 +183,7 @@ func TestIBKRScheduleShippedExample(t *testing.T) {
 }
 
 func TestIBKRResetNoticeExplainsRefusal(t *testing.T) {
-	a := IBKRNotice("synthetic", time.Time{}, true, "synthetic evidence")
+	a := GatewayResetWaitAlert("synthetic", time.Time{}, "synthetic evidence")
 	if strings.Contains(a.Body, "not a password failure") || !strings.Contains(a.Body, "refusal after 01:00 ET pages") {
 		t.Fatal(a.Body)
 	}
@@ -205,12 +193,5 @@ func TestParseIBKRScheduleRefusesAWrongFieldType(t *testing.T) {
 	// Well-formed JSON with the right names but a wrong type is refused, not read as empty.
 	if _, err := ParseIBKRSchedule([]byte(`{"windows":[{"days":"Sat","start":"00:00","end":"24:00","zone":"UTC"}]}`)); err == nil {
 		t.Fatal("days given as a string was accepted")
-	}
-}
-
-func TestAdapterSampleFaultCarriesHostSource(t *testing.T) {
-	a := AdapterSampleFault("synthetic-host", "ti-adapter-synthetic.service", "synthetic sample failure", time.Time{})
-	if a.AccountID != "synthetic-host" || a.Class(true) != Operational || a.Class(false) != Operational {
-		t.Fatalf("sampling fault needs a host source and operational class: %+v", a)
 	}
 }

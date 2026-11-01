@@ -11,7 +11,7 @@ import (
 )
 
 func TestPagingRuleCommentsCiteADR(t *testing.T) {
-	for file, names := range map[string][]string{"internal/report/paging.go": {"IBKRNotice"}, "cmd/reporter/gatewayjournal.go": {"resetNightEnd", "adapterStart"}} {
+	for file, names := range map[string][]string{"internal/report/paging.go": {"GatewayResetWaitAlert"}, "cmd/reporter/gatewayjournal.go": {"resetNightEnd"}, "cmd/reporter/receipts.go": {"queueReceiptCancellations", "retryReceiptCancellations", "discardUnscopedCancellations"}} {
 		f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(repoRoot(t), file), nil, parser.ParseComments)
 		if err != nil {
 			t.Fatal(err)

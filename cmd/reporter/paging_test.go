@@ -60,12 +60,12 @@ func TestPagingMatrix(t *testing.T) {
 						} else {
 							journal := newStandInGateway(t)
 							journal.ibc(stamp(start.Add(-time.Hour), ibcCompleted))
-							journal.adapter(stamp(start.Add(-time.Minute), linkLost))
-							ev, err := gatewayJournalChecker(journal.path(), []string{"ti-adapter-boost.service"}, journal.dir+"/systemctl")(start)
-							if err != nil || !ev.connectivity {
+							journal.adapter(stamp(start.Add(-4*time.Hour), linkLost))
+							ev, err := gatewayJournalChecker(journal.path(), []string{"ti-adapter-boost.service"})(start)
+							if err != nil || !ev.out {
 								t.Fatalf("synthetic connectivity journal: %+v %v", ev, err)
 							}
-							a = report.IBKRNotice("synthetic", start, false, ev.said)
+							a = report.GatewayLoggedOutAlert("synthetic", start, start, ev.said)
 						}
 						n, p, g := &policyRecorder{channel: "ntfy"}, &policyRecorder{channel: "pushover"}, &policyRecorder{channel: issuesChannel}
 						senders := []sender{n, p, g}
@@ -149,8 +149,8 @@ func TestPagingGatewayJournalNotices(t *testing.T) {
 		{"reset_before_one", time.Date(2026, 10, 31, 0, 40, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 23, 50, 0, 0, newYork), "gateway-start: reset wait: login refused at 23:50 ET inside IBKR's nightly reset hour; waiting")}, nil, "reset wait", false},
 		{"reset_at_one", time.Date(2026, 10, 31, 1, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 23, 50, 0, 0, newYork), "gateway-start: reset wait: login refused at 23:50 ET inside IBKR's nightly reset hour; waiting")}, nil, "logged out", true},
 		{"later_start_overrides_reset", time.Date(2026, 10, 31, 0, 40, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 23, 50, 0, 0, newYork), "gateway-start: reset wait: login refused at 00:39 ET; waiting"), stamp(time.Date(2026, 10, 31, 0, 10, 0, 0, newYork), ibcStarting)}, nil, "logged out", true},
-		{"weekend_connectivity", time.Date(2026, 10, 31, 9, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 31, 3, 35, 0, 0, newYork), ibcCompleted)}, []string{stamp(time.Date(2026, 10, 31, 5, 44, 0, 0, newYork), linkLost)}, "connectivity lost", false},
-		{"session_connectivity", time.Date(2026, 10, 30, 8, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 3, 35, 0, 0, newYork), ibcCompleted)}, []string{stamp(time.Date(2026, 10, 30, 7, 59, 0, 0, newYork), linkLost)}, "connectivity lost", true},
+		{"weekend_connectivity", time.Date(2026, 10, 31, 9, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 31, 3, 35, 0, 0, newYork), ibcCompleted)}, []string{stamp(time.Date(2026, 10, 31, 5, 44, 0, 0, newYork), linkLost)}, "logged out", false},
+		{"session_connectivity", time.Date(2026, 10, 30, 8, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 3, 35, 0, 0, newYork), ibcCompleted)}, []string{stamp(time.Date(2026, 10, 30, 3, 59, 0, 0, newYork), linkLost)}, "logged out", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newStandInGateway(t)
@@ -175,7 +175,7 @@ func TestPagingGatewayJournalNotices(t *testing.T) {
 			}
 			step := func(at time.Time) {
 				t.Helper()
-				err := gatewayStep(path, gatewayJournalChecker(g.path(), []string{"ti-adapter-boost.service"}, g.dir+"/systemctl"), func() (gatewayUnitSample, error) { return gatewayUnitSample{active: true}, nil }, "synthetic-host", sched, func() time.Time { return time.Time{} }, "", nil, []sender{p, n, is}, nil, func() time.Time { return at }, policy)
+				err := gatewayStep(path, gatewayJournalChecker(g.path(), []string{"ti-adapter-boost.service"}), func() (gatewayUnitSample, error) { return gatewayUnitSample{active: true}, nil }, "synthetic-host", sched, func() time.Time { return time.Time{} }, "", nil, []sender{p, n, is}, nil, func() time.Time { return at }, policy)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -189,14 +189,6 @@ func TestPagingGatewayJournalNotices(t *testing.T) {
 			}
 			if tc.want != "logged out" && strings.Contains(n.alerts[0].Body, "check the paper login") {
 				t.Fatal("notice tells owner to check password")
-			}
-			if tc.want == "connectivity lost" {
-				g.adapter(append(tc.adapter, stamp(tc.at.Add(time.Minute), linkUp))...)
-				step(tc.at.Add(time.Minute))
-				h, err := loadHostGateway(path)
-				if err != nil || h.Since != nil {
-					t.Fatalf("restoration failed: %+v %v", h, err)
-				}
 			}
 		})
 	}
@@ -342,32 +334,6 @@ func TestPagingCapitalDeliverySurvivesStateWriteFailure(t *testing.T) {
 	}
 }
 
-func TestPagingRotatedConnectivityEvidenceKeepsNotice(t *testing.T) {
-	g := newStandInGateway(t)
-	start := time.Date(2026, 10, 31, 14, 0, 0, 0, newYork)
-	g.ibc(stamp(start.Add(-time.Hour), ibcCompleted))
-	g.adapter(stamp(start.Add(-time.Minute), linkLost))
-	p := &policyRecorder{channel: "pushover"}
-	n := &policyRecorder{channel: "ntfy"}
-	path := t.TempDir() + "/gateway.json"
-	sched, err := gatewayScheduleFrom(func(string) string { return "" })
-	if err != nil {
-		t.Fatal(err)
-	}
-	step := func(at time.Time) {
-		t.Helper()
-		if err := gatewayStep(path, gatewayJournalChecker(g.path(), []string{"ti-adapter-boost.service"}, g.dir+"/systemctl"), func() (gatewayUnitSample, error) { return gatewayUnitSample{active: true}, nil }, "synthetic", sched, func() time.Time { return time.Time{} }, "", nil, []sender{p, n}, nil, func() time.Time { return at }, &pagingPolicy{after: 30 * time.Minute}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	step(start)
-	g.adapter()
-	step(start.Add(30 * time.Minute))
-	if len(p.alerts) != 1 || !strings.Contains(p.alerts[0].Title, "connectivity lost") {
-		t.Fatalf("escalation changed to password page: %+v", p.alerts)
-	}
-}
-
 func TestPagingStateAtStartCannotBypassOperationalDelay(t *testing.T) {
 	withBaseline(t)
 	systemd := newStandInSystemd(t)
@@ -457,7 +423,10 @@ func TestPagingMissedFiringsStillCountFromWindowEnd(t *testing.T) {
 			g := &policyRecorder{channel: issuesChannel}
 			seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
 			policy := &pagingPolicy{after: 30 * time.Minute, schedule: schedule}
-			a := report.IBKRNotice("synthetic", time.Time{}, reset, "synthetic maintenance")
+			a := report.GatewayLoggedOutAlert("synthetic", time.Time{}, time.Time{}, "synthetic maintenance")
+			if reset {
+				a = report.GatewayResetWaitAlert("synthetic", time.Time{}, "synthetic maintenance")
+			}
 			start := time.Date(2026, 10, 30, 23, 50, 0, 0, newYork)
 			if reset {
 				start = time.Date(2026, 10, 31, 0, 40, 0, 0, newYork)
@@ -470,7 +439,7 @@ func TestPagingMissedFiringsStillCountFromWindowEnd(t *testing.T) {
 			}
 			send(start)
 			// No reporter invocation during the rest of the scheduled window.
-			a = report.IBKRNotice("synthetic", time.Time{}, false, "still unavailable")
+			a = report.GatewayLoggedOutAlert("synthetic", time.Time{}, time.Time{}, "still unavailable")
 			send(time.Date(2026, 10, 31, 12, 29, 0, 0, newYork))
 			if len(p.alerts) != 0 {
 				t.Fatal("missed firings shortened window-end delay")
@@ -496,7 +465,7 @@ func TestPagingSupersededResetWaitStopsQuieting(t *testing.T) {
 	}
 	step := func(at time.Time) {
 		t.Helper()
-		if err := gatewayStep(path, gatewayJournalChecker(g.path(), nil, g.dir+"/systemctl"), func() (gatewayUnitSample, error) { return gatewayUnitSample{active: true}, nil }, "synthetic", sched, func() time.Time { return time.Time{} }, "", nil, []sender{p, n}, nil, func() time.Time { return at }, &pagingPolicy{}); err != nil {
+		if err := gatewayStep(path, gatewayJournalChecker(g.path(), nil), func() (gatewayUnitSample, error) { return gatewayUnitSample{active: true}, nil }, "synthetic", sched, func() time.Time { return time.Time{} }, "", nil, []sender{p, n}, nil, func() time.Time { return at }, &pagingPolicy{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -505,5 +474,35 @@ func TestPagingSupersededResetWaitStopsQuieting(t *testing.T) {
 	step(start.Add(10 * time.Minute))
 	if len(p.alerts) != 1 || !strings.Contains(p.alerts[0].Title, "logged out") {
 		t.Fatal("a superseded reset wait still quieted the genuine logout")
+	}
+}
+
+func TestPagingSessionStartupEveningUnitFailure(t *testing.T) {
+	withBaseline(t)
+	systemd := newStandInSystemd(t)
+	unit := "ti-adapter@sample.service"
+	systemd.fail(unit)
+	dir := t.TempDir()
+	path := writeRun(t, dir, haltedEntries(t)[:3])
+	at := time.Date(2026, 11, 2, 18, 0, 0, 0, newYork)
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+	r := &relay{sent: map[string][]string{}}
+	get := func(key string) string {
+		if key == "TI_ESCALATE_AFTER" {
+			return "session"
+		}
+		return twoChannels()(key)
+	}
+	args := []string{"-journal", path, "-state", dir + "/state.json", "-channel", "ntfy,pagerduty", "-units", unit, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+	if err := run(args, get, func() time.Time { return at }, io.Discard, &http.Client{Transport: r}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.to(pdHost); len(got) != 0 {
+		t.Fatalf("operational delay bypassed by standing: %v", got)
+	}
+	if got := r.to(ntfyHost); len(got) != 1 {
+		t.Fatalf("want one unit notice, got %v", got)
 	}
 }

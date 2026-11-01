@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
 	"syscall"
 	"time"
 
@@ -124,9 +123,7 @@ func (s gatewaySchedule) graceFrom(since, now time.Time) time.Time {
 // page and since when it has been seen logged out.
 type hostGateway struct {
 	delivered
-	Since  *time.Time             `json:"logged_out_since,omitempty"`
-	Notice report.Kind            `json:"notice_kind,omitempty"`
-	Links  map[string]adapterLoss `json:"adapter_losses,omitempty"`
+	Since *time.Time `json:"logged_out_since,omitempty"`
 	// Resolving is set when the Gateway has recovered but a channel has not yet
 	// taken the resolution: the next firing retries it and does not read the
 	// receipts that remain as an outage still open.
@@ -143,55 +140,6 @@ type hostGateway struct {
 	// a record only, that the outage was seen and not paged inside it
 	// (maintenance.go).
 	Held *time.Time `json:"held_in_maintenance_until,omitempty"`
-}
-
-// adapterLoss owns a connectivity incident's first observation and process
-// generation (ADR 0019, "Alerting"). Other units cannot supply its recovery.
-type adapterLoss struct {
-	Since   time.Time `json:"since"`
-	Started time.Time `json:"started"`
-}
-
-// updateAdapterLosses applies each unit's evidence only to its own loss (ADR
-// 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Silence never
-// resolves a loss; stopping or replacing its process invalidates its evidence.
-func (h *hostGateway) updateAdapterLosses(ev *gatewayEvidence, now time.Time) bool {
-	if ev.adapters == nil {
-		return false
-	}
-	if h.Links == nil {
-		h.Links = map[string]adapterLoss{}
-	}
-	// Previous-build state has no kind or ownership. A completed IBC login
-	// identifies an adapter-sourced outage, except one opened by the restart rule.
-	if h.Since != nil && len(h.Links) == 0 && ev.loggedIn && !h.RestartOnly && (h.Notice == "" || h.Notice == report.KindIBKRConnectivity) {
-		h.Notice = report.KindIBKRConnectivity
-		// Unknown ownership includes every configured candidate: a surviving
-		// unrelated loss must not exclude a unit whose journal rotated away.
-		for unit := range ev.adapters {
-			h.Links[unit] = adapterLoss{Since: *h.Since}
-		}
-	}
-	hadLoss := len(h.Links) > 0
-	for unit, evidence := range ev.adapters {
-		loss, exists := h.Links[unit]
-		if exists {
-			obsolete := evidence.sampleErr == nil && (!evidence.active || evidence.started.After(loss.Since) || !loss.Started.IsZero() && evidence.started.After(loss.Started))
-			if obsolete || !evidence.restored.Before(loss.Since) || !ev.recoveredAt.Before(loss.Since) {
-				delete(h.Links, unit)
-			}
-		}
-		if !evidence.lost.IsZero() {
-			if _, exists := h.Links[unit]; !exists {
-				h.Links[unit] = adapterLoss{Since: now, Started: evidence.started}
-			}
-		}
-	}
-	if len(h.Links) > 0 {
-		ev.out = true
-		ev.connectivity = ev.loggedIn || ev.silent && h.Notice == report.KindIBKRConnectivity
-	}
-	return hadLoss && len(h.Links) == 0
 }
 
 func loadHostGateway(path string) (hostGateway, error) {
@@ -280,7 +228,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Notice: h.Notice, Links: h.Links, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
 		if err != nil {
 			return err
 		}
@@ -304,8 +252,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		}
 	}
 	// An open outage is closed only by a completed login or a restored link
-	// NEWER than its start, or by invalidating the owning adapter's process
-	// evidence. Another adapter's events cannot recover its loss. Silence in the journals, or events older than the
+	// NEWER than its start. Silence in the journals, or events older than the
 	// outage that remain once the evidence of it has rotated away, prove
 	// nothing; none is opened from them either.
 	// A pending resolution of an earlier incident is not an open outage, but a
@@ -314,56 +261,14 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	open := h.Since != nil || (deliveredAnywhere(seen, key) && !h.Resolving)
 	// An equal time counts as newer: the journal's times are to the
 	// microsecond, and a login in the same instant as the firing is a login.
-	obsoleteLink := h.updateAdapterLosses(&ev, now)
-	out = out || ev.out
-	if !out && open && !obsoleteLink && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
+	if !out && open && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
 		out = true
-		ev.connectivity = h.Notice == report.KindIBKRConnectivity
-		said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as unavailable. " + said
+		said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as logged out. " + said
 		if h.Since == nil {
 			t := now
 			h.Since = &t
 		}
 	}
-	// Sampling faults have their own operational incident; they never prevent
-	// the Gateway incident from routing (ADR 0019, "Alerting").
-	units := make([]string, 0, len(ev.adapters))
-	for unit := range ev.adapters {
-		units = append(units, unit)
-	}
-	slices.Sort(units)
-	for _, unit := range units {
-		evidence := ev.adapters[unit]
-		a := report.AdapterSampleFault(host, unit, "", now)
-		if evidence.sampleErr != nil {
-			if seen[channelKey("resolving", a.Key)] {
-				// A recurring fault starts fresh while old receipts keep their own
-				// pending cancellations (alerts-and-dashboard.md, "Paging invariant").
-				forgetAlert(a.Key, nil, seen, sent, repeats)
-			}
-			a.Body += evidence.sampleErr.Error()
-			retErr = errors.Join(retErr, evidence.sampleErr, deliver(senders, a, seen, sent, repeats, now, gatewayRemindEvery, record, policies...))
-		} else {
-			if deliveredAnywhere(seen, a.Key) {
-				failed, resolveErr := resolveAll(senders, a.Key, seen, now)
-				keep := map[string]bool{}
-				for _, f := range setAside {
-					keep[f.channel] = f.channel == "pagerduty"
-				}
-				for _, ch := range failed {
-					keep[ch] = true
-				}
-				forgetAlert(a.Key, keep, seen, sent, repeats)
-				retErr = errors.Join(retErr, resolveErr)
-				if deliveredAnywhere(seen, a.Key) {
-					seen[channelKey("resolving", a.Key)] = true
-				}
-			}
-			delete(sent, channelKey("observed", a.Key))
-			delete(sent, channelKey("escalation", a.Key))
-		}
-	}
-
 	if !out {
 		// A Gateway that logged in again while a window held its outage is
 		// handled at the window's close, not before. The bookkeeping of that
@@ -373,7 +278,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 			retErr = errors.Join(retErr, closeGatewayHold(unitState, host, true, now, note))
 			h.Held = nil
 		}
-		h.Since, h.RestartOnly, h.Notice, h.Links = nil, false, "", nil
+		h.Since, h.RestartOnly = nil, false
 		delete(sent, channelKey("escalation", key))
 		delete(sent, channelKey("observed", key))
 		if !deliveredAnywhere(seen, key) {
@@ -391,15 +296,6 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		forgetAlert(key, keep, seen, sent, repeats)
 		h.Resolving = deliveredAnywhere(seen, key)
 		return errors.Join(retErr, resolveErr, record())
-	}
-	if ev.out {
-		h.Notice = ""
-		if ev.connectivity {
-			h.Notice = report.KindIBKRConnectivity
-		}
-		if ev.resetWait {
-			h.Notice = report.KindGatewayResetWait
-		}
 	}
 	if h.Since == nil {
 		t := now
@@ -430,8 +326,8 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	// Past a window an outage not yet ten minutes old keeps its hold: if it
 	// logs in before it pages, the window's hold is handled and said then.
 	a := report.GatewayLoggedOutAlert(host, *h.Since, now, said)
-	if ev.resetWait || ev.connectivity {
-		a = report.IBKRNotice(host, now, ev.resetWait, said)
+	if ev.resetWait {
+		a = report.GatewayResetWaitAlert(host, now, said)
 	}
 	if !ev.resetWait && (sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter) {
 		if p := policyOf(policies); p != nil {

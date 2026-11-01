@@ -75,7 +75,6 @@ d='` + g.dir + `'
 if [ -e "$d/systemctl-fail" ]; then echo "Failed to connect to bus" >&2; exit 1; fi
 echo "$@" >>"$d/systemctl-argv"
 if [ -e "$d/systemctl-raw" ]; then cat "$d/systemctl-raw"; exit 0; fi
-echo "ExecMainStartTimestamp=@946684800"
 echo "NRestarts=$(cat "$d/nrestarts" 2>/dev/null || echo 0)"
 echo "ActiveState=$(cat "$d/activestate" 2>/dev/null || echo active)"
 echo "SubState=$(cat "$d/substate" 2>/dev/null || echo running)"
@@ -141,7 +140,7 @@ func gatewayPages(r *relay) int {
 	n := 0
 	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
 		for _, m := range r.to(host) {
-			if (strings.Contains(m, "IB Gateway is logged out") || strings.Contains(m, "IBKR connectivity lost")) && !strings.Contains(m, `"event_action":"resolve"`) {
+			if strings.Contains(m, "IB Gateway is logged out") && !strings.Contains(m, `"event_action":"resolve"`) {
 				n++
 			}
 		}
@@ -334,15 +333,15 @@ func TestAdapterEvidenceIsExaminedWhenIBCsJournalHasNoLoginEvent(t *testing.T) {
 	}
 }
 
-// Any current loss is an operational incident; a newer restoration closes it
-// (alerts-and-dashboard.md, Paging invariant).
-func TestAdapterLossPagesDuringSessionUntilRestored(t *testing.T) {
+// The link must have been lost without a connection since, for 3 hours: lost
+// at 06:00, restored at 08:00 and lost again at 09:55 is a 5-minute loss.
+func TestAdapterLossCountsOnlyAsOneContinuousLossOfThreeHours(t *testing.T) {
 	cases := map[string]struct {
 		lines []string
 		want  int
 	}{
-		"lost, restored, lost again": {[]string{stamp(tuesday(6, 0), linkLost), stamp(tuesday(8, 0), linkUp), stamp(tuesday(9, 55), linkLost)}, 2},
-		"lost for under 3h":          {[]string{stamp(tuesday(8, 31), linkLost)}, 2},
+		"lost, restored, lost again": {[]string{stamp(tuesday(6, 0), linkLost), stamp(tuesday(8, 0), linkUp), stamp(tuesday(9, 55), linkLost)}, 0},
+		"lost for under 3h":          {[]string{stamp(tuesday(8, 31), linkLost)}, 0},
 		"lost 3h and still lost":     {[]string{stamp(tuesday(6, 0), linkLost), stamp(tuesday(7, 0), linkLost)}, 2},
 		"restored since":             {[]string{stamp(tuesday(5, 0), linkLost), stamp(tuesday(9, 59), linkUp)}, 0},
 	}
@@ -581,7 +580,7 @@ func TestTheLossIsTimedFromTheFirstLossAfterTheNewestRestorationNotTheNewestLoss
 	}
 }
 
-func TestAReconciliationEndsALossButANewerLossPages(t *testing.T) {
+func TestAReconciliationEndsALoss(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
 	g.adapter(stamp(tuesday(6, 0), linkLost), stamp(tuesday(8, 0), linkReconciled), stamp(tuesday(10, 55), linkLost))
@@ -591,8 +590,8 @@ func TestAReconciliationEndsALossButANewerLossPages(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if gatewayPages(r) != 2 {
-		t.Fatalf("paged %d times for a new loss at 10:55; want one per channel", gatewayPages(r))
+	if gatewayPages(r) != 0 {
+		t.Fatalf("paged %d times for a loss that began at 10:55", gatewayPages(r))
 	}
 }
 
@@ -787,7 +786,7 @@ func TestANewOutageWhileAResolveIsPendingPagesEveryChannelAtOnce(t *testing.T) {
 	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
 		n := 0
 		for _, m := range f.to(host) {
-			if (strings.Contains(m, "IB Gateway is logged out") || strings.Contains(m, "IBKR connectivity lost")) && !strings.Contains(m, `"event_action":"resolve"`) {
+			if strings.Contains(m, "IB Gateway is logged out") && !strings.Contains(m, `"event_action":"resolve"`) {
 				n++
 			}
 		}
@@ -1102,10 +1101,10 @@ func TestAnOldUnitFilesMarkerFlagIsAcceptedAndIgnored(t *testing.T) {
 	}
 }
 
-func resolvesOf(r *relay, keys ...string) int {
+func resolvesOf(r *relay) int {
 	n := 0
 	for _, m := range r.to("events.pagerduty.test") {
-		if strings.Contains(m, `"event_action":"resolve"`) && (len(keys) == 0 || strings.Contains(m, `"dedup_key":`+fmt.Sprintf("%q", keys[0]))) {
+		if strings.Contains(m, `"event_action":"resolve"`) {
 			n++
 		}
 	}
@@ -1181,12 +1180,12 @@ func TestAFailedSampleBreaksTheQuietStreakAndKeepsTheOutageOpen(t *testing.T) {
 	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 25))
 	_ = os.Remove(filepath.Join(g.dir, "systemctl-fail"))
 	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 30)) // quiet 1 again, not 2
-	if resolvesOf(r, "gateway-logged-out:"+hostName()) != 0 {
+	if resolvesOf(r) != 0 {
 		t.Fatal("a failed sample did not break the streak, or let a journal login close the loop")
 	}
 	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 35)) // quiet 2
-	if resolvesOf(r, "gateway-logged-out:"+hostName()) != 1 {
-		t.Fatalf("%d resolves after two good quiet firings, want 1", resolvesOf(r, "gateway-logged-out:"+hostName()))
+	if resolvesOf(r) != 1 {
+		t.Fatalf("%d resolves after two good quiet firings, want 1", resolvesOf(r))
 	}
 }
 

@@ -27,28 +27,28 @@ const (
 	gatewayUnit = "ti-gateway.service"
 	// gatewayJournalSince bounds how far back the journals are read.
 	gatewayJournalSince = "-14d"
+	// gatewayLinkLossAfter is how long an adapter's link to IBKR must have been
+	// lost, without one connection since, to count as the Gateway being logged
+	// out on its own evidence: IBKR's scheduled server resets and weekend
+	// maintenance drop the link for shorter spells while the Gateway is logged
+	// in, and a login failure shows in IBC's journal at once. A session dropped
+	// silently on IBKR's side with no IBC event therefore pages only after
+	// about this time plus gatewayPagesAfter.
+	gatewayLinkLossAfter = 3 * time.Hour
 )
 
 // gatewayEvidence is what the journals show: logged out (out), or that they
 // hold no login event at all (silent), or neither (logged in).
 type gatewayEvidence struct {
-	out, silent             bool
-	loggedIn                bool
-	adapters                map[string]adapterEvidence
-	resetWait, connectivity bool
-	said                    string
-	// recoveredAt is IBC's completed login when it is its newest login event.
-	// Adapter restorations stay with their unit in adapters. Recovery must be
-	// newer than the owning loss, never an older event left after rotation.
+	out, silent bool
+	resetWait   bool
+	said        string
+	// recoveredAt is the time of the newest positive event the journals show:
+	// IBC's completed login when it is IBC's newest login event, or the
+	// adapter's restored link or reconciliation. An open outage is closed only
+	// by one newer than the outage's start, never by older events that remain
+	// once the evidence of the outage has rotated away.
 	recoveredAt time.Time
-}
-
-// adapterEvidence keeps link and process observations together by unit (ADR 0019,
-// "Alerting"). A failed sample cannot invalidate that unit's journal evidence.
-type adapterEvidence struct {
-	active                  bool
-	started, lost, restored time.Time
-	sampleErr               error
 }
 
 // gatewayChecker reads the evidence as of now.
@@ -60,7 +60,8 @@ var (
 	// cmd/gateway-start logs "starting IBC" at every start and "cannot start
 	// IBC" when it cannot, so a restart of the unit resets the login state
 	// until a new "Login has completed"; IBC's own login screen after its
-	// restart is "LoginState is LOGGED_OUT".
+	// restart is "LoginState is LOGGED_OUT". Read every gateway-start line so
+	// only its latest state can establish a reset wait (ADR 0019, "Alerting").
 	ibcEvent = regexp.MustCompile(`Unrecognized Username or Password|LoginState is LOGGED_OUT|Login has completed|login retries stopped|gateway-start:`)
 	// The adapter's link lines (adapter/ibkr/connection.py _report and
 	// loop.py): connectivity-lost is code 1100/2110; "connected reason=restored"
@@ -68,10 +69,9 @@ var (
 	// account after a connect, which needs IBKR. A plain "connected" (the API
 	// handshake, logged at every reconnect, including every restore_timeout while
 	// Gateway has no IBKR) proves nothing about IBKR and is not matched.
-	linkEvent      = regexp.MustCompile(`ibkr link state=connectivity-lost|ibkr link state=connected reason=restored|ibkr reconciled client_id=`)
-	lostAccess     = regexp.MustCompile(`(?i)not seeing messages from other users|insufficient permissions|no journal files were opened`)
-	unixStartStamp = regexp.MustCompile(`^@\d+(\.\d+)?$`)
-	shortISO       = "2006-01-02T15:04:05-0700" // fractional seconds are accepted when parsing
+	linkEvent  = regexp.MustCompile(`ibkr link state=connectivity-lost|ibkr link state=connected reason=restored|ibkr reconciled client_id=`)
+	lostAccess = regexp.MustCompile(`(?i)not seeing messages from other users|insufficient permissions|no journal files were opened`)
+	shortISO   = "2006-01-02T15:04:05-0700" // fractional seconds are accepted when parsing
 )
 
 // journalQuery returns the lines of a unit's journal that match the pattern,
@@ -127,7 +127,7 @@ func lineTime(l string) (time.Time, error) {
 }
 
 // gatewayJournalChecker reads IBC's journal and each adapter's.
-func gatewayJournalChecker(journalctl string, adapters []string, systemctl string) gatewayChecker {
+func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker {
 	return func(now time.Time) (gatewayEvidence, error) {
 		ibc, err := journalQuery(journalctl, gatewayUnit, ibcEvent)
 		if err != nil {
@@ -165,60 +165,29 @@ func gatewayJournalChecker(journalctl string, adapters []string, systemctl strin
 				reasons = append(reasons, "IBC's newest login event: "+ibc[n-1])
 			}
 		}
-		loggedOut := len(reasons) > 0
-		loggedIn := len(ibc) > 0 && !loggedOut
-		connectivity := false
-		adaptersSeen := map[string]adapterEvidence{}
 		for _, unit := range adapters {
-			// Sampling incidents have their own lifecycle regardless of IBC login
-			// state (alerts-and-dashboard.md, "Paging invariant"; ADR 0019).
-			active, started, err := adapterStart(systemctl, unit)
-			evidence := adapterEvidence{active: active, started: started, sampleErr: err}
-			if loggedOut {
-				// IBC's logout needs no link corroboration (server.md, "The Gateway
-				// is logged out"), but its adapters still own their sampling incidents.
-				adaptersSeen[unit] = evidence
-				continue
-			}
 			lines, err := journalQuery(journalctl, unit, linkEvent)
 			if err != nil {
 				return gatewayEvidence{}, err
 			}
-			if _, _, _, err := lostSince(lines); err != nil {
-				return gatewayEvidence{}, fmt.Errorf("reporter: %s link events: %w", unit, err)
-			}
-			if evidence.sampleErr == nil && !active {
-				adaptersSeen[unit] = evidence
-				continue
-			}
-			var current []string
-			for _, line := range lines {
-				at, err := lineTime(line)
-				if err != nil {
-					return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read %s's link time: %w", unit, err)
-				}
-				if evidence.sampleErr != nil || at.After(started) {
-					current = append(current, line)
-				}
-			}
-			since, line, restored, err := lostSince(current)
+			since, line, restored, err := lostSince(lines)
 			if err != nil {
 				return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read %s's link events: %w", unit, err)
 			}
-			evidence.lost, evidence.restored = since, restored
-			adaptersSeen[unit] = evidence
-			if !since.IsZero() {
-				connectivity = loggedIn
-				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) with no restoration since, for over %s: %s", unit, now.Sub(since), line))
+			if restored.After(recovered) {
+				recovered = restored
+			}
+			if !since.IsZero() && now.Sub(since) >= gatewayLinkLossAfter {
+				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) with no restoration since, for over %s: %s", unit, gatewayLinkLossAfter, line))
 			}
 		}
 		switch {
 		case len(reasons) > 0:
-			return gatewayEvidence{out: true, resetWait: resetWait, connectivity: connectivity, loggedIn: loggedIn, adapters: adaptersSeen, said: strings.Join(reasons, "; "), recoveredAt: recovered}, nil
+			return gatewayEvidence{out: true, resetWait: resetWait, said: "gateway: logged out: " + strings.Join(reasons, "; "), recoveredAt: recovered}, nil
 		case len(ibc) == 0:
-			return gatewayEvidence{silent: true, adapters: adaptersSeen, said: "gateway: no login evidence: the ti-gateway journal holds no login event in the last 14 days", recoveredAt: recovered}, nil
+			return gatewayEvidence{silent: true, said: "gateway: no login evidence: the ti-gateway journal holds no login event in the last 14 days", recoveredAt: recovered}, nil
 		}
-		return gatewayEvidence{loggedIn: loggedIn, adapters: adaptersSeen, said: "gateway: logged in (IBC's newest login event is a completed login)", recoveredAt: recovered}, nil
+		return gatewayEvidence{said: "gateway: logged in (IBC's newest login event is a completed login)", recoveredAt: recovered}, nil
 	}
 }
 
@@ -317,43 +286,4 @@ func resetNightEnd(at time.Time) time.Time {
 		day++
 	}
 	return time.Date(at.Year(), at.Month(), day, 1, 0, 0, 0, at.Location())
-}
-
-// adapterStart bounds link evidence to an active adapter's current process
-// (ADR 0019, "Alerting"; server.md, "The Gateway is logged out"). Unix timestamps
-// avoid host locale and zone ambiguity; an unreadable sample is a sampling
-// fault, never evidence of login or a reason to discard journal evidence.
-func adapterStart(systemctl, unit string) (bool, time.Time, error) {
-	raw, err := unitCommand(systemctl, "show", "--timestamp=unix", "-p", "ActiveState", "-p", "ExecMainStartTimestamp", unit)
-	if err != nil {
-		return false, time.Time{}, fmt.Errorf("reporter: the gateway check could not sample adapter %s: %w", unit, err)
-	}
-	props := map[string]string{}
-	for _, line := range strings.Split(raw, "\n") {
-		k, v, _ := strings.Cut(line, "=")
-		props[k] = v
-	}
-	state := props["ActiveState"]
-	if !knownActiveStates[state] {
-		return false, time.Time{}, fmt.Errorf("reporter: the gateway check found adapter %s has invalid ActiveState", unit)
-	}
-	if state != "active" {
-		return false, time.Time{}, nil
-	}
-	stamp := props["ExecMainStartTimestamp"]
-	if !unixStartStamp.MatchString(stamp) {
-		return false, time.Time{}, fmt.Errorf("reporter: the gateway check found adapter %s has invalid ExecMainStartTimestamp", unit)
-	}
-	seconds, fraction, _ := strings.Cut(stamp[1:], ".")
-	sec, err := strconv.ParseInt(seconds, 10, 64)
-	// Bound to time.Time's RFC3339 range so the persisted generation round-trips.
-	if err != nil || sec > 253402300799 {
-		return false, time.Time{}, fmt.Errorf("reporter: the gateway check found adapter %s has invalid ExecMainStartTimestamp", unit)
-	}
-	fraction = (fraction + "000000000")[:9]
-	nanos, err := strconv.ParseInt(fraction, 10, 64)
-	if err != nil || sec == 0 && nanos == 0 {
-		return false, time.Time{}, fmt.Errorf("reporter: the gateway check found adapter %s has invalid ExecMainStartTimestamp", unit)
-	}
-	return true, time.Unix(sec, nanos).UTC(), nil
 }

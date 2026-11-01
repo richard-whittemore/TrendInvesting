@@ -35,17 +35,18 @@ missing mark, and a failed trading unit while a session is near. The outside
 Healthchecks heartbeat is capital-safety and remains outside the reporter.
 
 **Operational** incidents include failed units outside that trading exception,
-Gateway logout, IBKR connectivity loss, adapter sampling faults, data jobs, Flex
-and memory. The rule is **a page only when it makes sense**: the orchestrator acts on operational alerts first.
+Gateway logout, reset waits, data jobs, Flex and memory. The rule is **a page only when it makes sense**: the orchestrator acts on operational alerts first.
 With `TI_ESCALATE_AFTER` at its default `session`, an operational incident reaches
 Pushover only when a session is near: weekdays 05:30–16:00 ET on an NYSE session
 day. Outside that period it stays on the alerts repository and ntfy. An incident
 still open at the next session-near period pages then, once, followed by the
-hourly reminder. Weekends and NYSE holidays are skipped. This is both the shipped
+hourly reminder for incident kinds that support reminders; timer-job failures do not repeat
+(see the failed-unit row under “What can go wrong”). Weekends and NYSE holidays are skipped. This is both the shipped
 setting and the built-in default when `reporter.env` is missing.
 
-Detection grace still applies: Gateway logout and connectivity retain their
-ten-minute detection grace; reset waits are noticed immediately. Near a session,
+Detection grace still applies: Gateway logout retains its ten-minute grace
+outside restart windows; adapter 1100/2110 evidence must first persist for
+three continuous hours without restoration. Reset waits are noticed immediately. Near a session,
 operational incidents page after that existing grace. A duration such as `30m`
 keeps the delay behaviour outside session-near: its clock starts at first
 observation, before grace. `0` keeps immediate delivery after detection grace,
@@ -60,7 +61,7 @@ alerts repository and ntfy, and never reaches Pushover while the window lasts.
 With a duration setting, an open incident's escalation delay starts at the
 window's exact end; `session` waits for session-near. Overlapping
 windows form one continuous window. Capital-safety is never quieted by this rule.
-Operational reminders are never shorter than the existing hourly interval;
+For incident kinds that support them, operational reminders are never shorter than the existing hourly interval;
 a longer escalation period lengthens that interval. The escalation delay governs
 only the first Pushover. Resolution clears the incident's escalation clock.
 On entry to a quiet window or on recovery, the reporter cancels outstanding
@@ -82,23 +83,19 @@ A newest `gateway-start: reset wait: login refused at` line counts only from
 `reset wait: interrupted by stop` is not an active wait. The start program is
 waiting out IBKR's reset hour after a refused login; a refusal after 01:00 ET
 pages as a logout. This does not establish whether the password is correct.
-A connectivity loss counts only for an active adapter and only for journal lines
-newer than its last start. Each outstanding loss retains its adapter unit and
-process start; another adapter's obsolete or restored line cannot clear it.
-Even an empty adapter journal is sampled, so stopping that adapter ends its
-connectivity incident. A failed unit-state sample gets its own operational
-notice and leaves the journal evidence available for routing. Sampling incidents
-continue detection, reminders, recovery and cancellation retries even while IBC
-reports a logout. A recurring sampling fault starts a new incident with fresh
-escalation and delivery state, retaining only old receipts awaiting cancellation.
-A current restoration from the final owning adapter closes its loss even when
-IBC's journal has no login event; journal silence alone never does. Legacy state
-with unknown ownership retains every plausible configured adapter until its own
-recovery or process invalidation. Otherwise the Gateway's own login state decides.
-A logged-in Gateway with such 1100/2110 evidence and no later restoration gets
-a connectivity notice. Inside a scheduled window it follows the quiet rule;
-only if the Gateway is logged in and the loss outlasts its window does the
-notice advise a Gateway restart. Neither check restarts it itself.
+Gateway detection reads IBC's journal plus the existing adapter 1100/2110 rule:
+only a continuous loss of at least three hours without restoration or successful
+reconciliation counts as a Gateway outage. Plain API reconnects do not restore
+the link. This routes as an operational Gateway incident even when IBC's newest
+event is a completed login; a separate IBKR-only connectivity notice is deferred
+to a follow-up. Inside a scheduled window or off-session with the default policy,
+it reaches the orchestrator's channels (the alerts repository and ntfy).
+An open outage still needs a completed login, restoration or reconciliation
+at least as new as its first observation to resolve; journal silence and adapter
+stops or restarts cannot supply recovery. Adapter process sampling and sampling
+incidents are not part of this check. Previous-build state loads normally:
+obsolete notice and adapter-loss fields are ignored, while the Gateway outage,
+delivery records, clocks and receipt-specific cancellations remain usable.
 
 ## Alert class index
 
@@ -138,8 +135,6 @@ The outside Healthchecks heartbeat is capital-safety and is unchanged.
 | `<account>: order <client order ID> acknowledged` | Class: capital-safety |
 | `<account>: order <client order ID> not acknowledged` | Class: capital-safety |
 | `<host>: IB Gateway reset wait` | Class: operational |
-| `<host>: IBKR connectivity lost` | Class: operational |
-| `<host>: cannot sample <unit>` | Class: operational |
 | `<account>: margin cushion <level>` | Class: capital-safety |
 | `<account>: sale back to 98% sent (<detail>)` | Class: capital-safety |
 | `<account>: sale back to 98% released, not sent (<detail>)` | Class: capital-safety |

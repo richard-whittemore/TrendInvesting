@@ -59,7 +59,7 @@ func keepReceipt(s sender, key string, seen map[string]bool, at time.Time) {
 }
 
 // queueReceiptCancellations snapshots the emergencies a recovery or quiet route
-// must cancel (alerts-and-dashboard.md, "Paging invariant"). Each marker owns
+// must cancel (ADR 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Each marker owns
 // one receipt and alert key; a later incident's receipts cannot join its retry.
 // An unavailable channel retains the same snapshot until it can cancel.
 func queueReceiptCancellations(seen map[string]bool, key, channel string) {
@@ -80,7 +80,7 @@ func cancelReceipts(senders []sender, key string, seen map[string]bool, now time
 }
 
 // retryReceiptCancellations attempts only previously requested receipts
-// (alerts-and-dashboard.md, "Paging invariant"). Errors name the channel and
+// (ADR 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Errors name the channel and
 // alert, never a receipt. Expired or missing receipts need no remote cancel.
 func retryReceiptCancellations(senders []sender, key string, seen map[string]bool, now time.Time) ([]string, error) {
 	discardUnscopedCancellations(seen)
@@ -115,7 +115,7 @@ func retryReceiptCancellations(senders []sender, key string, seen map[string]boo
 }
 
 // discardUnscopedCancellations removes legacy requests whose receipt ownership
-// is unknowable (alerts-and-dashboard.md, "Paging invariant"). Never guess that
+// is unknowable (ADR 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Never guess that
 // a newer incident's emergency belongs to an old request. Keep the receipts for
 // a later observed recovery or normal expiry, which still bounds their lifetime.
 func discardUnscopedCancellations(seen map[string]bool) bool {

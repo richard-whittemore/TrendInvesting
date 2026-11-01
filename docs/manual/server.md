@@ -763,33 +763,36 @@ that worked minutes before with "Unrecognized Username or Password", and IBC
 leaves that dialog open for hours. Nothing reaches IBKR meanwhile, and no unit
 has failed to tell you. Two things now cover it.
 
-**The reporter distinguishes logout from connectivity loss.** The owning
-reporter reads the Gateway and adapter journals every five minutes. A refused
-login, login dialog or stopped retries means logged out. A completed login
-followed only by 1100/2110 means IBKR connectivity lost; it does not mean a bad
-password. A plain API reconnect proves nothing; 1102 (also 1101 restoration)
-or successful reconciliation ends the connectivity incident. Missing journal
-access fails the firing. Rotated evidence does not prove recovery. An inactive
-adapter or link evidence from before its last start does not establish a current
-loss; the Gateway’s own login state then decides.
+**The reporter reads the login evidence.** Every five minutes the owning
+reporter reads IBC's journal and the adapter journals. IBC's newest login event
+being a refusal, login dialog or stopped retries counts as logged out. Adapter
+1100/2110 counts only after a continuous loss of at least three hours without
+restoration (1101/1102) or successful reconciliation. A plain API reconnect
+proves nothing. A silent IBKR session drop without an IBC event therefore takes
+about three hours plus the ten-minute detection grace to detect; paging eligibility
+can defer Pushover further. This detection limit still needs the owner's explicit
+agreement before live money. Missing journal access fails the firing. A readable
+journal with no evidence opens no incident; an already open outage requires a
+completed login, restoration or reconciliation at least as new as its first
+observation to resolve. Adapter stops and restarts are not recovery evidence.
 
-Both are **operational**, following the [paging invariant](alerts-and-dashboard.md#paging-invariant):
-ntfy and an alerts issue first; with `TI_ESCALATE_AFTER` at its default `session`,
-Pushover only when a session is near (weekdays 05:30–16:00 ET on an NYSE session
-day), once detection grace has passed. An incident still open when the next
-session-near period starts pages then. A duration such as `30m` retains delayed
-escalation outside session-near; `0` keeps immediate delivery after grace.
-A connectivity loss is observed at the next firing; there is no three-hour blind interval. Outside session-near,
+The resulting Gateway incident is **operational**, following the
+[paging invariant](alerts-and-dashboard.md#paging-invariant): ntfy and an alerts
+issue first; with `TI_ESCALATE_AFTER` at its default `session`, Pushover only when
+a session is near (weekdays 05:30–16:00 ET on an NYSE session day), once detection
+grace has passed. An incident still open when the next session-near period starts
+pages then. A duration such as `30m` retains delayed escalation outside
+session-near; `0` keeps immediate delivery after grace. Outside session-near,
 the shared IBKR schedule holds Pushover through its window; a duration setting
-counts its delay from the window's end, while `session` waits for session-near. If loss outlasts maintenance, the notice asks for
-`sudo systemctl restart ti-gateway`; the reporter never runs that command.
+counts its delay from the window's end, while `session` waits for session-near.
+A separate IBKR-only connectivity notice is deferred to a follow-up; qualifying
+1100/2110 evidence uses the same operational Gateway incident today.
 
 The newest `gateway-start:` line being `gateway-start: reset wait: login refused at`
 produces a reset-wait notice only on the night it was written, from 23:40 to
 that night’s first 01:00 ET, marked scheduled IBKR interruption,
 with no Pushover. At 01:00 ET, or after another start state, ordinary logout
-handling resumes. An `interrupted by stop` line ends the wait. Both logout
-and connectivity loss retain the ten-minute detection grace,
+handling resumes. An `interrupted by stop` line ends the wait. Gateway outages retain the ten-minute detection grace,
 counted after the restart windows in `/etc/trend-investing/gateway.env`:
 five minutes before to 45 minutes after the nightly restart (23:40–00:30 by
 default), and five minutes before to 30 minutes after the Sunday cold restart
@@ -1194,10 +1197,8 @@ stop, not after two sessions of silence.
 | `provision.sh services` stops with "verification failed, nothing replaced and no plain text removed", or with "both exist and differ" | The plain-text file is kept and no encrypted copy replaces anything | For the first, run it again; if it keeps failing, see `journalctl` and the disk space. For the second, keep the right one as the message says, then run it again |
 | The Sunday phone prompt is missed | IBC exits, the unit starts it again after 30 seconds, and a new prompt arrives each time; nothing reaches IBKR meanwhile | Approve the next prompt (`docs/runbooks/gateway-login.md`) |
 | `ti-gateway` failed and stays down (the page `<host>: ti-gateway.service failed`); `journalctl -u ti-gateway` names the login file, or says "login retries stopped" | Exit 64, 65 or 78: the login file is empty, or holds an unknown key or value (for example a trading mode other than `paper` or `live`). Exit 77: the program stopped the retries (3 login attempts within 24 hours without an accepted login, or a counter it could not trust, or IBC output it could not watch), so IBKR cannot lock the login. IBKR's nightly session reset around 00:10 ET (longer on Friday nights) can also refuse a password that just worked. From 23:40 to 01:00 ET the unit waits it out internally: the journal says "gateway-start: reset wait: login refused at HH:MM ET inside IBKR's nightly reset hour; waiting Nm until HH:MM ET (consumed reset allowances M of 4 in 24h)". There are at most 4 uncounted reset refusals in any rolling 24 hours, then the three counted refusals (at most seven in any rolling 24 hours without an accepted login). Restarting resumes the remaining wait; journal failures cannot skip it. At the fifth reset refusal or 01:00 ET, whichever comes first, counted retries resume; if the bound is then reached, exit 77 stops the unit and the next reporter firing pages the failed unit (the separate logged-out page can arrive earlier, as explained above). The unit does not restart on any of these exits, because none fixes itself. The reporter's next firing pages it (the Gateway has no `OnFailure=` hook), and holds back the outside heartbeat while it stays down | For the login file: fill it in or correct it with `sudo ti-secrets edit ibkr-login.env`, then `sudo systemctl start ti-gateway` (`docs/runbooks/gateway-login.md`). After a nightly reset, recover by hand after 01:00 ET: `sudo systemctl start ti-gateway.service`, wait for "Login has completed" in the journal, then `sudo systemctl start ti-adapter-boost.service`. If the journal says "login retries stopped", check the paper login and clear the counter as below before starting. For "login retries stopped": check the paper login on IBKR's website, delete `/var/lib/ti-gateway/login-failures`, then `sudo systemctl start ti-gateway` ("The Gateway is logged out", above) |
-| `<host>: IB Gateway is logged out` (or `journalctl -u ti-gateway` says "Unrecognized Username or Password" or "login retries stopped") | IBKR refused the login, typically after the nightly restart, and IBC left the dialog open. During the nightly reset window (23:40 to 01:00 ET), there are at most 4 uncounted reset refusals in any rolling 24 hours, of up to 15 minutes each, capped at 01:00 ET; restarts resume a persisted wait. After those, or outside the window, the start program stops IBC and systemd starts it again, at most 3 login attempts of any kind within 24 hours (two retries; IBKR locks at 10); then the unit stops with exit 77 and stays down. Class: operational. After the ten-minute detection grace outside restart windows, paging follows the escalation and shared schedule rules above. A current, uninterrupted reset-wait line from this night before 01:00 ET produces a quiet notice instead. Connectivity loss from a logged-in Gateway has its own notice, not a password page | "The Gateway is logged out", above: check the paper login on IBKR's website, log out of any other session with the paper username, delete `/var/lib/ti-gateway/login-failures`, `sudo systemctl restart ti-gateway` |
+| `<host>: IB Gateway is logged out` (or `journalctl -u ti-gateway` says "Unrecognized Username or Password" or "login retries stopped") | IBKR refused the login, typically after the nightly restart, and IBC left the dialog open. During the nightly reset window (23:40 to 01:00 ET), there are at most 4 uncounted reset refusals in any rolling 24 hours, of up to 15 minutes each, capped at 01:00 ET; restarts resume a persisted wait. After those, or outside the window, the start program stops IBC and systemd starts it again, at most 3 login attempts of any kind within 24 hours (two retries; IBKR locks at 10); then the unit stops with exit 77 and stays down. Class: operational. After the ten-minute detection grace outside restart windows, paging follows the escalation and shared schedule rules above. A current, uninterrupted reset-wait line from this night before 01:00 ET produces a quiet notice instead. Adapter 1100/2110 without restoration for at least three continuous hours also produces this operational Gateway incident; inspect the journal evidence before treating it as a password problem | "The Gateway is logged out", above: check the paper login on IBKR's website, log out of any other session with the paper username, delete `/var/lib/ti-gateway/login-failures`, `sudo systemctl restart ti-gateway` |
 | `<host>: IB Gateway reset wait` | Class: operational. The newest gateway-start line records a refused-login reset wait on this night between 23:40 and the first 01:00 ET; an interrupted wait does not count. ntfy and the alerts repository receive one scheduled IBKR interruption notice; Pushover receives none during the wait | Let the bounded reset wait finish. At 01:00 ET ordinary logout detection and paging resume |
-| `<host>: IBKR connectivity lost` | Class: operational. IBC shows a completed login but an active adapter has 1100/2110 newer than its last start without restoration. After the ten-minute grace, session-near pages immediately; otherwise ntfy and the alerts repository receive a notice, with Pushover delayed and held through scheduled IBKR maintenance | Wait during maintenance. If it outlasts the window and the Gateway remains logged in, `sudo systemctl restart ti-gateway` and confirm Login has completed and 1102. A later restoration or reconciliation resolves the incident |
-| `<host>: cannot sample <unit>` | Class: operational. The reporter could not read a trustworthy adapter unit-state sample; this is an observation fault, not proof that the adapter failed. Its journal evidence and the other adapters are still checked. The notice follows the operational paging delay and repeats while sampling fails; a good sample resolves it | Check the named unit with `systemctl show` and fix the reporter's systemctl access or invalid unit properties; confirm the next reporter firing samples it successfully |
 | The IBKR password is wrong | Outside the nightly reset window (23:40 to 01:00 ET), the refused login is retried at most twice (3 attempts in all; any start counts, so after a good login fewer), then the unit stops, so IBKR cannot lock the login; you are paged | Correct the file (`sudo ti-secrets edit ibkr-login.env`), delete `/var/lib/ti-gateway/login-failures`, start it again (`docs/runbooks/gateway-login.md`) |
 | The journal of `ti-data` or `ti-reporter@boost` says "waiting for the account's first run" (the unit is not failed) | No engine run has been started, so there is nothing to record or report. The data job writes nothing; the reporter sends no alert and, if nothing else is wrong, pings the heartbeat. Nothing is paged ("The reporter before the first run", below) | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine") |
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |
