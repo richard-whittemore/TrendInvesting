@@ -399,6 +399,8 @@ echo ActiveState=active
 echo NRestarts=0
 echo SubState=running
 echo InvocationID=0123456789abcdef0123456789abcdef
+# As systemd answers "show --timestamp=unix": an active unit's start, in seconds.
+echo ExecMainStartTimestamp=@1700000000
 SH
 chmod 0755 "$sysd/systemctl"
 # Nor does a journal: the Gateway check reads ti-gateway's and the adapter's,
