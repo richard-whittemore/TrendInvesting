@@ -19,8 +19,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/ti-gateway/heal
-# The adapters' hand-over records are read, never written (least privilege).
+# The adapters' state is written only to take each adapter's own hand-over
+# lock (pending.json.lock) while the healer checks that no order is between
+# hand-over and its journal record; the records themselves are only read.
+ReadWritePaths=/var/lib/ti-gateway/heal /var/lib/trend-investing/adapters
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true

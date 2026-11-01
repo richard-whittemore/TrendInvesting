@@ -215,8 +215,19 @@ func TestIncidentCannotRestartAgainAfterTwoHours(t *testing.T) {
 }
 func TestInFlightOrderPreventsRestart(t *testing.T) {
 	r := fixture()
-	r.lockErr = errors.New("relay owns lock")
+	r.lockErr = fmt.Errorf("boost: %w", ErrOrderBusy)
 	assertRun(t, r, "order-busy")
+}
+
+// A guard that cannot be checked (a permission or file fault) also does
+// nothing, but the journal names the fault, never a busy order.
+func TestAnUncheckableGuardIsJournalledAsSuch(t *testing.T) {
+	r := fixture()
+	r.lockErr = errors.New("open pending.json.lock: read-only file system")
+	assertRun(t, r, "guard-unreadable")
+	if !strings.Contains(strings.Join(r.logs, "\n"), "read-only file system") {
+		t.Fatalf("the fault is not named: %v", r.logs)
+	}
 }
 func TestRemedyMustBelongToFailedInvocation(t *testing.T) {
 	r := fixture()

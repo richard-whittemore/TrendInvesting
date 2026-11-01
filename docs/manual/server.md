@@ -777,6 +777,7 @@ cannot qualify; its Gateway remains the owner's macOS app.
 | Restarted but no login within ten minutes | `login-timeout`: stop; the existing failed-unit hook and reporter still page |
 | Same failed invocation, or a failure predating the last restart | `same-incident`: nothing, even after two hours |
 | Any relay active, or an unresolved hand-over | `order-busy`: nothing; read and settle the adapter's evidence through the existing procedure |
+| The busy-order check itself cannot be made (a missing adapter folder, a permission or file fault) | `guard-unreadable`: nothing; the journal line names the fault, which is a server problem to fix, not an order |
 
 The invariant is no login attempt that gateway-start would refuse, no action
 inside a scheduled window or the nightly reset hour, once per incident, and

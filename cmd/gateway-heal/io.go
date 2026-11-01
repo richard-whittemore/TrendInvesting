@@ -217,7 +217,7 @@ func (g relayGuard) Acquire() (func(), error) {
 		}
 		if err == nil && !gatewayheal.HandoverClear(raw) {
 			release()
-			return nil, errors.New("unsettled hand-over")
+			return nil, fmt.Errorf("%s: unsettled hand-over: %w", name, gatewayheal.ErrOrderBusy)
 		}
 
 	}
@@ -251,6 +251,9 @@ func lockFile(path string, uid, gid uint32) (func(), error) {
 	}
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		closeFile()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("%s held: %w", path, gatewayheal.ErrOrderBusy)
+		}
 		return nil, err
 	}
 	return closeFile, nil

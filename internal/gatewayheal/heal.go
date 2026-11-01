@@ -55,6 +55,11 @@ type Guard interface {
 	Acquire() (release func(), err error)
 }
 
+// ErrOrderBusy is the guard's report that an adapter holds its hand-over lock
+// or has a hand-over without its journal record (ADR 0026 point 8). Any other
+// guard error means the check itself could not be made; both stop recovery.
+var ErrOrderBusy = errors.New("an order is between hand-over and its journal record")
+
 type healer struct{ log func(string) error }
 
 func (h healer) say(row, step string) error {
@@ -117,8 +122,12 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	}
 	// Re-read every mutable gate after waiting and again under relay exclusion.
 	release, err := guard.Acquire()
-	if err != nil {
+	if errors.Is(err, ErrOrderBusy) {
 		return h.say("order-busy", "no-action")
+	}
+	if err != nil {
+		// Fail closed, and say why: a fault is not a busy order.
+		return h.say("guard-unreadable", "no-action: "+strings.ReplaceAll(err.Error(), "\n", " "))
 	}
 	defer func() {
 		if release != nil {
