@@ -1723,5 +1723,35 @@ example, four executions of 1.8125 shares at $10.10 debit $73.24 from the
 budget, which fits the $73.23 whole-order reservation plus $0.10 slack. This bound assumes fills
 at or below the buy limit and aggregate fees within the order's fee allowance.
 It is not a structural reserve for execution counts beyond that cap or other
-cash changes. The structural cash buffer remains an owner decision pending
-under #622; this execution allowance does not settle that decision.
+cash changes. The structural cash buffer is separate from this execution allowance; see
+its owner decision of 2026-10-31 below.
+
+
+## Amendment (2026-10-31): owner decision — momentum IRA cash buffer
+
+Before point 2's **Scaling**, withhold `execution.cash_buffer_fraction`
+multiplied by the decision snapshot's net liquidation from the cash available
+under D5 when the buy phase starts, after the existing proceeds and cash-drop
+adjustments. The buy budget is `max(0, cash available − fraction × net
+liquidation)`. Default the fraction to **0.01** on new configuration loads;
+accept finite values from **0 to 0.05 inclusive** and refuse others at load
+with a reason naming the field and bounds. An explicit zero preserves the
+previous plan. The IRA configuration examples set **0.01** and
+`max_fees_per_order` **2.00**, the plan's fee allowance.
+
+The existing worst-case costing (quantity at the limit, maximum fees and
+fractional rounding slack), proportional scaling and increment rounding apply
+unchanged to that budget. Cash below the reserve leaves no buys: each is
+recorded as skipped by the existing scaling rule with its reason. Sells run
+first and never wait for this reserve. Boost is unaffected.
+
+The optional `cash_buffer` field on `strategy.targets.decided` records the
+full dollar reserve, even when cash is below it. It is additive to both
+supported quantity encodings, as the rounding-slack fields are. Historical
+records without it read as zero. New configuration loads materialize the
+fraction before hashing and journalling (ADR 0016); recorded configurations
+without it retain zero and their original hashes and decision bytes during
+replay (ADR 0015). Replay never applies the new-load default. An explicit
+fraction changes configuration identity, including explicit zero; it does
+not rewrite historical evidence or change the quantity schema. No sending
+behavior or paper/limited-live gate changes.

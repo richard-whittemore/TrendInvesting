@@ -233,6 +233,10 @@ type BondFund struct {
 // and 6): an IRA's cash rule, share quantity and fee allowance, and every
 // account's MaxSnapshotAge, which is all the joint margin account sets.
 type ExecutionConfiguration struct {
+	// CashBufferFraction is the IRA reserve as a fraction of decision net
+	// liquidation (ADR 0026, owner decision 2026-10-31). New config loads
+	// default to 0.01; nil belongs to historical records and means zero.
+	CashBufferFraction *float64 `json:"cash_buffer_fraction,omitempty"`
 	// CashRule is one of the CashRule constants (D5). It and ShareQuantity
 	// are always set for an IRA, so omitting them when empty changes no IRA
 	// configuration's bytes or hash, and the joint account's execution
@@ -548,6 +552,9 @@ func validBirth(s string) bool {
 
 func (c ExecutionConfiguration) validate() []error {
 	var errs []error
+	if c.CashBufferFraction != nil && (!isFinite(*c.CashBufferFraction) || *c.CashBufferFraction < 0 || *c.CashBufferFraction > 0.05) {
+		errs = append(errs, errors.New("execution.cash_buffer_fraction must be finite and in [0, 0.05]"))
+	}
 	if c.CashRule != CashRuleSettled && c.CashRule != CashRuleTotal {
 		errs = append(errs, fmt.Errorf("execution cash rule %q is not %q or %q", c.CashRule, CashRuleSettled, CashRuleTotal))
 	}
@@ -661,22 +668,28 @@ func TargetWeightConfigurationHash(payload TargetWeightConfigurationPayload) str
 		payload.Execution.RoundingSlackPerOrder = &slack
 	}
 	prefix := fmt.Sprintf("target-weight-configuration/v%d\n", payload.SchemaVersion())
-	var canonical []byte
-	if payload.Execution.ShareQuantity == ShareQuantityFractional {
-		canonical = canonicalJSON(payload)
-	} else {
-		// ADR 0016: preserve version 7's canonical shape; its encoder includes
-		// zero fields, so adding an omitted JSON field still changes that hash.
-		canonical = canonicalJSON(map[string]any{
-			"strategy_id": payload.StrategyID, "account_id": payload.AccountID,
-			"mode": payload.Mode, "adapter": payload.Adapter, "boost": payload.Boost,
-			"momentum": payload.Momentum, "glide": payload.Glide, "limits": payload.Limits,
-			"execution": map[string]any{"cash_rule": payload.Execution.CashRule,
-				"share_quantity":           payload.Execution.ShareQuantity,
-				"max_fees_per_order":       payload.Execution.MaxFeesPerOrder,
-				"max_snapshot_age_minutes": payload.Execution.MaxSnapshotAge},
-		})
+	// ADR 0016: freeze the historical canonical shapes, whose encoder
+	// includes zero fields even when JSON omits them. Only explicit reserves
+	// add the new field; old D7-L, D7-F and Boost hashes remain unchanged.
+	execution := map[string]any{
+		"cash_rule":                payload.Execution.CashRule,
+		"share_quantity":           payload.Execution.ShareQuantity,
+		"max_fees_per_order":       payload.Execution.MaxFeesPerOrder,
+		"max_snapshot_age_minutes": payload.Execution.MaxSnapshotAge,
 	}
+	if payload.Execution.ShareQuantity == ShareQuantityFractional {
+		execution["fractional_increment"] = payload.Execution.FractionalIncrement
+		execution["rounding_slack_per_order"] = payload.Execution.RoundingSlackPerOrder
+	}
+	if payload.Execution.CashBufferFraction != nil {
+		execution["cash_buffer_fraction"] = *payload.Execution.CashBufferFraction
+	}
+	canonical := canonicalJSON(map[string]any{
+		"strategy_id": payload.StrategyID, "account_id": payload.AccountID,
+		"mode": payload.Mode, "adapter": payload.Adapter, "boost": payload.Boost,
+		"momentum": payload.Momentum, "glide": payload.Glide, "limits": payload.Limits,
+		"execution": execution,
+	})
 	sum := sha256.Sum256(append([]byte(prefix), canonical...))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
@@ -718,4 +731,23 @@ func (p TargetWeightConfigurationPayload) ValidateSchema(v uint32) error {
 		return fmt.Errorf("configuration version %d does not describe execution rule %q", v, p.Execution.ShareQuantity)
 	}
 	return p.Validate()
+}
+
+// CashBuffer returns the recorded reserve fraction; absent historical fields
+// upcast to zero, never the new-load default (ADR 0026, 2026-10-31; ADR 0015).
+func (c ExecutionConfiguration) CashBuffer() float64 {
+	if c.CashBufferFraction == nil {
+		return 0
+	}
+	return *c.CashBufferFraction
+}
+
+// DefaultCashBuffer materializes the new-load default before hashing and
+// journalling. Replay must use the recorded configuration (ADR 0016;
+// ADR 0026, owner decision 2026-10-31).
+func (p *TargetWeightConfigurationPayload) DefaultCashBuffer() {
+	if p.StrategyID == TargetWeightStrategyMomentum && p.Execution.CashBufferFraction == nil {
+		fraction := 0.01
+		p.Execution.CashBufferFraction = &fraction
+	}
 }

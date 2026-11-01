@@ -210,6 +210,11 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 			return nil, err
 		}
 	}
+	if cfg.Execution.CashBufferFraction != nil {
+		// Freeze the configured reserve before deriving identity (ADR 0016).
+		fraction := cfg.Execution.CashBuffer()
+		cfg.Execution.CashBufferFraction = &fraction
+	}
 	h := &Handler{
 		strategyVersion: strategyVersion,
 		hash:            event.TargetWeightConfigurationHash(cfg),
@@ -639,6 +644,9 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 			p.Outcome, p.Targets, p.WithheldReason, p.Detail = event.TargetsOutcomeWithheld, nil, reason, detail
 		}
 	}
+	if p.Outcome == event.TargetsOutcomeDecided {
+		_, p.CashBuffer = orderplan.BuyBudget(r.cash(*r.snapshot), r.snapshot.NetLiquidation, r.exec.CashBuffer())
+	}
 	id := decisionID(h.cfg.AccountID, end)
 	b.add(id, event.TargetsDecidedEventType, p.SchemaVersion(), p)
 	if p.Outcome != event.TargetsOutcomeDecided || b.err != nil {
@@ -965,6 +973,11 @@ func (r *momentumRun) planBuys(b *emissions) {
 	if unexplained := r.h.gate.PendingCashIncrease(reconcile.CashBook(reb.decisionID, reb.snapshot)); unexplained > 0 {
 		reb.budget.Remove(unexplained)
 	}
+	// ADR 0026, owner decision 2026-10-31: reserve only when buys start,
+	// after proceeds and missing cash. Early clamping would lose the reserve
+	// shortfall when starting cash is below it. Sells never wait on this rule.
+	_, buffer := orderplan.BuyBudget(0, reb.snapshot.NetLiquidation, r.exec.CashBuffer())
+	reb.budget.WithholdCashBuffer(buffer)
 	buys := slices.Clone(reb.buys)
 	for i := range buys {
 		buys[i].RoundingSlack = r.exec.RoundingSlack()

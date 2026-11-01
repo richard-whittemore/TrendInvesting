@@ -17,6 +17,11 @@ import (
 // under ADR 0026 D7-F, including the engine's synthetic terminal reports.
 func TestFractionalEngineMonth(t *testing.T) {
 	cfg := boostConfiguration(t, momentumConfigPath)
+	// Preserve the historical rounding-slack fixture's zero reserve
+	// (ADR 0026, owner decision 2026-10-31); buffer cases have their own
+	// synthetic planner and execution fixtures.
+	zero := 0.0
+	cfg.Execution.CashBufferFraction = &zero
 	cfg.Execution.ShareQuantity = "fractional"
 	raw, err := json.Marshal(cfg)
 	if err != nil {

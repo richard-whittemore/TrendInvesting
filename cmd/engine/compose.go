@@ -98,6 +98,7 @@ func composeTargetWeight(path string, raw []byte, build string, asOf time.Time) 
 	if err := decoder.Decode(&cfg); err != nil {
 		return composition{}, fmt.Errorf("engine: decode the target-weight configuration in %s: %w", path, err)
 	}
+	cfg.DefaultCashBuffer()
 	if err := cfg.Validate(); err != nil {
 		return composition{}, fmt.Errorf("engine: the configuration in %s is invalid: %w", path, err)
 	}

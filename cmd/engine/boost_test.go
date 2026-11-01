@@ -37,6 +37,7 @@ func boostConfiguration(t *testing.T, path string) event.TargetWeightConfigurati
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("decode %s: %v", path, err)
 	}
+	cfg.DefaultCashBuffer()
 	return cfg
 }
 
@@ -360,5 +361,77 @@ func TestSendingIsEnabledOnlyInPaperUntilTheLimitedLiveGate(t *testing.T) {
 	}
 	if _, statErr := os.Stat(opts.logPath); !os.IsNotExist(statErr) {
 		t.Error("the refused live run left a durable log behind")
+	}
+}
+
+// ADR 0026, owner decision 2026-10-31: default only at configuration load;
+// recorded omissions retain their historical meaning during replay.
+func TestCashBufferConfigurationLoad(t *testing.T) {
+	var defaultHash string
+	for _, tc := range []struct {
+		name, field string
+		want        float64
+		invalid     bool
+	}{
+		{"default", "", 0.01, false}, {"zero", `,"cash_buffer_fraction":0`, 0, false},
+		{"one_percent", `,"cash_buffer_fraction":0.01`, 0.01, false},
+		{"maximum", `,"cash_buffer_fraction":0.05`, 0.05, false},
+		{"negative", `,"cash_buffer_fraction":-0.0001`, 0, true},
+		{"too_large", `,"cash_buffer_fraction":0.050001`, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := boostConfiguration(t, momentumConfigPath)
+			cfg.Execution.CashBufferFraction = nil
+			raw, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.field != "" {
+				raw = []byte(strings.Replace(string(raw), `"execution":{`, `"execution":{`+strings.TrimPrefix(tc.field, ",")+",", 1))
+			}
+			c, err := composeTargetWeight("synthetic", raw, "test", time.Date(2025, 1, 2, 21, 0, 0, 0, time.UTC))
+			if tc.invalid {
+				if err == nil || !strings.Contains(err.Error(), "cash_buffer_fraction must be finite and in [0, 0.05]") {
+					t.Fatalf("want clear bounds refusal, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "default" {
+				defaultHash = c.configurationHash
+			}
+			if tc.name == "one_percent" && c.configurationHash != defaultHash {
+				t.Fatal("omitted and explicit default hash differently")
+			}
+			// Read only the new field: execution also carries strings.
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(c.configEnvelope.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			var execution map[string]json.RawMessage
+			if err := json.Unmarshal(payload["execution"], &execution); err != nil {
+				t.Fatal(err)
+			}
+			if string(execution["cash_buffer_fraction"]) != fmt.Sprint(tc.want) {
+				t.Fatalf("recorded cash_buffer_fraction = %s; want %v", execution["cash_buffer_fraction"], tc.want)
+			}
+		})
+	}
+}
+
+func TestCashBufferBoostUnchanged(t *testing.T) {
+	cfg := boostConfiguration(t, boostConfigPath)
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := composeTargetWeight("synthetic", raw, "test", time.Date(2025, 1, 2, 21, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(c.configEnvelope.Payload), "cash_buffer") || c.configurationHash != event.TargetWeightConfigurationHash(cfg) {
+		t.Fatal("IRA default changed Boost configuration or hash")
 	}
 }

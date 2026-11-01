@@ -1,6 +1,7 @@
 package event_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -476,5 +477,103 @@ func TestLimitOrderLifecycleIsReadAtBothItsVersions(t *testing.T) {
 	got[0] = 99
 	if event.LimitOrderLifecycleVersions()[0] != event.OrderLifecycleLimitVersion {
 		t.Error("a reader's change to its list changed the shared one")
+	}
+}
+
+// ADR 0026, owner decision 2026-10-31 and ADR 0016: effective reserves
+// enter identity; historical omissions retain their old schema and hash.
+func TestCashBufferConfigurationIdentity(t *testing.T) {
+	for _, fractional := range []bool{false, true} {
+		t.Run(fmt.Sprint(fractional), func(t *testing.T) {
+			cfg := validMomentumConfiguration()
+			if fractional {
+				cfg.Execution.ShareQuantity = event.ShareQuantityFractional
+			}
+			oldHash := event.TargetWeightConfigurationHash(cfg)
+			// Historical synthetic configurations, before the optional reserve
+			// (ADR 0016); preserve both quantity rules' identities.
+			wantHash := "sha256:b0a3a1bf3e326d830695020d2727adb223f51e2532586c8f69d785cb0f9b30ba"
+			if fractional {
+				wantHash = "sha256:c3bd4e8bb887afd22067c6d11683a35a4540011edbf56c871866c15e7e92487d"
+			}
+			if oldHash != wantHash {
+				t.Fatalf("historical hash = %s; want %s", oldHash, wantHash)
+			}
+			seen := map[string]bool{oldHash: true}
+			for _, fraction := range []string{"0", "0.01", "0.05"} {
+				next := cfg
+				if err := json.Unmarshal([]byte(`{"cash_buffer_fraction":`+fraction+`}`), &next.Execution); err != nil {
+					t.Fatal(err)
+				}
+				hash := event.TargetWeightConfigurationHash(next)
+				if seen[hash] {
+					t.Errorf("cash buffer %s omitted from identity", fraction)
+				}
+				seen[hash] = true
+				if next.SchemaVersion() != cfg.SchemaVersion() {
+					t.Error("optional cash buffer changed the quantity schema")
+				}
+				if err := next.ValidateSchema(cfg.SchemaVersion()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestCashBufferDecisionSchema(t *testing.T) {
+	p := validMomentumDecided()
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var old event.TargetsDecidedPayload
+	if err := json.Unmarshal(raw, &old); err != nil {
+		t.Fatal(err)
+	}
+	again, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.CashBuffer != 0 {
+		t.Fatal("historical decision gained a reserve")
+	}
+	if !bytes.Equal(raw, again) {
+		t.Fatal("legacy decision bytes changed")
+	}
+	for _, amount := range []float64{100, -1} {
+		next := old
+		if err := json.Unmarshal([]byte(fmt.Sprintf(`{"cash_buffer":%v}`, amount)), &next); err != nil {
+			t.Fatal(err)
+		}
+		if amount < 0 {
+			if err := next.Validate(); err == nil {
+				t.Fatal("negative buffer accepted")
+			}
+			continue
+		}
+		if err := next.ValidateSchema(old.SchemaVersion()); err != nil {
+			t.Fatal(err)
+		}
+		if next.CashBuffer != amount {
+			t.Errorf("buffer = %v; want %v", next.CashBuffer, amount)
+		}
+	}
+	boost := validTargetsDecided()
+	if err := json.Unmarshal([]byte(`{"cash_buffer":100}`), &boost); err != nil {
+		t.Fatal(err)
+	}
+	if err := boost.Validate(); err == nil {
+		t.Error("Boost accepted an IRA buffer")
+	}
+}
+
+func TestCashBufferNonfiniteRefused(t *testing.T) {
+	for _, fraction := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		p := validMomentumConfiguration()
+		p.Execution.CashBufferFraction = &fraction
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "cash_buffer_fraction must be finite and in [0, 0.05]") {
+			t.Fatalf("fraction %v: %v", fraction, err)
+		}
 	}
 }

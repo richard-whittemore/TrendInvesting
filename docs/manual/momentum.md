@@ -164,9 +164,15 @@ section 5; ADR 0026, point 2):
    scaled against cash minus the total slack. Planned orders and risk
    decisions record it as `rounding_slack`; the insufficient-cash check
    includes the same allowance, held until the order is terminal.
-   This covers cent rounding within that cap. **#622's cash buffer, once
-   decided, is the structural reserve**; that owner decision is pending
-   (ADR 0026, "Per-execution rounding reserve").
+   The structural **cash buffer** is `execution.cash_buffer_fraction`
+   times the decision snapshot's net liquidation: default **0.01** (1%),
+   with inclusive bounds **0–0.05**. Before scaling buys, subtract this
+   reserve from available cash and floor the budget at zero. Worst-case
+   limit-price costs, fees, rounding slack and proportional scaling then
+   apply as above. A zero budget records buys as skipped with a reason;
+   the reserve never delays a risk-reducing sell. The target decision
+   records the dollar amount as `cash_buffer`; earlier records without
+   it mean zero (ADR 0026, owner decision of 2026-10-31).
 9. **Each buy is costed at its worst case**: its shares at the limit price
    (the previous close plus the 5% band) plus a **$2.00** fee allowance per
    order (`execution.max_fees_per_order`; $2.00 is the plan's value,
@@ -191,7 +197,8 @@ rebalance clearance").
 Every planned order, Boost's and the IRAs', goes through the risk gate
 (`internal/risklimit`) before it can be released. The limits live outside
 the strategy so that a defect in a rule cannot break them (ADR 0026, point
-3). Each limit's value is in the account's configuration, under `limits`,
+3). Each limit's value is in the account's configuration, under `limits`
+(or `execution.cash_buffer_fraction` for the cash buffer),
 and is part of its hash. Values are set so that **every order in the
 backtests passes**; a value that refuses a backtested order is a
 configuration error.
@@ -202,6 +209,7 @@ configuration error.
 | Orders per decision (`max_orders_per_decision`) | Orders that are not risk-reducing at one decision time | 1 | from the IRA configuration (none exists yet) | the plan's buys refused; Degraded (`order-count`) |
 | Order size (`max_order_fraction`) | One order's value as a share of net liquidation | 1 (100%) | from the IRA configuration | refused; Degraded (`order-size`) |
 | Price band (`price_band`) | The order's reference price must be within this share of IBKR's latest recorded price (the mark), recorded at or after the close | 0.05 | from the IRA configuration | refused; Degraded (`price-band`); an IRA buy with no mark is withheld alone (`missing-mark`), with an urgent page and no degradation |
+| Cash buffer (momentum IRAs only) | Hold back `cash_buffer_fraction × net liquidation` before buy scaling | — | default 0.01; 0–0.05 inclusive | budget floored at zero; buys scaled or skipped; sells unaffected |
 | Cash (IRAs only) | A buy's worst-case cost must fit the cash still available | — | always | refused; Degraded (`insufficient-cash`) |
 | Holding | A sell must not exceed the shares held, net of sells already working, in the engine's book and in IBKR's latest snapshot | always | always | refused; Degraded (`sell-exceeds-holding`, `broker-holding`) |
 | Snapshot age (`execution.max_snapshot_age_minutes`) | IBKR's latest snapshot must be no older than this when a sell is checked against it | 30 | from the IRA configuration (required; 1 to 390) | refused, **no state change**, re-planned at the next decision (`stale-broker-snapshot`) |
