@@ -211,9 +211,12 @@ func BuyCost(o event.OrderPlannedPayload, maxFees float64) float64 {
 // (ADR 0026, owner decision 2026-10-31): fraction × net liquidation. Inputs
 // are a positive net liquidation and a finite fraction in [0, 0.05]; the
 // budget's own floor at zero is applied where the reserve is withheld.
-// Sells never consume it.
+// Sells never consume it. The explicit conversion rounds the product before
+// any caller subtracts it, so no platform may fuse the two into one
+// operation (The Go Programming Language Specification, "Floating-point
+// operators"; determinism, docs/development.md).
 func CashBuffer(netLiquidation, fraction float64) float64 {
-	return fraction * netLiquidation
+	return float64(fraction * netLiquidation)
 }
 
 // ScaleBuys fits buys to budget (ADR 0026, point 2, "Scaling"): when their
