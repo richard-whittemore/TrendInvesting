@@ -60,9 +60,11 @@ var (
 	// cmd/gateway-start logs "starting IBC" at every start and "cannot start
 	// IBC" when it cannot, so a restart of the unit resets the login state
 	// until a new "Login has completed"; IBC's own login screen after its
-	// restart is "LoginState is LOGGED_OUT". Read every gateway-start line so
-	// only its latest state can establish a reset wait (ADR 0019, "Alerting").
-	ibcEvent = regexp.MustCompile(`Unrecognized Username or Password|LoginState is LOGGED_OUT|Login has completed|login retries stopped|gateway-start:`)
+	// restart is "LoginState is LOGGED_OUT".
+	ibcEvent = regexp.MustCompile(`Unrecognized Username or Password|LoginState is LOGGED_OUT|Login has completed|login retries stopped|gateway-start: starting IBC|gateway-start: cannot start IBC`)
+	// resetWaitEvent reads reset-wait evidence separately from login events
+	// (ADR 0019, "Alerting"); other start-script messages cannot imply logout.
+	resetWaitEvent = regexp.MustCompile(`gateway-start: reset wait:`)
 	// The adapter's link lines (adapter/ibkr/connection.py _report and
 	// loop.py): connectivity-lost is code 1100/2110; "connected reason=restored"
 	// is IBKR's restoration (1101/1102); "reconciled" is a successful read of the
@@ -132,6 +134,32 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		ibc, err := journalQuery(journalctl, gatewayUnit, ibcEvent)
 		if err != nil {
 			return gatewayEvidence{}, err
+		}
+		resets, err := journalQuery(journalctl, gatewayUnit, resetWaitEvent)
+		if err != nil {
+			return gatewayEvidence{}, err
+		}
+		// Merge only reset-wait evidence with login events in journal order;
+		// arbitrary gateway-start messages are not login state (ADR 0019).
+		for _, reset := range resets {
+			at, err := lineTime(reset)
+			if err != nil {
+				return gatewayEvidence{}, fmt.Errorf("reporter: reset wait time: %w", err)
+			}
+			i := len(ibc)
+			for i > 0 {
+				previous, err := lineTime(ibc[i-1])
+				if err != nil {
+					return gatewayEvidence{}, err
+				}
+				if !previous.After(at) {
+					break
+				}
+				i--
+			}
+			ibc = append(ibc, "")
+			copy(ibc[i+1:], ibc[i:])
+			ibc[i] = reset
 		}
 		var reasons []string
 		var recovered time.Time

@@ -64,8 +64,12 @@ windows form one continuous window. Capital-safety is never quieted by this rule
 For incident kinds that support them, operational reminders are never shorter than the existing hourly interval;
 a longer escalation period lengthens that interval. The escalation delay governs
 only the first Pushover. Resolution clears the incident's escalation clock.
-On entry to a quiet window or on recovery, the reporter cancels outstanding
-Pushover emergencies through the receipt cancel API. Failed cancellations are
+On entry to a quiet IBKR window, the reporter cancels only outstanding Pushover
+emergencies that were operational when sent; on recovery, it cancels all
+outstanding emergencies for that incident. The class is recorded with each
+receipt at send time; a capital-safety receipt is never cancelled except on
+recovery. The end of session-near alone never cancels an emergency. Cancellations
+use the receipt cancel API. Failed cancellations are
 retried when that incident's delivery or recovery processing runs and its channel
 is configured and available, even after the window closes or escalation becomes
 eligible. An explicit maintenance hold on the Gateway returns before its delivery
@@ -1922,8 +1926,8 @@ name; the other words in angle brackets are filled in by the reporter.
 | `<account>: order <id> not acknowledged` | Class: capital-safety. urgent | [order lifecycle](order-lifecycle.md) |
 | `<account>: order <id> acknowledged` | Class: capital-safety. routine | [order lifecycle](order-lifecycle.md) |
 | `<host>: the server's clock failed its check` (the server's name, not an account's) | Class: capital-safety. urgent | this chapter, below, and [server](server.md), "The clock" |
-| `<host>: IB Gateway is logged out` (the server's name) | Class: capital-safety. urgent, repeated hourly | [server](server.md), "The Gateway is logged out" |
-| `<host>: <unit> failed` (the server's name and the failed unit's, such as `ti-adapter-boost.service`) | Class: operational (capital-safety for trading units near a session). urgent | this chapter, below, and [server](server.md), "A failed unit"; the engine's and adapter's chapters have a row for their own unit |
+| `<host>: IB Gateway is logged out` (the server's name) | Class: operational. urgent, reminded hourly once escalated | [server](server.md), "The Gateway is logged out" |
+| `<host>: <unit> failed` (the server's name and the failed unit's, such as `ti-adapter-boost.service`) | Class: operational; capital-safety for an engine, adapter or Gateway failure near a session. urgent | this chapter, below, and [server](server.md), "A failed unit"; the engine's and adapter's chapters have a row for their own unit |
 | `<account>: daily summary <date>` | routine | this chapter, "What the summary shows, and its limits" |
 
 **Why an order was refused.** The reason in `order refused (<reason>)`:

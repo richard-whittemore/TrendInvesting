@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 // receiptMargin is how long past an emergency's expire time its receipt is
@@ -47,25 +49,33 @@ func receiptChannel(channel, receipt string, at time.Time) string {
 }
 
 // keepReceipt records, in seen, the receipt of the emergency the send of
-// alert key just opened on s, if it opened one.
-func keepReceipt(s sender, key string, seen map[string]bool, at time.Time) {
+// alert just opened on s, with its send-time class (alerts-and-dashboard.md,
+// "Paging invariant"). Calendar uncertainty preserves capital-safety.
+func keepReceipt(s sender, a report.Alert, seen map[string]bool, at time.Time) {
 	r, ok := s.(receipter)
 	if !ok {
 		return
 	}
 	if receipt := r.takeReceipt(); receipt != "" {
-		seen[channelKey(receiptChannel(s.name(), receipt, at), key)] = true
+		near, err := report.SessionNear(at)
+		if err != nil {
+			near = true
+		}
+		ch := receiptChannel(s.name(), receipt, at) + ":" + string(a.Class(near))
+		seen[channelKey(ch, a.Key)] = true
 	}
 }
 
 // queueReceiptCancellations snapshots the emergencies a recovery or quiet route
 // must cancel (ADR 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Each marker owns
 // one receipt and alert key; a later incident's receipts cannot join its retry.
-// An unavailable channel retains the same snapshot until it can cancel.
-func queueReceiptCancellations(seen map[string]bool, key, channel string) {
+// An unavailable channel retains the same snapshot until it can cancel. Quiet
+// windows select only receipts recorded as operational; legacy unclassified
+// receipts and capital-safety receipts require recovery.
+func queueReceiptCancellations(seen map[string]bool, key, channel string, operationalOnly bool) {
 	for k := range seen {
 		ch, alert, _ := strings.Cut(k, "|")
-		if alert == key && strings.HasPrefix(ch, "receipt:"+channel) {
+		if alert == key && strings.HasPrefix(ch, "receipt:"+channel) && (!operationalOnly || strings.HasSuffix(ch, ":"+string(report.Operational))) {
 			seen["cancel:"+k] = true
 		}
 	}
@@ -75,7 +85,7 @@ func queueReceiptCancellations(seen map[string]bool, key, channel string) {
 // including unavailable channels, then attempts available senders (ADR 0019,
 // "Alerting"). Retry paths use retryReceiptCancellations without a new snapshot.
 func cancelReceipts(senders []sender, key string, seen map[string]bool, now time.Time) ([]string, error) {
-	queueReceiptCancellations(seen, key, "")
+	queueReceiptCancellations(seen, key, "", false)
 	return retryReceiptCancellations(senders, key, seen, now)
 }
 
@@ -144,6 +154,7 @@ func discardUnscopedCancellations(seen map[string]bool) bool {
 // check pages only a drift that persists over its consecutive checks, and a
 // clock put right between two checks passes the next one unremarked.
 func receiptOver(stamp string, life time.Duration, now time.Time) bool {
+	stamp, _, _ = strings.Cut(stamp, ":")
 	unix, err := strconv.ParseInt(stamp, 10, 64)
 	return err == nil && now.After(time.Unix(unix, 0).Add(life+receiptMargin))
 }

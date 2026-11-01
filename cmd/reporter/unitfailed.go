@@ -384,7 +384,7 @@ func remindRun(u *unitState, unit, episode, run string, senders []sender, at tim
 	var policyErr error
 	if p := policyOf(policies); p != nil {
 		a := report.Alert{Key: key, Kind: report.KindUnitFailed, Repeat: true}
-		senders, a, interval, policyErr = p.route(senders, a, u.sent, at, interval)
+		senders, a, interval, _, policyErr = p.route(senders, a, u.sent, at, interval)
 		if !a.Repeat {
 			return errors.Join(policyErr, u.record())
 		}
@@ -430,7 +430,7 @@ func remindRun(u *unitState, unit, episode, run string, senders []sender, at tim
 				}
 			} else {
 				if err = s.send(a, 0); err == nil {
-					keepReceipt(s, a.Key, u.seen, at)
+					keepReceipt(s, a, u.seen, at)
 				}
 			}
 			if err != nil {

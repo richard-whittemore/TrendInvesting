@@ -18,7 +18,7 @@ func TestPagingReminderNeverShortens(t *testing.T) {
 	for _, at := range []time.Time{time.Date(2026, 10, 31, 18, 0, 0, 0, time.UTC), time.Date(2026, 10, 30, 14, 0, 0, 0, time.UTC)} {
 		for _, delay := range []time.Duration{0, 30 * time.Minute, 2 * time.Hour} {
 			p := &pagingPolicy{after: delay}
-			_, _, every, err := p.route(nil, report.Alert{Key: "synthetic", Kind: report.KindGatewayLoggedOut}, map[string]time.Time{}, at, time.Hour)
+			_, _, every, _, err := p.route(nil, report.Alert{Key: "synthetic", Kind: report.KindGatewayLoggedOut}, map[string]time.Time{}, at, time.Hour)
 			want := time.Hour
 			if delay > want {
 				want = delay

@@ -55,3 +55,21 @@ func TestPagingServerManualUsesSessionDefault(t *testing.T) {
 		t.Error("server manual still promises duration default instead of session")
 	}
 }
+
+func TestPagingManualReceiptClassAndChapterIndex(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "manual", "alerts-and-dashboard.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	for _, phrase := range []string{
+		"On entry to a quiet IBKR window, the reporter cancels only outstanding Pushover emergencies that were operational when sent; on recovery, it cancels all outstanding emergencies for that incident.",
+		"The class is recorded with each receipt at send time; a capital-safety receipt is never cancelled except on recovery.",
+		"| `<host>: IB Gateway is logged out` (the server's name) | Class: operational. urgent, reminded hourly once escalated |",
+		"| `<host>: <unit> failed` (the server's name and the failed unit's, such as `ti-adapter-boost.service`) | Class: operational; capital-safety for an engine, adapter or Gateway failure near a session. urgent |",
+	} {
+		if !strings.Contains(text, phrase) {
+			t.Errorf("manual missing receipt/class contract: %s", phrase)
+		}
+	}
+}

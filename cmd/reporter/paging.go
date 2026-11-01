@@ -73,12 +73,12 @@ func policyOf(policies []*pagingPolicy) *pagingPolicy {
 	return nil
 }
 
-// route returns the eligible channels and reminder period. The delay begins
+// route returns the eligible channels, reminder period and quiet-window state. The delay begins
 // at observation, or at the end of the last quiet window, never at delivery.
 // Only caller-observed open incidents reach here; recovery forgets their clock.
-func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]time.Time, now time.Time, every time.Duration) ([]sender, report.Alert, time.Duration, error) {
+func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]time.Time, now time.Time, every time.Duration) ([]sender, report.Alert, time.Duration, bool, error) {
 	if p == nil || p.bypass || a.Kind == kindSummary {
-		return senders, a, every, nil
+		return senders, a, every, false, nil
 	}
 	near, err := report.SessionNear(now)
 	if err != nil {
@@ -88,7 +88,7 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 		sent[channelKey("observed", a.Key)] = now
 	}
 	if a.Class(near) == report.CapitalSafety {
-		return senders, a, every, err
+		return senders, a, every, false, err
 	}
 	if p.after > every {
 		every = p.after
@@ -108,7 +108,7 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 	if a.Kind == report.KindGatewayResetWait {
 		loc, e := loadNewYork()
 		if e != nil {
-			return senders, a, every, e
+			return senders, a, every, false, e
 		}
 		if end := resetNightEnd(now.In(loc)); end.After(until) {
 			until = end
@@ -139,28 +139,20 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 	if quiet {
 		a.Repeat = false
 	}
-	return allowed, a, every, err
+	return allowed, a, every, quiet, err
 }
 
-// routeAndCancel stops outstanding emergencies when routing enters a quiet
+// routeAndCancel stops emergencies sent as operational when routing enters a quiet
 // window (alerts-and-dashboard.md, "Paging invariant"). Callers persist seen
 // even when cancellation fails. Available senders retry only the requested
 // receipts whenever this route runs, even after eligibility returns (ADR 0019).
 // The Gateway explicit maintenance hold returns before routing.
 func (p *pagingPolicy) routeAndCancel(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, now time.Time, every time.Duration) ([]sender, report.Alert, time.Duration, error) {
-	allowed, routed, interval, err := p.route(senders, a, sent, now, every)
-	for _, s := range senders {
-		eligible := false
-		for _, next := range allowed {
-			if next.name() == s.name() {
-				eligible = true
-			}
-		}
-		if !eligible {
-			queueReceiptCancellations(seen, a.Key, s.name()+":")
-		}
-		_, cancelErr := retryReceiptCancellations([]sender{s}, a.Key, seen, now)
-		err = errors.Join(err, cancelErr)
+	allowed, routed, interval, quiet, err := p.route(senders, a, sent, now, every)
+	if quiet {
+		queueReceiptCancellations(seen, a.Key, "", true)
 	}
+	_, cancelErr := retryReceiptCancellations(senders, a.Key, seen, now)
+	err = errors.Join(err, cancelErr)
 	return allowed, routed, interval, err
 }

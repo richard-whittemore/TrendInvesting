@@ -517,7 +517,7 @@ func TestACancelIsDroppedOnceTheEmergencyHasExpiredAnyway(t *testing.T) {
 // receiptKey is the state-file key of a recorded receipt of the Pushover
 // emergency sent at the time, for the alert key.
 func receiptKey(receipt string, at time.Time, key string) string {
-	return channelKey(receiptChannel("pushover", receipt, at), key)
+	return channelKey(receiptChannel("pushover", receipt, at)+":"+string(report.CapitalSafety), key)
 }
 
 func TestEveryRunDropsReceiptsPastTheirExpiryWhateverTheAlert(t *testing.T) {

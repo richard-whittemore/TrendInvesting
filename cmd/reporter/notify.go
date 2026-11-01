@@ -308,7 +308,7 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 			failures = append(failures, fmt.Errorf("%s: %w", s.name(), err))
 			continue
 		}
-		keepReceipt(s, a.Key, seen, now)
+		keepReceipt(s, a, seen, now)
 		seen[key] = true
 		if a.Repeat || policyOf(policies) != nil {
 			sent[key] = now
