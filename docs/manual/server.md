@@ -819,7 +819,9 @@ engine. Units and their fixed pending paths must remain as provisioned.
 
 The reservation is `/var/lib/ti-gateway-heal/last-restart.json`, root-owned mode
 0600 in a root-owned 0700 directory directly under root-owned `/var/lib`. A shared lock serializes healer instances;
-the file and its directory are synced before the restart. A command failure or
+the file and its directory are synced before the restart. After systemctl returns,
+on success or failure, the healer saves the later of the reservation and completion
+times as `LastRestart`; the two-hour limit counts from that time. A command failure or
 a crash consumes the allowance rather than risking a duplicate. Never delete
 this state to force a retry. Each healer starts only its own adapter.
 Contending healers wait for the
@@ -845,6 +847,11 @@ Stopping an already failed adapter does not clear its failed state and is not
 this veto. The healer requires the same failed invocation at every re-check,
 including after a weekend window wait and immediately before starting the adapter.
 `reset-failed` is the only supported account-specific veto.
+
+A second failure of the same adapter during a healer's wait is not recovered
+automatically. Starting the already-waiting healer does not queue another run;
+the waiting run rejects the changed adapter invocation. That second failure
+still pages as an operational alert and requires owner recovery.
 
 The paper login has run unattended at every nightly and Sunday restart so far.
 A healer restart uses that same unattended login. If IBKR ever requires a phone
@@ -1317,7 +1324,7 @@ stop, not after two sessions of silence.
 | A page from Healthchecks (through Pushover) that your check `trend-investing-reporter` is down | The reporter has not finished a clean firing for 20 minutes (period 5 minutes plus 15 minutes' grace). Nothing on the server sent this page; it works even when the server is dead | Check the server is up and reachable over Tailscale (the dashboard, or `ssh`). If it is: `systemctl list-timers ti-reporter@boost.timer`, then `journalctl -u ti-reporter@boost -n 50` for the run's error. If the server is dead, start it from the Lightsail console, then read "After a reboot" |
 | The reporter's journal says "the heartbeat ping was not sent: ..." | The reporter's run is unaffected; it will ping again at the next firing. The reason is the kind of failure only (an address that is not an absolute URL, the service not reached or not answering in time, or the status it answered), never the address | If the pages from Healthchecks come anyway, check `TI_HEARTBEAT_URL` in `secrets.env` is the check's full ping address and that the server can reach the internet. A single line during a Healthchecks outage needs nothing |
 | No page from Healthchecks when you stop the timer (the test above) | The check is not wired: the address is missing or wrong, the period or grace is wrong, or the Pushover integration is not ticked on the check | Healthchecks' page for the check shows the last ping; fix the address, the 5-minute period, the 15-minute grace, or the integration |
-| A page from the server, titled with the unit's name and ending "failed", that a trading unit failed | The engine, the adapter or the reporter stopped; only the adapter's exit-3 Gateway remedy may trigger the bounded healer. Otherwise systemd does not restart them; or the data job failed, which its timer runs again at the next firing. See "A failed unit" below | Read the manual row the page names, then `journalctl -u <unit>`. To veto adapter healing, `sudo systemctl reset-failed <adapter>` (row `owner-stopped`), or `sudo systemctl stop 'ti-gateway-heal@<adapter unit>.service'`; stopping an already failed adapter alone is not a veto |
+| A page from the server, titled with the unit's name and ending "failed", that a trading unit failed | The engine, the adapter or the reporter stopped; only the adapter's exit-3 Gateway remedy may trigger the bounded healer. Otherwise systemd does not restart them; or the data job failed, which its timer runs again at the next firing. See "A failed unit" below | Read the manual row the page names, then `journalctl -u <unit>`. To veto adapter healing, `sudo systemctl reset-failed <adapter>` (row `owner-stopped`); stopping an already failed adapter alone is not a veto |
 | `provision.sh firewall` printed "SKIPPED firewall: Tailscale is not signed in yet" | The firewall is not changed, so the public door is still open | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh firewall` again |
 | The disk fills | An engine that cannot write its log stops deciding and releases nothing more (ADR 0027); the data job writes nothing; the reporter cannot save its state | Free space, then resume or start as `docs/runbooks/durable-log.md` says |
 | The server's clock drifts behind IBKR's | The engine counts the account reading as stale and blocks every sell (`stale-broker-snapshot`); the sale back to 98% is withheld and you are alerted to that. The reporter's own clock check pages you first, within 10 minutes of the drift ("The server's clock failed its check") | Run the clock check ("The clock", above); fix the time syncing (or, on the Mac mini, the Mac's automatic date and time), then wait for the next close |

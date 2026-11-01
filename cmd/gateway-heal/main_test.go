@@ -428,3 +428,36 @@ func TestGatewayUnitMutationTimeoutsAreOwnedBySystemd(t *testing.T) {
 		}
 	}
 }
+
+// Command diagnostics identify the failed evidence or action without unbounded
+// output (docs/manual/server.md, Gateway healer). Stand-ins only record calls.
+func TestExternalCommandFailureIncludesBoundedStderr(t *testing.T) {
+	for _, name := range []string{"systemctl", "journalctl"} {
+		for _, diagnostic := range []string{"  permission denied  ", strings.Repeat("x", 5000)} {
+			t.Run(name+"/"+diagnostic[:3], func(t *testing.T) {
+				dir := t.TempDir()
+				calls := filepath.Join(dir, "calls")
+				script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$HEAL_CALLS\"\nprintf '%s\\n' \"$HEAL_DIAGNOSTIC\" >&2\nexit 1\n"
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+				t.Setenv("HEAL_CALLS", calls)
+				t.Setenv("HEAL_DIAGNOSTIC", diagnostic)
+				args := []string{"show", gatewayheal.GatewayUnit}
+				if name == "journalctl" {
+					args = []string{"-u", gatewayheal.GatewayUnit}
+				}
+				err := executeCommand(context.Background(), name, args, io.Discard)
+				want := name + " " + strings.Join(args, " ") + ": exit status 1: " + strings.TrimSpace(diagnostic[:min(len(diagnostic), 4096)])
+				if err == nil || err.Error() != want {
+					t.Fatalf("error=%v, want %q", err, want)
+				}
+				raw, readErr := os.ReadFile(calls)
+				if readErr != nil || string(raw) != strings.Join(args, " ")+"\n" {
+					t.Fatalf("calls=%q err=%v", raw, readErr)
+				}
+			})
+		}
+	}
+}

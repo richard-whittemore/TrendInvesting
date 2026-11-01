@@ -107,12 +107,27 @@ func executeCommand(ctx context.Context, name string, args []string, out io.Writ
 	}
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "TZ=UTC", "SYSTEMD_COLORS=0")
 	cmd.Stdout = out
+	diagnostic := &boundedStderr{}
+	cmd.Stderr = diagnostic
 	// The command context reserves half the total bound for pipe drain.
 	// WaitDelay cannot extend the total command budget (server.md, Gateway healer).
 	if deadline, bounded := ctx.Deadline(); bounded {
 		cmd.WaitDelay = min(time.Second, time.Until(deadline))
 	}
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(diagnostic.buffer.String()))
+	}
+	return nil
+}
+
+// boundedStderr retains at most 4 KiB while draining all diagnostic output
+// so command failures remain diagnosable (server.md, Gateway healer).
+type boundedStderr struct{ buffer bytes.Buffer }
+
+func (w *boundedStderr) Write(p []byte) (int, error) {
+	n := min(len(p), 4096-w.buffer.Len())
+	_, _ = w.buffer.Write(p[:n])
+	return len(p), nil
 }
 
 // boundedOutput refuses oversized command properties or timestamped loss

@@ -309,8 +309,8 @@ func TestGatewayAlreadyRestartedStillRequiresFreshGates(t *testing.T) {
 				gateway.Started = r.loss.Add(-time.Second)
 				row = "same-incident"
 			case "owner", "replacement", "deadline", "window":
-				r.onLines = func(id string) {
-					if id != "new-login" {
+				r.onLog = func(line string) {
+					if line != "gateway-heal: row=already-restarted step=adapter-start" {
 						return
 					}
 					switch kind {
@@ -352,7 +352,7 @@ func TestGatewayAlreadyRestartedDoesNotNeedRelayExclusion(t *testing.T) {
 }
 
 // The mutation gates follow server.md's fresh-evidence invariant: both status
-// queries precede a fresh counter/schedule read, with the owner veto last.
+// queries precede a fresh counter/schedule read, then invocation login evidence.
 func TestActionCheckEvidenceOrder(t *testing.T) {
 	r := fixture()
 	var steps []string
@@ -364,7 +364,7 @@ func TestActionCheckEvidenceOrder(t *testing.T) {
 	if err != nil || row != "" {
 		t.Fatalf("row=%q err=%v", row, err)
 	}
-	want := []string{"journal", "status " + GatewayUnit, "read", "status " + AdapterUnits[0], "read"}
+	want := []string{"status " + GatewayUnit, "read", "status " + AdapterUnits[0], "read", "journal"}
 	if !reflect.DeepEqual(steps, want) {
 		t.Fatalf("evidence order=%v, want %v", steps, want)
 	}
@@ -391,4 +391,74 @@ func TestAdapterStatusCannotHideCounterOrScheduleChange(t *testing.T) {
 			assertSafetyTrace(t, r, append(eligibleRows("reserve-restart", "restart"), "gateway-heal: row="+row+" step=before-restart"), nil)
 		})
 	}
+}
+
+// A logout during the final status read withdraws permission for either
+// mutation (docs/manual/server.md, Gateway healer; ADR 0019, Alerting).
+func TestFinalAdapterStatusLogoutPreventsMutation(t *testing.T) {
+	for _, mutation := range []string{"restart", "start"} {
+		t.Run(mutation, func(t *testing.T) {
+			r := fixture()
+			if mutation == "start" {
+				r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.loss.Add(time.Second)}
+			}
+			gateway := r.statuses[GatewayUnit]
+			r.onStatus = func(unit string) {
+				if unit == AdapterUnits[0] && (mutation == "start" && r.seen["status"] > 0 || mutation == "restart" && !r.state.LastRestart.IsZero()) {
+					r.journals[gateway.Invocation] = append(r.journals[gateway.Invocation], "LOGGED_OUT")
+				}
+			}
+			assertRun(t, r, "logged-out")
+			if r.statuses[GatewayUnit] != gateway {
+				t.Fatal("logout changed systemd properties")
+			}
+		})
+	}
+}
+
+// The durable reservation survives failure, and the two-hour allowance starts
+// at the later reservation/completion time (docs/manual/server.md, Gateway healer).
+func TestRestartCompletionAdvancesReservation(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		for _, duration := range []time.Duration{time.Minute, -time.Minute} {
+			t.Run(fmt.Sprintf("failed=%v/duration=%s", failed, duration), func(t *testing.T) {
+				r := fixture()
+				reserved := r.at
+				if failed {
+					r.actErr = fmt.Errorf("synthetic restart failure")
+				}
+				r.onAct = func(action, _ string) {
+					if action == "restart" {
+						if r.state.LastRestart != reserved {
+							t.Fatal("missing pre-action reservation")
+						}
+						r.at = r.at.Add(duration)
+					}
+				}
+				err := r.run()
+				if (err != nil) != failed {
+					t.Fatalf("err=%v", err)
+				}
+				want := reserved
+				if duration > 0 {
+					want = reserved.Add(duration)
+				}
+				if r.state.LastRestart != want || r.state.Incident != "failed-run" {
+					t.Fatalf("state=%+v, want LastRestart=%s incident=failed-run", r.state, want)
+				}
+				if r.seen["save"] != 2 {
+					t.Fatalf("saves=%d, want reservation and completion", r.seen["save"])
+				}
+			})
+		}
+	}
+}
+
+func TestRestartCompletionSaveFailureStopsRecovery(t *testing.T) {
+	r := fixture()
+	r.failAt = map[string]int{"save": 2}
+	if err := r.run(); err == nil {
+		t.Fatal("completion save failure ignored")
+	}
+	assertSafetyTrace(t, r, eligibleRows("reserve-restart", "restart"), []string{"restart " + GatewayUnit})
 }

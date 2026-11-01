@@ -191,7 +191,14 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	if row != "" {
 		return h.say(row, "before-restart")
 	}
-	if err := ctl.Act("restart", GatewayUnit); err != nil {
+	restartErr := ctl.Act("restart", GatewayUnit)
+	// Keep the durable reservation and advance it after either command result;
+	// the two-hour limit uses the later time (server.md, Gateway healer).
+	completed := clock.Now()
+	if completed.Before(started) {
+		completed = started
+	}
+	if err := errors.Join(restartErr, store.Save(State{LastRestart: completed, Incident: failed.Invocation})); err != nil {
 		return err
 	}
 	restarted, err := ctl.Status(GatewayUnit)
@@ -277,16 +284,6 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	if gateway.Active != "active" || gateway.Invocation == "" {
 		return "logged-out", nil
 	}
-	lines, err := c.journal.Lines(GatewayUnit, gateway.Invocation)
-	if err != nil {
-		return "", err
-	}
-	if loginProblem(lines) {
-		return "login-problem", nil
-	}
-	if !LoggedIn(lines) {
-		return "logged-out", nil
-	}
 	current, err := c.ctl.Status(GatewayUnit)
 	if err != nil {
 		return "", err
@@ -312,7 +309,7 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	}
 	// Status queries may block while the login counter or the schedule
 	// changes, so both files are read again after every status query and
-	// checked here, immediately before the clock gates and the mutation.
+	// checked before the final login evidence and clock gates.
 	input, err = c.reader.Read()
 	if err != nil {
 		return "", err
@@ -320,7 +317,19 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	if len(input.Counter) != 0 {
 		return "login-problem", nil
 	}
-	// Status queries can cross a window too. Evaluate the clock last.
+	// Read invocation login evidence last: a logout during a blocking status
+	// query withdraws permission (ADR 0019, Alerting; server.md, Gateway healer).
+	lines, err := c.journal.Lines(GatewayUnit, gateway.Invocation)
+	if err != nil {
+		return "", err
+	}
+	if loginProblem(lines) {
+		return "login-problem", nil
+	}
+	if !LoggedIn(lines) {
+		return "logged-out", nil
+	}
+	// Evidence queries can cross a window too. Evaluate the clock last.
 	if !c.priorRestart.IsZero() && c.clock.Now().Sub(c.priorRestart) < 2*time.Hour {
 		return "rate-limit", nil
 	}
