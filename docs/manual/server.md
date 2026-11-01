@@ -848,6 +848,15 @@ this veto. The healer requires the same failed invocation at every re-check,
 including after a weekend window wait and immediately before starting the adapter.
 `reset-failed` is the only supported account-specific veto.
 
+**What the checks cannot close.** The healer reads its evidence (the Gateway's
+status and login lines, the adapter's status, the login counter and the
+schedule) one after another, and acts after the last read. Whichever is read
+first can change while the rest are read, and nothing can be read in the
+instant between the last read and the restart. Login safety does not rest on
+this: the Gateway's own start program counts and caps login attempts whatever
+the healer does, and the healer restarts only a Gateway its own journal showed
+logged in during the same check.
+
 A second failure of the same adapter during a healer's wait is not recovered
 automatically. Starting the already-waiting healer does not queue another run;
 the waiting run rejects the changed adapter invocation. That second failure
