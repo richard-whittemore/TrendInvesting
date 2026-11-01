@@ -74,6 +74,8 @@ func cancelReceipts(senders []sender, key string, seen map[string]bool, now time
 		if !ok {
 			continue
 		}
+		pending := channelKey("cancel:"+s.name(), key)
+		failed := false
 		prefix := "receipt:" + s.name() + ":"
 		for k := range seen {
 			ch, alert, found := strings.Cut(k, "|")
@@ -87,11 +89,16 @@ func cancelReceipts(senders []sender, key string, seen map[string]bool, now time
 				continue
 			}
 			if err := r.cancel(receipt); err != nil {
+				failed = true
+				seen[pending] = true
 				kept = append(kept, ch)
 				failures = append(failures, fmt.Errorf("%s: cancel the page of %s: %w", s.name(), key, err))
 				continue
 			}
 			delete(seen, k)
+		}
+		if !failed {
+			delete(seen, pending)
 		}
 	}
 	return kept, errors.Join(failures...)
@@ -140,10 +147,28 @@ func pruneReceipts(seen map[string]bool, sent map[string]time.Time, repeats map[
 			alerts[alert] = true
 		}
 	}
+	for k := range seen {
+		ch, alert, _ := strings.Cut(k, "|")
+		if channel, pending := strings.CutPrefix(ch, "cancel:"); pending && !hasReceipt(seen, channel, alert) {
+			delete(seen, k)
+		}
+	}
 	for alert := range alerts {
 		if !deliveredAnywhere(seen, alert) {
 			forgetAlert(alert, nil, seen, sent, repeats)
 		}
 	}
 	return len(alerts) > 0
+}
+
+// hasReceipt links pending cancellation bookkeeping to its emergency (ADR 0019,
+// "Alerting"). A marker alone must never keep a recovered incident open.
+func hasReceipt(seen map[string]bool, channel, alert string) bool {
+	for k := range seen {
+		ch, key, _ := strings.Cut(k, "|")
+		if key == alert && strings.HasPrefix(ch, "receipt:"+channel+":") {
+			return true
+		}
+	}
+	return false
 }

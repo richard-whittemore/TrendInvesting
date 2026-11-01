@@ -1102,10 +1102,10 @@ func TestAnOldUnitFilesMarkerFlagIsAcceptedAndIgnored(t *testing.T) {
 	}
 }
 
-func resolvesOf(r *relay) int {
+func resolvesOf(r *relay, keys ...string) int {
 	n := 0
 	for _, m := range r.to("events.pagerduty.test") {
-		if strings.Contains(m, `"event_action":"resolve"`) {
+		if strings.Contains(m, `"event_action":"resolve"`) && (len(keys) == 0 || strings.Contains(m, `"dedup_key":`+fmt.Sprintf("%q", keys[0]))) {
 			n++
 		}
 	}
@@ -1181,12 +1181,12 @@ func TestAFailedSampleBreaksTheQuietStreakAndKeepsTheOutageOpen(t *testing.T) {
 	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 25))
 	_ = os.Remove(filepath.Join(g.dir, "systemctl-fail"))
 	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 30)) // quiet 1 again, not 2
-	if resolvesOf(r) != 0 {
+	if resolvesOf(r, "gateway-logged-out:"+hostName()) != 0 {
 		t.Fatal("a failed sample did not break the streak, or let a journal login close the loop")
 	}
 	_ = gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 35)) // quiet 2
-	if resolvesOf(r) != 1 {
-		t.Fatalf("%d resolves after two good quiet firings, want 1", resolvesOf(r))
+	if resolvesOf(r, "gateway-logged-out:"+hostName()) != 1 {
+		t.Fatalf("%d resolves after two good quiet firings, want 1", resolvesOf(r, "gateway-logged-out:"+hostName()))
 	}
 }
 

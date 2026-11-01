@@ -207,3 +207,10 @@ func TestParseIBKRScheduleRefusesAWrongFieldType(t *testing.T) {
 		t.Fatal("days given as a string was accepted")
 	}
 }
+
+func TestAdapterSampleFaultCarriesHostSource(t *testing.T) {
+	a := AdapterSampleFault("synthetic-host", "ti-adapter-synthetic.service", "synthetic sample failure", time.Time{})
+	if a.AccountID != "synthetic-host" || a.Class(true) != Operational || a.Class(false) != Operational {
+		t.Fatalf("sampling fault needs a host source and operational class: %+v", a)
+	}
+}

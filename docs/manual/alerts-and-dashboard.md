@@ -57,7 +57,8 @@ a longer escalation period lengthens that interval. The escalation delay governs
 only the first Pushover. Resolution clears the incident's escalation clock.
 On entry to a quiet window or on recovery, the reporter cancels outstanding
 Pushover emergencies through the receipt cancel API. Failed cancellations are
-retried; a missing receipt cannot be cancelled and expires on Pushover's timer.
+retried on every later firing, even after the window closes or escalation becomes
+eligible, until successful or expired; a missing receipt cannot be cancelled and expires on Pushover's timer.
 
 A newest `gateway-start: reset wait: login refused at` line counts only from
 23:40 to the same night's first 01:00 ET, and only on the night it was written.
@@ -65,7 +66,11 @@ A newest `gateway-start: reset wait: login refused at` line counts only from
 waiting out IBKR's reset hour after a refused login; a refusal after 01:00 ET
 pages as a logout. This does not establish whether the password is correct.
 A connectivity loss counts only for an active adapter and only for journal lines
-newer than its last start. Otherwise the Gateway's own login state decides.
+newer than its last start. Each outstanding loss retains its adapter unit and
+process start; another adapter's obsolete or restored line cannot clear it.
+Even an empty adapter journal is sampled, so stopping that adapter ends its
+connectivity incident. A failed unit-state sample gets its own operational
+notice and leaves the journal evidence available for routing. Otherwise the Gateway's own login state decides.
 A logged-in Gateway with such 1100/2110 evidence and no later restoration gets
 a connectivity notice. Inside a scheduled window it follows the quiet rule;
 only if the Gateway is logged in and the loss outlasts its window does the
@@ -110,6 +115,7 @@ The outside Healthchecks heartbeat is capital-safety and is unchanged.
 | `<account>: order <client order ID> not acknowledged` | Class: capital-safety |
 | `<host>: IB Gateway reset wait` | Class: operational |
 | `<host>: IBKR connectivity lost` | Class: operational |
+| `<host>: cannot sample <unit>` | Class: operational |
 | `<account>: margin cushion <level>` | Class: capital-safety |
 | `<account>: sale back to 98% sent (<detail>)` | Class: capital-safety |
 | `<account>: sale back to 98% released, not sent (<detail>)` | Class: capital-safety |

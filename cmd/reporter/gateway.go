@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"syscall"
 	"time"
 
@@ -123,8 +124,9 @@ func (s gatewaySchedule) graceFrom(since, now time.Time) time.Time {
 // page and since when it has been seen logged out.
 type hostGateway struct {
 	delivered
-	Since  *time.Time  `json:"logged_out_since,omitempty"`
-	Notice report.Kind `json:"notice_kind,omitempty"`
+	Since  *time.Time             `json:"logged_out_since,omitempty"`
+	Notice report.Kind            `json:"notice_kind,omitempty"`
+	Links  map[string]adapterLoss `json:"adapter_losses,omitempty"`
 	// Resolving is set when the Gateway has recovered but a channel has not yet
 	// taken the resolution: the next firing retries it and does not read the
 	// receipts that remain as an outage still open.
@@ -141,6 +143,62 @@ type hostGateway struct {
 	// a record only, that the outage was seen and not paged inside it
 	// (maintenance.go).
 	Held *time.Time `json:"held_in_maintenance_until,omitempty"`
+}
+
+// adapterLoss owns a connectivity incident's first observation and process
+// generation (ADR 0019, "Alerting"). Other units cannot supply its recovery.
+type adapterLoss struct {
+	Since   time.Time `json:"since"`
+	Started time.Time `json:"started"`
+}
+
+// updateAdapterLosses applies each unit's evidence only to its own loss (ADR
+// 0019, "Alerting"; alerts-and-dashboard.md, "Paging invariant"). Silence never
+// resolves a loss; stopping or replacing its process invalidates its evidence.
+func (h *hostGateway) updateAdapterLosses(ev *gatewayEvidence, now time.Time) bool {
+	if ev.adapters == nil {
+		return false
+	}
+	if h.Links == nil {
+		h.Links = map[string]adapterLoss{}
+	}
+	// Previous-build state has no kind or ownership. A completed IBC login
+	// identifies an adapter-sourced outage, except one opened by the restart rule.
+	if h.Since != nil && len(h.Links) == 0 && ev.loggedIn && !h.RestartOnly && (h.Notice == "" || h.Notice == report.KindIBKRConnectivity) {
+		h.Notice = report.KindIBKRConnectivity
+		for unit, evidence := range ev.adapters {
+			if !evidence.previousLoss.IsZero() {
+				h.Links[unit] = adapterLoss{Since: *h.Since}
+			}
+		}
+		// When the old loss lines rotated away, ownership is unknown. Retain each
+		// configured candidate until its own recovery or process change is known.
+		if len(h.Links) == 0 {
+			for unit := range ev.adapters {
+				h.Links[unit] = adapterLoss{Since: *h.Since}
+			}
+		}
+	}
+	hadLoss := len(h.Links) > 0
+	for unit, evidence := range ev.adapters {
+		loss, exists := h.Links[unit]
+		if exists {
+			obsolete := evidence.sampleErr == nil && (!evidence.active || evidence.started.After(loss.Since) || !loss.Started.IsZero() && evidence.started.After(loss.Started))
+			if obsolete || !evidence.restored.Before(loss.Since) || !ev.recoveredAt.Before(loss.Since) {
+				delete(h.Links, unit)
+			}
+		}
+		if !evidence.lost.IsZero() {
+			if _, exists := h.Links[unit]; !exists {
+				h.Links[unit] = adapterLoss{Since: now, Started: evidence.started}
+			}
+		}
+	}
+	if len(h.Links) > 0 {
+		ev.out = true
+		ev.connectivity = ev.loggedIn || ev.silent && h.Notice == report.KindIBKRConnectivity
+	}
+	return hadLoss && len(h.Links) == 0 && !ev.silent
 }
 
 func loadHostGateway(path string) (hostGateway, error) {
@@ -229,20 +287,32 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Notice: h.Notice, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Notice: h.Notice, Links: h.Links, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
 		if err != nil {
 			return err
 		}
 		return writeAtomic(path, raw)
 	}
+	key := report.GatewayKey(host)
+	observed, escalation := sent[channelKey("observed", key)], sent[channelKey("escalation", key)]
 	if pruneReceipts(seen, sent, repeats, now) {
+		// Expiring an earlier receipt cannot erase an open incident's clocks
+		// (ADR 0019; alerts-and-dashboard.md, "Paging invariant").
+		if h.Since != nil {
+			if !observed.IsZero() {
+				sent[channelKey("observed", key)] = observed
+			}
+			if !escalation.IsZero() {
+				sent[channelKey("escalation", key)] = escalation
+			}
+		}
 		if err := record(); err != nil {
 			return err
 		}
 	}
-	key := report.GatewayKey(host)
 	// An open outage is closed only by a completed login or a restored link
-	// NEWER than its start. Silence in the journals, or events older than the
+	// NEWER than its start, or by invalidating the owning adapter's process
+	// evidence. Another adapter's events cannot recover its loss. Silence in the journals, or events older than the
 	// outage that remain once the evidence of it has rotated away, prove
 	// nothing; none is opened from them either.
 	// A pending resolution of an earlier incident is not an open outage, but a
@@ -251,7 +321,8 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	open := h.Since != nil || (deliveredAnywhere(seen, key) && !h.Resolving)
 	// An equal time counts as newer: the journal's times are to the
 	// microsecond, and a login in the same instant as the firing is a login.
-	obsoleteLink := h.Notice == report.KindIBKRConnectivity && ev.linkObsolete && !ev.silent
+	obsoleteLink := h.updateAdapterLosses(&ev, now)
+	out = out || ev.out
 	if !out && open && !obsoleteLink && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
 		out = true
 		ev.connectivity = h.Notice == report.KindIBKRConnectivity
@@ -261,6 +332,37 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 			h.Since = &t
 		}
 	}
+	// Sampling faults have their own operational incident; they never prevent
+	// the Gateway incident from routing (ADR 0019, "Alerting").
+	units := make([]string, 0, len(ev.adapters))
+	for unit := range ev.adapters {
+		units = append(units, unit)
+	}
+	slices.Sort(units)
+	for _, unit := range units {
+		evidence := ev.adapters[unit]
+		a := report.AdapterSampleFault(host, unit, "", now)
+		if evidence.sampleErr != nil {
+			a.Body += evidence.sampleErr.Error()
+			retErr = errors.Join(retErr, evidence.sampleErr, deliver(senders, a, seen, sent, repeats, now, gatewayRemindEvery, record, policies...))
+		} else {
+			if deliveredAnywhere(seen, a.Key) {
+				failed, resolveErr := resolveAll(senders, a.Key, seen, now)
+				keep := map[string]bool{}
+				for _, f := range setAside {
+					keep[f.channel] = f.channel == "pagerduty"
+				}
+				for _, ch := range failed {
+					keep[ch] = true
+				}
+				forgetAlert(a.Key, keep, seen, sent, repeats)
+				retErr = errors.Join(retErr, resolveErr)
+			}
+			delete(sent, channelKey("observed", a.Key))
+			delete(sent, channelKey("escalation", a.Key))
+		}
+	}
+
 	if !out {
 		// A Gateway that logged in again while a window held its outage is
 		// handled at the window's close, not before. The bookkeeping of that
@@ -270,7 +372,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 			retErr = errors.Join(retErr, closeGatewayHold(unitState, host, true, now, note))
 			h.Held = nil
 		}
-		h.Since, h.RestartOnly, h.Notice = nil, false, ""
+		h.Since, h.RestartOnly, h.Notice, h.Links = nil, false, "", nil
 		delete(sent, channelKey("escalation", key))
 		delete(sent, channelKey("observed", key))
 		if !deliveredAnywhere(seen, key) {
@@ -347,7 +449,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		// is still pending: the channel that never took that resolution holds a
 		// receipt for the old incident and would stay silent, so the receipts go
 		// now. Until here a recovery still retries the pending resolution.
-		forgetAlert(key, map[string]bool{}, seen, sent, repeats)
+		forgetAlert(key, map[string]bool{"observed": true, "escalation": true}, seen, sent, repeats)
 		h.Resolving = false
 	}
 	err = deliver(senders, a, seen, sent, repeats, now, gatewayRemindEvery, record, policies...)

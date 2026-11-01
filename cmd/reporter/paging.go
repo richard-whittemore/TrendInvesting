@@ -142,21 +142,20 @@ func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]t
 
 // routeAndCancel stops outstanding emergencies when routing enters a quiet
 // window (alerts-and-dashboard.md, "Paging invariant"). Callers persist seen
-// even when cancellation fails; failed receipts remain available for retry.
+// even when cancellation fails; pending cancels retry at every firing, including
+// after the window closes, until successful or the receipt expires (ADR 0019).
 func (p *pagingPolicy) routeAndCancel(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, now time.Time, every time.Duration) ([]sender, report.Alert, time.Duration, error) {
 	allowed, routed, interval, err := p.route(senders, a, sent, now, every)
-	if sent[channelKey("escalation", a.Key)].After(now) {
-		for _, s := range senders {
-			eligible := false
-			for _, next := range allowed {
-				if next.name() == s.name() {
-					eligible = true
-				}
+	for _, s := range senders {
+		eligible := false
+		for _, next := range allowed {
+			if next.name() == s.name() {
+				eligible = true
 			}
-			if !eligible {
-				_, cancelErr := cancelReceipts([]sender{s}, a.Key, seen, now)
-				err = errors.Join(err, cancelErr)
-			}
+		}
+		if !eligible || seen[channelKey("cancel:"+s.name(), a.Key)] {
+			_, cancelErr := cancelReceipts([]sender{s}, a.Key, seen, now)
+			err = errors.Join(err, cancelErr)
 		}
 	}
 	return allowed, routed, interval, err

@@ -31,7 +31,7 @@ func (a Alert) Class(near bool) Class {
 			return CapitalSafety
 		}
 		return Operational
-	case KindGatewayLoggedOut, KindIBKRConnectivity, KindGatewayResetWait, KindHistoryUnavailable, KindRestoredLogNewer:
+	case KindAdapterSampleFault, KindGatewayLoggedOut, KindIBKRConnectivity, KindGatewayResetWait, KindHistoryUnavailable, KindRestoredLogNewer:
 		return Operational
 	default:
 		return CapitalSafety
@@ -270,7 +270,7 @@ const (
 )
 
 // IBKRNotice selects the reset-wait kind when reset is true, otherwise connectivity
-// loss, per server.md, "The Gateway is logged out". Callers must establish the
+// loss (ADR 0019, "Alerting"; server.md, "The Gateway is logged out"). Callers must establish the
 // corresponding current journal evidence; all notices share GatewayKey(host).
 func IBKRNotice(host string, now time.Time, reset bool, said string) Alert {
 	kind := KindIBKRConnectivity
@@ -301,4 +301,16 @@ func (s IBKRSchedule) ClosedSince(from, now time.Time) time.Time {
 		}
 	}
 	return latest
+}
+
+// KindAdapterSampleFault is an operational failure to observe an adapter's unit
+// state, not evidence that the trading unit failed (ADR 0019, "Alerting").
+const KindAdapterSampleFault Kind = "adapter-sample-fault"
+
+// AdapterSampleFault reports a unit-specific observation fault (ADR 0019,
+// "Alerting"). Callers continue routing the journal evidence independently.
+func AdapterSampleFault(host, unit, said string, now time.Time) Alert {
+	return Alert{Key: "adapter-sample-fault:" + unit + ":" + host, Kind: KindAdapterSampleFault, Severity: Urgent, AccountID: host, At: now, Repeat: true,
+		Title: fmt.Sprintf("%s: cannot sample %s", host, unit),
+		Body:  "The reporter could not sample the adapter's unit state. Journal evidence is still checked; this does not establish that the adapter failed. Check systemctl access and the unit's state. " + said}
 }
