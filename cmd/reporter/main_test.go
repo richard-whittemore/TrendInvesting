@@ -113,7 +113,16 @@ func writeDurableLog(t *testing.T, dir string) string {
 	return path
 }
 
-func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+// env keeps existing delivery-mechanism tests on the owner's immediate mode.
+// Paging tests inject their own configuration to exercise the 30-minute default.
+func env(m map[string]string) func(string) string {
+	return func(k string) string {
+		if k == "TI_ESCALATE_AFTER" && m[k] == "" {
+			return "0"
+		}
+		return m[k]
+	}
+}
 
 func TestRunDeliversEachAlertOnceAcrossRuns(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}

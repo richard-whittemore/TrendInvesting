@@ -140,7 +140,7 @@ func gatewayPages(r *relay) int {
 	n := 0
 	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
 		for _, m := range r.to(host) {
-			if strings.Contains(m, "IB Gateway is logged out") && !strings.Contains(m, `"event_action":"resolve"`) {
+			if (strings.Contains(m, "IB Gateway is logged out") || strings.Contains(m, "IBKR connectivity lost")) && !strings.Contains(m, `"event_action":"resolve"`) {
 				n++
 			}
 		}
@@ -333,15 +333,15 @@ func TestAdapterEvidenceIsExaminedWhenIBCsJournalHasNoLoginEvent(t *testing.T) {
 	}
 }
 
-// The link must have been lost without a connection since, for 3 hours: lost
-// at 06:00, restored at 08:00 and lost again at 09:55 is a 5-minute loss.
-func TestAdapterLossCountsOnlyAsOneContinuousLossOfThreeHours(t *testing.T) {
+// Any current loss is an operational incident; a newer restoration closes it
+// (alerts-and-dashboard.md, Paging invariant).
+func TestAdapterLossPagesDuringSessionUntilRestored(t *testing.T) {
 	cases := map[string]struct {
 		lines []string
 		want  int
 	}{
-		"lost, restored, lost again": {[]string{stamp(tuesday(6, 0), linkLost), stamp(tuesday(8, 0), linkUp), stamp(tuesday(9, 55), linkLost)}, 0},
-		"lost for under 3h":          {[]string{stamp(tuesday(8, 31), linkLost)}, 0},
+		"lost, restored, lost again": {[]string{stamp(tuesday(6, 0), linkLost), stamp(tuesday(8, 0), linkUp), stamp(tuesday(9, 55), linkLost)}, 2},
+		"lost for under 3h":          {[]string{stamp(tuesday(8, 31), linkLost)}, 2},
 		"lost 3h and still lost":     {[]string{stamp(tuesday(6, 0), linkLost), stamp(tuesday(7, 0), linkLost)}, 2},
 		"restored since":             {[]string{stamp(tuesday(5, 0), linkLost), stamp(tuesday(9, 59), linkUp)}, 0},
 	}
@@ -580,7 +580,7 @@ func TestTheLossIsTimedFromTheFirstLossAfterTheNewestRestorationNotTheNewestLoss
 	}
 }
 
-func TestAReconciliationEndsALoss(t *testing.T) {
+func TestAReconciliationEndsALossButANewerLossPages(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	g := newStandInGateway(t)
 	g.adapter(stamp(tuesday(6, 0), linkLost), stamp(tuesday(8, 0), linkReconciled), stamp(tuesday(10, 55), linkLost))
@@ -590,8 +590,8 @@ func TestAReconciliationEndsALoss(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if gatewayPages(r) != 0 {
-		t.Fatalf("paged %d times for a loss that began at 10:55", gatewayPages(r))
+	if gatewayPages(r) != 2 {
+		t.Fatalf("paged %d times for a new loss at 10:55; want one per channel", gatewayPages(r))
 	}
 }
 
@@ -786,7 +786,7 @@ func TestANewOutageWhileAResolveIsPendingPagesEveryChannelAtOnce(t *testing.T) {
 	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
 		n := 0
 		for _, m := range f.to(host) {
-			if strings.Contains(m, "IB Gateway is logged out") && !strings.Contains(m, `"event_action":"resolve"`) {
+			if (strings.Contains(m, "IB Gateway is logged out") || strings.Contains(m, "IBKR connectivity lost")) && !strings.Contains(m, `"event_action":"resolve"`) {
 				n++
 			}
 		}

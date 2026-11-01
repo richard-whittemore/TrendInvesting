@@ -816,7 +816,34 @@ func TestEveryAlertTitleIsExplainedInExactlyOneRow(t *testing.T) {
 		t.Fatalf("found %d alert titles in internal/report; the reader of its titles is broken", len(titles))
 	}
 	chapters := readManual(t, root)
+	raw, err := os.ReadFile(filepath.Join(root, "docs", "manual", "alerts-and-dashboard.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, index, found := strings.Cut(string(raw), "## Alert class index\n")
+	if !found {
+		t.Fatal("missing alert class index")
+	}
+	index, _, _ = strings.Cut(index, "\n## ")
+	classIndex := chapter{name: "alert class index"}
+	for _, line := range strings.Split(index, "\n") {
+		if strings.HasPrefix(line, "| `") {
+			classIndex.rows = append(classIndex.rows, line)
+			if !alertRowHasClass(line) {
+				t.Errorf("alert row without a class: %s", line)
+			}
+		}
+	}
 	for _, title := range titles {
+		rows := matchedRows([]chapter{classIndex}, titleCell(title))
+		if len(rows) != 1 {
+			t.Errorf("alert %q needs exactly one class-index row; got %d", title, len(rows))
+		}
+		for _, row := range rows {
+			if !alertRowHasClass(row.row) {
+				t.Errorf("alert row without a class: %s", row.row)
+			}
+		}
 		if rows := rowsMatching(chapters, titleCell(title)); len(rows) != 1 {
 			t.Errorf("alert title %q (written as %s) begins %d \"What can go wrong\" rows %v; want exactly one",
 				title, titlePattern(title), len(rows), rows)
@@ -1204,5 +1231,21 @@ func alerts(account string) Alert {
 `
 	if _, problems := titlesIn(parseSource(t, src)); len(problems) != 1 || !strings.Contains(problems[0], "x.go:4") {
 		t.Errorf("problems %q; want one naming the literal's position", problems)
+	}
+}
+
+// alertRowHasClass enforces the paging invariant in alerts-and-dashboard.md.
+// The class must be attached to the alert row, not inherited from a heading.
+func alertRowHasClass(row string) bool {
+	return strings.Contains(row, "Class: capital-safety") || strings.Contains(row, "Class: operational")
+}
+func TestAnAlertRowWithoutAClassFails(t *testing.T) {
+	if alertRowHasClass("| `alert` | does something | read the capital-safety chapter |") {
+		t.Fatal("accepted a row without a class")
+	}
+	for _, class := range []string{"capital-safety", "operational"} {
+		if !alertRowHasClass("| `alert` | Class: " + class + ". Does something | Act |") {
+			t.Fatal("rejected class", class)
+		}
 	}
 }

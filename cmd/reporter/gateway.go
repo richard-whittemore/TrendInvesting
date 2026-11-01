@@ -123,7 +123,8 @@ func (s gatewaySchedule) graceFrom(since, now time.Time) time.Time {
 // page and since when it has been seen logged out.
 type hostGateway struct {
 	delivered
-	Since *time.Time `json:"logged_out_since,omitempty"`
+	Since  *time.Time  `json:"logged_out_since,omitempty"`
+	Notice report.Kind `json:"notice_kind,omitempty"`
 	// Resolving is set when the Gateway has recovered but a channel has not yet
 	// taken the resolution: the next firing retries it and does not read the
 	// receipts that remain as an outage still open.
@@ -164,7 +165,7 @@ func loadHostGateway(path string) (hostGateway, error) {
 // seen in; it pages once the time passes gatewayPagesAfter outside a window,
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
-func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, window func() time.Time, unitState string, note func(string), senders []sender, setAside []channelFault, clock func() time.Time) (retErr error) {
+func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, window func() time.Time, unitState string, note func(string), senders []sender, setAside []channelFault, clock func() time.Time, policies ...*pagingPolicy) (retErr error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -228,7 +229,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Notice: h.Notice, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
 		if err != nil {
 			return err
 		}
@@ -252,7 +253,8 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	// microsecond, and a login in the same instant as the firing is a login.
 	if !out && open && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
 		out = true
-		said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as logged out. " + said
+		ev.connectivity = h.Notice == report.KindIBKRConnectivity
+		said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as unavailable. " + said
 		if h.Since == nil {
 			t := now
 			h.Since = &t
@@ -267,7 +269,9 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 			retErr = errors.Join(retErr, closeGatewayHold(unitState, host, true, now, note))
 			h.Held = nil
 		}
-		h.Since, h.RestartOnly = nil, false
+		h.Since, h.RestartOnly, h.Notice = nil, false, ""
+		delete(sent, channelKey("escalation", key))
+		delete(sent, channelKey("observed", key))
 		if !deliveredAnywhere(seen, key) {
 			h.Resolving = false
 			return errors.Join(retErr, record())
@@ -283,6 +287,15 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		forgetAlert(key, keep, seen, sent, repeats)
 		h.Resolving = deliveredAnywhere(seen, key)
 		return errors.Join(retErr, resolveErr, record())
+	}
+	if ev.out {
+		h.Notice = ""
+		if ev.connectivity {
+			h.Notice = report.KindIBKRConnectivity
+		}
+		if ev.resetWait {
+			h.Notice = report.KindGatewayResetWait
+		}
 	}
 	if h.Since == nil {
 		t := now
@@ -306,7 +319,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	}
 	// Past a window an outage not yet ten minutes old keeps its hold: if it
 	// logs in before it pages, the window's hold is handled and said then.
-	if sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter {
+	if !ev.resetWait && !ev.connectivity && (sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter) {
 		return errors.Join(retErr, record())
 	}
 	// It pages. The hold is forgotten only now, immediately before the page,
@@ -322,7 +335,11 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		forgetAlert(key, map[string]bool{}, seen, sent, repeats)
 		h.Resolving = false
 	}
-	err = deliver(senders, report.GatewayLoggedOutAlert(host, *h.Since, now, said), seen, sent, repeats, now, gatewayRemindEvery, record)
+	a := report.GatewayLoggedOutAlert(host, *h.Since, now, said)
+	if ev.resetWait || ev.connectivity {
+		a = report.IBKRNotice(host, now, ev.resetWait, said)
+	}
+	err = deliver(senders, a, seen, sent, repeats, now, gatewayRemindEvery, record, policies...)
 	return errors.Join(retErr, err, record())
 }
 

@@ -27,21 +27,14 @@ const (
 	gatewayUnit = "ti-gateway.service"
 	// gatewayJournalSince bounds how far back the journals are read.
 	gatewayJournalSince = "-14d"
-	// gatewayLinkLossAfter is how long an adapter's link to IBKR must have been
-	// lost, without one connection since, to count as the Gateway being logged
-	// out on its own evidence: IBKR's scheduled server resets and weekend
-	// maintenance drop the link for shorter spells while the Gateway is logged
-	// in, and a login failure shows in IBC's journal at once. A session dropped
-	// silently on IBKR's side with no IBC event therefore pages only after
-	// about this time plus gatewayPagesAfter.
-	gatewayLinkLossAfter = 3 * time.Hour
 )
 
 // gatewayEvidence is what the journals show: logged out (out), or that they
 // hold no login event at all (silent), or neither (logged in).
 type gatewayEvidence struct {
-	out, silent bool
-	said        string
+	out, silent             bool
+	resetWait, connectivity bool
+	said                    string
 	// recoveredAt is the time of the newest positive event the journals show:
 	// IBC's completed login when it is IBC's newest login event, or the
 	// adapter's restored link or reconciliation. An open outage is closed only
@@ -60,7 +53,7 @@ var (
 	// IBC" when it cannot, so a restart of the unit resets the login state
 	// until a new "Login has completed"; IBC's own login screen after its
 	// restart is "LoginState is LOGGED_OUT".
-	ibcEvent = regexp.MustCompile(`Unrecognized Username or Password|LoginState is LOGGED_OUT|Login has completed|login retries stopped|gateway-start: starting IBC|gateway-start: cannot start IBC`)
+	ibcEvent = regexp.MustCompile(`Unrecognized Username or Password|LoginState is LOGGED_OUT|Login has completed|login retries stopped|gateway-start:`)
 	// The adapter's link lines (adapter/ibkr/connection.py _report and
 	// loop.py): connectivity-lost is code 1100/2110; "connected reason=restored"
 	// is IBKR's restoration (1101/1102); "reconciled" is a successful read of the
@@ -133,6 +126,17 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		}
 		var reasons []string
 		var recovered time.Time
+		resetWait := false
+		for i := len(ibc) - 1; i >= 0; i-- {
+			if strings.Contains(ibc[i], "gateway-start:") {
+				loc, err := loadNewYork()
+				if err != nil {
+					return gatewayEvidence{}, err
+				}
+				resetWait = strings.Contains(ibc[i], "gateway-start: reset wait:") && now.In(loc).Hour() < 1
+				break
+			}
+		}
 		if n := len(ibc); n > 0 {
 			if strings.Contains(ibc[n-1], "Login has completed") {
 				at, err := lineTime(ibc[n-1])
@@ -140,10 +144,13 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 					return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
 				}
 				recovered = at
+				resetWait = false
 			} else {
 				reasons = append(reasons, "IBC's newest login event: "+ibc[n-1])
 			}
 		}
+		loggedOut := len(reasons) > 0
+		connectivity := false
 		for _, unit := range adapters {
 			lines, err := journalQuery(journalctl, unit, linkEvent)
 			if err != nil {
@@ -156,13 +163,14 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 			if restored.After(recovered) {
 				recovered = restored
 			}
-			if !since.IsZero() && now.Sub(since) >= gatewayLinkLossAfter {
-				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) with no restoration since, for over %s: %s", unit, gatewayLinkLossAfter, line))
+			if !since.IsZero() {
+				connectivity = !loggedOut
+				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) with no restoration since, for over %s: %s", unit, now.Sub(since), line))
 			}
 		}
 		switch {
 		case len(reasons) > 0:
-			return gatewayEvidence{out: true, said: "gateway: logged out: " + strings.Join(reasons, "; "), recoveredAt: recovered}, nil
+			return gatewayEvidence{out: true, resetWait: resetWait, connectivity: connectivity, said: strings.Join(reasons, "; "), recoveredAt: recovered}, nil
 		case len(ibc) == 0:
 			return gatewayEvidence{silent: true, said: "gateway: no login evidence: the ti-gateway journal holds no login event in the last 14 days", recoveredAt: recovered}, nil
 		}

@@ -185,6 +185,10 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 			failures = append(failures, secretsErr)
 		}
 	}
+	policy, policyErr := loadPagingPolicy(getenv)
+	if policyErr != nil {
+		failures = append(failures, policyErr)
+	}
 	bounded := *client
 	bounded.Timeout = *sendTimeout
 	senders, setAside, err := buildSenders(*channels, getenv, &bounded, out)
@@ -206,7 +210,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 		if handledRun(u, unit, run) {
 			return nil
 		}
-		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, at, time.Time{}, *repeat)
+		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, at, time.Time{}, *repeat, policy)
 	})
 	return errors.Join(append(failures, err)...)
 }
@@ -242,7 +246,7 @@ func failedInvocation(getenv func(string) string, systemctl, unit string, at tim
 // key. sampledAt is when the firing sampled systemd (zero for a hook, which
 // names its run itself): a run the sample named joins uncounted when a later
 // run was recorded at or after it, since that run is newer than the sample.
-func failedRun(u *unitState, unit, run, journalctl string, secrets []string, senders []sender, setAside []channelFault, at, sampledAt time.Time, every time.Duration) error {
+func failedRun(u *unitState, unit, run, journalctl string, secrets []string, senders []sender, setAside []channelFault, at, sampledAt time.Time, every time.Duration, policies ...*pagingPolicy) error {
 	var errs []error
 	// A run already resolved does not page again, whichever unit and however
 	// old the sample that names it (the Gateway is sampled by every instance,
@@ -272,25 +276,25 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 		run = ""
 	}
 	if episode == "" {
-		return errors.Join(append(errs, pageRun(u, unit, run, journalctl, secrets, senders, at, every))...)
+		return errors.Join(append(errs, pageRun(u, unit, run, journalctl, secrets, senders, at, every, policies...))...)
 	}
 	if episode == run {
 		// The unit is failed under the run that opened the episode: still
 		// the same failure, so a reminder falls due even though no later run
 		// was named.
-		errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every))
+		errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every, policies...))
 		if !remindsUnit(unit) {
 			return errors.Join(errs...)
 		}
-		return errors.Join(append(errs, remindRun(u, unit, episode, "", senders, at))...)
+		return errors.Join(append(errs, remindRun(u, unit, episode, "", senders, at, policies...))...)
 	}
 	// A channel that has not yet taken the episode's page is sent it first.
-	errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every))
+	errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every, policies...))
 	if !remindsUnit(unit) {
 		noteLaterRun(u, unit, episode, run, at)
 		return errors.Join(append(errs, u.record())...)
 	}
-	return errors.Join(append(errs, remindRun(u, unit, episode, run, senders, at))...)
+	return errors.Join(append(errs, remindRun(u, unit, episode, run, senders, at, policies...))...)
 }
 
 // remindsUnit is whether a failed unit is reminded hourly. The data job is
@@ -367,10 +371,19 @@ func noteLaterRun(u *unitState, unit, episode, run string, at time.Time) {
 // known, under the episode's key. A channel
 // whose reminder fails is retried at the next firing that finds the unit
 // still failed.
-func remindRun(u *unitState, unit, episode, run string, senders []sender, at time.Time) error {
+func remindRun(u *unitState, unit, episode, run string, senders []sender, at time.Time, policies ...*pagingPolicy) error {
 	key := report.UnitFailedKey(unit, episode)
 	noteLaterRun(u, unit, episode, run, at)
-	runs, since := 1+u.repeats[runsKey(key)], time.Time{}
+	interval := unitReminderInterval
+	var policyErr error
+	if p := policyOf(policies); p != nil {
+		a := report.Alert{Key: key, Kind: report.KindUnitFailed, Repeat: true}
+		senders, a, interval, policyErr = p.route(senders, a, u.sent, at, interval)
+		if !a.Repeat {
+			return errors.Join(policyErr, u.record())
+		}
+	}
+	runs, since := 1+u.repeats[runsKey(key)], u.sent[channelKey("observed", key)]
 	var due, echoes []sender
 	for _, s := range senders {
 		if _, echo := s.(echoOnly); echo {
@@ -388,11 +401,11 @@ func remindRun(u *unitState, unit, episode, run string, senders []sender, at tim
 		if last.IsZero() {
 			last = took
 		}
-		if at.Sub(last) >= unitReminderInterval {
+		if at.Sub(last) >= interval {
 			due = append(due, s)
 		}
 	}
-	var errs []error
+	errs := []error{policyErr}
 	if len(due) > 0 {
 		a := report.UnitStillFailedAlert(hostName(), unit, episode, since, runs, at)
 		for _, s := range echoes {
@@ -425,9 +438,9 @@ func remindRun(u *unitState, unit, episode, run string, senders []sender, at tim
 }
 
 // pageRun pages the failed run of unit on each channel that has not taken it.
-func pageRun(u *unitState, unit, invocation, journalctl string, secrets []string, senders []sender, at time.Time, every time.Duration) error {
+func pageRun(u *unitState, unit, invocation, journalctl string, secrets []string, senders []sender, at time.Time, every time.Duration, policies ...*pagingPolicy) error {
 	key := report.UnitFailedKey(unit, invocation)
-	if allTook(senders, key, u.seen) {
+	if policyOf(policies) == nil && allTook(senders, key, u.seen) {
 		return nil
 	}
 	a := report.UnitFailedAlert(hostName(), unit, invocation, unitReason(journalctl, unit, invocation, secrets), at)
@@ -442,7 +455,7 @@ func pageRun(u *unitState, unit, invocation, journalctl string, secrets []string
 		}
 		return u.record()
 	}
-	return deliver(senders, a, u.seen, u.sent, u.repeats, at, every, record)
+	return deliver(senders, a, u.seen, u.sent, u.repeats, at, every, record, policies...)
 }
 
 // unitReason is the failed run's own last journal line
@@ -604,7 +617,7 @@ func splitUnits(list string) []string {
 // the next firing), and every other error, including any failure to persist
 // the record, is hard and fails the firing (ADR 0019: delivery state is
 // durable).
-func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, window func() time.Time, current func(string) (unitSample, error), note func(string)) (soft, hard error) {
+func unitStep(path string, units, resolveOnly []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration, window func() time.Time, current func(string) (unitSample, error), note func(string), policies ...*pagingPolicy) (soft, hard error) {
 	var softErrs, hardErrs []error
 	err := withUnitState(path, at, func(u *unitState) error {
 		// Held records are a window's. Whether one holds a failed unit is asked
@@ -665,9 +678,9 @@ func unitStep(path string, units, resolveOnly []string, samples map[string]unitS
 				switch {
 				case resolves && handledRun(u, unit, sample.invocation):
 				case resolves:
-					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, time.Time{}, every))
+					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, time.Time{}, every, policies...))
 				default:
-					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every))
+					fail(failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every, policies...))
 				}
 				continue
 			}
@@ -794,6 +807,14 @@ func splitPersist(err error) (persist, other error) {
 func unitRecords(u *unitState, unit string) map[string]time.Time {
 	prefix := report.UnitFailedKeyPrefix(unit)
 	runs := map[string]time.Time{}
+	// Observation survives even if every channel failed or was held. Use its
+	// actual time, never the future window end (alerts-and-dashboard.md,
+	// "Paging invariant").
+	for k, at := range u.sent {
+		if ch, key, ok := strings.Cut(k, "|"); ok && ch == "observed" && strings.HasPrefix(key, prefix) {
+			runs[strings.TrimPrefix(key, prefix)] = at
+		}
+	}
 	for k, took := range u.seen {
 		_, key, ok := strings.Cut(k, "|")
 		if !took || !ok || !strings.HasPrefix(key, prefix) {

@@ -256,7 +256,18 @@ func channelKey(channel, alertKey string) string { return channel + "|" + alertK
 // channel can tell a repeat from the first delivery. After each success,
 // record saves the state, so a run stopped midway has saved every delivery
 // it made. The error joins every channel failure and every failed save.
-func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, every time.Duration, record func() error) error {
+func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, every time.Duration, record func() error, policies ...*pagingPolicy) error {
+	var policyErr error
+	if p := policyOf(policies); p != nil {
+		key := channelKey("escalation", a.Key)
+		before := sent[key]
+		observed := sent[channelKey("observed", a.Key)]
+		senders, a, every, policyErr = p.route(senders, a, sent, now, every)
+		if !before.Equal(sent[key]) || !observed.Equal(sent[channelKey("observed", a.Key)]) {
+			policyErr = errors.Join(policyErr, record())
+		}
+	}
+
 	var pending []sender
 	for _, s := range senders {
 		_, echo := s.(echoOnly)
@@ -275,12 +286,13 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 		}
 	}
 	if reaching == 0 {
-		return nil
+		return policyErr
 	}
 	// An issue tracker is sent the alert after every other channel, so a
 	// slow one never holds back a page (ADR 0019, "Alerting").
 	pending = trackersLast(pending)
 	var failures []error
+	failures = append(failures, policyErr)
 	for _, s := range pending {
 		key := channelKey(s.name(), a.Key)
 		repeat := 0
@@ -297,7 +309,7 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 		}
 		keepReceipt(s, a.Key, seen, now)
 		seen[key] = true
-		if a.Repeat {
+		if a.Repeat || policyOf(policies) != nil {
 			sent[key] = now
 		}
 		if repeat > 0 {
