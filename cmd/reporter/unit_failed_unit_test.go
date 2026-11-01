@@ -32,9 +32,18 @@ func directive(t *testing.T, path, section, key string) []string {
 // the reporter are never restarted by systemd (the reporter is fired by its
 // timer), so a failed one is paged by the hook with its own name.
 func TestEveryTradingUnitHandsItsFailureToTheHook(t *testing.T) {
-	for _, path := range []string{engineUnitPath, adapterUnitPath, reporterUnitPath, "../../deploy/systemd/ti-data.service", "../../deploy/systemd/ti-data@.service", "../../deploy/systemd/ti-flex@.service"} {
+	for _, path := range []string{engineUnitPath, reporterUnitPath, "../../deploy/systemd/ti-data.service", "../../deploy/systemd/ti-data@.service", "../../deploy/systemd/ti-flex@.service"} {
 		if got := directive(t, path, "[Unit]", "OnFailure"); len(got) != 1 || got[0] != "ti-unit-failed@%n.service" {
 			t.Errorf("%s: OnFailure = %v, want ti-unit-failed@%%n.service", path, got)
+		}
+	}
+	// An adapter also hands its failure to the Gateway healer, which acts only
+	// on the Gateway-restart remedy (docs/manual/server.md, "Gateway healer");
+	// the page is never replaced by it.
+	for _, path := range []string{adapterUnitPath, "../../deploy/systemd/ti-adapter@.service"} {
+		got := strings.Join(directive(t, path, "[Unit]", "OnFailure"), " ")
+		if got != "ti-unit-failed@%n.service ti-gateway-heal@%n.service" {
+			t.Errorf("%s: OnFailure = %q, want the failed-unit hook then the Gateway healer", path, got)
 		}
 	}
 	for _, path := range []string{engineUnitPath, adapterUnitPath} {
