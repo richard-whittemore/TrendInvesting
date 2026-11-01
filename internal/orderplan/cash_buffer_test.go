@@ -33,7 +33,8 @@ func TestCashBufferBudget(t *testing.T) {
 				{"below_reserve_skipped", 50, 0.01, 0, 100},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					budget, buffer := orderplan.BuyBudget(tc.cash, 10000, tc.fraction)
+					buffer := orderplan.CashBuffer(10000, tc.fraction)
+					budget := max(0, tc.cash-buffer) // the withholding's floor at zero
 					if budget != tc.wantBudget || buffer != tc.wantBuffer {
 						t.Errorf("budget/buffer = %v/%v; want %v/%v", budget, buffer, tc.wantBudget, tc.wantBuffer)
 					}

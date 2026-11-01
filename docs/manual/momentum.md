@@ -169,7 +169,7 @@ section 5; ADR 0026, point 2):
    with inclusive bounds **0–0.05**. Before scaling buys, subtract this
    reserve from available cash and floor the budget at zero. Worst-case
    limit-price costs, fees, rounding slack and proportional scaling then
-   apply as above. A zero budget records buys as skipped with a reason;
+   apply as in step 9 below. A zero budget records buys as skipped with a reason;
    the reserve never delays a risk-reducing sell. The target decision
    records the dollar amount as `cash_buffer`; earlier records without
    it mean zero (ADR 0026, owner decision of 2026-10-31).
@@ -198,8 +198,9 @@ Every planned order, Boost's and the IRAs', goes through the risk gate
 (`internal/risklimit`) before it can be released. The limits live outside
 the strategy so that a defect in a rule cannot break them (ADR 0026, point
 3). Each limit's value is in the account's configuration, under `limits`
-(or `execution.cash_buffer_fraction` for the cash buffer),
-and is part of its hash. Values are set so that **every order in the
+and is part of its hash. The cash buffer is not one of these limits: it
+shrinks the buy budget before the buys are planned (step 8), and the
+gate's cash check then applies to what is left. Values are set so that **every order in the
 backtests passes**; a value that refuses a backtested order is a
 configuration error.
 

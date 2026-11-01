@@ -367,7 +367,18 @@ func TestSendingIsEnabledOnlyInPaperUntilTheLimitedLiveGate(t *testing.T) {
 // ADR 0026, owner decision 2026-10-31: default only at configuration load;
 // recorded omissions retain their historical meaning during replay.
 func TestCashBufferConfigurationLoad(t *testing.T) {
-	var defaultHash string
+	// The omitted field's hash, computed here so no subtest depends on another.
+	base := boostConfiguration(t, momentumConfigPath)
+	base.Execution.CashBufferFraction = nil
+	baseRaw, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseComposed, err := composeTargetWeight("synthetic", baseRaw, "test", time.Date(2025, 1, 2, 21, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultHash := baseComposed.configurationHash
 	for _, tc := range []struct {
 		name, field string
 		want        float64
@@ -398,9 +409,6 @@ func TestCashBufferConfigurationLoad(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatal(err)
-			}
-			if tc.name == "default" {
-				defaultHash = c.configurationHash
 			}
 			if tc.name == "one_percent" && c.configurationHash != defaultHash {
 				t.Fatal("omitted and explicit default hash differently")

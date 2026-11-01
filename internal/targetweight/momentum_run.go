@@ -645,7 +645,7 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 		}
 	}
 	if p.Outcome == event.TargetsOutcomeDecided {
-		_, p.CashBuffer = orderplan.BuyBudget(r.cash(*r.snapshot), r.snapshot.NetLiquidation, r.exec.CashBuffer())
+		p.CashBuffer = orderplan.CashBuffer(r.snapshot.NetLiquidation, r.exec.CashBuffer())
 	}
 	id := decisionID(h.cfg.AccountID, end)
 	b.add(id, event.TargetsDecidedEventType, p.SchemaVersion(), p)
@@ -976,7 +976,7 @@ func (r *momentumRun) planBuys(b *emissions) {
 	// ADR 0026, owner decision 2026-10-31: reserve only when buys start,
 	// after proceeds and missing cash. Early clamping would lose the reserve
 	// shortfall when starting cash is below it. Sells never wait on this rule.
-	_, buffer := orderplan.BuyBudget(0, reb.snapshot.NetLiquidation, r.exec.CashBuffer())
+	buffer := orderplan.CashBuffer(reb.snapshot.NetLiquidation, r.exec.CashBuffer())
 	reb.budget.WithholdCashBuffer(buffer)
 	buys := slices.Clone(reb.buys)
 	for i := range buys {

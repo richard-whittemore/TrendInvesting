@@ -207,12 +207,13 @@ func BuyCost(o event.OrderPlannedPayload, maxFees float64) float64 {
 	return value
 }
 
-// BuyBudget withholds the IRA reserve before ScaleBuys (ADR 0026, owner
-// decision 2026-10-31). Inputs are validated cash, positive net liquidation
-// and a finite fraction in [0, 0.05]. Sells never consume this budget.
-func BuyBudget(cash, netLiquidation, fraction float64) (budget, buffer float64) {
-	buffer = float64(fraction * netLiquidation)
-	return max(0, cash-buffer), buffer
+// CashBuffer is the IRA reserve withheld from the buy budget before ScaleBuys
+// (ADR 0026, owner decision 2026-10-31): fraction × net liquidation. Inputs
+// are a positive net liquidation and a finite fraction in [0, 0.05]; the
+// budget's own floor at zero is applied where the reserve is withheld.
+// Sells never consume it.
+func CashBuffer(netLiquidation, fraction float64) float64 {
+	return fraction * netLiquidation
 }
 
 // ScaleBuys fits buys to budget (ADR 0026, point 2, "Scaling"): when their
