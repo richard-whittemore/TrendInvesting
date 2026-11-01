@@ -631,13 +631,28 @@ install_adapter_settings() {
   done
 }
 
+# Keep the relay lock inode across upgrades: the healer flocks it read-only
+# under its sandbox (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
+install_adapter_lock() {
+  local path=$1
+  if test ! -e "$path" && test ! -L "$path"; then
+    (umask 077; set -C; : >"$path") || return 1
+  fi
+  if test -L "$path" || test ! -f "$path"; then
+    log "refusing nonregular adapter lock: $path"
+    return 1
+  fi
+  chown ti-trader:ti-trader "$path"
+  chmod 0600 "$path"
+}
+
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
   log "directories and config"
   # Root-only recovery accounting survives Gateway restarts; never overwrite
   # its state on upgrades (docs/manual/server.md, Gateway healer).
-  install -d -o root -g root -m 0700 /var/lib/ti-gateway/heal
+  install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/
   install -m 0755 "$here"/ira-replay.sh "$here"/ira-replay.py /usr/local/libexec/trend-investing/
@@ -711,6 +726,7 @@ CONF
     # can (ADR 0026, kill-switch amendment; docs/manual/operator.md).
     install -d -o ti-operator -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
+    install_adapter_lock "/var/lib/trend-investing/adapters/$a/pending.json.lock"
     # The Flex reader's ledger of cash movements and its status file
     # (ti-flex@<instance>.service; docs/manual/reconciliation.md).
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/flex/$a"

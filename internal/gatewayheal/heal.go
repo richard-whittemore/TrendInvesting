@@ -25,9 +25,9 @@ var AdapterUnits = []string{"ti-adapter-boost.service", "ti-adapter@trad-ira.ser
 type Status struct {
 	Active, Invocation string
 	Code, Exit         int
-	Finished           time.Time
+	Finished, Started  time.Time
 }
-type Inputs struct{ Schedule, Counter []byte }
+type Inputs struct{ Schedule, Counter, GatewayEnv []byte }
 type State struct {
 	LastRestart time.Time `json:"last_restart"`
 	Incident    string    `json:"incident"`
@@ -43,6 +43,7 @@ type Store interface {
 }
 type Journal interface {
 	Lines(unit, invocation string) ([]string, error)
+	Loss(unit, invocation string) (time.Time, error)
 }
 type Systemctl interface {
 	Status(string) (Status, error)
@@ -78,20 +79,14 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	if err != nil {
 		return err
 	}
-	if failed.Active != "failed" || failed.Code != 1 || failed.Exit != 3 || failed.Invocation == "" || failed.Finished.IsZero() {
+	if !eligibleFailure(failed) {
 		return h.say("other-exit", "no-action")
 	}
 	lines, err := journal.Lines(unit, failed.Invocation)
 	if err != nil {
 		return err
 	}
-	found := false
-	for _, line := range lines {
-		if strings.TrimSpace(line) == Remedy {
-			found = true
-		}
-	}
-	if !found {
+	if !hasRemedy(lines) {
 		return h.say("no-remedy", "no-action")
 	}
 	prior, err := store.Load()
@@ -108,7 +103,7 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	if err != nil {
 		return err
 	}
-	end, err := WindowEnd(input.Schedule, clock.Now())
+	end, err := input.windowEnd(clock.Now())
 	if err != nil {
 		return err
 	}
@@ -120,13 +115,11 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 			return err
 		}
 	}
-	// Re-read every mutable gate after waiting and again under relay exclusion.
 	release, err := guard.Acquire()
 	if errors.Is(err, ErrOrderBusy) {
 		return h.say("order-busy", "no-action")
 	}
 	if err != nil {
-		// Fail closed, and say why: a fault is not a busy order.
 		return h.say("guard-unreadable", "no-action: "+strings.ReplaceAll(err.Error(), "\n", " "))
 	}
 	defer func() {
@@ -134,55 +127,32 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 			release()
 		}
 	}()
-	current, err := ctl.Status(unit)
-	if err != nil {
-		return err
-	}
-	if current != failed {
-		return h.say("same-incident", "adapter-changed")
-	}
-	input, err = reader.Read()
-	if err != nil {
-		return err
-	}
-	end, err = WindowEnd(input.Schedule, clock.Now())
-	if err != nil {
-		return err
-	}
-	if !end.IsZero() {
-		return h.say("window", "still-blocked-after-recheck")
-	}
 	gateway, err := ctl.Status(GatewayUnit)
 	if err != nil {
 		return err
 	}
-	lines, err = journal.Lines(GatewayUnit, gateway.Invocation)
+	checks := actionChecks{clock: clock, reader: reader, journal: journal, ctl: ctl, priorRestart: prior.LastRestart}
+	row, err := checks.check(unit, failed, gateway)
 	if err != nil {
 		return err
 	}
-	if len(input.Counter) != 0 || loginProblem(lines) {
-		return h.say("login-problem", "no-action")
+	if row != "" {
+		return h.say(row, "no-action")
 	}
-	if gateway.Active != "active" || gateway.Invocation == "" || !LoggedIn(lines) {
-		return h.say("logged-out", "no-action")
-	}
-	input, err = reader.Read()
+	loss, err := journal.Loss(unit, failed.Invocation)
 	if err != nil {
 		return err
 	}
-	if len(input.Counter) != 0 {
-		return h.say("login-problem", "before-restart")
+	if loss.IsZero() || !failed.Finished.After(loss) {
+		return h.say("no-remedy", "missing-incident-loss")
 	}
 	started := clock.Now()
 	if !prior.LastRestart.IsZero() && started.Sub(prior.LastRestart) < 2*time.Hour {
 		return h.say("rate-limit", "no-action")
 	}
-	end, err = WindowEnd(input.Schedule, started)
-	if err != nil {
-		return err
-	}
-	if !end.IsZero() {
-		return h.say("window", "no-action")
+	checks.deadline = started.Add(10 * time.Minute)
+	if bounded, ok := ctl.(interface{ SetDeadline(time.Time) }); ok {
+		bounded.SetDeadline(checks.deadline)
 	}
 	if err := h.say("eligible", "reserve-restart"); err != nil {
 		return err
@@ -193,69 +163,198 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	if err := h.say("eligible", "restart"); err != nil {
 		return err
 	}
+	// Durable accounting and audit output may block. Re-read the gates after
+	// both, immediately before mutation (server.md, Gateway healer invariant).
+	row, err = checks.check(unit, failed, gateway)
+	if err != nil {
+		return err
+	}
+	if row != "" {
+		return h.say(row, "before-restart")
+	}
 	if err := ctl.Act("restart", GatewayUnit); err != nil {
 		return err
+	}
+	restarted, err := ctl.Status(GatewayUnit)
+	if err != nil {
+		return err
+	}
+	if restarted.Invocation == "" || restarted.Invocation == gateway.Invocation || restarted.Started.Before(started.Truncate(time.Second)) {
+		return h.say("logged-out", "restart-identity-unconfirmed")
 	}
 	if err := h.say("eligible", "wait-login"); err != nil {
 		return err
 	}
-	for clock.Now().Sub(started) < 10*time.Minute {
-		current, err = ctl.Status(GatewayUnit)
+	for clock.Now().Before(checks.deadline) {
+		current, err := ctl.Status(GatewayUnit)
 		if err != nil {
 			return err
 		}
-		if current.Invocation != "" && current.Invocation != gateway.Invocation {
-			lines, err = journal.Lines(GatewayUnit, current.Invocation)
-			if err != nil {
+		if current.Invocation != restarted.Invocation || current.Started != restarted.Started {
+			return h.say("logged-out", "gateway-changed")
+		}
+		lines, err := journal.Lines(GatewayUnit, restarted.Invocation)
+		if err != nil {
+			return err
+		}
+		if !clock.Now().Before(checks.deadline) {
+			break
+		}
+		if loginProblem(lines) {
+			return h.say("login-problem", "after-restart")
+		}
+		input, err = reader.Read()
+		if err != nil {
+			return err
+		}
+		// gateway-start settles its provisional count before forwarding accepted
+		// login output. A lagging observation never authorizes a start; poll within
+		// the same deadline (server.md, Gateway healer; gateway-start main.go).
+		if current.Active == "active" && LoggedIn(lines) && len(input.Counter) == 0 {
+			if err := h.say("eligible", "login-completed"); err != nil {
 				return err
 			}
-			if clock.Now().Sub(started) >= 10*time.Minute {
-				return h.say("login-timeout", "stop-existing-page-stands")
-			}
-			if current.Active == "active" && LoggedIn(lines) && !loginProblem(lines) {
-				if err := h.say("eligible", "login-completed"); err != nil {
-					return err
-				}
-				// A slow login can cross into a new window. It cannot authorize an
-				// adapter start in that window (server.md, Gateway healer invariant).
-				input, err = reader.Read()
-				if err != nil {
-					return err
-				}
-				end, err = WindowEnd(input.Schedule, clock.Now())
-				if err != nil {
-					return err
-				}
-				if !end.IsZero() {
-					return h.say("window", "login-crossed-window")
-				}
-				if len(input.Counter) != 0 {
-					return h.say("login-problem", "after-restart")
-				}
-				current, err = ctl.Status(unit)
-				if err != nil {
-					return err
-				}
-				if current != failed {
-					return h.say("same-incident", "adapter-changed")
-				}
-				if clock.Now().Sub(started) >= 10*time.Minute {
-					return h.say("login-timeout", "stop-existing-page-stands")
-				}
-				release()
-				release = nil
-				if err := h.say("eligible", "adapter-start"); err != nil {
-					return err
-				}
-				return ctl.Act("start", unit)
-			}
+			release()
+			release = nil
+			checks.priorRestart = time.Time{}
+			return checks.startAdapters(h, unit, failed, restarted, loss)
 		}
-		remaining := 10*time.Minute - clock.Now().Sub(started)
+		remaining := checks.deadline.Sub(clock.Now())
+		if remaining <= 0 {
+			break
+		}
 		if err := clock.Wait(min(5*time.Second, remaining)); err != nil {
 			return err
 		}
 	}
 	return h.say("login-timeout", "stop-existing-page-stands")
+}
+
+func eligibleFailure(s Status) bool {
+	return s.Active == "failed" && s.Code == 1 && s.Exit == 3 && s.Invocation != "" && !s.Finished.IsZero()
+}
+func hasRemedy(lines []string) bool {
+	for _, line := range lines {
+		if strings.TrimSpace(line) == Remedy {
+			return true
+		}
+	}
+	return false
+}
+
+type actionChecks struct {
+	clock        Clock
+	reader       Reader
+	journal      Journal
+	ctl          Systemctl
+	deadline     time.Time
+	priorRestart time.Time
+}
+
+// check refreshes the evidence and identities for each named mutation. No
+// durable save or audit write may intervene before the systemctl action
+// (server.md, Gateway healer; ADR 0026 point 8).
+func (c actionChecks) check(unit string, failed, gateway Status) (string, error) {
+	if gateway.Active != "active" || gateway.Invocation == "" {
+		return "logged-out", nil
+	}
+	lines, err := c.journal.Lines(GatewayUnit, gateway.Invocation)
+	if err != nil {
+		return "", err
+	}
+	if loginProblem(lines) {
+		return "login-problem", nil
+	}
+	if !LoggedIn(lines) {
+		return "logged-out", nil
+	}
+	input, err := c.reader.Read()
+	if err != nil {
+		return "", err
+	}
+	if len(input.Counter) != 0 {
+		return "login-problem", nil
+	}
+	current, err := c.ctl.Status(unit)
+	if err != nil {
+		return "", err
+	}
+	if current.Active != "failed" || current != failed {
+		return "owner-stopped", nil
+	}
+	current, err = c.ctl.Status(GatewayUnit)
+	if err != nil {
+		return "", err
+	}
+	if current != gateway {
+		return "logged-out", nil
+	}
+	// Status queries may block while a counter or schedule changes.
+	input, err = c.reader.Read()
+	if err != nil {
+		return "", err
+	}
+	// Status queries can cross a window too. Evaluate the clock last.
+	if !c.priorRestart.IsZero() && c.clock.Now().Sub(c.priorRestart) < 2*time.Hour {
+		return "rate-limit", nil
+	}
+	if !c.deadline.IsZero() && !c.clock.Now().Before(c.deadline) {
+		return "login-timeout", nil
+	}
+	end, err := input.windowEnd(c.clock.Now())
+	if err != nil {
+		return "", err
+	}
+	if !end.IsZero() {
+		return "window", nil
+	}
+	if len(input.Counter) != 0 {
+		return "login-problem", nil
+	}
+	return "", nil
+}
+
+func (c actionChecks) startAdapters(h healer, trigger string, failed, gateway Status, loss time.Time) error {
+	for _, unit := range AdapterUnits {
+		candidate := failed
+		if unit != trigger {
+			var err error
+			candidate, err = c.ctl.Status(unit)
+			if err != nil {
+				return err
+			}
+			if !eligibleFailure(candidate) || !candidate.Finished.After(loss) {
+				continue
+			}
+		}
+		lines, err := c.journal.Lines(unit, candidate.Invocation)
+		if err != nil {
+			return err
+		}
+		if !hasRemedy(lines) {
+			continue
+		}
+		if err := h.say("eligible", "adapter-start"); err != nil {
+			return err
+		}
+		row, err := c.check(unit, candidate, gateway)
+		if err != nil {
+			return err
+		}
+		if row != "" {
+			if err := h.say(row, "before-adapter-start"); err != nil {
+				return err
+			}
+			if row == "owner-stopped" || row == "same-incident" {
+				continue
+			}
+			return nil
+		}
+		if err := c.ctl.Act("start", unit); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func AllowedAdapter(unit string) bool {
 	for _, name := range AdapterUnits {
@@ -267,7 +366,7 @@ func AllowedAdapter(unit string) bool {
 }
 func loginProblem(lines []string) bool {
 	for _, line := range lines {
-		if strings.Contains(line, "login retries stopped") || strings.Contains(line, "gateway-start: reset wait:") {
+		if strings.Contains(line, "login retries stopped") || strings.Contains(line, "gateway-start: reset wait:") || strings.Contains(line, "Unrecognized Username or Password") {
 			return true
 		}
 	}
@@ -282,19 +381,56 @@ func LoggedIn(lines []string) bool {
 		if strings.Contains(line, "Login has completed") {
 			logged = true
 		}
-		if strings.Contains(line, "LOGGED_OUT") || strings.Contains(line, "Unrecognized Username or Password") {
+		if strings.Contains(line, "LOGGED_OUT") || strings.Contains(line, "Unrecognized Username or Password") || strings.Contains(line, "gateway-start: starting IBC") || strings.Contains(line, "gateway-start: cannot start IBC") {
 			logged = false
 		}
 	}
 	return logged
 }
 
+// windowEnd includes the IBC Sunday cold restart configured in gateway.env,
+// with ten minutes on either side, independently of the owner-editable adapter
+// schedule (server.md, Gateway healer). Ambiguous or missing times fail closed.
+func (input Inputs) windowEnd(now time.Time) (time.Time, error) {
+	value := ""
+	seen := false
+	for _, line := range strings.Split(string(input.GatewayEnv), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, v, ok := strings.Cut(line, "=")
+		if strings.TrimSpace(key) != "TI_GATEWAY_COLD_RESTART" {
+			continue
+		}
+		if !ok || seen {
+			return time.Time{}, errors.New("ambiguous Gateway cold restart time")
+		}
+		seen = true
+		value = strings.TrimSpace(v)
+		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
+			value = value[1 : len(value)-1]
+		}
+	}
+	cold, err := time.Parse("15:04", value)
+	if err != nil || cold.Format("15:04") != value {
+		return time.Time{}, errors.New("missing or invalid Gateway cold restart time")
+	}
+	start, end := cold.Add(-10*time.Minute), cold.Add(10*time.Minute)
+	day := "Sun"
+	if start.Day() != cold.Day() {
+		day = "Sat"
+	}
+	extra := []byte(fmt.Sprintf(`{"windows":[{"days":[%q],"start":%q,"end":%q,"zone":"America/New_York"}]}`, day, start.Format("15:04"), end.Format("15:04")))
+	return WindowEnd(input.Schedule, now, extra)
+}
+
 // WindowEnd reuses report's adapter-schema parser and unions its windows with
 // the mandatory nightly reset hour (server.md, Gateway healer). A union with
 // no gap within nine days fails closed, even when each schedule has a gap.
-func WindowEnd(raw []byte, now time.Time) (time.Time, error) {
+func WindowEnd(raw []byte, now time.Time, extra ...[]byte) (time.Time, error) {
 	var schedules []report.IBKRSchedule
-	for _, data := range [][]byte{raw, []byte(`{"windows":[{"days":["daily"],"start":"23:40","end":"01:00","zone":"America/New_York"}]}`)} {
+	for _, data := range append([][]byte{raw, []byte(`{"windows":[{"days":["daily"],"start":"23:40","end":"01:00","zone":"America/New_York"}]}`)}, extra...) {
 		schedule, err := report.ParseIBKRSchedule(data)
 		if err != nil {
 			return time.Time{}, err

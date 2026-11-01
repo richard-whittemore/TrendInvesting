@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,7 +32,7 @@ func TestSystemctlAndJournalAreInvocationScoped(t *testing.T) {
 	if _, err = s.Lines(gatewayheal.GatewayUnit, "abcdef"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"journalctl", "--no-pager", "-o", "cat", "-n", "2000", "_SYSTEMD_UNIT=ti-gateway.service", "_SYSTEMD_INVOCATION_ID=abcdef"}
+	want := []string{"journalctl", "--no-pager", "-o", "cat", "_SYSTEMD_UNIT=ti-gateway.service", "_SYSTEMD_INVOCATION_ID=abcdef"}
 	if !reflect.DeepEqual(calls[2], want) {
 		t.Fatalf("journal=%v", calls[2])
 	}
@@ -52,8 +54,8 @@ func TestStateIsDurablePrivateAndSerialized(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unlock()
-	if _, err = store.lock(); err == nil {
-		t.Fatal("parallel healer entered")
+	if _, err = store.lock(); err == nil || strings.Contains(err.Error(), "order") || !strings.Contains(err.Error(), "another healer") {
+		t.Fatalf("parallel healer did not report its own collision: %v", err)
 	}
 	state := gatewayheal.State{LastRestart: time.Date(2026, 11, 2, 15, 0, 0, 0, time.UTC), Incident: "synthetic"}
 	if err := store.Save(state); err != nil {
@@ -117,11 +119,14 @@ func TestRelayLocksExcludeAllAccountsAndRelease(t *testing.T) {
 }
 func TestInputsRefuseMissingScheduleAndNonregularCounter(t *testing.T) {
 	root := t.TempDir()
-	r := files{schedule: filepath.Join(root, "schedule"), counter: filepath.Join(root, "counter")}
+	r := files{schedule: filepath.Join(root, "schedule"), counter: filepath.Join(root, "counter"), gatewayEnv: filepath.Join(root, "gateway.env")}
 	if _, err := r.Read(); err == nil {
 		t.Fatal("missing schedule accepted")
 	}
 	if err := os.WriteFile(r.schedule, []byte(`{"windows":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(r.gatewayEnv, []byte("TI_GATEWAY_COLD_RESTART=09:00"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.Read(); err != nil {
@@ -182,12 +187,160 @@ func TestAbandonedHandoversStillPreventRestart(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(root, name, "pending.json.lock"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "boost", "pending.json.handover"), []byte(`{"synthetic-order":"handing-over"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if release, err := (relayGuard{root: root}).Acquire(); err == nil {
+	if release, err := (relayGuard{root: root}).Acquire(); !errors.Is(err, gatewayheal.ErrOrderBusy) {
+		if release != nil {
+			release()
+		}
+		t.Fatal("unsettled hand-over was not classified as order-busy", err)
+	}
+}
+
+func TestRestartStateRejectsAmbiguousFields(t *testing.T) {
+	dir := t.TempDir()
+	store := diskState{dir: dir, uid: uint32(os.Getuid())}
+	for _, raw := range []string{
+		`{"last_restart":"2026-11-02T15:00:00Z","last_restart":"2026-10-02T15:00:00Z","incident":"a"}`,
+		`{"last_restart":"2026-11-02T15:00:00Z","incident":"a","incident":"b"}`,
+		`{"LAST_RESTART":"2026-11-02T15:00:00Z","incident":"a"}`,
+		`{"last_restart":"2026-11-02T15:00:00Z","Incident":"a"}`,
+		`{"last_restart":"2026-11-02T15:00:00Z","incident":"a","unknown":1}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "last-restart.json"), []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Load(); err == nil {
+			t.Errorf("accepted ambiguous state: %s", raw)
+		}
+	}
+}
+func TestMissingRelayLockIsNeverCreated(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"boost", "trad-ira", "roth-ira"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release, err := (relayGuard{root: root}).Acquire()
+	if release != nil {
 		release()
-		t.Fatal("unsettled hand-over allowed restart")
+	}
+	if err == nil {
+		t.Error("missing relay locks accepted")
+	}
+	for _, name := range []string{"boost", "trad-ira", "roth-ira"} {
+		if _, err := os.Stat(filepath.Join(root, name, "pending.json.lock")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("created relay lock for %s", name)
+		}
+	}
+}
+
+func TestExternalCommandsHaveDeadlineAndBoundedDrain(t *testing.T) {
+	raw, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"context.WithTimeout", "exec.CommandContext", "cmd.WaitDelay"} {
+		if !strings.Contains(string(raw), required) {
+			t.Errorf("command bound missing %s", required)
+		}
+	}
+}
+
+func TestCommandDeadlineCapsRecoveryAndUnwinds(t *testing.T) {
+	now := time.Date(2026, 11, 2, 17, 0, 0, 0, time.UTC)
+	r := commandRunner{now: func() time.Time { return now }, deadline: now.Add(5 * time.Second)}
+	calls := 0
+	r.execute = func(ctx context.Context, _ string, _ []string, _ io.Writer) error {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 5*time.Second {
+			t.Fatal("missing remaining recovery bound")
+		}
+		return context.DeadlineExceeded
+	}
+	if _, err := r.run("systemctl", "show"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	now = now.Add(5 * time.Second)
+	if _, err := r.run("systemctl", "show"); !errors.Is(err, context.DeadlineExceeded) || calls != 1 {
+		t.Fatal("expired deadline ran a command", err, calls)
+	}
+}
+func TestInvocationStreamRetainsLoginBeyondOrdinaryNoise(t *testing.T) {
+	r := commandRunner{now: time.Now, execute: func(_ context.Context, _ string, _ []string, out io.Writer) error {
+		_, err := io.WriteString(out, "IBC: Login has completed\n"+strings.Repeat("ordinary message\n", 3000))
+		return err
+	}}
+	raw, err := r.run("journalctl", "-o", "cat")
+	if err != nil || !gatewayheal.LoggedIn(strings.Split(string(raw), "\n")) {
+		t.Fatal("login lost behind noise", err)
+	}
+	if len(raw) > 100 {
+		t.Fatal("journal not reduced with bounded memory", len(raw))
+	}
+}
+
+func TestLossUsesCurrentInvocationAndFirstUnrestoredLoss(t *testing.T) {
+	s := systemd{run: func(name string, args ...string) ([]byte, error) {
+		query := strings.Join(args, " ")
+		if name != "journalctl" || !strings.Contains(query, "_SYSTEMD_INVOCATION_ID=failed-id") || strings.Contains(query, "-n ") {
+			t.Fatal(query)
+		}
+		return []byte("2026-11-02T15:00:00+00:00 host adapter: ibkr link state=connectivity-lost\n" +
+			"2026-11-02T15:01:00+00:00 host adapter: ibkr link state=connected reason=restored\n" +
+			"2026-11-02T15:02:00+00:00 host adapter: ibkr link state=connectivity-lost\n" +
+			"2026-11-02T15:03:00+00:00 host adapter: ibkr link state=connectivity-lost\n"), nil
+	}}
+	got, err := s.Loss(gatewayheal.AdapterUnits[0], "failed-id")
+	if err != nil || !got.Equal(time.Date(2026, 11, 2, 15, 2, 0, 0, time.UTC)) {
+		t.Fatal(got, err)
+	}
+}
+func TestCommandStreamRefusesOversizedLineAndRetainsLogout(t *testing.T) {
+	for _, content := range []string{"IBC: Login has completed\n" + strings.Repeat("noise\n", 3000) + "IBC: LoginState is LOGGED_OUT", strings.Repeat("x", 1024*1024+1)} {
+		r := commandRunner{now: time.Now, execute: func(_ context.Context, _ string, _ []string, out io.Writer) error {
+			_, err := io.Copy(out, strings.NewReader(content))
+			return err
+		}}
+		raw, err := r.run("journalctl", "-o", "cat")
+		if len(content) > 1024*1024 {
+			if err == nil {
+				t.Fatal("oversized line accepted")
+			}
+			continue
+		}
+		if err != nil || gatewayheal.LoggedIn(strings.Split(string(raw), "\n")) {
+			t.Fatal("logout lost", err)
+		}
+	}
+}
+func TestGatewayEnvironmentIsRequired(t *testing.T) {
+	dir := t.TempDir()
+	r := files{schedule: filepath.Join(dir, "schedule"), counter: filepath.Join(dir, "counter"), gatewayEnv: filepath.Join(dir, "env")}
+	if err := os.WriteFile(r.schedule, []byte(`{"windows":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Read(); err == nil {
+		t.Fatal("missing Gateway environment accepted")
+	}
+}
+
+func TestSystemdTimestampsPreserveFailureAfterLossWithinSecond(t *testing.T) {
+	s := systemd{run: func(_ string, args ...string) ([]byte, error) {
+		if !containsArg(args, "--timestamp=us") {
+			t.Error("systemctl timestamp precision not requested")
+		}
+		return []byte("ActiveState=failed\nExecMainCode=1\nExecMainStatus=3\nInvocationID=abcdef\nExecMainExitTimestamp=Mon 2026-11-02 14:59:00.654321 UTC\nExecMainStartTimestamp=Mon 2026-11-02 14:58:00.123456 UTC\n"), nil
+	}}
+	got, err := s.Status(gatewayheal.AdapterUnits[0])
+	if err != nil || got.Finished.Nanosecond() != 654321000 || got.Started.Nanosecond() != 123456000 {
+		t.Fatal(got, err)
 	}
 }

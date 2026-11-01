@@ -12,7 +12,7 @@ package gatewayheal
 // once, await Login has completed for at most 10m, then start adapter; log steps.
 // same, restart within 2h -> nothing; existing operational page stands.
 // scheduled window or 23:40–01:00 ET -> wait for end, re-check once.
-// nonzero login-failures counter or retries stopped -> nothing.
+// any nonempty login-failures counter file (including retained reset metadata) or retries stopped -> nothing.
 // LOGGED_OUT -> nothing; existing logout handling.
 // any other adapter exit status -> nothing.
 // restarted, no login within 10m -> stop; existing page stands.
@@ -28,6 +28,10 @@ import (
 
 type rig struct {
 	onRead                                                                    func()
+	onSave                                                                    func()
+	onStatus                                                                  func(string)
+	onAct                                                                     func(string, string)
+	loss                                                                      time.Time
 	failAt                                                                    map[string]int
 	seen                                                                      map[string]int
 	onAcquire                                                                 func()
@@ -49,7 +53,7 @@ type rig struct {
 
 func fixture() *rig {
 	at := time.Date(2026, 11, 2, 15, 0, 0, 0, time.UTC)
-	return &rig{at: at, input: Inputs{Schedule: []byte(`{"windows":[]}`)},
+	return &rig{at: at, input: Inputs{Schedule: []byte(`{"windows":[]}`), GatewayEnv: []byte("TI_GATEWAY_COLD_RESTART=09:00\n")}, loss: at.Add(-10 * time.Minute),
 		statuses: map[string]Status{AdapterUnits[0]: {Active: "failed", Code: 1, Exit: 3, Invocation: "failed-run", Finished: at.Add(-time.Minute)}, GatewayUnit: {Active: "active", Invocation: "old-login"}},
 		journals: map[string][]string{"failed-run": {Remedy}, "old-login": {"Login has completed"}, "new-login": {"Login has completed"}}, login: true}
 }
@@ -71,12 +75,18 @@ func (r *rig) Read() (Inputs, error) {
 }
 func (r *rig) Load() (State, error) { return r.state, r.fault("load") }
 func (r *rig) Save(s State) error {
+	if r.onSave != nil {
+		r.onSave()
+	}
 	if r.saveErr == nil {
 		r.state = s
 	}
 	return errors.Join(r.saveErr, r.fault("save"))
 }
 func (r *rig) Status(unit string) (Status, error) {
+	if r.onStatus != nil {
+		r.onStatus(unit)
+	}
 	return r.statuses[unit], errors.Join(r.statusErr, r.fault("status"))
 }
 func (r *rig) Lines(_, invocation string) ([]string, error) {
@@ -91,12 +101,15 @@ func (r *rig) Act(action, unit string) error {
 		if !r.locked {
 			panic("restart without order exclusion")
 		}
-		r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login"}
+		r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.at}
 		if !r.login {
 			r.journals["new-login"] = nil
 		}
 	} else if r.locked {
 		panic("adapter started while relay locks held")
+	}
+	if r.onAct != nil {
+		r.onAct(action, unit)
 	}
 	return errors.Join(r.actErr, r.fault("act"))
 }
@@ -460,3 +473,5 @@ func TestCounterChangingDuringEvidenceReadPreventsRestart(t *testing.T) {
 	}
 	assertRun(t, r, "login-problem")
 }
+
+func (r *rig) Loss(_, _ string) (time.Time, error) { return r.loss, nil }

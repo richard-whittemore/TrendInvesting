@@ -49,7 +49,8 @@ EnvironmentFile=/var/lib/trend-investing/engines/boost/run.env
 LoadCredential=account:/run/trend-investing/secrets/accounts/boost.env
 WorkingDirectory=/opt/trend-investing/adapter
 ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/boost.json --secrets %d/account --account-key IBKR_ACCOUNT_BOOST --pending /var/lib/trend-investing/adapters/boost/pending.json --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --socket /run/ti-engine-boost/engine.sock --streams /var/lib/trend-investing/data/streams/boost --cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
-# Ordinary stops remain for the owner. Only the exit-3 Gateway remedy can
+# To veto recovery of a failed unit, reset-failed it or stop its healer
+# (docs/manual/server.md, Gateway healer). Only the exit-3 Gateway remedy can
 # start this adapter through the bounded healer (docs/manual/server.md,
 # Gateway healer; ADR 0025). SIGTERM stops it cleanly.
 Restart=no

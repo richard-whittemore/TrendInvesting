@@ -17,7 +17,16 @@ import (
 )
 
 type systemd struct {
-	run func(string, ...string) ([]byte, error)
+	run         func(string, ...string) ([]byte, error)
+	setDeadline func(time.Time)
+}
+
+var statusTimeForRun = func(at time.Time) time.Time { return at }
+
+func (s systemd) SetDeadline(at time.Time) {
+	if s.setDeadline != nil {
+		s.setDeadline(at)
+	}
 }
 
 func (s systemd) Act(action, unit string) error {
@@ -29,7 +38,7 @@ func (s systemd) Act(action, unit string) error {
 }
 func (s systemd) Status(unit string) (gatewayheal.Status, error) {
 	var out gatewayheal.Status
-	raw, err := s.run("systemctl", "show", "--no-pager", "-p", "ActiveState", "-p", "ExecMainCode", "-p", "ExecMainStatus", "-p", "InvocationID", "-p", "ExecMainExitTimestamp", unit)
+	raw, err := s.run("systemctl", "show", "--timestamp=us", "--no-pager", "-p", "ActiveState", "-p", "ExecMainCode", "-p", "ExecMainStatus", "-p", "InvocationID", "-p", "ExecMainExitTimestamp", "-p", "ExecMainStartTimestamp", unit)
 	if err != nil {
 		return out, err
 	}
@@ -57,20 +66,30 @@ func (s systemd) Status(unit string) (gatewayheal.Status, error) {
 			return out, err
 		}
 	}
+	if !out.Finished.IsZero() {
+		out.Finished = statusTimeForRun(out.Finished)
+	}
+	if stamp := props["ExecMainStartTimestamp"]; stamp != "" {
+		out.Started, err = time.Parse("Mon 2006-01-02 15:04:05 MST", stamp)
+		if err != nil {
+			return out, err
+		}
+		out.Started = statusTimeForRun(out.Started)
+	}
 	return out, nil
 }
 func (s systemd) Lines(unit, invocation string) ([]string, error) {
 	if invocation == "" {
 		return nil, errors.New("missing journal invocation")
 	}
-	raw, err := s.run("journalctl", "--no-pager", "-o", "cat", "-n", "2000", "_SYSTEMD_UNIT="+unit, "_SYSTEMD_INVOCATION_ID="+invocation)
+	raw, err := s.run("journalctl", "--no-pager", "-o", "cat", "_SYSTEMD_UNIT="+unit, "_SYSTEMD_INVOCATION_ID="+invocation)
 	if err != nil {
 		return nil, err
 	}
 	return strings.Split(string(raw), "\n"), nil
 }
 
-type files struct{ schedule, counter string }
+type files struct{ schedule, counter, gatewayEnv string }
 
 func (f files) Read() (gatewayheal.Inputs, error) {
 	var out gatewayheal.Inputs
@@ -79,6 +98,11 @@ func (f files) Read() (gatewayheal.Inputs, error) {
 		return out, err
 	}
 	out.Schedule = raw
+	raw, err = regularRead(f.gatewayEnv)
+	if err != nil {
+		return out, err
+	}
+	out.GatewayEnv = raw
 	raw, err = regularRead(f.counter)
 	if errors.Is(err, os.ErrNotExist) {
 		err = nil
@@ -117,7 +141,7 @@ func (s diskState) lock() (func(), error) {
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0o700 || stat.Uid != s.uid {
 		return nil, errors.New("healer directory must be root-owned mode 0o700")
 	}
-	return lockFile(filepath.Join(s.dir, "lock"), s.uid, 0)
+	return lockFile(filepath.Join(s.dir, "lock"), s.uid, true, ErrAnotherHealer)
 }
 func (s diskState) Load() (gatewayheal.State, error) {
 	var state gatewayheal.State
@@ -138,14 +162,40 @@ func (s diskState) Load() (gatewayheal.State, error) {
 		return state, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&state); err != nil {
+	token, err := dec.Token()
+	if err != nil || token != json.Delim('{') {
+		return state, errors.New("restart state must be an object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		token, err = dec.Token()
+		if err != nil {
+			return state, err
+		}
+		key, ok := token.(string)
+		if !ok || seen[key] {
+			return state, errors.New("duplicate restart state field")
+		}
+		seen[key] = true
+		switch key {
+		case "last_restart":
+			err = dec.Decode(&state.LastRestart)
+		case "incident":
+			err = dec.Decode(&state.Incident)
+		default:
+			return state, fmt.Errorf("unknown restart state field %q", key)
+		}
+		if err != nil {
+			return state, err
+		}
+	}
+	if _, err := dec.Token(); err != nil {
 		return state, err
 	}
 	if state.LastRestart.IsZero() || state.Incident == "" {
 		return state, errors.New("incomplete restart state")
 	}
-	if err = dec.Decode(new(any)); !errors.Is(err, io.EOF) {
+	if _, err = dec.Token(); !errors.Is(err, io.EOF) {
 		return state, errors.New("trailing restart state")
 	}
 	return state, nil
@@ -204,7 +254,7 @@ func (g relayGuard) Acquire() (func(), error) {
 			release()
 			return nil, errors.New("invalid adapter directory")
 		}
-		done, err := lockFile(filepath.Join(dir, "pending.json.lock"), stat.Uid, stat.Gid)
+		done, err := lockFile(filepath.Join(dir, "pending.json.lock"), stat.Uid, false, gatewayheal.ErrOrderBusy)
 		if err != nil {
 			release()
 			return nil, err
@@ -223,38 +273,70 @@ func (g relayGuard) Acquire() (func(), error) {
 	}
 	return release, nil
 }
-func lockFile(path string, uid, gid uint32) (func(), error) {
-	fd, err := syscall.Open(path, syscall.O_RDWR|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-	created := err == nil
-	if errors.Is(err, syscall.EEXIST) {
-		fd, err = syscall.Open(path, syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
+
+var ErrAnotherHealer = errors.New("another healer is running")
+
+func lockFile(path string, uid uint32, create bool, busy error) (func(), error) {
+	flags := syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+	if create {
+		flags |= syscall.O_CREAT
 	}
+	fd, err := syscall.Open(path, flags, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), path)
 	closeFile := func() { _ = f.Close() }
-	if created && os.Geteuid() != int(uid) {
-		if err := f.Chown(int(uid), int(gid)); err != nil {
-			closeFile()
-			return nil, err
-		}
-	}
 	info, err := f.Stat()
 	if err != nil {
 		closeFile()
 		return nil, err
 	}
-	if !info.Mode().IsRegular() {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || stat.Uid != uid {
 		closeFile()
 		return nil, fmt.Errorf("lock is not a regular file")
 	}
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		closeFile()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, fmt.Errorf("%s held: %w", path, gatewayheal.ErrOrderBusy)
+			return nil, fmt.Errorf("%s held: %w", path, busy)
 		}
 		return nil, err
 	}
 	return closeFile, nil
+}
+
+// Loss reads this adapter invocation's uninterrupted connection loss (ADR 0025;
+// cmd/reporter/gatewayjournal.go, lostSince). A restored link resets its origin.
+func (s systemd) Loss(unit, invocation string) (time.Time, error) {
+	if invocation == "" {
+		return time.Time{}, errors.New("missing journal invocation")
+	}
+	raw, err := s.run("journalctl", "--no-pager", "-o", "short-iso-precise", "--grep=ibkr link state=connectivity-lost|ibkr link state=connected reason=restored|ibkr reconciled client_id=", "_SYSTEMD_UNIT="+unit, "_SYSTEMD_INVOCATION_ID="+invocation)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var loss time.Time
+	for _, line := range strings.Split(string(raw), "\n") {
+		lost := strings.Contains(line, "ibkr link state=connectivity-lost")
+		restored := strings.Contains(line, "ibkr link state=connected reason=restored") || strings.Contains(line, "ibkr reconciled client_id=")
+		if !lost && !restored {
+			continue
+		}
+		field, _, _ := strings.Cut(line, " ")
+		at, err := time.Parse("2006-01-02T15:04:05-0700", field)
+		if err != nil {
+			at, err = time.Parse(time.RFC3339, field)
+		}
+		if err != nil {
+			return time.Time{}, err
+		}
+		if restored {
+			loss = time.Time{}
+		} else if loss.IsZero() {
+			loss = statusTimeForRun(at)
+		}
+	}
+	return loss, nil
 }

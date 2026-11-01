@@ -82,7 +82,7 @@ docker start -a "$id"
 # systemd itself names and starts it on a templated unit's failure
 # (deploy/rehearsal/inside-systemd.sh). Not --privileged: it runs systemd as
 # the Mac mini container does (deploy/mac-mini/up.sh, which gives the reason
-# for each capability): every capability dropped and the same eleven added
+# for each capability): every capability dropped and the same twelve added
 # back, a cgroup namespace of its own whose tree is remounted writable before
 # systemd starts, and Docker's default seccomp filter kept. / is mounted
 # shared, as up.sh's mount-shared.service does, so that systemd can hand a
@@ -92,7 +92,7 @@ docker start -a "$id"
 # Massive, the runbook's port check and the New York clock; sudo is the
 # owner's, as the runbook types it.
 caps=(--cap-drop ALL)
-for cap in SYS_ADMIN SYS_CHROOT CHOWN FOWNER DAC_OVERRIDE SETUID SETGID SETPCAP AUDIT_WRITE KILL FSETID; do
+for cap in SYS_ADMIN SYS_CHROOT CHOWN FOWNER DAC_OVERRIDE DAC_READ_SEARCH SETUID SETGID SETPCAP AUDIT_WRITE KILL FSETID; do
   caps+=(--cap-add "$cap")
 done
 sd=$(docker create "${caps[@]}" --cgroupns=private --tmpfs /run --tmpfs /run/lock -e container=docker --platform "$platform" ubuntu:24.04 \

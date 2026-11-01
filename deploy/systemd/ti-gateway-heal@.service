@@ -19,10 +19,17 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# The adapters' state is written only to take each adapter's own hand-over
-# lock (pending.json.lock) while the healer checks that no order is between
-# hand-over and its journal record; the records themselves are only read.
-ReadWritePaths=/var/lib/ti-gateway/heal /var/lib/trend-investing/adapters
+# Provisioned relay locks need only read access for flock (ADR 0026 point 8).
+ReadWritePaths=/var/lib/ti-gateway-heal
+ReadOnlyPaths=/var/lib/trend-investing/adapters
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+ProtectKernelModules=true
+ProtectKernelLogs=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
