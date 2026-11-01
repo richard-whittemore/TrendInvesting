@@ -6,6 +6,8 @@ rehearse_gateway_heal() {
   local hook=ti-gateway-heal@ti-adapter-boost.service.service n said page_hook=ti-unit-failed@ti-adapter-boost.service.service page_before failed_invocation
   page_before=$(instances)
   install -d -m 0700 /var/lib/ti-gateway-heal
+  # The Gateway's own state folder, where gateway-start keeps its login counter.
+  install -d -m 0750 /var/lib/ti-gateway
   # The files the healer reads on the server, as provisioning lays them down:
   # the Gateway's restart times and IBKR's schedule (a missing one fails closed).
   install -d -m 0755 /etc/trend-investing
