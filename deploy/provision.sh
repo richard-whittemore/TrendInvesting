@@ -635,8 +635,10 @@ install_adapter_settings() {
 # under its sandbox (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
 install_adapter_lock() {
   local path=$1
+  # Created only when absent, so an existing lock keeps its inode; through
+  # install(1) like every other path this script lays down.
   if test ! -e "$path" && test ! -L "$path"; then
-    (umask 077; set -C; : >"$path") || return 1
+    install -m 0600 -o ti-trader -g ti-trader /dev/null "$path" || return 1
   fi
   if test -L "$path" || test ! -f "$path"; then
     log "refusing nonregular adapter lock: $path"
