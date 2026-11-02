@@ -24,6 +24,11 @@ func TestGatewayUnreachableNoticeManualRemedy(t *testing.T) {
 			t.Errorf("server.md lacks link-only remedy %q", want)
 		}
 	}
+	// A healer that stood down for a login problem, an order mid-hand-over or the
+	// owner's veto must not be overridden by a hand restart.
+	if adapter := read("ibkr-adapter.md"); !strings.Contains(adapter, "never restart the Gateway by hand while that row is `login-problem`, `order-busy` or `owner-stopped`") {
+		t.Error("ibkr-adapter.md lets a hand restart override the healer's refusals")
+	}
 	for _, file := range []string{"server.md", "ibkr-adapter.md", "alerts-and-dashboard.md"} {
 		text := read(file)
 		if file != "server.md" && !strings.Contains(text, "Gateway healer") {
