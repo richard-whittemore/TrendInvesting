@@ -90,15 +90,28 @@ pages as a logout. This does not establish whether the password is correct.
 Gateway detection reads IBC's journal plus the existing adapter 1100/2110 rule:
 only a continuous loss of at least three hours without restoration or successful
 reconciliation counts as a Gateway outage. Plain API reconnects do not restore
-the link. This routes as an operational Gateway incident even when IBC's newest
-event is a completed login; a separate IBKR-only connectivity notice is deferred
-to a follow-up. Inside a scheduled window or off-session with the default policy,
-it reaches the orchestrator's channels (the alerts repository and ntfy).
+the link. When IBC's newest login event is a completed login with no later
+logout, the title is “IB Gateway is logged in but IBKR's servers are unreachable”.
+Only the wording changes: the host Gateway incident key, detection grace,
+routing, reminders and resolution are unchanged. Inside a scheduled window or
+off-session with the default policy, it reaches the orchestrator's channels
+(the alerts repository and ntfy). Let the scheduled window finish; the Gateway
+healer restarts automatically if loss outlasts its window and the adapter exits
+with the restart remedy, subject to the gates and restart limit in
+[server](server.md), “Gateway healer”. Check the Gateway, adapter and healer
+journals and follow the healer's decision row if recovery is refused or fails.
+An IBC logout or refused login keeps the logged-out wording and remedy,
+regardless of adapter evidence. An adapter journal read failure cannot suppress
+that IBC-established outage; the failure is included in its text. Without IBC
+outage evidence the read failure still fails the firing. Connectivity-loss
+lines more than two minutes ahead of the check's clock are ignored and named
+in the check's text with the adapter, timestamp and clock-skew allowance; they
+cannot delay detection from valid evidence.
 An open outage still needs a completed login, restoration or reconciliation
 at least as new as its first observation to resolve; journal silence and adapter
 stops or restarts cannot supply recovery. Adapter process sampling and sampling
-incidents are not part of this check. Previous-build state loads normally:
-obsolete notice and adapter-loss fields are ignored, while the Gateway outage,
+incidents are not part of this check. No state-file keys are added. Previous-build
+state loads normally: obsolete notice and adapter-loss fields are ignored, while the Gateway outage,
 delivery records, clocks and receipt-specific cancellations remain usable.
 
 ## Alert class index
@@ -131,6 +144,7 @@ The outside Healthchecks heartbeat is capital-safety and is unchanged.
 | `<account>: <instrument> withheld this month (missing mark: <transient or final> — <detail>)` | Class: capital-safety |
 | `<host>: the server's clock failed its check` | Class: capital-safety |
 | `<host>: IB Gateway is logged out` | Class: operational |
+| `<host>: IB Gateway is logged in but IBKR's servers are unreachable` | Class: operational; same Gateway incident |
 | `<instance>: sell of <instrument> incomplete after the session ending <day> (<n> shares outstanding)` | Class: capital-safety |
 | `<account>: operator clearance <input> refused` | Class: capital-safety |
 | `<account>: operator clearance <input> not read` | Class: capital-safety |

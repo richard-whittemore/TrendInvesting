@@ -59,8 +59,8 @@ echo "$*" >>'` + g.dir + `/argv'
 if [ -e '` + g.dir + `/rmwin' ]; then rm -f "$(cat '` + g.dir + `/rmwin')"; fi
 unit=""; pattern=""
 while [ $# -gt 0 ]; do case $1 in -u) unit=$2; shift;; -g) pattern=$2; shift;; esac; shift; done
-if [ -e '` + g.dir + `/fail' ]; then echo "Failed to open journal files" >&2; exit 1; fi
-if [ -e '` + g.dir + `/noaccess' ]; then echo "Hint: You are currently not seeing messages from other users and the system."; echo "-- No entries --"; exit 0; fi
+if [ -e '` + g.dir + `/fail' ] || [ -e '` + g.dir + `/fail-'"$unit" ]; then echo "Failed to open journal files" >&2; exit 1; fi
+if [ -e '` + g.dir + `/noaccess' ] || [ -e '` + g.dir + `/noaccess-'"$unit" ]; then echo "Hint: You are currently not seeing messages from other users and the system."; echo "-- No entries --"; exit 0; fi
 out=$(cat '` + g.dir + `'/"$unit" 2>/dev/null)
 out=$(printf '%s\n' "$out" | grep -E -- "$pattern")
 if [ -z "$out" ]; then echo "-- No entries --"; exit 1; fi
@@ -140,7 +140,7 @@ func gatewayPages(r *relay) int {
 	n := 0
 	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
 		for _, m := range r.to(host) {
-			if strings.Contains(m, "IB Gateway is logged out") && !strings.Contains(m, `"event_action":"resolve"`) {
+			if (strings.Contains(m, "IB Gateway is logged out") || strings.Contains(m, "IB Gateway is logged in but IBKR")) && !strings.Contains(m, `"event_action":"resolve"`) {
 				n++
 			}
 		}

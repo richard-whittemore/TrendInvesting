@@ -326,6 +326,16 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	// Past a window an outage not yet ten minutes old keeps its hold: if it
 	// logs in before it pages, the window's hold is handled and said then.
 	a := report.GatewayLoggedOutAlert(host, *h.Since, now, said)
+	// Only presentation changes for link evidence with a completed IBC login;
+	// the host's incident, routing and clocks stay the same (docs/manual/server.md,
+	// "The Gateway is logged out" and "Gateway healer"; ADR 0019, "Alerting").
+	if ev.ibkrUnreachable {
+		a.Title = fmt.Sprintf("%s: IB Gateway is logged in but IBKR's servers are unreachable", host)
+		a.Body = fmt.Sprintf("IBC's newest login event is a completed login, with no later logout. The adapters report IBKR's servers unreachable; the Gateway outage has been observed since about %s (checked at %s). Nothing reaches IBKR meanwhile: every account's engine is blind and cannot trade. The check said: %s "+
+			"Remedy (docs/manual/server.md, \"Gateway healer\"): let the scheduled window finish. The Gateway healer restarts the Gateway automatically if the loss outlasts its window and the adapter exits with the Gateway-restart remedy, subject to the healer's safety gates and restart limit. "+
+			"Check `journalctl -u ti-gateway` and the adapter's journal for recovery, and `journalctl -u 'ti-gateway-heal@*'` for the `gateway-heal:` decision. If recovery is refused or fails, follow that row in the manual; approve a phone prompt if one comes. Reminders and resolution follow the existing Gateway incident.",
+			h.Since.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339), said)
+	}
 	if ev.resetWait {
 		a = report.GatewayResetWaitAlert(host, now, said)
 	}
