@@ -364,7 +364,7 @@ func TestAGatewayThatLoggedInAgainInsideTheWindowPagesNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	g.login()
+	g.login(tuesday(14, 15))
 	for _, at := range []time.Time{tuesday(14, 15), tuesday(14, 30), tuesday(14, 45)} {
 		if err := gatewayRun(t, r, dir, g.path(), "boost", at); err != nil {
 			t.Fatal(err)
@@ -804,7 +804,7 @@ func TestAGatewayThatRecoversInsideTheWindowIsHandledAtTheClose(t *testing.T) {
 		return gatewayOutput(t, r, dir, g, at)
 	}
 	say(tuesday(14, 5))
-	g.login()
+	g.login(tuesday(14, 10))
 	for _, at := range []time.Time{tuesday(14, 10), tuesday(14, 20)} {
 		if out := say(at); strings.Contains(out, "held during maintenance") {
 			t.Fatalf("said while the window was open: %s", out)
@@ -896,7 +896,7 @@ func TestTwoWindowsEachHandleTheirGatewayAndUnitHoldsOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 		fire(from.Add(time.Minute))
-		g.login()
+		g.login(until)
 	}
 	window(tuesday(14, 0), tuesday(14, 10), a)
 	fire(tuesday(14, 12))
@@ -940,7 +940,7 @@ func TestAShortHeldOutageThatRecoversAfterTheCloseIsHandled(t *testing.T) {
 	if out := gatewayOutput(t, r, dir, g, tuesday(14, 26)); strings.Contains(out, "held during maintenance") {
 		t.Fatalf("said while the outage was still out: %s", out)
 	}
-	g.login()
+	g.login(tuesday(14, 31))
 	out := gatewayOutput(t, r, dir, g, tuesday(14, 31))
 	if n := strings.Count(out, "held during maintenance and recovered: IB Gateway"); n != 1 {
 		t.Errorf("the recovery was said %d times, want once:\n%s", n, out)

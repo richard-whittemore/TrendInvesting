@@ -15,8 +15,8 @@ import (
 // The Gateway's journals say whether it is logged in (ADR 0019, "Alerting").
 // IBC's, ti-gateway, holds the login events; the adapter's holds the link
 // state. An unreadable adapter journal cannot suppress an IBC-established
-// outage; its error accompanies that alert. Otherwise an unreadable journal
-// fails the firing, never implying a login (docs/manual/server.md,
+// outage; the firing returns its error after deciding and delivering the outage.
+// An unreadable journal never implies a login (docs/manual/server.md,
 // "The Gateway is logged out").
 
 // The journal read is bounded as the clock check is (clock.go); tests shorten it.
@@ -38,8 +38,8 @@ const (
 	// about this time plus gatewayPagesAfter (docs/manual/server.md,
 	// "The Gateway is logged out"; ADR 0019, "Alerting").
 	gatewayLinkLossAfter = 3 * time.Hour
-	// gatewayLinkClockSkew allows small clock differences; later loss lines
-	// are diagnostic only (docs/manual/server.md, "The Gateway is logged out").
+	// gatewayLinkClockSkew allows small clock differences; later evidence
+	// lines are diagnostic only (docs/manual/server.md, "The Gateway is logged out").
 	gatewayLinkClockSkew = 2 * time.Minute
 )
 
@@ -60,7 +60,9 @@ type gatewayEvidence struct {
 	recoveredAt time.Time
 }
 
-// gatewayChecker reads the evidence as of now.
+// gatewayChecker reads the evidence as of now. An IBC-established outage may
+// accompany an adapter read error: decide the outage before returning that fault
+// (docs/manual/server.md, "The Gateway is logged out"; ADR 0019, "Alerting").
 type gatewayChecker func(now time.Time) (gatewayEvidence, error)
 
 var (
@@ -148,6 +150,25 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		if err != nil {
 			return gatewayEvidence{}, err
 		}
+		var futureFirst string
+		futureCount := 0
+		ignore := func(unit string, lines []string) {
+			if len(lines) > 0 && futureCount == 0 {
+				futureFirst = unit + ": " + lines[0]
+			}
+			futureCount += len(lines)
+		}
+		var ignored []string
+		ibc, ignored, err = eligibleGatewayLines(ibc, now)
+		if err != nil {
+			return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
+		}
+		ignore(gatewayUnit, ignored)
+		resets, ignored, err = eligibleGatewayLines(resets, now)
+		if err != nil {
+			return gatewayEvidence{}, fmt.Errorf("reporter: reset wait time: %w", err)
+		}
+		ignore(gatewayUnit, ignored)
 		// A reset wait must be strictly newer than every completed-login
 		// timestamp (ADR 0019, "Alerting"). Login events retain journal order;
 		// wall-clock changes must not let an older reset override a login.
@@ -222,24 +243,25 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		}
 		ibcOut := len(reasons) > 0
 		var diagnostics []string
+		var readErr error
 		for _, unit := range adapters {
 			lines, err := journalQuery(journalctl, unit, linkEvent)
 			if err != nil {
 				if !ibcOut {
 					return gatewayEvidence{}, err
 				}
+				readErr = errors.Join(readErr, err)
 				diagnostics = append(diagnostics, err.Error())
 				continue
 			}
 			since, line, restored, ignored, err := lostSince(lines, now)
-			for _, l := range ignored {
-				diagnostics = append(diagnostics, fmt.Sprintf("%s: ignored future-dated connectivity-loss beyond the %s clock-skew allowance: %s", unit, gatewayLinkClockSkew, l))
-			}
+			ignore(unit, ignored)
 			if err != nil {
 				err = fmt.Errorf("reporter: the gateway check could not read %s's link events: %w", unit, err)
 				if !ibcOut {
 					return gatewayEvidence{}, err
 				}
+				readErr = errors.Join(readErr, err)
 				diagnostics = append(diagnostics, err.Error())
 				continue
 			}
@@ -266,31 +288,47 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		default:
 			ev.said = "gateway: logged in (IBC's newest login event is a completed login)"
 		}
+		if futureCount > 0 {
+			diagnostics = append(diagnostics, fmt.Sprintf("ignored future-dated evidence beyond the %s clock-skew allowance: %s; %d additional future-dated lines", gatewayLinkClockSkew, futureFirst, futureCount-1))
+		}
 		if len(diagnostics) > 0 {
 			ev.said += "; " + strings.Join(diagnostics, "; ")
 		}
-		return ev, nil
+		return ev, readErr
 	}
 }
 
-// lostSince finds when the current uninterrupted loss began: the first
-// connectivity-lost line after the newest restoration or reconciliation (zero
-// when there is none, or nothing is lost), that line, and the newest
-// restoration's time. Loss lines beyond the clock-skew allowance are returned
-// as diagnostics and cannot start or postpone a loss (docs/manual/server.md,
-// "The Gateway is logged out").
-func lostSince(lines []string, now time.Time) (since time.Time, first string, restored time.Time, ignored []string, err error) {
-	for _, l := range lines {
-		at, err := lineTime(l)
+// eligibleGatewayLines applies the same clock-skew bound to all evidence at
+// this firing, preserving journal order. Future recovery cannot end a loss or
+// close an outage (docs/manual/server.md, "The Gateway is logged out").
+func eligibleGatewayLines(lines []string, now time.Time) (eligible, ignored []string, err error) {
+	for _, line := range lines {
+		at, err := lineTime(line)
 		if err != nil {
-			return time.Time{}, "", time.Time{}, ignored, err
+			return nil, ignored, err
 		}
+		if at.After(now.Add(gatewayLinkClockSkew)) {
+			ignored = append(ignored, line)
+		} else {
+			eligible = append(eligible, line)
+		}
+	}
+	return eligible, ignored, nil
+}
+
+// lostSince keeps the earliest eligible loss timestamp within the current
+// uninterrupted segment. Restoration boundaries remain in journal order, so
+// a loss that becomes eligible at a later firing cannot postpone detection or
+// supply recovery (docs/manual/server.md, "The Gateway is logged out").
+func lostSince(lines []string, now time.Time) (since time.Time, first string, restored time.Time, ignored []string, err error) {
+	lines, ignored, err = eligibleGatewayLines(lines, now)
+	if err != nil {
+		return time.Time{}, "", time.Time{}, ignored, err
+	}
+	for _, l := range lines {
+		at, _ := lineTime(l) // eligibleGatewayLines has validated every timestamp.
 		if strings.Contains(l, "state=connectivity-lost") {
-			if at.After(now.Add(gatewayLinkClockSkew)) {
-				ignored = append(ignored, l)
-				continue
-			}
-			if since.IsZero() {
+			if since.IsZero() || at.Before(since) {
 				since, first = at, l
 			}
 			continue

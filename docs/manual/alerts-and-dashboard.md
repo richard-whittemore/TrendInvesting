@@ -95,20 +95,28 @@ logout, the title is “IB Gateway is logged in but IBKR's servers are unreachab
 Only the wording changes: the host Gateway incident key, detection grace,
 routing, reminders and resolution are unchanged. Inside a scheduled window or
 off-session with the default policy, it reaches the orchestrator's channels
-(the alerts repository and ntfy). Let the scheduled window finish; the Gateway
-healer restarts automatically if loss outlasts its window and the adapter exits
-with the restart remedy, subject to the gates and restart limit in
-[server](server.md), “Gateway healer”. Check the Gateway, adapter and healer
-journals and follow the healer's decision row if recovery is refused or fails.
+(the alerts repository and ntfy). The link-only notice reports IBKR's servers
+unreachable from a logged-in Gateway for over three hours outside any scheduled
+IBKR window. It names the affected accounts by their adapters' unresolved loss
+evidence; other accounts' trading status is not established. The Gateway healer
+acts only when an adapter stops at the end of a scheduled window. Check IBKR's
+system status, then restart the Gateway (`sudo systemctl restart ti-gateway`),
+approve a phone prompt if one comes, and start the affected adapters per
+[Gateway login](../runbooks/gateway-login.md). See [server](server.md), “Gateway
+healer”, for the healer's gates and restart limit.
 An IBC logout or refused login keeps the logged-out wording and remedy,
-regardless of adapter evidence. An adapter journal read failure cannot suppress
-that IBC-established outage; the failure is included in its text. Without IBC
-outage evidence the read failure still fails the firing. Connectivity-loss
-lines more than two minutes ahead of the check's clock are ignored and named
-in the check's text with the adapter, timestamp and clock-skew allowance; they
-cannot delay detection from valid evidence.
+regardless of adapter evidence. An adapter journal read or parse failure cannot
+suppress that IBC-established outage: decide and deliver the outage when due,
+then return the fault as the firing's error, even during grace or maintenance.
+The reporter's failure page remains open and its outside heartbeat is withheld.
+All evidence, including restoration, reconciliation and completed login, must
+be dated no later than the firing's clock plus two minutes. Later lines are
+ignored; the text names only the first and counts the rest across all journals.
+The earliest eligible loss in each uninterrupted segment counts, preserving
+restoration boundaries in journal order. A loss becoming eligible on a later
+firing cannot postpone an open outage or resolve it.
 An open outage still needs a completed login, restoration or reconciliation
-at least as new as its first observation to resolve; journal silence and adapter
+at least as new as its first observation and within the clock allowance to resolve; journal silence and adapter
 stops or restarts cannot supply recovery. Adapter process sampling and sampling
 incidents are not part of this check. No state-file keys are added. Previous-build
 state loads normally: obsolete notice and adapter-loss fields are ignored, while the Gateway outage,
@@ -144,7 +152,7 @@ The outside Healthchecks heartbeat is capital-safety and is unchanged.
 | `<account>: <instrument> withheld this month (missing mark: <transient or final> — <detail>)` | Class: capital-safety |
 | `<host>: the server's clock failed its check` | Class: capital-safety |
 | `<host>: IB Gateway is logged out` | Class: operational |
-| `<host>: IB Gateway is logged in but IBKR's servers are unreachable` | Class: operational; same Gateway incident |
+| `<host>: IB Gateway is logged in but IBKR's servers are unreachable` | Class: operational; same Gateway incident. Check IBKR's system status, then `sudo systemctl restart ti-gateway`; approve any phone prompt and start the affected adapters. The healer acts only at a scheduled window's end |
 | `<instance>: sell of <instrument> incomplete after the session ending <day> (<n> shares outstanding)` | Class: capital-safety |
 | `<account>: operator clearance <input> refused` | Class: capital-safety |
 | `<account>: operator clearance <input> not read` | Class: capital-safety |
@@ -1941,6 +1949,7 @@ name; the other words in angle brackets are filled in by the reporter.
 | `<account>: order <id> acknowledged` | Class: capital-safety. routine | [order lifecycle](order-lifecycle.md) |
 | `<host>: the server's clock failed its check` (the server's name, not an account's) | Class: capital-safety. urgent | this chapter, below, and [server](server.md), "The clock" |
 | `<host>: IB Gateway is logged out` (the server's name) | Class: operational. urgent, reminded hourly once escalated | [server](server.md), "The Gateway is logged out" |
+| `<host>: IB Gateway is logged in but IBKR's servers are unreachable` | Class: operational; same Gateway incident, reminded hourly once escalated. Names the accounts whose adapters show unresolved loss | Check IBKR's system status, then `sudo systemctl restart ti-gateway`; approve any phone prompt and start the affected adapters. The healer acts only when an adapter stops at the end of a scheduled window. See [server](server.md), "Gateway healer" |
 | `<host>: <unit> failed` (the server's name and the failed unit's, such as `ti-adapter-boost.service`) | Class: operational; capital-safety for an engine, adapter or Gateway failure near a session. urgent | this chapter, below, and [server](server.md), "A failed unit"; the engine's and adapter's chapters have a row for their own unit |
 | `<account>: daily summary <date>` | routine | this chapter, "What the summary shows, and its limits" |
 

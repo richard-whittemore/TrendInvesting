@@ -889,15 +889,23 @@ proves nothing. A silent IBKR session drop without an IBC event therefore takes
 about three hours plus the ten-minute detection grace to detect; paging eligibility
 can defer Pushover further. This detection limit still needs the owner's explicit
 agreement before live money. Missing IBC journal access fails the firing. An
-adapter journal read failure also fails the firing unless IBC has already
-established the outage: that outage is delivered with the adapter read failure
-in its text. A connectivity-loss line more than two minutes ahead of the check's
-clock is ignored as evidence and named in the check's text, with its adapter,
-timestamp and clock-skew allowance; it cannot postpone detection from valid
-loss lines. A readable journal with no evidence opens no incident; an already
-open outage requires a completed login, restoration or reconciliation at least
-as new as its first
-observation to resolve. Adapter stops and restarts are not recovery evidence.
+adapter journal read or parse failure also fails the firing. If IBC has already
+established the outage, the reporter first decides and, when due, delivers that
+outage with the adapter fault in its text, then returns the fault as the firing's
+error. The firing still fails during grace or maintenance when no outage page
+is due; its failure page remains open and the outside heartbeat is withheld.
+
+Every evidence line must be dated no later than the firing's clock plus two
+minutes, including loss, restoration, reconciliation and completed login.
+Later lines are ignored as evidence. The check text names only the first such
+line, its journal and the two-minute allowance, plus a count of the rest across
+all journals. Within each uninterrupted loss segment, the earliest eligible
+loss timestamp counts; restoration boundaries remain in journal order. A loss
+that becomes eligible on a later firing cannot move an open outage's start
+later or resolve it. A readable journal with no evidence opens no incident;
+an already open outage requires a completed login, restoration or reconciliation
+at least as new as its first observation, and within the same clock allowance,
+to resolve. Adapter stops and restarts are not recovery evidence.
 
 The resulting Gateway incident is **operational**, following the
 [paging invariant](alerts-and-dashboard.md#paging-invariant): ntfy and an alerts
@@ -916,15 +924,17 @@ routing, reminders and resolution; it creates no per-adapter incident or
 additional saved state. An IBC logout or refused login keeps the logged-out
 wording and remedy regardless of what the adapters report.
 
-For the IBKR-unreachable notice, let the scheduled window finish. The
-**Gateway healer** restarts the Gateway automatically if the loss outlasts its
-window and the adapter exits with the Gateway-restart remedy, subject to the
-healer's safety gates and restart limit above. Check `journalctl -u ti-gateway`
-and the adapter's journal for recovery, and `journalctl -u 'ti-gateway-heal@*'`
-for the `gateway-heal:` decision. If recovery is refused or fails, follow that
-row in the healer table; approve a phone prompt if one comes. The notice does
-not ask for a manual restart during the window or treat link loss as a password
-failure.
+For the IBKR-unreachable notice, IBKR's servers have been unreachable from a
+logged-in Gateway for over three hours outside any scheduled IBKR window.
+The notice names the affected accounts by the adapters with unresolved loss
+evidence; it does not establish other accounts' trading status. The **Gateway
+healer** acts only when an adapter stops at the end of a scheduled window,
+subject to its safety gates and restart limit. Here, check IBKR's system status,
+then restart the Gateway (`sudo systemctl restart ti-gateway`), approve a phone
+prompt if one comes, and start the affected adapters as described in
+[Gateway login](../runbooks/gateway-login.md). Check `journalctl -u ti-gateway`
+and the adapters' journals for recovery. This link-only notice calls for a
+restart; waiting alone need not recover the Gateway.
 
 Only matching login, reset-wait and start-state evidence participates in Gateway
 state: `Unrecognized Username or Password`, `LoginState is LOGGED_OUT`,
