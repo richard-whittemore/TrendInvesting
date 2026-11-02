@@ -104,20 +104,14 @@ Inside a scheduled IBKR window, wait for the Gateway healer; outside one, check
 IBKR's system status, then restart the Gateway (`sudo systemctl restart ti-gateway`),
 approve a phone prompt if one comes, and start the affected adapters per
 [Gateway login](../runbooks/gateway-login.md). See the server manual's
-[Gateway healer](server.md#gateway-healer) for the healer's gates and restart limit.
+[The Gateway is logged out](server.md#the-gateway-is-logged-out), its "Gateway healer" part, for the healer's gates and restart limit.
 An IBC logout or refused login keeps the logged-out wording and remedy,
 regardless of adapter evidence. An adapter journal read or parse failure cannot
 suppress that IBC-established outage: decide and deliver the outage when due,
 then return the fault as the firing's error, even during grace or maintenance.
 The reporter's failure page remains open and its outside heartbeat is withheld.
-All evidence, including restoration, reconciliation and completed login, must
-be dated no later than the firing's clock plus two minutes. Later lines are
-ignored; the text names only the first and counts the rest across all journals.
-The earliest eligible loss in each uninterrupted segment counts, preserving
-restoration boundaries in journal order. A loss becoming eligible on a later
-firing cannot postpone an open outage or resolve it.
 An open outage still needs a completed login, restoration or reconciliation
-at least as new as its first observation and within the clock allowance to resolve; journal silence and adapter
+at least as new as its first observation to resolve; journal silence and adapter
 stops or restarts cannot supply recovery. Adapter process sampling and sampling
 incidents are not part of this check. No state-file keys are added. Previous-build
 state loads normally: obsolete notice and adapter-loss fields are ignored, while the Gateway outage,

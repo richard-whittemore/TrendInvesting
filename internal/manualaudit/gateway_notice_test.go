@@ -19,6 +19,9 @@ func TestGatewayUnreachableNoticeManualRemedy(t *testing.T) {
 		return strings.Join(strings.Fields(string(raw)), " ")
 	}
 	server := read("server.md")
+	if !strings.Contains(server, "## The Gateway is logged out") {
+		t.Fatal("server.md lacks the heading targeted by the Gateway healer link")
+	}
 	_, overview, ok := strings.Cut(read("alerts-and-dashboard.md"), "The link-only notice reports")
 	if !ok {
 		t.Fatal("alerts-and-dashboard.md lacks the link-only notice overview")
@@ -27,7 +30,7 @@ func TestGatewayUnreachableNoticeManualRemedy(t *testing.T) {
 	if !ok {
 		t.Fatal("alerts-and-dashboard.md lacks the end of the link-only notice overview")
 	}
-	for _, want := range []string{"Inside a scheduled IBKR window, wait for the Gateway healer; outside one, check IBKR's system status, then restart the Gateway", "[Gateway healer](server.md#gateway-healer)"} {
+	for _, want := range []string{"Inside a scheduled IBKR window, wait for the Gateway healer; outside one, check IBKR's system status, then restart the Gateway", "[The Gateway is logged out](server.md#the-gateway-is-logged-out), its \"Gateway healer\" part"} {
 		if !strings.Contains(overview, want) {
 			t.Errorf("alerts-and-dashboard.md lacks conditional overview remedy %q", want)
 		}

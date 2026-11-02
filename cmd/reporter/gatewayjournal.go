@@ -38,9 +38,6 @@ const (
 	// about this time plus gatewayPagesAfter (docs/manual/server.md,
 	// "The Gateway is logged out"; ADR 0019, "Alerting").
 	gatewayLinkLossAfter = 3 * time.Hour
-	// gatewayLinkClockSkew allows small clock differences; later evidence
-	// lines are diagnostic only (docs/manual/server.md, "The Gateway is logged out").
-	gatewayLinkClockSkew = 2 * time.Minute
 )
 
 // gatewayEvidence is what the journals show: logged out (out), or that they
@@ -150,37 +147,6 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		if err != nil {
 			return gatewayEvidence{}, err
 		}
-		var futureFirst string
-		futureCount := 0
-		ignore := func(unit string, lines []string) {
-			if len(lines) > 0 && futureCount == 0 {
-				futureFirst = unit + ": " + lines[0]
-			}
-			futureCount += len(lines)
-		}
-		var ignored []string
-		// Only completed logins may be discarded for clock skew. Keeping IBC
-		// outage evidence in journal order prevents an earlier login becoming
-		// recovery (docs/manual/server.md, "The Gateway is logged out").
-		var eligibleIBC []string
-		for _, line := range ibc {
-			at, err := lineTime(line)
-			if err != nil {
-				return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
-			}
-			if strings.Contains(line, "Login has completed") && at.After(now.Add(gatewayLinkClockSkew)) {
-				ignored = append(ignored, line)
-			} else {
-				eligibleIBC = append(eligibleIBC, line)
-			}
-		}
-		ibc = eligibleIBC
-		ignore(gatewayUnit, ignored)
-		resets, ignored, err = eligibleGatewayLines(resets, now)
-		if err != nil {
-			return gatewayEvidence{}, fmt.Errorf("reporter: reset wait time: %w", err)
-		}
-		ignore(gatewayUnit, ignored)
 		// A reset wait must be strictly newer than every completed-login
 		// timestamp (ADR 0019, "Alerting"). Login events retain journal order;
 		// wall-clock changes must not let an older reset override a login.
@@ -266,8 +232,7 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 				diagnostics = append(diagnostics, err.Error())
 				continue
 			}
-			since, line, restored, ignored, err := lostSince(lines, now)
-			ignore(unit, ignored)
+			since, line, restored, err := lostSince(lines)
 			if err != nil {
 				err = fmt.Errorf("reporter: the gateway check could not read %s's link events: %w", unit, err)
 				if !ibcOut {
@@ -300,9 +265,6 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 		default:
 			ev.said = "gateway: logged in (IBC's newest login event is a completed login)"
 		}
-		if futureCount > 0 {
-			diagnostics = append(diagnostics, fmt.Sprintf("ignored future-dated evidence beyond the %s clock-skew allowance: %s; %d additional future-dated lines", gatewayLinkClockSkew, futureFirst, futureCount-1))
-		}
 		if len(diagnostics) > 0 {
 			ev.said += "; " + strings.Join(diagnostics, "; ")
 		}
@@ -310,44 +272,25 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 	}
 }
 
-// eligibleGatewayLines applies the clock-skew bound to adapter and reset-wait
-// evidence, preserving journal order. Future recovery cannot end a loss or
-// close an outage (docs/manual/server.md, "The Gateway is logged out").
-func eligibleGatewayLines(lines []string, now time.Time) (eligible, ignored []string, err error) {
-	for _, line := range lines {
-		at, err := lineTime(line)
-		if err != nil {
-			return nil, ignored, err
-		}
-		if at.After(now.Add(gatewayLinkClockSkew)) {
-			ignored = append(ignored, line)
-		} else {
-			eligible = append(eligible, line)
-		}
-	}
-	return eligible, ignored, nil
-}
-
-// lostSince keeps the earliest eligible loss timestamp within the current
-// uninterrupted segment. Restoration boundaries remain in journal order, so
-// a loss that becomes eligible at a later firing cannot postpone detection or
-// supply recovery (docs/manual/server.md, "The Gateway is logged out").
-func lostSince(lines []string, now time.Time) (since time.Time, first string, restored time.Time, ignored []string, err error) {
-	lines, ignored, err = eligibleGatewayLines(lines, now)
-	if err != nil {
-		return time.Time{}, "", time.Time{}, ignored, err
-	}
+// lostSince finds when the current uninterrupted loss began: the first
+// connectivity-lost line after the newest restoration or reconciliation (zero
+// when there is none, or nothing is lost), that line, and the newest
+// restoration's time.
+func lostSince(lines []string) (since time.Time, first string, restored time.Time, err error) {
 	for _, l := range lines {
-		at, _ := lineTime(l) // eligibleGatewayLines has validated every timestamp.
+		at, err := lineTime(l)
+		if err != nil {
+			return time.Time{}, "", time.Time{}, err
+		}
 		if strings.Contains(l, "state=connectivity-lost") {
-			if since.IsZero() || at.Before(since) {
+			if since.IsZero() {
 				since, first = at, l
 			}
 			continue
 		}
 		since, first, restored = time.Time{}, "", at
 	}
-	return since, first, restored, ignored, nil
+	return since, first, restored, nil
 }
 
 // gatewayUnitSample is what systemd says of ti-gateway.service: how many times

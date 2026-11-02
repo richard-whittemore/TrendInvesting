@@ -895,17 +895,10 @@ outage with the adapter fault in its text, then returns the fault as the firing'
 error. The firing still fails during grace or maintenance when no outage page
 is due; its failure page remains open and the outside heartbeat is withheld.
 
-Every evidence line must be dated no later than the firing's clock plus two
-minutes, including loss, restoration, reconciliation and completed login.
-Later lines are ignored as evidence. The check text names only the first such
-line, its journal and the two-minute allowance, plus a count of the rest across
-all journals. Within each uninterrupted loss segment, the earliest eligible
-loss timestamp counts; restoration boundaries remain in journal order. A loss
-that becomes eligible on a later firing cannot move an open outage's start
-later or resolve it. A readable journal with no evidence opens no incident;
-an already open outage requires a completed login, restoration or reconciliation
-at least as new as its first observation, and within the same clock allowance,
-to resolve. Adapter stops and restarts are not recovery evidence.
+A readable journal with no evidence opens no incident; an already open outage
+requires a completed login, restoration or reconciliation at least as new as
+its first observation to resolve. Adapter stops and restarts are not recovery
+evidence.
 
 The resulting Gateway incident is **operational**, following the
 [paging invariant](alerts-and-dashboard.md#paging-invariant): ntfy and an alerts

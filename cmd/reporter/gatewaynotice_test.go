@@ -5,7 +5,6 @@ package main
 // (a) IBC logout or refused login keeps today's logged-out alert regardless of adapters.
 // (b) Link evidence with IBC logged in uses the same key with IBKR-unreachable wording.
 // (c) An adapter stop never resolves an IBC-established outage.
-// (d) A future-dated loss beyond two minutes never delays or suppresses detection.
 // (e) An adapter journal read failure never suppresses an IBC-established outage.
 // (f) The existing state-file shape round-trips unchanged, with no new keys.
 
@@ -47,7 +46,6 @@ func TestGatewayIBCLogoutAlwaysKeepsLoggedOutAlert(t *testing.T) {
 			"lost":         {stamp(start.Add(-4*time.Hour), linkLost)},
 			"restored":     {stamp(start, linkUp)},
 			"reconciled":   {stamp(start, linkReconciled)},
-			"future loss":  {stamp(start.Add(24*time.Hour), linkLost)},
 			"read failure": nil,
 		} {
 			t.Run(event+"/"+name, func(t *testing.T) {
@@ -142,58 +140,6 @@ func TestGatewayAdapterStopPreservesIBCOutage(t *testing.T) {
 	TestPagingLogoutCannotResolveWhenAdapterStops(t)
 }
 
-func TestGatewayFutureLossNeverDelaysOrSuppresses(t *testing.T) {
-	start := tuesday(12, 0)
-	future := stamp(start.Add(24*time.Hour), linkLost)
-	old := stamp(start.Add(-4*time.Hour), linkLost)
-	for _, tc := range []struct {
-		name         string
-		lines        []string
-		out, ignored bool
-	}{
-		{"future before valid", []string{future, old}, true, true},
-		{"future after valid", []string{old, future}, true, true},
-		{"future only", []string{future}, false, true},
-		{"future then restoration", []string{future, stamp(start, linkUp)}, false, true},
-		{"two-minute allowance", []string{stamp(start.Add(2*time.Minute), linkLost), old}, true, false},
-		{"beyond allowance", []string{stamp(start.Add(2*time.Minute+time.Second), linkLost), old}, true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			g := newStandInGateway(t)
-			g.ibc(stamp(start.Add(-5*time.Hour), ibcCompleted))
-			g.adapter(tc.lines...)
-			ev, err := gatewayJournalChecker(g.path(), []string{"ti-adapter-boost.service"})(start)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if ev.out != tc.out {
-				t.Errorf("out=%t, want %t; future loss changed detection", ev.out, tc.out)
-			}
-			if strings.Contains(ev.said, "ignored future-dated evidence") != tc.ignored {
-				t.Errorf("missing or unexpected future-line diagnostic: %s", ev.said)
-			}
-			if tc.ignored {
-				ignoredLine := tc.lines[0]
-				if tc.name == "future after valid" {
-					ignoredLine = tc.lines[1]
-				}
-				if !strings.Contains(ev.said, "ti-adapter-boost.service") || !strings.Contains(ev.said, ignoredLine) || !strings.Contains(ev.said, "2m0s") {
-					t.Errorf("diagnostic must name adapter, line and allowance: %s", ev.said)
-				}
-			}
-			if tc.out {
-				p := &policyRecorder{channel: "ntfy"}
-				path := filepath.Join(t.TempDir(), "gateway.json")
-				gatewayNoticeStep(t, g, path, start, p, "ti-adapter-boost.service")
-				gatewayNoticeStep(t, g, path, start.Add(10*time.Minute), p, "ti-adapter-boost.service")
-				if len(p.alerts) != 1 {
-					t.Fatal("future loss suppressed delivery")
-				}
-			}
-		})
-	}
-}
-
 func TestGatewayAdapterReadFailureDoesNotSuppressIBCOutage(t *testing.T) {
 	for _, failure := range []string{"fail", "noaccess", "malformed"} {
 		t.Run(failure, func(t *testing.T) {
@@ -269,36 +215,6 @@ func TestGatewayMainStateShapeRoundTripsUnchanged(t *testing.T) {
 	}
 }
 
-// Synthetic clock corrections preserve the outage and journal-order recovery
-// boundaries (server.md, "The Gateway is logged out"; ADR 0019, "Alerting").
-func TestGatewayLossCrossingSkewThresholdKeepsOutage(t *testing.T) {
-	g := newStandInGateway(t)
-	start := tuesday(12, 0)
-	g.ibc(stamp(start.Add(-5*time.Hour), ibcCompleted))
-	g.adapter(stamp(start.Add(3*time.Minute), linkLost), stamp(start.Add(-4*time.Hour), linkLost))
-	g.write("ti-adapter@trad-ira.service", stamp(start.Add(-time.Hour), linkReconciled))
-	p := &policyRecorder{channel: "ntfy"}
-	path := filepath.Join(t.TempDir(), "gateway.json")
-	gatewayNoticeStep(t, g, path, start, p, "ti-adapter-boost.service", "ti-adapter@trad-ira.service")
-	g.write("ti-adapter@trad-ira.service", stamp(start.Add(4*time.Minute), linkReconciled))
-	for _, offset := range []time.Duration{5 * time.Minute, 10 * time.Minute} {
-		gatewayNoticeStep(t, g, path, start.Add(offset), p, "ti-adapter-boost.service", "ti-adapter@trad-ira.service")
-		h, err := loadHostGateway(path)
-		if err != nil || h.Since == nil || !h.Since.Equal(start) {
-			t.Errorf("newly eligible loss moved or resolved the open outage: %+v %v", h, err)
-		}
-	}
-	if len(p.alerts) != 1 {
-		t.Fatalf("crossing skew threshold suppressed page: %+v", p.alerts)
-	}
-	g.adapter(stamp(start.Add(3*time.Minute), linkLost), stamp(start.Add(-4*time.Hour), linkLost), stamp(start.Add(11*time.Minute), linkUp))
-	gatewayNoticeStep(t, g, path, start.Add(15*time.Minute), p, "ti-adapter-boost.service", "ti-adapter@trad-ira.service")
-	h, err := loadHostGateway(path)
-	if err != nil || h.Since != nil {
-		t.Fatalf("genuine later restoration did not close outage: %+v %v", h, err)
-	}
-}
-
 func TestGatewayLinkNoticeNamesOnlyAffectedAccounts(t *testing.T) {
 	g := newStandInGateway(t)
 	start := tuesday(12, 0)
@@ -315,66 +231,6 @@ func TestGatewayLinkNoticeNamesOnlyAffectedAccounts(t *testing.T) {
 	body := p.alerts[0].Body
 	if !strings.Contains(body, "ti-adapter-boost.service") || !strings.Contains(body, "Other accounts' trading status is not established by this check") || strings.Contains(body, "every account") || strings.Contains(body, "Nothing reaches IBKR") {
 		t.Fatalf("link-only notice overstates affected accounts: %s", body)
-	}
-}
-
-func TestGatewayFutureRecoveryCannotCloseOpenOutage(t *testing.T) {
-	for _, event := range []string{linkUp, linkReconciled, ibcCompleted} {
-		for _, skew := range []time.Duration{2 * time.Minute, 2*time.Minute + time.Second, 24 * time.Hour} {
-			t.Run(event+"/"+skew.String(), func(t *testing.T) {
-				g := newStandInGateway(t)
-				start := tuesday(12, 0)
-				g.ibc(stamp(start.Add(-5*time.Hour), ibcCompleted))
-				g.adapter(stamp(start.Add(-4*time.Hour), linkLost))
-				p := &policyRecorder{channel: "ntfy"}
-				path := filepath.Join(t.TempDir(), "gateway.json")
-				gatewayNoticeStep(t, g, path, start, p, "ti-adapter-boost.service")
-				gatewayNoticeStep(t, g, path, start.Add(10*time.Minute), p, "ti-adapter-boost.service")
-				at := start.Add(15 * time.Minute)
-				line := stamp(at.Add(skew), event)
-				g.adapter() // The qualifying loss has rotated away.
-				if event == ibcCompleted {
-					g.ibc(stamp(start.Add(-5*time.Hour), ibcCompleted), line)
-				} else {
-					g.adapter(line)
-				}
-				gatewayNoticeStep(t, g, path, at, p, "ti-adapter-boost.service")
-				h, err := loadHostGateway(path)
-				wantOpen := skew > 2*time.Minute
-				if err != nil || (h.Since != nil) != wantOpen {
-					t.Errorf("future recovery changed open outage: want open=%t, state=%+v err=%v", wantOpen, h, err)
-				}
-				ev, err := gatewayJournalChecker(g.path(), []string{"ti-adapter-boost.service"})(at)
-				if err != nil || (strings.Contains(ev.said, line) && strings.Contains(ev.said, "ignored future-dated evidence")) != wantOpen {
-					t.Errorf("recovery diagnostic missing or unexpected: %+v %v", ev, err)
-				}
-			})
-		}
-	}
-}
-
-func TestGatewayFutureRecoveryDoesNotEndLossSegment(t *testing.T) {
-	for _, event := range []string{linkUp, linkReconciled} {
-		start := tuesday(12, 0)
-		since, _, restored, _, err := lostSince([]string{stamp(start.Add(-4*time.Hour), linkLost), stamp(start.Add(24*time.Hour), event)}, start)
-		if err != nil || !since.Equal(start.Add(-4*time.Hour)) || !restored.IsZero() {
-			t.Errorf("future recovery ended loss segment: %v %v %v", since, restored, err)
-		}
-	}
-}
-
-func TestGatewayFutureDiagnosticsBoundedAcrossJournals(t *testing.T) {
-	g := newStandInGateway(t)
-	start := tuesday(12, 0)
-	first := stamp(start.Add(24*time.Hour), ibcCompleted)
-	second := stamp(start.Add(25*time.Hour), linkLost)
-	third := stamp(start.Add(26*time.Hour), linkReconciled)
-	g.ibc(stamp(start.Add(-5*time.Hour), ibcCompleted), first)
-	g.adapter(second, third)
-	g.write("ti-adapter@trad-ira.service", second, third)
-	ev, err := gatewayJournalChecker(g.path(), []string{"ti-adapter-boost.service", "ti-adapter@trad-ira.service"})(start)
-	if err != nil || !strings.Contains(ev.said, first) || !strings.Contains(ev.said, "4 additional future-dated lines") || strings.Contains(ev.said, second) || strings.Contains(ev.said, third) {
-		t.Fatalf("future diagnostics must name only first line and remaining count: %s %v", ev.said, err)
 	}
 }
 
@@ -399,51 +255,5 @@ func TestGatewayAdapterReadFaultFailsDuringMaintenance(t *testing.T) {
 	h, loadErr := loadHostGateway(path)
 	if loadErr != nil || h.Since == nil || len(p.alerts) != 0 {
 		t.Errorf("maintenance must retain outage without delivery: %+v %+v %v", h, p.alerts, loadErr)
-	}
-}
-
-func TestGatewayFutureIBCStateKeepsOutageEvidence(t *testing.T) {
-	start := tuesday(12, 0)
-	for _, event := range []string{ibcCompleted, ibcRefused, ibcStarting, "host gateway-start[1]: gateway-start: reset wait: login refused at"} {
-		g := newStandInGateway(t)
-		g.ibc(stamp(start.Add(-time.Hour), ibcRefused), stamp(start.Add(24*time.Hour), event))
-		ev, err := gatewayJournalChecker(g.path(), nil)(start)
-		wantIgnored := event == ibcCompleted || strings.Contains(event, "reset wait:")
-		if err != nil || !ev.out || ev.resetWait || !ev.recoveredAt.IsZero() || strings.Contains(ev.said, "ignored future-dated evidence") != wantIgnored {
-			t.Errorf("future IBC state replaced eligible logout: %+v %v", ev, err)
-		}
-	}
-}
-
-// IBC outage evidence cannot expose an earlier login as recovery, even after a
-// clock change (docs/manual/server.md, "The Gateway is logged out").
-func TestGatewayFutureIBCOutageCannotPromotePastLoginToRecovery(t *testing.T) {
-	for _, event := range []string{"host ibc[1]: LoginState is LOGGED_OUT", ibcRefused, "host ibc[1]: login retries stopped", ibcStarting, "host gateway-start[1]: gateway-start: cannot start IBC"} {
-		t.Run(event, func(t *testing.T) {
-			g := newStandInGateway(t)
-			start := tuesday(12, 0)
-			g.ibc(stamp(start.Add(-time.Hour), ibcRefused))
-			p := &policyRecorder{channel: "ntfy"}
-			path := filepath.Join(t.TempDir(), "gateway.json")
-			gatewayNoticeStep(t, g, path, start, p)
-			gatewayNoticeStep(t, g, path, start.Add(10*time.Minute), p)
-			h, err := loadHostGateway(path)
-			if err != nil || h.Since == nil || len(h.Keys) != 1 || len(p.alerts) != 1 {
-				t.Fatalf("outage was not opened and delivered: %+v %v", h, err)
-			}
-			keys := h.Keys
-			future := stamp(start.Add(24*time.Hour), event)
-			g.ibc(stamp(start.Add(11*time.Minute), ibcCompleted), future)
-			at := start.Add(15 * time.Minute)
-			ev, err := gatewayJournalChecker(g.path(), nil)(at)
-			if err != nil || !ev.out || !ev.recoveredAt.IsZero() || !strings.Contains(ev.said, future) || strings.Contains(ev.said, "ignored future-dated evidence") {
-				t.Errorf("future IBC outage must remain newest evidence without recovery: %+v %v", ev, err)
-			}
-			gatewayNoticeStep(t, g, path, at, p)
-			h, err = loadHostGateway(path)
-			if err != nil || h.Since == nil || !h.Since.Equal(start) || h.Resolving || !reflect.DeepEqual(h.Keys, keys) {
-				t.Errorf("future IBC outage promoted past login into resolution: %+v %v", h, err)
-			}
-		})
 	}
 }
