@@ -56,7 +56,8 @@ func TestMomentumManualCashReadingMatchesIRAConfigs(t *testing.T) {
 		"account's settled cash",
 		"No Borrow Margin",
 		"Unsettled sale proceeds are therefore not spent",
-		"plan decision D5 chose `total-cash`",
+		"decision D5 chose `total-cash`",
+		"no later buy phase spends them",
 		"ADR 0026, point 2",
 	} {
 		if !strings.Contains(flat, want) {
