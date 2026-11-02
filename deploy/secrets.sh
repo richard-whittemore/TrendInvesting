@@ -19,7 +19,10 @@
 #                                  checked by decrypting it, synced, renamed
 #                                  over the old one), replace the unlocked copy
 #                                  if the secrets are unlocked, and remove the
-#                                  plain text
+#                                  plain text. An absent optional IRA login
+#                                  starts from a template only after verifying
+#                                  the passphrase against an existing secret;
+#                                  an unchanged template writes nothing.
 #   sudo ti-secrets passphrase     change the passphrase of every file: every
 #                                  new copy is written and checked by
 #                                  decrypting it with the new passphrase
@@ -64,7 +67,8 @@
 # while one remains, so no copy under an old passphrase outlives a change.
 #
 # NAME is a file's place under /etc/trend-investing: secrets.env,
-# ibkr-login.env or accounts/<account>.env. Its encrypted copy is NAME.gpg
+# ibkr-login.env, ibkr-login-trad-ira.env, ibkr-login-roth-ira.env or
+# accounts/<account>.env (docs/manual/server.md). Its encrypted copy is NAME.gpg
 # there, root:root 0600; its unlocked copy is
 # /run/trend-investing/secrets/NAME, root:root 0600, in a tmpfs mounted
 # root-only (0700) for it.
@@ -131,7 +135,7 @@ die() {
 warn() { printf '%s: warning: %s\n' "$prog" "$*" >&2; }
 
 usage() {
-  die "usage: ti-unlock, or ti-secrets unlock|lock|status|migrate|passphrase, ti-secrets passphrase --resume, or ti-secrets edit|diff NAME (secrets.env, ibkr-login.env, accounts/<account>.env)"
+  die "usage: ti-unlock, or ti-secrets unlock|lock|status|migrate|passphrase, ti-secrets passphrase --resume, or ti-secrets edit|diff NAME (secrets.env, ibkr-login.env, ibkr-login-trad-ira.env, ibkr-login-roth-ira.env, accounts/<account>.env)"
 }
 
 passfd=
@@ -183,7 +187,7 @@ need_gpg() { command -v gpg >/dev/null || die "gpg is not installed: run sudo de
 # valid_name NAME: one of the secret files this script keeps.
 valid_name() {
   case $1 in
-    secrets.env | ibkr-login.env) return 0 ;;
+    secrets.env | ibkr-login.env | ibkr-login-trad-ira.env | ibkr-login-roth-ira.env) return 0 ;;
     accounts/*.env)
       local a=${1#accounts/}
       a=${a%.env}
@@ -197,7 +201,7 @@ valid_name() {
 # plain text, one NAME per line.
 encrypted_names() {
   local n f
-  for n in secrets.env ibkr-login.env; do
+  for n in secrets.env ibkr-login.env ibkr-login-trad-ira.env ibkr-login-roth-ira.env; do
     if test -f "$etc/$n.gpg"; then echo "$n"; fi
   done
   for f in "$etc"/accounts/*.env.gpg; do
@@ -208,7 +212,7 @@ encrypted_names() {
 }
 plain_names() {
   local n f
-  for n in secrets.env ibkr-login.env; do
+  for n in secrets.env ibkr-login.env ibkr-login-trad-ira.env ibkr-login-roth-ira.env; do
     if test -f "$etc/$n"; then echo "$n"; fi
   done
   for f in "$etc"/accounts/*.env; do
@@ -519,17 +523,51 @@ set_editor_args() {
 }
 
 cmd_edit() {
-  local name=$1 phrase work base editor tmp unlocked=0
-  valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login.env, accounts/<account>.env)"
+  local name=$1 phrase work base editor tmp verify creating=0 unlocked=0
+  valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login.env, ibkr-login-trad-ira.env, ibkr-login-roth-ira.env, accounts/<account>.env)"
   refuse_interrupted_change
-  test -f "$etc/$name.gpg" || die "there is no $etc/$name.gpg (sudo ti-secrets status lists the files)"
+  if ! test -f "$etc/$name.gpg"; then
+    case $name in
+      ibkr-login-trad-ira.env | ibkr-login-roth-ira.env)
+        test ! -e "$etc/$name.gpg" && test ! -L "$etc/$name.gpg" || die "$etc/$name.gpg already exists; nothing changed"
+        creating=1
+        ;;
+      *) die "there is no $etc/$name.gpg (sudo ti-secrets status lists the files)" ;;
+    esac
+  fi
   test ! -e "$etc/$name" || die "$etc/$name is on disk in plain text: run sudo ti-secrets migrate first"
+  if test "$creating" = 1; then
+    test ! -L "$etc/$name" || die "$etc/$name is a link; nothing changed"
+  fi
   ensure_tmpfs
   read_secret phrase "Passphrase for the server's secrets: "
   new_work work
   base=$(basename "$name")
-  decrypt_to "$phrase" "$etc/$name.gpg" "$work/.before" ||
-    die "the passphrase is wrong, or $etc/$name.gpg is damaged ($(gpg_said)); nothing changed"
+  if test "$creating" = 1; then
+    # ADR 0028: every secret shares the owner's passphrase. Verify against
+    # an existing secret before creating an optional IRA login, so a typo
+    # cannot encrypt the new file under a different passphrase.
+    if test -f "$etc/secrets.env.gpg"; then
+      verify=secrets.env
+    elif test -f "$etc/ibkr-login.env.gpg"; then
+      verify=ibkr-login.env
+    else
+      die "no secrets.env.gpg or ibkr-login.env.gpg to verify the passphrase; nothing changed"
+    fi
+    decrypt_to "$phrase" "$etc/$verify.gpg" "$work/.verify" ||
+      die "the passphrase is wrong, or $etc/$verify.gpg is damaged ($(gpg_said)); nothing changed"
+    rm -f -- "$work/.verify"
+    cat >"$work/.before" <<'TEMPLATE'
+# No service reads it yet.
+TWS_USERID=
+TWS_PASSWORD=
+TWS_TRADING_MODE=paper
+TWS_READONLY_API=yes
+TEMPLATE
+  else
+    decrypt_to "$phrase" "$etc/$name.gpg" "$work/.before" ||
+      die "the passphrase is wrong, or $etc/$name.gpg is damaged ($(gpg_said)); nothing changed"
+  fi
   install -m 0600 "$work/.before" "$work/$base"
   editor=${SUDO_EDITOR:-${VISUAL:-${EDITOR:-}}}
   if test -z "$editor"; then
@@ -550,7 +588,7 @@ cmd_edit() {
   if cmp -s "$work/.before" "$work/$base"; then
     # An unlocked copy that differs from the encrypted file (an edit cut
     # short before it was made again) is brought up to it.
-    if test "$unlocked" = 1 && ! cmp -s "$work/.before" "$run/$name"; then
+    if test "$creating" = 0 && test "$unlocked" = 1 && ! cmp -s "$work/.before" "$run/$name"; then
       place "$work/.before" "$name"
       log "$name is unchanged; nothing written, and its unlocked copy, which was not the encrypted one, is made again from it"
     else
@@ -584,7 +622,7 @@ cmd_edit() {
 # changed.
 cmd_diff() {
   local name=$1 phrase work status=0
-  valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login.env, accounts/<account>.env)"
+  valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login.env, ibkr-login-trad-ira.env, ibkr-login-roth-ira.env, accounts/<account>.env)"
   test -t 1 || die "diff prints the secrets: run it with its output on the terminal, not redirected to a file or piped; nothing read"
   test -f "$etc/$name.gpg" || die "there is no $etc/$name.gpg (sudo ti-secrets status lists the files)"
   test -f "$etc/$name" || die "$etc/$name is not on disk in plain text: there is nothing to compare (sudo ti-secrets edit $name opens the encrypted one)"

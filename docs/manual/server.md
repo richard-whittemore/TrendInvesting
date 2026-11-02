@@ -128,12 +128,26 @@ the same disk as the files, and a snapshot would carry both.
 | File | What it holds | Who reads it |
 | --- | --- | --- |
 | `ibkr-login.env` | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
+| `ibkr-login-trad-ira.env` | the Traditional IRA paper account's own IBKR login: `TWS_USERID`, `TWS_PASSWORD`, `TWS_TRADING_MODE=paper`, `TWS_READONLY_API=yes` | held for the IRAs' own Gateways, not yet used |
+| `ibkr-login-roth-ira.env` | the Roth IRA paper account's own IBKR login: `TWS_USERID`, `TWS_PASSWORD`, `TWS_TRADING_MODE=paper`, `TWS_READONLY_API=yes` | held for the IRAs' own Gateways, not yet used |
 | `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY`, `TI_PAGERDUTY_ROUTING_KEY` (unused: the server pages through Pushover), `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL`, and the Flex reader's `TI_IBKR_FLEX_TOKEN`, `TI_IBKR_FLEX_QUERY_ID` and `TI_IBKR_FLEX_TRADES_QUERY_ID` | handed as a private credential file (`LoadCredential`) to the data job, the engines, the reporter and the Flex readers; the dashboard is given none |
 | `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
 | `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's adapter (`ti-adapter@trad-ira.service`) and its Flex reader (`ti-flex@trad-ira.service`) |
 | `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to its adapter (`ti-adapter@roth-ira.service`, client ID 13) and Flex reader (`ti-flex@roth-ira.service`) |
 
 An existing server's `secrets.env` keeps the layout it was provisioned with, because provisioning never overwrites it, so the owner may tidy it by hand to match `deploy/etc/secrets.env.example`.
+
+The two IRA login files are optional; provisioning never creates them. The
+first `sudo ti-secrets edit ibkr-login-trad-ira.env` creates the Traditional
+IRA file, and `sudo ti-secrets edit ibkr-login-roth-ira.env` does the same for
+the Roth IRA. Each first edit verifies your passphrase by decrypting
+`secrets.env.gpg` (or `ibkr-login.env.gpg` if the former is absent), then opens
+a template with empty `TWS_USERID` and `TWS_PASSWORD`,
+`TWS_TRADING_MODE=paper`, and `TWS_READONLY_API=yes`. Fill in that IRA's own
+paper login and save. Leaving the template unchanged writes nothing. A
+wrong passphrase, or neither verification file existing, changes nothing.
+Later edits open the saved encrypted file as usual. No service reads these
+IRA login files yet, and their absence is normal in `ti-secrets status`.
 
 What each program actually reads today:
 
