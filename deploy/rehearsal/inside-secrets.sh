@@ -33,6 +33,7 @@ marker=${TI_TEST_MARKER:?}
 etc=/etc/trend-investing
 run=/run/trend-investing/secrets
 names="secrets.env ibkr-login.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env"
+optional_names="ibkr-login-trad-ira.env ibkr-login-roth-ira.env"
 p=/root/deploy/provision.sh
 
 # with PASSPHRASE CMD...: CMD, given PASSPHRASE on descriptor 7 for every
@@ -78,6 +79,13 @@ for n in $names; do
   test "$(stat -c %U:%G:%a "$etc/$n.gpg")" = root:root:600 || fail "$etc/$n.gpg is not root:root 0600"
 done
 test "$(stat -c %a "$etc/accounts")" = 700 || fail "$etc/accounts is not 0700"
+for n in $optional_names; do
+  test ! -e "$etc/$n" && test ! -e "$etc/$n.gpg" || fail "provisioning created optional $n"
+  if ti-secrets status | grep -qF "$n"; then fail "status reports absent optional $n"; fi
+done
+# An already-provisioned server must need no passphrase for services.
+TI_PASSPHRASE_FD=7 "$p" services 7</dev/null >/dev/null || fail "unattended services tried to read a passphrase"
+
 found=$(on_disk "$marker")
 test -z "$found" || fail "the migrated secret is still on disk in plain text: $found"
 pass "provisioning migrated the earlier plain-text secrets.env and encrypted every stub: no secret file in plain text, the marker nowhere on disk"
@@ -190,12 +198,46 @@ ti-secrets lock >/dev/null
 printf 'IBKR_ACCOUNT_BOOST=DU0000000\n' >"$edits/content"
 edit "$pass" accounts/boost.env >/dev/null || fail "an edit while locked failed"
 test -z "$(unlocked_files)" || fail "an edit while locked decrypted files into the tmpfs: $(unlocked_files)"
-for bad in ../secrets.env /etc/passwd accounts/../../x nothing.env accounts/x.env; do
+for bad in ibkr-login-boost.env ibkr-login-x.env ../secrets.env /etc/passwd accounts/../../x nothing.env accounts/x.env; do
   if edit "$pass" "$bad" >/dev/null 2>&1; then fail "ti-secrets edit accepted the name '$bad'"; fi
 done
 with "$pass" ti-unlock >/dev/null
 grep -qx 'IBKR_ACCOUNT_BOOST=DU0000000' "$run/accounts/boost.env" || fail "the edit made while locked is not in the encrypted file"
-pass "an edit with a wrong passphrase or no change writes nothing; an edit while locked decrypts nothing into the tmpfs; only the five names are accepted"
+pass "an edit with a wrong passphrase or no change writes nothing; an edit while locked decrypts nothing into the tmpfs; only the declared secret names with encrypted files are accepted"
+
+# Optional IRA logins start only at the owner's first edit. Wrong passphrases
+# must fail before the editor, and an unchanged template must not become an
+# unlocked file, even when the other secrets are unlocked (ADR 0028).
+for n in $optional_names; do
+  before=$(sums)
+  runs_before=$(runs)
+  if edit "not the passphrase" "$n" >/dev/null 2>"$err"; then fail "first edit of $n accepted a wrong passphrase"; fi
+  grep -q 'nothing changed' "$err" || fail "first edit refusal does not say nothing changed"
+  test "$(runs)" = "$runs_before" || fail "wrong first-edit passphrase ran the editor"
+  test "$(sums)" = "$before" || fail "wrong first-edit passphrase changed a file"
+  EDITOR=true with "$pass" ti-secrets edit "$n" >"$err" || fail "unchanged first edit failed"
+  grep -q 'unchanged; nothing written' "$err" || fail "unchanged template did not report nothing written"
+  test "$(sums)" = "$before" || fail "unchanged template changed a file"
+  test ! -e "$etc/$n" && test ! -e "$etc/$n.gpg" && test ! -e "$run/$n" || fail "refused or unchanged first edit created $n"
+  printf 'TWS_USERID=synthetic-%s\nTWS_PASSWORD=synthetic-password\nTWS_TRADING_MODE=paper\nTWS_READONLY_API=yes\n' "$n" >"$edits/content"
+  edit "$pass" "$n" >/dev/null || fail "first edit could not create $n"
+  test ! -e "$etc/$n" || fail "first edit left plaintext on disk"
+  test "$(stat -c %U:%G:%a "$etc/$n.gpg")" = root:root:600 || fail "first edit encryption is not root:root 0600"
+  cmp -s "$run/$n" "$edits/content" || fail "first edit did not place unlocked $n"
+  ti-secrets lock >/dev/null
+  with "$pass" ti-unlock >/dev/null || fail "created $n does not decrypt"
+  cmp -s "$run/$n" "$edits/content" || fail "created $n did not decrypt to the editor's text"
+  sed "s/^TWS_USERID=.*/TWS_USERID=second-$n/" "$run/$n" >"$edits/content"
+  edit "$pass" "$n" >/dev/null || fail "second edit of $n failed"
+  cmp -s "$run/$n" "$edits/content" || fail "second edit did not replace unlocked $n"
+  cp "$run/$n" "$etc/$n"
+  on_tty "$pass" "ti-secrets diff $n" </dev/null >/dev/null || fail "could not compare $n"
+  with "$pass" ti-secrets migrate >/dev/null || fail "could not migrate $n"
+  test ! -e "$etc/$n" || fail "$n migration left plain text"
+  ti-secrets status | grep -F "$n" | grep -q 'encrypted, unlocked' || fail "$n status is missing or wrong"
+done
+names="$names $optional_names"
+pass "optional IRA first edits verify the passphrase, create only changed templates, and support subsequent edits"
 
 # --- The passphrase is changed for every file at once; the old one then
 # unlocks nothing.

@@ -528,6 +528,12 @@ called "install -m 0755 $work/deploy/secrets.sh /usr/local/sbin/ti-secrets" || f
 called "ln -sfn ti-secrets /usr/local/sbin/ti-unlock" || fail "Lightsail services does not install ti-unlock"
 test "$(grep -n 'secrets-migrate' "$work/calls" | cut -d: -f1)" -gt "$(grep -n 'roth-ira.env' "$work/calls" | tail -1 | cut -d: -f1)" || fail "Lightsail services does not encrypt the secret files after writing their stubs"
 
+# Optional IRA logins are created only by the owner's first edit; services
+# must not introduce plaintext that makes an unattended migration prompt.
+for login in ibkr-login-trad-ira.env ibkr-login-roth-ira.env; do
+  if called "$work/etc/$login"; then fail "$login must not be provisioned"; fi
+done
+
 scenario "" x86_64 firewall || fail "Lightsail firewall failed: $(cat "$work/out")"
 said "Tailscale is not signed in" || fail "Lightsail's firewall step no longer checks Tailscale: $(cat "$work/out")"
 # Signed in to Tailscale: the Gateway's API ports (4002 paper, 4001 live) are
