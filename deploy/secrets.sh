@@ -774,7 +774,16 @@ migrate_login_name() {
     cmp -s "$stage/login" "$plain" || die "$encrypted and $plain differ; refusing login migration; preserve both and resolve which file to keep"
   fi
   if ! test -e "$etc/$old.gpg" && ! test -e "$etc/$old" && ! test -e "$run/$old"; then return 0; fi
-  if test -e "$run/$old"; then mv -- "$run/$old" "$run/$new"; fi
+  # An unlocked copy moves only beside its own encrypted file; any other
+  # leftover may be stale and is removed (sudo ti-unlock remakes it).
+  if test -e "$run/$old"; then
+    if test -e "$etc/$old.gpg"; then
+      mv -- "$run/$old" "$run/$new"
+    else
+      rm -- "$run/$old"
+      log "removed a leftover unlocked $old whose encrypted file was not beside it; sudo ti-unlock makes $new's unlocked copy from its encrypted file"
+    fi
+  fi
   for suffix in .gpg ''; do
     if test -e "$etc/$old$suffix"; then mv -- "$etc/$old$suffix" "$etc/$new$suffix"; fi
   done
