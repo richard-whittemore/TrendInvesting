@@ -642,7 +642,11 @@ def main(argv=None):
             rehearse(Path(work), account)
         except RehearsalFailed as failed:
             print("FAIL: {}".format(failed))
-            print("adapter log:\n" + (Path(work) / "adapter.log").read_text())
+            adapter_log = Path(work) / "adapter.log"
+            if adapter_log.exists():
+                print("adapter log:\n" + adapter_log.read_text())
+            else:
+                print("adapter.log does not exist yet")
             for out in sorted(Path(work).glob("*.out")):
                 print("{}:\n{}".format(out.name, out.read_text()))
             return 1
