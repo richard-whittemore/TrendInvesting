@@ -894,7 +894,10 @@ every five minutes and the Gateway reports 1100/2110 again, so repeated losses
 retain the first loss time across those connects.
 A silent IBKR session drop without an IBC event therefore takes
 about three hours plus the ten-minute detection grace to detect; paging eligibility
-can defer Pushover further. This detection limit still needs the owner's explicit
+can defer Pushover further. A new adapter process starts that clock again, so
+restarting the adapter by hand during an outage postpones this page; an adapter
+that stops is paged on its own as a failed unit, and within one running process
+the clock is never restarted. This detection limit still needs the owner's explicit
 agreement before live money. Missing IBC journal access fails the firing. An
 adapter journal read or parse failure also fails the firing. If IBC has already
 established the outage, the reporter first decides and, when due, delivers that
