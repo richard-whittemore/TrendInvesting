@@ -156,9 +156,11 @@ section 5; ADR 0026, point 2):
    account's settled cash: `execution.cash_rule` is `settled-cash` in both
    `deploy/etc/engines/trad-ira.config` and
    `deploy/etc/engines/roth-ira.config.example`. Unsettled sale proceeds are
-   therefore not spent, including proceeds from this rebalance's sells, so
-   buys that need them wait for settlement. This is the cautious choice:
-   plan decision D5 chose `total-cash` for margin IRAs, which may buy with
+   therefore not spent, including proceeds from this rebalance's sells, and
+   no later buy phase spends them once they settle: the buys are scaled to
+   the settled cash on hand, so after a month that rotates holdings, much of
+   the new targets stays in cash until the next monthly rebalance. Plan
+   decision D5 chose `total-cash` for margin IRAs, which may buy with
    unsettled proceeds, pending IBKR's confirmation for the accounts as
    opened (No Borrow Margin). Anything a newer account snapshot
    shows has gone is subtracted; a later cash increase does not enlarge
