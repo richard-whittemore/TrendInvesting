@@ -19,7 +19,10 @@
 #                                  checked by decrypting it, synced, renamed
 #                                  over the old one), replace the unlocked copy
 #                                  if the secrets are unlocked, and remove the
-#                                  plain text
+#                                  plain text. An absent optional login
+#                                  starts from a template only after verifying
+#                                  the passphrase against an existing secret;
+#                                  an unchanged template writes nothing.
 #   sudo ti-secrets passphrase     change the passphrase of every file: every
 #                                  new copy is written and checked by
 #                                  decrypting it with the new passphrase
@@ -520,34 +523,58 @@ set_editor_args() {
 }
 
 cmd_edit() {
-  local name=$1 phrase work base editor tmp existing unlocked=0 creating=0
+  local name=$1 phrase work base editor tmp verify creating=0 unlocked=0
   test "$name" != ibkr-login.env || die "ibkr-login.env was renamed to ibkr-login-joint.env; run sudo ti-secrets migrate, then sudo ti-secrets edit ibkr-login-joint.env"
-  valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login-{joint,trad-ira,roth-ira,live}.env, accounts/<account>.env)"
+  valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login-joint.env, ibkr-login-trad-ira.env, ibkr-login-roth-ira.env, ibkr-login-live.env, accounts/<account>.env)"
   refuse_interrupted_change
   if ! test -f "$etc/$name.gpg"; then
     case $name in
-      ibkr-login-trad-ira.env | ibkr-login-roth-ira.env | ibkr-login-live.env) creating=1 ;;
+      ibkr-login-trad-ira.env | ibkr-login-roth-ira.env | ibkr-login-live.env)
+        test ! -e "$etc/$name.gpg" && test ! -L "$etc/$name.gpg" || die "$etc/$name.gpg already exists; nothing changed"
+        creating=1
+        ;;
       *) die "there is no $etc/$name.gpg (sudo ti-secrets status lists the files)" ;;
     esac
   fi
   test ! -e "$etc/$name" || die "$etc/$name is on disk in plain text: run sudo ti-secrets migrate first"
+  if test "$creating" = 1; then
+    test ! -L "$etc/$name" || die "$etc/$name is a link; nothing changed"
+  fi
   ensure_tmpfs
   read_secret phrase "Passphrase for the server's secrets: "
   new_work work
   base=$(basename "$name")
   if test "$creating" = 1; then
-    # An optional login is created only after verifying the shared passphrase
-    # against an existing secret (ADR 0028; docs/runbooks/gateway-login.md).
-    existing=$(encrypted_names)
-    existing=${existing%%$'\n'*}
-    test -n "$existing" || die "no existing encrypted secret to verify the passphrase; run sudo deploy/provision.sh services"
-    decrypt_to "$phrase" "$etc/$existing.gpg" "$work/.verified" ||
-      die "the passphrase is wrong, or $etc/$existing.gpg is damaged ($(gpg_said)); nothing changed"
-    rm -f -- "$work/.verified"
-    if test "$name" = ibkr-login-live.env; then
-      printf '%s\n' 'TWS_USERID=' 'TWS_PASSWORD=' 'TWS_TRADING_MODE=live' 'TWS_READONLY_API=yes' 'TWS_SECOND_FACTOR_DEVICE=IB Key' >"$work/.before"
+    # ADR 0028: every secret shares the owner's passphrase. Verify against
+    # an existing secret before creating an optional login, so a typo
+    # cannot encrypt the new file under a different passphrase.
+    if test -f "$etc/secrets.env.gpg"; then
+      verify=secrets.env
+    elif test -f "$etc/ibkr-login-joint.env.gpg"; then
+      verify=ibkr-login-joint.env
     else
-      printf '%s\n' 'TWS_USERID=' 'TWS_PASSWORD=' 'TWS_TRADING_MODE=paper' 'TWS_READONLY_API=yes' >"$work/.before"
+      die "no secrets.env.gpg or ibkr-login-joint.env.gpg to verify the passphrase; nothing changed"
+    fi
+    decrypt_to "$phrase" "$etc/$verify.gpg" "$work/.verify" ||
+      die "the passphrase is wrong, or $etc/$verify.gpg is damaged ($(gpg_said)); nothing changed"
+    rm -f -- "$work/.verify"
+    if test "$name" = ibkr-login-live.env; then
+      cat >"$work/.before" <<'TEMPLATE'
+# No service reads it yet.
+TWS_USERID=
+TWS_PASSWORD=
+TWS_TRADING_MODE=live
+TWS_READONLY_API=yes
+TWS_SECOND_FACTOR_DEVICE=IB Key
+TEMPLATE
+    else
+      cat >"$work/.before" <<'TEMPLATE'
+# No service reads it yet.
+TWS_USERID=
+TWS_PASSWORD=
+TWS_TRADING_MODE=paper
+TWS_READONLY_API=yes
+TEMPLATE
     fi
   else
     decrypt_to "$phrase" "$etc/$name.gpg" "$work/.before" ||
@@ -570,10 +597,10 @@ cmd_edit() {
     $editor ${editor_args[@]+"${editor_args[@]}"} "$work/$base" {lockfd}>&-) || die "the editor exited with an error; nothing changed"
   test -f "$work/$base" || die "the editor removed the file; nothing changed"
   if is_unlocked; then unlocked=1; fi
-  if test "$creating" = 0 && cmp -s "$work/.before" "$work/$base"; then
+  if cmp -s "$work/.before" "$work/$base"; then
     # An unlocked copy that differs from the encrypted file (an edit cut
     # short before it was made again) is brought up to it.
-    if test "$unlocked" = 1 && ! cmp -s "$work/.before" "$run/$name"; then
+    if test "$creating" = 0 && test "$unlocked" = 1 && ! cmp -s "$work/.before" "$run/$name"; then
       place "$work/.before" "$name"
       log "$name is unchanged; nothing written, and its unlocked copy, which was not the encrypted one, is made again from it"
     else

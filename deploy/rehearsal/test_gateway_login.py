@@ -41,6 +41,8 @@ import subprocess
 import tempfile
 import unittest
 
+import test_roth
+
 
 DEPLOY = Path(__file__).resolve().parents[1]
 
@@ -289,24 +291,25 @@ export SUDO_EDITOR=$etc/editor
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ibkr-login-joint.env", result.stderr)
 
-    def editor(self, status=0):
+    def editor(self, status=0, change=False):
         path = self.etc / "editor"
-        path.write_text(f'#!/bin/sh\ncp "$1" "{self.root}/editor-input"\nexit {status}\n')
+        edit = 'printf "TWS_USERID=synthetic-user\\n" >>"$1"\n' if change else ''
+        path.write_text(f'#!/bin/sh\ncp "$1" "{self.root}/editor-input"\n{edit}exit {status}\n')
         path.chmod(0o700)
 
     def create(self, selection):
         (self.etc / "secrets.env.gpg").write_text("fixture-existing")
-        self.editor()
+        self.editor(change=True)
         name = f"ibkr-login-{selection}.env"
         result = self.secrets(f"cmd_edit {name}")
         self.assertEqual(result.returncode, 0, result.stderr)
-        expected = ("TWS_USERID=\nTWS_PASSWORD=\n"
+        expected = ("# No service reads it yet.\nTWS_USERID=\nTWS_PASSWORD=\n"
                     f"TWS_TRADING_MODE={'live' if selection == 'live' else 'paper'}\n"
                     "TWS_READONLY_API=yes\n")
         if selection == "live":
             expected += "TWS_SECOND_FACTOR_DEVICE=IB Key\n"
         self.assertEqual((self.root / "editor-input").read_text(), expected)
-        self.assertEqual((self.etc / (name + ".gpg")).read_text(), expected)
+        self.assertEqual((self.etc / (name + ".gpg")).read_text(), expected + "TWS_USERID=synthetic-user\n")
         self.assertFalse((self.etc / name).exists())
 
     def test_create_trad_ira(self):
@@ -420,6 +423,58 @@ export SUDO_EDITOR=$etc/editor
         provision = (DEPLOY / "provision.sh").read_text()
         self.assertIn('install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/', provision)
         self.assertIn("AssertPathExists=/run/trend-investing/secrets/secrets.env\n", unit)
+
+
+class OptionalLoginFirstEditTests(test_roth.IRAFirstEditTests):
+    """Apply the installed IRA lifecycle contract to every optional login."""
+
+    names = (*test_roth.IRALoginSecretsTests.names, "ibkr-login-live.env")
+
+    def test_first_edit_refuses_existing_nonregular_paths_before_editor(self):
+        for name in self.names:
+            for suffix, kind in ((".gpg", "directory"), (".gpg", "link"), ("", "link")):
+                with self.subTest(name=name, suffix=suffix, kind=kind):
+                    path = self.folder / (name + suffix)
+                    if kind == "directory":
+                        path.mkdir()
+                    else:
+                        path.symlink_to(self.folder / "absent-target")
+                    try:
+                        before = self.snapshot()
+                        result = self.command('cmd_edit "$1"', name, phrases=(self.phrase,), edit="unchanged")
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("nothing changed", result.stderr)
+                        self.assertEqual(self.snapshot(), before)
+                        self.assertFalse((self.folder / "editor-before").exists())
+                        self.assertEqual(list(self.run.iterdir()), [])
+                        self.assertTrue(path.is_dir() if kind == "directory" else path.is_symlink())
+                    finally:
+                        (self.folder / "editor-before").unlink(missing_ok=True)
+                        if kind == "directory":
+                            path.rmdir()
+                        else:
+                            path.unlink()
+
+    def test_first_edit_creates_then_second_edit_decrypts_existing_content(self):
+        for name in self.names:
+            with self.subTest(name=name):
+                self.ok(self.command('cmd_edit "$1"', name, phrases=(self.phrase,)))
+                template = (self.folder / "editor-before").read_text()
+                fields = dict(line.split("=", 1) for line in template.splitlines()
+                              if not line.startswith("#"))
+                expected = {"TWS_USERID": "", "TWS_PASSWORD": "",
+                            "TWS_TRADING_MODE": "paper", "TWS_READONLY_API": "yes"}
+                if name == "ibkr-login-live.env":
+                    expected.update(TWS_TRADING_MODE="live", TWS_SECOND_FACTOR_DEVICE="IB Key")
+                self.assertEqual(fields, expected)
+                first = self.ok(self.decrypt(name)).stdout
+                self.assertEqual(first, template + "TWS_USERID=synthetic-user\n")
+                self.assertFalse((self.folder / name).exists())
+                self.assertEqual((self.folder / (name + ".gpg")).stat().st_mode & 0o777, 0o600)
+                self.assertEqual(list(self.run.iterdir()), [])
+                self.ok(self.command('cmd_edit "$1"', name, phrases=(self.phrase,), edit="second"))
+                self.assertEqual((self.folder / "editor-before").read_text(), first)
+                self.assertEqual(self.ok(self.decrypt(name)).stdout, first + "TWS_PASSWORD=synthetic-password\n")
 
 
 if __name__ == "__main__":
