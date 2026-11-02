@@ -294,6 +294,44 @@ export SUDO_EDITOR=$etc/editor
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ibkr-login-joint.env", result.stderr)
 
+    def test_diff_existing_old_name_is_read_only(self):
+        encrypted = self.etc / "ibkr-login.env.gpg"
+        plain = self.etc / "ibkr-login.env"
+        encrypted.write_text("synthetic-encrypted\n")
+        for contents, status in (("synthetic-encrypted\n", 0), ("synthetic-conflict\n", 1)):
+            with self.subTest(status=status):
+                plain.write_text(contents)
+                # Stand in for terminal stdout while capturing synthetic diff output.
+                result = self.secrets('''
+test() {
+  if [[ $# = 2 && $1 = -t && $2 = 1 ]]; then return 0; fi
+  builtin test "$@"
+}
+cmd_diff ibkr-login.env
+''')
+                self.assertEqual(result.returncode, status, result.stderr)
+                if status == 0:
+                    self.assertIn("hold the same text", result.stdout)
+                else:
+                    self.assertIn("-synthetic-encrypted", result.stdout)
+                    self.assertIn("+synthetic-conflict", result.stdout)
+                self.assertEqual(encrypted.read_text(), "synthetic-encrypted\n")
+                self.assertEqual(plain.read_text(), contents)
+                self.assertEqual(list(self.run.iterdir()), [])
+
+    def test_edit_existing_old_name_is_refused(self):
+        encrypted = self.etc / "ibkr-login.env.gpg"
+        plain = self.etc / "ibkr-login.env"
+        encrypted.write_text("synthetic-encrypted\n")
+        plain.write_text("synthetic-conflict\n")
+        result = self.secrets("cmd_edit ibkr-login.env", phrase="must-not-be-read")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("legacy ibkr-login.env remains", result.stderr)
+        self.assertNotIn("unexpected passphrase prompt", result.stderr)
+        self.assertEqual(encrypted.read_text(), "synthetic-encrypted\n")
+        self.assertEqual(plain.read_text(), "synthetic-conflict\n")
+        self.assertEqual(list(self.run.iterdir()), [])
+
     def editor(self, status=0, change=False):
         path = self.etc / "editor"
         edit = 'printf "TWS_USERID=synthetic-user\\n" >>"$1"\n' if change else ''
@@ -423,18 +461,28 @@ export SUDO_EDITOR=$etc/editor
                 self.assertNotIn("unexpected passphrase prompt", result.stderr)
 
     def test_migration_partial_unlocked_both_directions(self):
-        for encrypted_new in (True, False):
+        for encrypted_new in (False, True):
             with self.subTest(encrypted_new=encrypted_new):
                 enc = self.etc / ("ibkr-login-joint.env.gpg" if encrypted_new else "ibkr-login.env.gpg")
                 plain = self.run / ("ibkr-login.env" if encrypted_new else "ibkr-login-joint.env")
                 enc.write_text("synthetic")
-                plain.write_text("synthetic")
+                plain.write_text("synthetic-stale" if encrypted_new else "synthetic")
                 result = self.secrets("cmd_migrate", phrase="must-not-be-read")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertFalse((self.run / "ibkr-login.env").exists())
                 self.assertFalse((self.etc / "ibkr-login.env.gpg").exists())
+                self.assertEqual((self.etc / "ibkr-login-joint.env.gpg").read_text(), "synthetic")
+                if encrypted_new:
+                    self.assertFalse((self.run / "ibkr-login-joint.env").exists())
+                    self.assertIn(
+                        "removed a leftover unlocked ibkr-login.env whose encrypted file was already renamed; "
+                        "sudo ti-unlock makes ibkr-login-joint.env's unlocked copy from its encrypted file",
+                        result.stdout,
+                    )
+                else:
+                    self.assertEqual((self.run / "ibkr-login-joint.env").read_text(), "synthetic")
+                    (self.run / "ibkr-login-joint.env").unlink()
                 (self.etc / "ibkr-login-joint.env.gpg").unlink()
-                (self.run / "ibkr-login-joint.env").unlink()
 
     def test_migration_partial_disk_pair_both_directions(self):
         for encrypted_new in (True, False):

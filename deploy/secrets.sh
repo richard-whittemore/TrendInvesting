@@ -643,9 +643,8 @@ TEMPLATE
 # different, 2 or more the comparison failed, which is reported. Nothing is
 # changed.
 cmd_diff() {
-  refuse_legacy_login
   local name=$1 phrase work status=0
-  valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login-{joint,trad-ira,roth-ira,live}.env, accounts/<account>.env)"
+  test "$name" = ibkr-login.env || valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login-{joint,trad-ira,roth-ira,live}.env, accounts/<account>.env)"
   test -t 1 || die "diff prints the secrets: run it with its output on the terminal, not redirected to a file or piped; nothing read"
   test -f "$etc/$name.gpg" || die "there is no $etc/$name.gpg (sudo ti-secrets status lists the files)"
   test -f "$etc/$name" || die "$etc/$name is not on disk in plain text: there is nothing to compare (sudo ti-secrets edit $name opens the encrypted one)"
@@ -747,6 +746,11 @@ cmd_passphrase() {
 # resumable only after verifying their contents (ADR 0028). Preserve conflicts.
 migrate_login_name() {
   local old=ibkr-login.env new=ibkr-login-joint.env suffix phrase stage encrypted plain
+  if test -e "$run/$old" && ! test -e "$etc/$old.gpg" && ! test -e "$etc/$old"; then
+    rm -- "$run/$old"
+    log "removed a leftover unlocked ibkr-login.env whose encrypted file was already renamed; sudo ti-unlock makes ibkr-login-joint.env's unlocked copy from its encrypted file"
+    return 0
+  fi
   for suffix in .gpg ''; do
     if test -e "$etc/$old$suffix" && test -e "$etc/$new$suffix"; then
       die "$etc/$old$suffix and $etc/$new$suffix both exist; refusing login migration; preserve both and resolve which file to keep"
