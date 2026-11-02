@@ -333,7 +333,7 @@ func TestAdapterEvidenceIsExaminedWhenIBCsJournalHasNoLoginEvent(t *testing.T) {
 	}
 }
 
-// The link must have been lost without a connection since, for 3 hours: lost
+// The link must have been lost without restoration since, for 3 hours: lost
 // at 06:00, restored at 08:00 and lost again at 09:55 is a 5-minute loss.
 func TestAdapterLossCountsOnlyAsOneContinuousLossOfThreeHours(t *testing.T) {
 	cases := map[string]struct {
@@ -540,26 +540,50 @@ func TestNoJournalEvidenceKeepsAnOpenOutageOpenAndPagesNothingWhenNoneIsOpen(t *
 	}
 }
 
-// The adapter reconnects every restore_timeout while the Gateway has no IBKR,
-// and logs the API handshake each time; only IBKR's restoration (or a
-// reconciliation, which needs IBKR) ends a loss. A silent drop of 4 hours is
-// lost, handshake, lost, handshake ... and pages.
-func TestARepeatedReconnectWhileIBKRIsGoneIsOneLongLossAndPages(t *testing.T) {
-	r := &relay{sent: map[string][]string{}}
-	g := newStandInGateway(t)
-	var lines []string
-	for at := tuesday(6, 0); at.Before(tuesday(10, 0)); at = at.Add(5 * time.Minute) {
-		lines = append(lines, stamp(at, linkLost), stamp(at.Add(time.Minute), linkHandshake))
-	}
-	g.adapter(lines...)
-	dir := t.TempDir()
-	for _, min := range []int{0, 5, 10} {
-		if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(11, min)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if gatewayPages(r) != 2 {
-		t.Fatalf("%d pages for a 5-hour silent drop with a reconnect every 5 minutes, want 1 per channel", gatewayPages(r))
+// API reconnects during an IBKR outage preserve its first loss (docs/manual/server.md,
+// "The Gateway is logged out"; ADR 0019, "Alerting"). Forty conn/loss cycles
+// span 3h10m: an immediate retry at the start, then five-minute restore timeouts.
+// The three-hour threshold and ten-minute detection grace must still page.
+func TestGatewayRepeatedReconnectKeepsFirstLossAndPages(t *testing.T) {
+	for name, conn := range map[string]string{"connected": adapterConn, "handshake": linkHandshake} {
+		t.Run(name, func(t *testing.T) {
+			r := &relay{sent: map[string][]string{}}
+			g := newStandInGateway(t)
+			firstLoss := tuesday(6, 0)
+			lines := []string{stamp(firstLoss.Add(-time.Minute), adapterStart), stamp(firstLoss, linkLost)}
+			dir := t.TempDir()
+			for cycle := 0; cycle < 40; cycle++ {
+				at := firstLoss.Add(time.Duration(max(0, cycle-1)) * 5 * time.Minute)
+				lines = append(lines, stamp(at, conn), stamp(at, linkLost))
+				g.adapter(lines...)
+				since, _, _, err := lostSince(lines)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !since.Equal(firstLoss) {
+					t.Errorf("cycle %d: since = %v, want first loss %v", cycle+1, since, firstLoss)
+				}
+				if at.Equal(firstLoss.Add(3 * time.Hour)) {
+					ev, err := gatewayJournalChecker(g.path(), []string{"ti-adapter-boost.service"})(at)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !ev.out || !strings.Contains(ev.said, stamp(firstLoss, linkLost)) {
+						t.Errorf("three hours after FIRST loss must establish outage: %+v", ev)
+					}
+				}
+				if err := gatewayRun(t, r, dir, g.path(), "boost", at); err != nil {
+					t.Fatal(err)
+				}
+				wantPages := 0
+				if at.Equal(firstLoss.Add(3*time.Hour + 10*time.Minute)) {
+					wantPages = 2
+				}
+				if got := gatewayPages(r); got != wantPages {
+					t.Errorf("cycle %d (%s since first loss): pages = %d, want %d", cycle+1, at.Sub(firstLoss), got, wantPages)
+				}
+			}
+		})
 	}
 }
 
