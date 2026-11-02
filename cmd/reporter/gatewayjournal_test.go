@@ -17,7 +17,6 @@
 //
 // start = "ibkr adapter starting", conn = "ibkr link connected" (also the
 // adapter's state=connected handshake), rest = existing restoration/reconciliation.
-// failed = the new invocation exits before connecting, with no loss of its own.
 // loss_conn_loss keeps the FIRST loss time; loss_start_conn_loss uses the first
 // loss of the NEW invocation. Plain connects never restart the three-hour clock.
 // * Resolution uses a completed IBC login newer than the open incident; the
