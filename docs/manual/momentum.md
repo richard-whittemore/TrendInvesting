@@ -152,10 +152,23 @@ section 5; ADR 0026, point 2):
    planned only once every sell has finished (filled, cancelled or refused),
    or at once if there were no sells, because an IRA never borrows: the buys
    are paid from the cash actually there (plan section 5, "IRA execution").
-8. **The buy budget** is the account's total cash (both IRAs are margin
-   IRAs that never borrow, so unsettled sale proceeds count: plan decision
-   D5, cash rule `total-cash`), plus what the sells raised net of
-   commission, minus anything a newer account snapshot shows has gone.
+8. **The buy budget** starts from the decision snapshot's reading of the
+   account's settled cash: `execution.cash_rule` is `settled-cash` in both
+   `deploy/etc/engines/trad-ira.config` and
+   `deploy/etc/engines/roth-ira.config.example`. Unsettled sale proceeds are
+   therefore not spent, including proceeds from this rebalance's sells, and
+   no later buy phase spends them once they settle: the buys are scaled to
+   the settled cash on hand, so after a month that rotates holdings, much of
+   the new targets stays in cash until the next monthly rebalance. Plan
+   decision D5 chose `total-cash` for margin IRAs, which may buy with
+   unsettled proceeds, pending IBKR's confirmation for the accounts as
+   opened (No Borrow Margin). Anything a newer account snapshot
+   shows has gone is subtracted; a later cash increase does not enlarge
+   this rebalance's budget. The code also accepts `total-cash` for an IRA:
+   that choice uses settled and unsettled cash and adds the rebalance's
+   realised sale proceeds net of commission. Which reading funds buys is
+   the configured D5 choice (plan decision D5; ADR 0026, point 2, "Budget"
+   and "Carried forward").
    For fractional buys, it also holds back explicit **rounding slack per
    planned buy** (`execution.rounding_slack_per_order`, default **$0.10**,
    bounds **$0.01–$1.00**). Each partial execution settles in cents; this
@@ -269,7 +282,7 @@ for configuration and the same-day probe.
 | 2 | the morning after the last session of the month | The same job writes the compact stream, exactly as `encode --ranker`: bars for the named instruments, the universe snapshot, and the 500 ranked stocks' price histories ([momentum universe](momentum-universe.md)). | Built |
 | 3 | the same morning | The IRA's own adapter, `ti-adapter@trad-ira` (client ID 12), reads the account once and delivers that stream behind it: the account snapshot the engine reads (version 6 for D7-F: exact scaled positions, net liquidation, IBKR's settled and total cash, from the same reading), and, before the session's close, a mark for every name the engine can decide, each ranked stock at its universe close and SPY, IEF, SHY and the holdings at their bars, each with the IBKR contract the adapter resolved for it by name; a name IBKR cannot resolve to one US-dollar stock gets no mark ([IBKR adapter](ibkr-adapter.md), "The IRAs' adapter" and "Contracts and marks for an IRA"). The morning reading stands for the close only with the IRA's own Flex executions proof (`ti-flex@trad-ira`, 05:45, 06:45, 07:45). | Built; the order to start the engine, its warm-up, the adapter and the same-day probe is `docs/runbooks/first-dry-run-day.md`, "The Traditional IRA" |
 | 4 | at the close | The engine decides the month and plans the sells, checked against the limits; a buy for a name without a mark as of the close is refused (`missing-mark`) and recorded as a withheld pick. Its allocation stays in cash for the month; the account stays Normal and the other buys proceed subject to the other limits. | Built and tested on recorded inputs, and against the real IRA adapter with the scripted Gateway |
-| 5 | next session | In dry-run (now): nothing is sent; the engine records a synthetic cancel for each order it releases, so the buys are planned at the same close from the snapshot's settled cash. In paper (later): the adapter sends the sells; when every sell has finished, the engine plans and releases the buys from the cash realised. | Dry-run built and rehearsed: the IRA adapter runs and the engine decides a dry-run month. **Stops here today**: no IRA order is sent before the paper gate (AGENTS.md rule 5); sending one will need the adapter's sender to take the contract the journal records for a pick, which today names a contract only from `con_ids` |
+| 5 | next session | In dry-run (now): nothing is sent; the engine records a synthetic cancel for each order it releases, so the buys are planned at the same close from the snapshot's settled cash. In paper (later): the adapter sends the sells; when every sell has finished, the engine plans and releases the buys under `execution.cash_rule`. With the shipped `settled-cash` choice, these sells' unsettled proceeds do not fund the buys (ADR 0026, point 2, D5). | Dry-run built and rehearsed: the IRA adapter runs and the engine decides a dry-run month. **Stops here today**: no IRA order is sent before the paper gate (AGENTS.md rule 5); sending one will need the adapter's sender to take the contract the journal records for a pick, which today names a contract only from `con_ids` |
 | 6 | after | Fills come back; the reporter and the dashboard show the month. | As for Boost ([boost](boost.md#one-boost-day-from-the-data-to-ibkr-and-back)) |
 
 A missing mark is a per-pick exception, under ADR 0026's amendment of
@@ -319,7 +332,7 @@ latest decision and any `missing-mark` refusal.
 | Alert `<account>: decision withheld (all-unaffordable)` (urgent), or a trade recorded as skipped | No pick could be bought in whole shares, or a trade rounded to no share. Explained in [minimum lot](momentum-minimum-lot.md), "What can go wrong" | As that chapter says |
 | `rebalance-in-progress`. Alert `<account>: decision withheld (rebalance-in-progress)` (routine): last month's rebalance is still working | The month's decision is withheld and nothing more is sent until IBKR reports every order of the rebalance finished or you clear it. An order settled `--never-sent` never finishes, so it holds the next rebalance until you clear it ([paper trading](paper-trading.md), the row "The link stayed down past the end of the order's day") | `docs/runbooks/missed-rebalance.md`; [operator](operator.md), "A rebalance clearance" |
 | The sells finish but `journal-query orders` shows smaller buys than planned, or a buy recorded as skipped | The buys were scaled down to fit the cash; a buy left with no share is recorded as skipped | Nothing; the next month decides afresh |
-| `journal-query orders` shows a sell failed or was cancelled part-filled | The buys wait for every sell to finish, then are budgeted from the cash actually raised; nothing is ever borrowed | Check the order at IBKR |
+| `journal-query orders` shows a sell failed or was cancelled part-filled | The buys wait for every sell to finish, then are budgeted under `execution.cash_rule`; the shipped `settled-cash` choice excludes these sells' unsettled proceeds (ADR 0026, point 2, D5). Nothing is ever borrowed | Check the order at IBKR |
 | Any other refusal: `<account>: order refused (order-count)`, `(order-size)`, `(price-band)`, `(sell-exceeds-holding)`, `(broker-holding)`, `(stale-broker-snapshot)`, `(undecided-order)` or `(kill-switch)` | Refused; the state that follows (Degraded, Halted or none) is in the hard-limits table above. Explained in [states-and-kill-switch](states-and-kill-switch.md), "What can go wrong" | `docs/runbooks/halted-account.md` |
 | A fresh run started while a rebalance was working | `operator approve` states the rebalance in progress in the approval, the engine checks it against the previous log, and the fresh run sends nothing for it and withholds every month as `rebalance-in-progress` until you clear it (ADR 0026, point 5) | `docs/runbooks/missed-rebalance.md`, "A restart mid-rebalance" |
 
