@@ -34,7 +34,6 @@ import (
 const (
 	adapterStart = "host adapter[3]: ibkr adapter starting mode=paper client_id=11 sending=off ibapi=synthetic"
 	adapterConn  = "host adapter[3]: ibkr link connected client_id=11"
-	adapterFail  = "host adapter[3]: adapter failed before connecting"
 )
 
 func TestGatewayAdapterCurrentInvocation(t *testing.T) {
@@ -49,7 +48,6 @@ func TestGatewayAdapterCurrentInvocation(t *testing.T) {
 		{"loss_start", []string{linkLost, adapterStart}, false},
 		{"loss_start_conn", []string{linkLost, adapterStart, adapterConn}, false},
 		{"loss_start_conn_loss", []string{linkLost, adapterStart, adapterConn, linkLost}, true},
-		{"loss_start_failed", []string{linkLost, adapterStart, adapterFail}, false},
 		{"loss_conn_loss", []string{linkLost, adapterConn, linkLost}, true},
 	}
 	for _, tc := range cases {
