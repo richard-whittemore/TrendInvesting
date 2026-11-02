@@ -110,7 +110,7 @@ func TestGatewayIBKRUnreachableKeepsIncidentAndTiming(t *testing.T) {
 			if !reflect.DeepEqual(metadata, want) {
 				t.Fatalf("wording changed alert identity or routing: %+v", a)
 			}
-			for _, text := range []string{"Gateway healer", "only when an adapter stops at the end of a scheduled window", "Inside a scheduled IBKR window the adapter waits", "outside a window, check IBKR's system status", "over three hours", "IBKR's system status", "sudo systemctl restart ti-gateway", "1100/2110"} {
+			for _, text := range []string{"Gateway healer", "only when an adapter stops at the end of a scheduled window", "Inside a scheduled IBKR window the adapter waits", "outside a window, check IBKR's system status", "over three hours", "IBKR's system status", "sudo systemctl restart ti-gateway", "1100/2110", "If the healer's journal (journalctl -u ti-gateway-heal@*) shows it stood down for login-problem, order-busy or owner-stopped, do not restart by hand; follow server.md, \"Gateway healer\"."} {
 				if !strings.Contains(a.Body, text) {
 					t.Errorf("missing %q in remedy: %s", text, a.Body)
 				}
@@ -402,14 +402,48 @@ func TestGatewayAdapterReadFaultFailsDuringMaintenance(t *testing.T) {
 	}
 }
 
-func TestGatewayFutureIBCStateCannotReplaceEligibleEvidence(t *testing.T) {
+func TestGatewayFutureIBCStateKeepsOutageEvidence(t *testing.T) {
 	start := tuesday(12, 0)
 	for _, event := range []string{ibcCompleted, ibcRefused, ibcStarting, "host gateway-start[1]: gateway-start: reset wait: login refused at"} {
 		g := newStandInGateway(t)
 		g.ibc(stamp(start.Add(-time.Hour), ibcRefused), stamp(start.Add(24*time.Hour), event))
 		ev, err := gatewayJournalChecker(g.path(), nil)(start)
-		if err != nil || !ev.out || ev.resetWait || !ev.recoveredAt.IsZero() || !strings.Contains(ev.said, "ignored future-dated evidence") {
+		wantIgnored := event == ibcCompleted || strings.Contains(event, "reset wait:")
+		if err != nil || !ev.out || ev.resetWait || !ev.recoveredAt.IsZero() || strings.Contains(ev.said, "ignored future-dated evidence") != wantIgnored {
 			t.Errorf("future IBC state replaced eligible logout: %+v %v", ev, err)
 		}
+	}
+}
+
+// IBC outage evidence cannot expose an earlier login as recovery, even after a
+// clock change (docs/manual/server.md, "The Gateway is logged out").
+func TestGatewayFutureIBCOutageCannotPromotePastLoginToRecovery(t *testing.T) {
+	for _, event := range []string{"host ibc[1]: LoginState is LOGGED_OUT", ibcRefused, "host ibc[1]: login retries stopped", ibcStarting, "host gateway-start[1]: gateway-start: cannot start IBC"} {
+		t.Run(event, func(t *testing.T) {
+			g := newStandInGateway(t)
+			start := tuesday(12, 0)
+			g.ibc(stamp(start.Add(-time.Hour), ibcRefused))
+			p := &policyRecorder{channel: "ntfy"}
+			path := filepath.Join(t.TempDir(), "gateway.json")
+			gatewayNoticeStep(t, g, path, start, p)
+			gatewayNoticeStep(t, g, path, start.Add(10*time.Minute), p)
+			h, err := loadHostGateway(path)
+			if err != nil || h.Since == nil || len(h.Keys) != 1 || len(p.alerts) != 1 {
+				t.Fatalf("outage was not opened and delivered: %+v %v", h, err)
+			}
+			keys := h.Keys
+			future := stamp(start.Add(24*time.Hour), event)
+			g.ibc(stamp(start.Add(11*time.Minute), ibcCompleted), future)
+			at := start.Add(15 * time.Minute)
+			ev, err := gatewayJournalChecker(g.path(), nil)(at)
+			if err != nil || !ev.out || !ev.recoveredAt.IsZero() || !strings.Contains(ev.said, future) || strings.Contains(ev.said, "ignored future-dated evidence") {
+				t.Errorf("future IBC outage must remain newest evidence without recovery: %+v %v", ev, err)
+			}
+			gatewayNoticeStep(t, g, path, at, p)
+			h, err = loadHostGateway(path)
+			if err != nil || h.Since == nil || !h.Since.Equal(start) || h.Resolving || !reflect.DeepEqual(h.Keys, keys) {
+				t.Errorf("future IBC outage promoted past login into resolution: %+v %v", h, err)
+			}
+		})
 	}
 }

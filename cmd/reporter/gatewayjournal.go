@@ -159,10 +159,22 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 			futureCount += len(lines)
 		}
 		var ignored []string
-		ibc, ignored, err = eligibleGatewayLines(ibc, now)
-		if err != nil {
-			return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
+		// Only completed logins may be discarded for clock skew. Keeping IBC
+		// outage evidence in journal order prevents an earlier login becoming
+		// recovery (docs/manual/server.md, "The Gateway is logged out").
+		var eligibleIBC []string
+		for _, line := range ibc {
+			at, err := lineTime(line)
+			if err != nil {
+				return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
+			}
+			if strings.Contains(line, "Login has completed") && at.After(now.Add(gatewayLinkClockSkew)) {
+				ignored = append(ignored, line)
+			} else {
+				eligibleIBC = append(eligibleIBC, line)
+			}
 		}
+		ibc = eligibleIBC
 		ignore(gatewayUnit, ignored)
 		resets, ignored, err = eligibleGatewayLines(resets, now)
 		if err != nil {
@@ -298,8 +310,8 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 	}
 }
 
-// eligibleGatewayLines applies the same clock-skew bound to all evidence at
-// this firing, preserving journal order. Future recovery cannot end a loss or
+// eligibleGatewayLines applies the clock-skew bound to adapter and reset-wait
+// evidence, preserving journal order. Future recovery cannot end a loss or
 // close an outage (docs/manual/server.md, "The Gateway is logged out").
 func eligibleGatewayLines(lines []string, now time.Time) (eligible, ignored []string, err error) {
 	for _, line := range lines {

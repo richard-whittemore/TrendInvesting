@@ -99,11 +99,12 @@ off-session with the default policy, it reaches the orchestrator's channels
 unreachable from a logged-in Gateway for over three hours (elapsed time,
 scheduled IBKR windows included). It names the affected accounts by their adapters' unresolved loss
 evidence; other accounts' trading status is not established. The Gateway healer
-acts only when an adapter stops at the end of a scheduled window. Check IBKR's
-system status, then restart the Gateway (`sudo systemctl restart ti-gateway`),
+acts only when an adapter stops at the end of a scheduled window.
+Inside a scheduled IBKR window, wait for the Gateway healer; outside one, check
+IBKR's system status, then restart the Gateway (`sudo systemctl restart ti-gateway`),
 approve a phone prompt if one comes, and start the affected adapters per
-[Gateway login](../runbooks/gateway-login.md). See [server](server.md), “Gateway
-healer”, for the healer's gates and restart limit.
+[Gateway login](../runbooks/gateway-login.md). See the server manual's
+[Gateway healer](server.md#gateway-healer) for the healer's gates and restart limit.
 An IBC logout or refused login keeps the logged-out wording and remedy,
 regardless of adapter evidence. An adapter journal read or parse failure cannot
 suppress that IBC-established outage: decide and deliver the outage when due,
