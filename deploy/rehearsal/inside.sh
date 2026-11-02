@@ -125,7 +125,7 @@ for u in ti-gateway ti-trader; do
   test "$(getent passwd "$u" | cut -d: -f7)" = /usr/sbin/nologin || fail "$u has a login shell"
   test "$(id -u "$u")" -ne 0 || fail "$u is uid 0"
 done
-for f in ibkr-login.env secrets.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
+for f in ibkr-login-joint.env secrets.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
   test ! -e "/etc/trend-investing/$f" || fail "$f is on disk in plain text"
   test "$(mode_of "/etc/trend-investing/$f.gpg")" = 600 || fail "$f.gpg is not mode 600"
   test "$(stat -c %U:%G "/etc/trend-investing/$f.gpg")" = root:root || fail "$f.gpg is not root-owned"
@@ -207,10 +207,9 @@ pass "the pinned protobuf wheel is verified, a mismatch is refused with nothing 
 # Credential rendering: a fake secret must reach the config file only, mode 0600.
 # shellcheck disable=SC2016
 fake_pw='fakePW!with$pecial&chars\\n#x'
-cred=$(mktemp -d)
-printf 'TWS_USERID=fakeuser\nTWS_PASSWORD=%s\nTWS_TRADING_MODE=paper\nTWS_READONLY_API=yes\n' "$fake_pw" >"$cred/ibkr-login"
 run=$(mktemp -d)
-out=$(CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run IBC_TEMPLATE=/opt/ibc/config.ini \
+printf 'TWS_USERID=fakeuser\nTWS_PASSWORD=%s\nTWS_TRADING_MODE=paper\nTWS_READONLY_API=yes\n' "$fake_pw" >"$run/login.env"
+out=$(RUNTIME_DIRECTORY=$run IBC_TEMPLATE=/opt/ibc/config.ini \
   /usr/local/libexec/trend-investing/render-ibc-config.sh 2>&1)
 case $out in *fakePW*|*fakeuser*) fail "renderer printed a credential" ;; esac
 test "$(mode_of "$run/config.ini")" = 600 || fail "rendered config not 0600"
@@ -228,18 +227,18 @@ if grep -rqF fakePW /etc/trend-investing /var/log 2>/dev/null; then fail "fake s
 pass "renderer writes credentials only to a 0600 file and prints none"
 
 # Refusals: empty login, bad mode.
-printf 'TWS_USERID=\nTWS_PASSWORD=\n' >"$cred/ibkr-login"
-CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run /usr/local/libexec/trend-investing/render-ibc-config.sh >/dev/null 2>&1 && fail "empty login accepted"
-printf 'TWS_USERID=a\nTWS_PASSWORD=b\nTWS_TRADING_MODE=prod\n' >"$cred/ibkr-login"
-CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run /usr/local/libexec/trend-investing/render-ibc-config.sh >/dev/null 2>&1 && fail "bad mode accepted"
+printf 'TWS_USERID=\nTWS_PASSWORD=\n' >"$run/login.env"
+RUNTIME_DIRECTORY=$run /usr/local/libexec/trend-investing/render-ibc-config.sh >/dev/null 2>&1 && fail "empty login accepted"
+printf 'TWS_USERID=a\nTWS_PASSWORD=b\nTWS_TRADING_MODE=prod\n' >"$run/login.env"
+RUNTIME_DIRECTORY=$run /usr/local/libexec/trend-investing/render-ibc-config.sh >/dev/null 2>&1 && fail "bad mode accepted"
 pass "renderer refuses an empty login and an unknown trading mode"
 
 # The gateway's start renders first, so an empty login ends the unit's main
 # process with 78, which the unit does not restart on (no 30-second loop
 # before the owner fills the login in).
-printf 'TWS_USERID=\nTWS_PASSWORD=\n' >"$cred/ibkr-login"
+printf 'TWS_USERID=\nTWS_PASSWORD=\n' >"$run/login.env"
 status=0
-CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run GATEWAY_MAJOR=1050 \
+RUNTIME_DIRECTORY=$run GATEWAY_MAJOR=1050 \
   /usr/local/libexec/trend-investing/start-gateway.sh >/dev/null 2>&1 || status=$?
 test "$status" = 78 || fail "start-gateway exited $status on an empty login, want 78"
 grep -qx 'RestartPreventExitStatus=64 65 77 78' /etc/systemd/system/ti-gateway.service || fail "ti-gateway restarts on a configuration exit"
@@ -588,7 +587,7 @@ pass "systemd-analyze verify clean on all units"
 # The check above can fail: a unit with an invalid credential name must
 # produce a diagnostic, or an empty log would prove nothing.
 broken=$(mktemp -d)
-sed 's|^LoadCredential=ibkr-login:|LoadCredential=bad/name:|' ti-gateway.service >"$broken/ti-gateway.service"
+sed 's|^LoadCredential=secrets:|LoadCredential=bad/name:|' ti-data.service >"$broken/ti-gateway.service"
 grep -q '^LoadCredential=bad/name:' "$broken/ti-gateway.service" || fail "could not break the test unit"
 systemd-analyze verify "$broken/ti-gateway.service" >"$verify_log" 2>&1 || true
 cat "$verify_log"

@@ -127,27 +127,40 @@ the same disk as the files, and a snapshot would carry both.
 
 | File | What it holds | Who reads it |
 | --- | --- | --- |
-| `ibkr-login.env` | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
-| `ibkr-login-trad-ira.env` | the Traditional IRA paper account's own IBKR login: `TWS_USERID`, `TWS_PASSWORD`, `TWS_TRADING_MODE=paper`, `TWS_READONLY_API=yes` | held for the IRAs' own Gateways, not yet used |
-| `ibkr-login-roth-ira.env` | the Roth IRA paper account's own IBKR login: `TWS_USERID`, `TWS_PASSWORD`, `TWS_TRADING_MODE=paper`, `TWS_READONLY_API=yes` | held for the IRAs' own Gateways, not yet used |
+| `ibkr-login-joint.env`, `ibkr-login-trad-ira.env`, `ibkr-login-roth-ira.env`, `ibkr-login-live.env` | one file per IBKR login, holding the IBKR username and password, the trading mode (`paper`, or `live` for the real login), optional second-factor device (`IB Key` for live), and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only the selected login is staged by a root pre-start into `ti-gateway.service`'s runtime directory. IBC's settings file is written from it into memory on each start, never to disk beside the code |
 | `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY`, `TI_PAGERDUTY_ROUTING_KEY` (unused: the server pages through Pushover), `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL`, and the Flex reader's `TI_IBKR_FLEX_TOKEN`, `TI_IBKR_FLEX_QUERY_ID` and `TI_IBKR_FLEX_TRADES_QUERY_ID` | handed as a private credential file (`LoadCredential`) to the data job, the engines, the reporter and the Flex readers; the dashboard is given none |
 | `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
 | `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's adapter (`ti-adapter@trad-ira.service`) and its Flex reader (`ti-flex@trad-ira.service`) |
 | `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to its adapter (`ti-adapter@roth-ira.service`, client ID 13) and Flex reader (`ti-flex@roth-ira.service`) |
 
-An existing server's `secrets.env` keeps the layout it was provisioned with, because provisioning never overwrites it, so the owner may tidy it by hand to match `deploy/etc/secrets.env.example`.
+The Gateway's non-secret selector is `/etc/trend-investing/gateway-login`:
+`joint`, `trad-ira`, `roth-ira` or `live`. Provisioning creates it once as
+`joint` and never overwrites it. `sudo ti-gateway-login` shows it;
+`sudo ti-gateway-login live` selects the real login, which reaches all three
+accounts. Selection alone never restarts anything; a Gateway restart applies
+it. Trading mode and read-only status come from the selected secret file.
+A root pre-start validates the selector and stages only that login as
+`login.env` in the Gateway's runtime directory, mode 0600 and owned by
+`ti-gateway`. The renderer reads that staged copy. The Gateway's sandbox
+makes `/run/trend-investing/secrets` inaccessible, and systemd removes the
+runtime directory at stop. While locked, its `secrets.env` assertion refuses
+startup. Staging refuses a missing, empty or linked selected login or an
+invalid selector with exit 64.
 
-The two IRA login files are optional; provisioning never creates them. The
-first `sudo ti-secrets edit ibkr-login-trad-ira.env` creates the Traditional
-IRA file, and `sudo ti-secrets edit ibkr-login-roth-ira.env` does the same for
-the Roth IRA. Each first edit verifies your passphrase by decrypting
-`secrets.env.gpg` (or `ibkr-login.env.gpg` if the former is absent), then opens
-a template with empty `TWS_USERID` and `TWS_PASSWORD`,
-`TWS_TRADING_MODE=paper`, and `TWS_READONLY_API=yes`. Fill in that IRA's own
-paper login and save. Leaving the template unchanged writes nothing. A
-wrong passphrase, or neither verification file existing, changes nothing.
-Later edits open the saved encrypted file as usual. No service reads these
-IRA login files yet, and their absence is normal in `ti-secrets status`.
+No owner command is needed for the existing joint file: provisioning renames
+`ibkr-login.env.gpg` and any unlocked copy to `ibkr-login-joint.env.gpg` and
+`ibkr-login-joint.env`, without a passphrase. `sudo ti-secrets migrate` does
+this too; old and new copies together cause a refusal. The old name is no
+longer valid for editing. Optional login files are created on first edit,
+after verifying the passphrase against an existing encrypted secret:
+`sudo SUDO_EDITOR=nano ti-secrets edit ibkr-login-live.env` (or
+`ibkr-login-trad-ira.env`, `ibkr-login-roth-ira.env`). Live starts read-only,
+with `TWS_SECOND_FACTOR_DEVICE=IB Key`; never remove the explicit
+`TWS_READONLY_API=yes` line from a live file. See the
+[login selection runbook](../runbooks/gateway-login.md#login-files-and-selection)
+for the exact commands and file mapping.
+
+An existing server's `secrets.env` keeps the layout it was provisioned with, because provisioning never overwrites it, so the owner may tidy it by hand to match `deploy/etc/secrets.env.example`.
 
 What each program actually reads today:
 
@@ -193,7 +206,7 @@ What each program actually reads today:
 Never paste a secret into an issue, a pull request, a chat with an agent or
 a command line.
 
-**Editing a file:** `sudo ti-secrets edit secrets.env` (or `ibkr-login.env`,
+**Editing a file:** `sudo ti-secrets edit secrets.env` (or any login file above,
 `accounts/boost.env`, `accounts/trad-ira.env`, `accounts/roth-ira.env`). It
 asks for the passphrase, decrypts the file into memory, opens it in the
 editor, and when you save and quit encrypts it again (the old encrypted file
@@ -201,7 +214,8 @@ is replaced only once the new one is checked), updates the unlocked copy if
 the secrets are unlocked, and removes the plain text. Each unit reads the new
 value at its next start: the reporter at its next firing, the Gateway after
 `sudo systemctl restart ti-gateway`. A wrong passphrase writes nothing, and
-quitting without a change writes nothing either (except that an unlocked
+quitting without a change writes nothing either for an existing file (a new
+optional login is encrypted from its template; an unlocked
 copy that is not the encrypted file is made again from it). `sudo ti-secrets
 status` lists each file as encrypted or not and unlocked or locked, and shows
 no secret.
@@ -1125,11 +1139,11 @@ failed unit").
 
 **What you do when paged:**
 
-1. Log in to the paper account on IBKR's website. If that is refused, the
+1. Check `sudo ti-gateway-login`, then try that login on IBKR's website. If it is refused, the
    password changed or the login is locked: fix it there (IBKR phones, not
-   this program), and `sudo ti-secrets edit ibkr-login.env` if the password
-   changed.
-2. Never stay logged in anywhere else with the paper username (the app, the
+   this program), then check `sudo ti-gateway-login` and edit that login file
+   (for `joint`, `sudo ti-secrets edit ibkr-login-joint.env`) if its password changed.
+2. Never stay logged in anywhere else with the selected username (the app, the
    website, another Gateway): a second session makes IBKR log the Gateway
    out. Log out of those.
 3. `sudo rm -f /var/lib/ti-gateway/login-failures` if the page or the
@@ -1374,11 +1388,11 @@ stop, not after two sessions of silence.
 | The passphrase is lost | The encrypted files can never be read; there is no recovery | Fill every secret in again: remove the `.gpg` files (`sudo rm /etc/trend-investing/*.gpg /etc/trend-investing/accounts/*.gpg`), run `sudo deploy/provision.sh services`, which asks for a new passphrase, then enter each secret with `sudo ti-secrets edit` |
 | `provision.sh services` stops with "verification failed, nothing replaced and no plain text removed", or with "both exist and differ" | The plain-text file is kept and no encrypted copy replaces anything | For the first, run it again; if it keeps failing, see `journalctl` and the disk space. For the second, keep the right one as the message says, then run it again |
 | The Sunday phone prompt is missed | IBC exits, the unit starts it again after 30 seconds, and a new prompt arrives each time; nothing reaches IBKR meanwhile | Approve the next prompt (`docs/runbooks/gateway-login.md`) |
-| `ti-gateway` failed and stays down (the page `<host>: ti-gateway.service failed`); `journalctl -u ti-gateway` names the login file, or says "login retries stopped" | Exit 64, 65 or 78: the login file is empty, or holds an unknown key or value (for example a trading mode other than `paper` or `live`). Exit 77: the program stopped the retries (3 login attempts within 24 hours without an accepted login, or a counter it could not trust, or IBC output it could not watch), so IBKR cannot lock the login. IBKR's nightly session reset around 00:10 ET (longer on Friday nights) can also refuse a password that just worked. From 23:40 to 01:00 ET the unit waits it out internally: the journal says "gateway-start: reset wait: login refused at HH:MM ET inside IBKR's nightly reset hour; waiting Nm until HH:MM ET (consumed reset allowances M of 4 in 24h)". There are at most 4 uncounted reset refusals in any rolling 24 hours, then the three counted refusals (at most seven in any rolling 24 hours without an accepted login). Restarting resumes the remaining wait; journal failures cannot skip it. At the fifth reset refusal or 01:00 ET, whichever comes first, counted retries resume; if the bound is then reached, exit 77 stops the unit and the next reporter firing pages the failed unit (the separate logged-out page can arrive earlier, as explained above). The unit does not restart on any of these exits, because none fixes itself. The reporter's next firing pages it (the Gateway has no `OnFailure=` hook), and holds back the outside heartbeat while it stays down | For the login file: fill it in or correct it with `sudo ti-secrets edit ibkr-login.env`, then `sudo systemctl start ti-gateway` (`docs/runbooks/gateway-login.md`). After a nightly reset, recover by hand after 01:00 ET: `sudo systemctl start ti-gateway.service`, wait for "Login has completed" in the journal, then `sudo systemctl start ti-adapter-boost.service`. If the journal says "login retries stopped", check the paper login and clear the counter as below before starting. For "login retries stopped": check the paper login on IBKR's website, delete `/var/lib/ti-gateway/login-failures`, then `sudo systemctl start ti-gateway` ("The Gateway is logged out", above) |
-| `<host>: IB Gateway is logged out` (or `journalctl -u ti-gateway` says "Unrecognized Username or Password" or "login retries stopped") | IBKR refused the login, typically after the nightly restart, and IBC left the dialog open. During the nightly reset window (23:40 to 01:00 ET), there are at most 4 uncounted reset refusals in any rolling 24 hours, of up to 15 minutes each, capped at 01:00 ET; restarts resume a persisted wait. After those, or outside the window, the start program stops IBC and systemd starts it again, at most 3 login attempts of any kind within 24 hours (two retries; IBKR locks at 10); then the unit stops with exit 77 and stays down. Class: operational. After the ten-minute detection grace outside restart windows, paging follows the escalation and shared schedule rules above. A current, uninterrupted reset-wait line from this night before 01:00 ET produces a quiet notice instead. Adapter 1100/2110 without restoration for at least three continuous hours uses this same incident, with the IBKR-unreachable title below when IBC shows a completed login and no later logout | "The Gateway is logged out", above: check the paper login on IBKR's website, log out of any other session with the paper username, delete `/var/lib/ti-gateway/login-failures`, `sudo systemctl restart ti-gateway` |
+| `ti-gateway` failed and stays down (the page `<host>: ti-gateway.service failed`); `journalctl -u ti-gateway` names the login file, or says "login retries stopped" | Exit 64, 65 or 78: the login file is empty, or holds an unknown key or value (for example a trading mode other than `paper` or `live`). Exit 77: the program stopped the retries (3 login attempts within 24 hours without an accepted login, or a counter it could not trust, or IBC output it could not watch), so IBKR cannot lock the login. IBKR's nightly session reset around 00:10 ET (longer on Friday nights) can also refuse a password that just worked. From 23:40 to 01:00 ET the unit waits it out internally: the journal says "gateway-start: reset wait: login refused at HH:MM ET inside IBKR's nightly reset hour; waiting Nm until HH:MM ET (consumed reset allowances M of 4 in 24h)". There are at most 4 uncounted reset refusals in any rolling 24 hours, then the three counted refusals (at most seven in any rolling 24 hours without an accepted login). Restarting resumes the remaining wait; journal failures cannot skip it. At the fifth reset refusal or 01:00 ET, whichever comes first, counted retries resume; if the bound is then reached, exit 77 stops the unit and the next reporter firing pages the failed unit (the separate logged-out page can arrive earlier, as explained above). The unit does not restart on any of these exits, because none fixes itself. The reporter's next firing pages it (the Gateway has no `OnFailure=` hook), and holds back the outside heartbeat while it stays down | For the login file: check `sudo ti-gateway-login`, then fill in or correct the selected file (for `joint`, `sudo ti-secrets edit ibkr-login-joint.env`), then `sudo systemctl start ti-gateway` (`docs/runbooks/gateway-login.md`). After a nightly reset, recover by hand after 01:00 ET: `sudo systemctl start ti-gateway.service`, wait for "Login has completed" in the journal, then `sudo systemctl start ti-adapter-boost.service`. If the journal says "login retries stopped", check the selected login and clear the counter as below before starting. For "login retries stopped": check the selected login on IBKR's website, delete `/var/lib/ti-gateway/login-failures`, then `sudo systemctl start ti-gateway` ("The Gateway is logged out", above) |
+| `<host>: IB Gateway is logged out` (or `journalctl -u ti-gateway` says "Unrecognized Username or Password" or "login retries stopped") | IBKR refused the login, typically after the nightly restart, and IBC left the dialog open. During the nightly reset window (23:40 to 01:00 ET), there are at most 4 uncounted reset refusals in any rolling 24 hours, of up to 15 minutes each, capped at 01:00 ET; restarts resume a persisted wait. After those, or outside the window, the start program stops IBC and systemd starts it again, at most 3 login attempts of any kind within 24 hours (two retries; IBKR locks at 10); then the unit stops with exit 77 and stays down. Class: operational. After the ten-minute detection grace outside restart windows, paging follows the escalation and shared schedule rules above. A current, uninterrupted reset-wait line from this night before 01:00 ET produces a quiet notice instead. Adapter 1100/2110 without restoration for at least three continuous hours uses this same incident, with the IBKR-unreachable title below when IBC shows a completed login and no later logout | "The Gateway is logged out", above: check the selected login on IBKR's website, log out of any other session with the paper username, delete `/var/lib/ti-gateway/login-failures`, `sudo systemctl restart ti-gateway` |
 | `<host>: IB Gateway is logged in but IBKR's servers are unreachable` | Class: operational. IBC's newest login event is a completed login; adapter 1100/2110 evidence meets the same three-hour rule. The host Gateway incident key, detection grace, routing, reminders and resolution are unchanged | Inside a scheduled IBKR window, wait: the Gateway healer restarts the Gateway when the window ends if the adapter exits with the restart remedy, subject to its gates and restart limit. Outside a window, check IBKR's system status, then restart the Gateway (`sudo systemctl restart ti-gateway`). Check `journalctl -u ti-gateway`, the adapter journal and `journalctl -u 'ti-gateway-heal@*'`; follow the `gateway-heal:` row in “Gateway healer” above if recovery is refused or fails; approve a phone prompt if one comes |
 | `<host>: IB Gateway reset wait` | Class: operational. Among matching start/reset-state evidence, the newest state records a refused-login reset wait on this night between 23:40 and the first 01:00 ET, strictly newer than the newest completed-login timestamp. An interrupted wait does not count; unrelated gateway-start diagnostics do not change the state. ntfy and the alerts repository receive one scheduled IBKR interruption notice; Pushover receives none during the wait | Let the bounded reset wait finish. At 01:00 ET ordinary logout detection and paging resume |
-| The IBKR password is wrong | Outside the nightly reset window (23:40 to 01:00 ET), the refused login is retried at most twice (3 attempts in all; any start counts, so after a good login fewer), then the unit stops, so IBKR cannot lock the login; you are paged | Correct the file (`sudo ti-secrets edit ibkr-login.env`), delete `/var/lib/ti-gateway/login-failures`, start it again (`docs/runbooks/gateway-login.md`) |
+| The IBKR password is wrong | Outside the nightly reset window (23:40 to 01:00 ET), the refused login is retried at most twice (3 attempts in all; any start counts, so after a good login fewer), then the unit stops, so IBKR cannot lock the login; you are paged | Check `sudo ti-gateway-login` and correct the selected file (for `joint`, `sudo ti-secrets edit ibkr-login-joint.env`), delete `/var/lib/ti-gateway/login-failures`, start it again (`docs/runbooks/gateway-login.md`) |
 | The journal of `ti-data` or `ti-reporter@boost` says "waiting for the account's first run" (the unit is not failed) | No engine run has been started, so there is nothing to record or report. The data job writes nothing; the reporter sends no alert and, if nothing else is wrong, pings the heartbeat. Nothing is paged ("The reporter before the first run", below) | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine") |
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |
 | `ti-engine@<instance>`, `ti-adapter-boost` or `ti-adapter@<instance>` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account; the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |

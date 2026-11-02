@@ -525,8 +525,10 @@ called "/systemd/ti-gateway.service" || fail "Lightsail no longer installs the G
 called "systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer" || fail "Lightsail no longer starts the timers"
 grep -q '"host": "127.0.0.1"' "$work/etc/adapters/boost.json" || fail "Lightsail's adapter configuration does not point at 127.0.0.1"
 called "install -m 0755 $work/deploy/secrets.sh /usr/local/sbin/ti-secrets" || fail "Lightsail services does not install ti-secrets: $(grep secrets "$work/calls")"
+called "install -m 0755 $work/deploy/gateway-login.sh /usr/local/sbin/ti-gateway-login" || fail "selector command not installed"
+test "$(grep -n 'secrets-migrate' "$work/calls" | head -1 | cut -d: -f1)" -lt "$(grep -n 'ibkr-login-joint.env.example' "$work/calls" | head -1 | cut -d: -f1)" || fail "migration must run before the joint stub"
 called "ln -sfn ti-secrets /usr/local/sbin/ti-unlock" || fail "Lightsail services does not install ti-unlock"
-test "$(grep -n 'secrets-migrate' "$work/calls" | cut -d: -f1)" -gt "$(grep -n 'roth-ira.env' "$work/calls" | tail -1 | cut -d: -f1)" || fail "Lightsail services does not encrypt the secret files after writing their stubs"
+test "$(grep -n 'secrets-migrate' "$work/calls" | tail -1 | cut -d: -f1)" -gt "$(grep -n 'roth-ira.env' "$work/calls" | tail -1 | cut -d: -f1)" || fail "Lightsail services does not encrypt the secret files after writing their stubs"
 
 # Optional IRA logins are created only by the owner's first edit; services
 # must not introduce plaintext that makes an unattended migration prompt.

@@ -543,6 +543,16 @@ write_stub() {
 # that fails stops provisioning with the plain text kept.
 secrets_migrate() { "$here/secrets.sh" migrate; }
 
+# Preserve the owner's non-secret selection on every rerun
+# (docs/runbooks/gateway-login.md); gateway.env is separately rewritten.
+init_gateway_login() {
+  if ! test -e "$etc/gateway-login"; then
+    install -m 0644 /dev/stdin "$etc/gateway-login" <<'CONF'
+joint
+CONF
+  fi
+}
+
 # elf_machine FILE: FILE's ELF e_machine (62 x86-64, 183 AArch64), the two
 # little-endian bytes at offset 18; empty if FILE is not an ELF file.
 elf_machine() {
@@ -708,7 +718,12 @@ CONF
       ln -sfn "/opt/trend-investing/bin/$b" "/usr/local/bin/$b"
     fi
   done
-  write_stub "$etc/ibkr-login.env" "$here/etc/ibkr-login.env.example"
+  # Rename the existing joint login before a stub could collide with it
+  # (docs/runbooks/gateway-login.md); no passphrase is needed for the rename.
+  secrets_migrate
+  init_gateway_login
+  install -m 0755 "$here/gateway-login.sh" /usr/local/sbin/ti-gateway-login
+  write_stub "$etc/ibkr-login-joint.env" "$here/etc/ibkr-login-joint.env.example"
   write_stub "$etc/secrets.env" "$here/etc/secrets.env.example"
   # Each adapter's account number in a file of its own, handed only to that
   # adapter (ADR 0026 point 8: one engine per account).

@@ -66,7 +66,7 @@ unlocked=/run/trend-investing/secrets
 # encrypted, with a marker; migrated as provision.sh services migrates them.
 printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PUSHOVER_APP_TOKEN=fake\nTI_PUSHOVER_USER_KEY=fake\nTI_PUSHOVER_URL=http://127.0.0.1:8099/1/messages.json\nTI_GITHUB_ISSUES_REPO=owner/repo\nTI_GITHUB_API_URL=http://127.0.0.1:8099/gh\nTI_GITHUB_API_ALLOW_HOST=127.0.0.1:8099\nTI_GITHUB_ISSUES_TOKEN=%s\n' "$marker" >/etc/trend-investing/secrets.env
 chmod 0600 /etc/trend-investing/secrets.env
-for f in ibkr-login.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
+for f in ibkr-login-joint.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
   install -m 0600 "/deploy/etc/$f.example" "/etc/trend-investing/$f"
 done
 with_pass ti-secrets migrate >/dev/null || fail "ti-secrets migrate failed"
@@ -105,7 +105,7 @@ refused() {
   grep -qxF "AssertPathExists=$unlocked/$2" <<<"$said" || fail "$1 does not assert $unlocked/$2"
   test "$(systemctl show -p ActiveState --value "$1")" != failed || fail "$1 is failed, not refused"
 }
-refused ti-gateway.service ibkr-login.env
+refused ti-gateway.service secrets.env
 refused ti-engine@boost.service secrets.env
 refused ti-adapter-boost.service accounts/boost.env
 # A template's unit file names its instance's file by %i, as systemctl cat shows it.

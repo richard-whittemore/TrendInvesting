@@ -35,7 +35,7 @@ Do the owner steps in part A that are **[NOW]** first: they take the longest
 
 - **The program never handles your IBKR login.** The username and password go
   only into IB Gateway's login screen (on the Mac mini) or into the
-  root-only file `/etc/trend-investing/ibkr-login.env` on the server (ADR
+  root-only file `/etc/trend-investing/ibkr-login-joint.env` on the server (ADR
   0025 point 6). Never paste them into an issue, a pull request, a chat with
   an agent, a shell command line or a screenshot.
 - **This repository is public.** Your paper account number (it begins `DU`;
@@ -111,7 +111,8 @@ Your IBKR paper account has its own username and password, separate from your
 live ones (IBKR sends them when the paper account is opened; they are shown
 in Account Management).
 
-- **Server.** `sudo ti-secrets edit ibkr-login.env`, fill in
+- **Server.** `sudo ti-gateway-login joint` selects Boost's joint paper login.
+  `sudo ti-secrets edit ibkr-login-joint.env`, fill in
   `TWS_USERID` and `TWS_PASSWORD` with the **paper** username and password,
   leave `TWS_TRADING_MODE=paper`. Save. Start the Gateway:
   `sudo systemctl start ti-gateway`, and approve the IBKR Mobile prompt on
@@ -137,7 +138,7 @@ know they are right):
 | --- | --- | --- |
 | Socket port | **4002** | IB Gateway's paper-trading port (4001 is the live one; the adapter's paper configuration must use 4002) |
 | Enable ActiveX and Socket Clients | on | Without it the adapter's connection is refused |
-| Read-Only API | **on (leave it on) for now** | A read-only API refuses every order, which is what you want until the moment of the first order. On the server this is `TWS_READONLY_API=yes` in `ibkr-login.env`, the shipped value. You turn it off in B4, immediately before the first order, and back on afterwards (C) |
+| Read-Only API | **on (leave it on) for now** | A read-only API refuses every order, which is what you want until the moment of the first order. On the server this is `TWS_READONLY_API=yes` in `ibkr-login-joint.env`, the shipped value. You turn it off in B4, immediately before the first order, and back on afterwards (C) |
 | Trusted IPs | `127.0.0.1` only | The adapter runs on the same machine as the Gateway. Do not add another address, and do not open the port in any firewall: the server's firewall already allows inbound traffic on the Tailscale interface only |
 | Allow connections from localhost only | on | Same reason |
 | Master API client ID | **11** (Boost's client ID) | IBKR shows an API client the executions of other clients, of TWS and of IBKR's own app only when its client ID is the Master API client ID. The adapter asks for every client's executions to check that nothing executed since the close (`docs/manual/paper-trading.md`, "A paper day"); with this set, its list has them all. On the server, set it once in Gateway's own settings as for the others (IBC does not set it); the adapter's check of the holdings and cash since the previous close does not depend on it |
@@ -284,7 +285,7 @@ Order of starting, each on the server, each an explicit step of yours:
 1. The Gateway is running and logged in (A3).
 2. **Close the Gateway's ports to your other tailnet devices.** Read-only holds only in dry-run. Once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices now, before the next step turns the Read-Only API off. The steps, the policy to paste and the checks are in `docs/manual/server.md`, "Closing the Gateway's ports to your other devices"; do not go on to step 3 until its checks pass.
 3. **Turn the Read-Only API off, now, and not before.** On the server:
-   `sudo ti-secrets edit ibkr-login.env`, set
+   `sudo ti-secrets edit ibkr-login-joint.env`, set
    `TWS_READONLY_API=no`, then `sudo systemctl restart ti-gateway` and
    approve the phone prompt if it comes; wait until the check in A4 shows
    port 4002 listening again. On the Mac: untick Read-Only API in
@@ -491,7 +492,7 @@ Check in this order, and compare the three: they must agree.
 
 When the order is filled, reconciled and the reconnect proof (B7) passed, the
 first paper order is done. Then turn the Read-Only API back on: on the server
-set `TWS_READONLY_API=yes` in `ibkr-login.env` and `sudo systemctl restart
+set `TWS_READONLY_API=yes` in `ibkr-login-joint.env` and `sudo systemctl restart
 ti-gateway`; on the Mac tick Read-Only API in Gateway's settings. Do this even
 if you plan to run again soon, so a stray start cannot send. Record the
 result: which machine, which Gateway and API builds, the date, and what you

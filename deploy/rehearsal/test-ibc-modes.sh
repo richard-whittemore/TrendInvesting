@@ -86,14 +86,14 @@ expect "step_gateway unpacks nothing on a rerun" "" "$(grep '^unzip' "$work/effe
 # looks, so the firewall is not the guard. (BindAddress is IBC's command
 # server's address, not the API's, so it is not set.)
 render="$here/../libexec/render-ibc-config.sh"
-cred="$work/cred"; run_dir="$work/run"
-mkdir -p "$cred" "$run_dir"
-printf 'TWS_USERID=u\nTWS_PASSWORD=p\n' >"$cred/ibkr-login"
-printf '%s\n' '# comment' 'IbLoginId=' 'IbPassword=' 'TradingMode=live' 'ReadOnlyApi=no' \
+run_dir="$work/run"
+mkdir -p "$run_dir"
+printf 'TWS_USERID=u\nTWS_PASSWORD=p\n' >"$run_dir/login.env"
+printf '%s\n' '# comment' 'SecondFactorDevice=' 'IbLoginId=' 'IbPassword=' 'TradingMode=live' 'ReadOnlyApi=no' \
   'AutoRestartTime=' 'ColdRestartTime=' 'ReloginAfterSecondFactorAuthenticationTimeout=no' \
   'AcceptNonBrokerageAccountWarning=no' 'CommandServerPort=7462' \
   'TrustedTwsApiClientIPs=100.64.0.1' 'AcceptIncomingConnectionAction=manual' 'LoginDialogDisplayTimeout=20' >"$work/template.ini"
-CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run_dir IBC_TEMPLATE=$work/template.ini "$render" >/dev/null
+RUNTIME_DIRECTORY=$run_dir IBC_TEMPLATE=$work/template.ini "$render" >/dev/null
 grep -qx 'LoginDialogDisplayTimeout=60' "$run_dir/config.ini" || expect "login dialog timeout is pinned to IBC's documented default" LoginDialogDisplayTimeout=60 "$(grep '^LoginDialogDisplayTimeout' "$run_dir/config.ini" || echo missing)"
 grep -qx 'AcceptIncomingConnectionAction=reject' "$run_dir/config.ini" || expect "incoming API connections are rejected" reject "$(grep '^AcceptIncomingConnectionAction' "$run_dir/config.ini" || echo missing)"
 grep -qx 'TrustedTwsApiClientIPs=' "$run_dir/config.ini" || expect "no trusted API client addresses" "TrustedTwsApiClientIPs=" "$(grep '^TrustedTwsApiClientIPs' "$run_dir/config.ini" || echo missing)"
