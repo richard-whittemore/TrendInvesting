@@ -137,8 +137,12 @@ The Gateway's non-secret selector is `/etc/trend-investing/gateway-login`:
 `joint`, `trad-ira`, `roth-ira` or `live`. Provisioning creates it once as
 `joint` and never overwrites it. `sudo ti-gateway-login` shows it;
 `sudo ti-gateway-login live` selects the real login, which reaches all three
-accounts. Selection alone never restarts anything; a Gateway restart applies
-it. Trading mode and read-only status come from the selected secret file.
+accounts. The selection applies at the Gateway's next start of any kind,
+including an owner restart, the healer, `ti-unlock` or a systemd restart.
+Select only immediately before a planned restart. For live, restart at once
+with `sudo systemctl restart ti-gateway` and switch back to joint afterwards.
+The encrypted login must exist before selection. Staging requires live mode
+for the live selection and paper mode for every paper selection.
 A root pre-start validates the selector and stages only that login as
 `login.env` in the Gateway's runtime directory, mode 0600 and owned by
 `ti-gateway`. The renderer reads that staged copy. The Gateway's sandbox
@@ -150,7 +154,9 @@ invalid selector with exit 64.
 No owner command is needed for the existing joint file: provisioning renames
 `ibkr-login.env.gpg` and any unlocked copy to `ibkr-login-joint.env.gpg` and
 `ibkr-login-joint.env`, without a passphrase. `sudo ti-secrets migrate` does
-this too; old and new copies together cause a refusal. The old name is no
+this too and completes partial renames. Both full sets cause a refusal.
+Complementary encrypted and on-disk plaintext names require passphrase
+verification before completing the rename. The old name is no
 longer valid for editing. Optional login files are created on first edit,
 after verifying the passphrase against an existing encrypted secret:
 `sudo SUDO_EDITOR=nano ti-secrets edit ibkr-login-live.env` (or
@@ -214,9 +220,10 @@ is replaced only once the new one is checked), updates the unlocked copy if
 the secrets are unlocked, and removes the plain text. Each unit reads the new
 value at its next start: the reporter at its next firing, the Gateway after
 `sudo systemctl restart ti-gateway`. A wrong passphrase writes nothing, and
-quitting without a change writes nothing either for an existing file (a new
-optional login is encrypted from its template; an unlocked
-copy that is not the encrypted file is made again from it). `sudo ti-secrets
+quitting without a change writes nothing for an existing file. Closing an
+unchanged first-edit template creates nothing. Save an actual change to
+create an optional login. An unlocked copy that differs from the encrypted
+file is made again from it. `sudo ti-secrets
 status` lists each file as encrypted or not and unlocked or locked, and shows
 no secret.
 

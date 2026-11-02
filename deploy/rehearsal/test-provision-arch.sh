@@ -20,7 +20,7 @@ trap 'rm -rf "$work"' EXIT
 # The caller's environment must not decide any case.
 unset TI_TARGET TI_REHEARSAL TI_REHEARSAL_ANY_ARCH TI_REHEARSAL_SKIP_INSTALLER TI_DIST
 # The harness's own switches are the caller's to set per case, never inherited.
-unset FAKE_ANY_ARCH FAKE_SKIP FAKE_DIST FAKE_NO_CLOCK FAKE_LIVE
+unset FAKE_ANY_ARCH FAKE_SKIP FAKE_DIST FAKE_NO_CLOCK FAKE_LIVE FAKE_MIGRATION_REFUSED
 
 failures=0
 fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
@@ -56,6 +56,11 @@ scenario() {
     record() { echo "$*" >>"$TEST_CALLS"; }
     install() { record install "$@"; }
     systemctl() { record systemctl "$@"; }
+    secrets_migrate() {
+      record secrets-migrate
+      test "${FAKE_MIGRATION_REFUSED:-0}" != 1
+    }
+    init_gateway_login() { record init-gateway-login; }
     apt-get() { record apt-get "$@"; }
     useradd() { record useradd "$@"; }
     chmod() { record chmod "$@"; }
@@ -192,6 +197,30 @@ done
 called "install -m 0644 $work/deploy/systemd/ti-data@roth-ira.timer.d/stagger.conf $work/units/ti-data@roth-ira.timer.d/" || fail "missing Roth data stagger"
 if grep -E 'systemctl (enable|start).*ti-memory' "$work/calls" >/dev/null; then fail "measurement enabled without owner"; fi
 if called "systemctl mask"; then fail "Lightsail masks a unit: $(cat "$work/calls")"; fi
+
+# Migration precedes every installation, and refusal propagates through main
+# (docs/runbooks/gateway-login.md). These stand-ins change no host files.
+if FAKE_MIGRATION_REFUSED=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services; then
+  fail "services acknowledged success after migration refused"
+fi
+said "before installing Gateway" || fail "migration refusal does not explain that Gateway files were preserved"
+if called "install "; then fail "migration refusal installed files"; fi
+if called "init-gateway-login"; then fail "migration refusal wrote the selector"; fi
+FAKE_LIVE=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "coordinated Gateway install failed"
+python3 - "$work/calls" <<'PYCODE' || fail "Gateway install/reload ordering differs"
+from pathlib import Path
+import sys
+calls = Path(sys.argv[1]).read_text().splitlines()
+migration = calls.index("secrets-migrate")
+first_install = next(i for i, call in enumerate(calls) if call.startswith("install "))
+staging = next(i for i, call in enumerate(calls) if "libexec/stage-gateway-login.sh" in call)
+unit = next(i for i, call in enumerate(calls) if "systemd/ti-gateway.service" in call)
+assert migration < first_install <= staging < unit
+assert calls[unit + 1] == "systemctl daemon-reload"
+assert "render-ibc-config.sh" in calls[staging]
+assert unit == staging + 1
+assert not any(call.startswith("systemctl restart ti-gateway") for call in calls)
+PYCODE
 
 # --- services refuses a Go program built for another architecture.
 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "Lightsail services refused an x86_64 dist/: $(cat "$work/out")"

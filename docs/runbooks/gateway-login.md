@@ -27,10 +27,23 @@ with exit 64; it never falls back to another login.
 Provisioning's `services` step renames `ibkr-login.env.gpg` to
 `ibkr-login-joint.env.gpg`, and its unlocked copy if present, without asking
 for a passphrase. `sudo ti-secrets migrate` also performs this rename.
-Rerunning it changes nothing. If old and new files both exist, migration
-refuses and names them; preserve both and resolve which file to keep before
-retrying. The old name is no longer accepted by `ti-secrets edit`. A legacy
-plain-text login is renamed too, then follows the normal encryption migration.
+Rerunning it completes a partial rename, including an unlocked copy still
+under the old name. Complementary encrypted and on-disk plaintext names
+require a passphrase to verify that their contents match before renaming.
+If both encrypted copies or both plaintext copies exist, migration refuses
+and names them. Preserve both and resolve which file to keep before retrying.
+Ordinary unlocks, edits and new passphrase rotations require migration first.
+Resume an interrupted rotation with `sudo ti-secrets passphrase --resume`.
+Its worklist includes the legacy login, preserving the shared passphrase.
+The old name is no longer accepted by `ti-secrets edit`. A legacy plain-text
+login is renamed too, then follows the normal encryption migration.
+
+The services step runs migration before installing any Gateway files. A
+refused migration stops the step with a nonzero exit before installing the
+renderer, staging script, unit or selector. After migration, the staging
+script, renderer and unit are installed together, immediately followed by
+`daemon-reload`. Provisioning leaves Gateway restarts to the owner and reports
+a failed Gateway so the owner can resolve the error and restart it.
 
 Create optional login files on their first edit:
 
@@ -46,8 +59,9 @@ before opening the editor or creating a file. The paper templates have blank
 `TWS_READONLY_API=yes`, with no second-factor line. The live template has
 blank credentials, `TWS_TRADING_MODE=live`, `TWS_READONLY_API=yes` and
 `TWS_SECOND_FACTOR_DEVICE=IB Key`. Fill credentials in the editor only.
-The optional file is encrypted even if the editor closes without a change;
-an editor error creates nothing. Live mode requires an explicit
+Closing an unchanged first-edit template creates nothing. Save an actual change
+to create the optional encrypted file. An editor error creates nothing.
+Live mode requires an explicit
 `TWS_READONLY_API=yes` or `no`; leave it `yes` until the trading gates permit
 orders. Selecting a login does not authorize orders or change adapter accounts.
 
@@ -62,14 +76,21 @@ sudo ti-gateway-login live
 ```
 
 The commands with an argument are alternatives: choose the login to use.
-They write the selector atomically and print the restart instruction; they
-never restart a service. If secrets are locked, run `sudo ti-unlock` (which
-starts an enabled, stopped Gateway). For a running Gateway, apply the
-selection when ready with `sudo systemctl restart ti-gateway` and approve
-the IB Key prompt on the phone for the live login.
+They durably replace the selector, syncing the temporary file before its
+rename and the parent directory afterwards. A selection whose encrypted
+login file is missing is refused, with the command to create it.
+The selection applies at the Gateway's next start of any kind, including an
+owner restart, the healer, `ti-unlock` or a systemd restart after an IBC exit.
+Select only immediately before a planned restart. For live, restart at once
+with `sudo systemctl restart ti-gateway`, approve the IB Key prompt, and
+switch back to joint afterwards. If secrets are locked, run `sudo ti-unlock`,
+which starts an enabled, stopped Gateway.
 
 A root `ExecStartPre=+` runs `stage-gateway-login.sh` before Gateway starts.
-It validates the selector and copies exactly the selected
+It validates the selector and requires `TWS_TRADING_MODE=live` for `live`
+and `TWS_TRADING_MODE=paper` for `joint`, `trad-ira` and `roth-ira`. A mismatch
+exits 64 with a message naming the selected file. Live also requires an
+explicit `TWS_READONLY_API`. It copies exactly the selected
 `/run/trend-investing/secrets/ibkr-login-<selection>.env` into the unit's
 `RuntimeDirectory` as `login.env`, mode 0600 and owned by `ti-gateway`.
 The source open refuses symbolic links. A missing, empty, linked or unreadable
@@ -82,6 +103,12 @@ A file whose username or password is blank
 refuses with exit 78. Trading mode and read-only status come from that file;
 `TWS_SECOND_FACTOR_DEVICE` becomes IBC's `SecondFactorDevice`, empty when
 absent. Rendered credentials stay in memory and are never logged.
+
+Systemd permits at most three starts in ten minutes. Repeated staging or
+rendering failures end in a failed unit and trigger the failed-unit page.
+The renderer's protected exit statuses still stop retries immediately.
+After correcting a configuration failure, use
+`sudo systemctl reset-failed ti-gateway` and `sudo systemctl restart ti-gateway`.
 
 ## What the engines do while it is down
 

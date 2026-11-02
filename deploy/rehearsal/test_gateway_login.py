@@ -40,6 +40,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
+import stat
+import sys
 
 import test_roth
 
@@ -303,7 +306,7 @@ export SUDO_EDITOR=$etc/editor
         name = f"ibkr-login-{selection}.env"
         result = self.secrets(f"cmd_edit {name}")
         self.assertEqual(result.returncode, 0, result.stderr)
-        expected = ("# No service reads it yet.\nTWS_USERID=\nTWS_PASSWORD=\n"
+        expected = ("# ti-gateway reads this file when selected (docs/runbooks/gateway-login.md).\nTWS_USERID=\nTWS_PASSWORD=\n"
                     f"TWS_TRADING_MODE={'live' if selection == 'live' else 'paper'}\n"
                     "TWS_READONLY_API=yes\n")
         if selection == "live":
@@ -365,6 +368,7 @@ export SUDO_EDITOR=$etc/editor
         self.assertEqual(result.stdout.strip(), "joint")
 
     def test_command_set(self):
+        (self.etc / "ibkr-login-live.env.gpg").touch()
         old = self.selector.open()
         self.addCleanup(old.close)
         result = self.command("live")
@@ -373,7 +377,7 @@ export SUDO_EDITOR=$etc/editor
         self.assertEqual(old.read(), "joint\n")
         self.assertEqual(self.selector.stat().st_mode & 0o777, 0o644)
         self.assertIn("restart", result.stdout.lower())
-        self.assertEqual(sorted(p.name for p in self.etc.iterdir()), ["gateway-login"])
+        self.assertEqual(sorted(p.name for p in self.etc.iterdir()), ["gateway-login", "ibkr-login-live.env.gpg"])
 
     def test_command_invalid(self):
         for args in (("garbage",), ("joint", "live")):
@@ -408,6 +412,177 @@ export SUDO_EDITOR=$etc/editor
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.selector.read_text(), "live\n")
 
+    def test_legacy_enumeration_and_ordinary_refusal(self):
+        (self.etc / "ibkr-login.env.gpg").write_text("synthetic")
+        self.assertIn("ibkr-login.env", self.secrets("encrypted_names").stdout.splitlines())
+        for command in ("cmd_unlock", "cmd_edit ibkr-login-live.env", "cmd_passphrase 0"):
+            with self.subTest(command=command):
+                result = self.secrets(command, phrase="must-not-be-read")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("migrate", result.stderr)
+                self.assertNotIn("unexpected passphrase prompt", result.stderr)
+
+    def test_migration_partial_unlocked_both_directions(self):
+        for encrypted_new in (True, False):
+            with self.subTest(encrypted_new=encrypted_new):
+                enc = self.etc / ("ibkr-login-joint.env.gpg" if encrypted_new else "ibkr-login.env.gpg")
+                plain = self.run / ("ibkr-login.env" if encrypted_new else "ibkr-login-joint.env")
+                enc.write_text("synthetic")
+                plain.write_text("synthetic")
+                result = self.secrets("cmd_migrate", phrase="must-not-be-read")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((self.run / "ibkr-login.env").exists())
+                self.assertFalse((self.etc / "ibkr-login.env.gpg").exists())
+                (self.etc / "ibkr-login-joint.env.gpg").unlink()
+                (self.run / "ibkr-login-joint.env").unlink()
+
+    def test_migration_partial_disk_pair_both_directions(self):
+        for encrypted_new in (True, False):
+            with self.subTest(encrypted_new=encrypted_new):
+                enc = self.etc / ("ibkr-login-joint.env.gpg" if encrypted_new else "ibkr-login.env.gpg")
+                plain = self.etc / ("ibkr-login.env" if encrypted_new else "ibkr-login-joint.env")
+                enc.write_text("synthetic")
+                plain.write_text("synthetic")
+                result = self.secrets("migrate_login_name")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((self.etc / "ibkr-login.env").exists())
+                self.assertFalse((self.etc / "ibkr-login.env.gpg").exists())
+                for suffix in ("", ".gpg"):
+                    (self.etc / ("ibkr-login-joint.env" + suffix)).unlink()
+
+    def test_migration_partial_disk_conflict_preserved(self):
+        for encrypted_new in (True, False):
+            with self.subTest(encrypted_new=encrypted_new):
+                enc = self.etc / ("ibkr-login-joint.env.gpg" if encrypted_new else "ibkr-login.env.gpg")
+                plain = self.etc / ("ibkr-login.env" if encrypted_new else "ibkr-login-joint.env")
+                enc.write_text("synthetic-encrypted")
+                plain.write_text("synthetic-conflict")
+                result = self.secrets("cmd_migrate")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("differ", result.stderr)
+                self.assertEqual(enc.read_text(), "synthetic-encrypted")
+                self.assertEqual(plain.read_text(), "synthetic-conflict")
+                enc.unlink()
+                plain.unlink()
+
+    def test_command_sync_failure_preserves_old_selector(self):
+        source = (DEPLOY / "gateway-login.sh").read_text()
+        code = source.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        with mock.patch.object(sys, "argv", ["-", str(self.selector), "live"]), mock.patch.object(os, "fsync", side_effect=OSError("synthetic sync failure")):
+            with self.assertRaises(OSError):
+                exec(compile(code, "selector-durability", "exec"), {})
+        self.assertEqual(self.selector.read_text(), "joint\n")
+        self.assertEqual(list(self.etc.iterdir()), [self.selector])
+
+    def test_command_missing_login(self):
+        result = self.command("live")
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("ti-secrets edit ibkr-login-live.env", result.stderr)
+        self.assertEqual(self.selector.read_text(), "joint\n")
+
+    def test_command_restart_notice(self):
+        (self.etc / "ibkr-login-live.env.gpg").touch()
+        result = self.command("live")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for phrase in ("next start of any kind", "owner restart", "healer", "ti-unlock", "systemd restart", "restart at once", "switch back to joint"):
+            self.assertIn(phrase, result.stdout)
+
+    def test_command_durable_replace(self):
+        source = (DEPLOY / "gateway-login.sh").read_text()
+        self.assertIn("os.fsync", source)
+        code = source.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        events = []
+        real_sync, real_replace = os.fsync, os.replace
+        def sync(fd):
+            events.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+            real_sync(fd)
+        def replace(src, dst):
+            self.assertEqual(Path(src).parent, self.selector.parent)
+            events.append("rename")
+            real_replace(src, dst)
+        with mock.patch.object(sys, "argv", ["-", str(self.selector), "live"]), mock.patch.object(os, "fsync", sync), mock.patch.object(os, "replace", replace):
+            exec(compile(code, "selector-durability", "exec"), {})
+        self.assertEqual(events, ["file", "rename", "directory"])
+        self.assertEqual(self.selector.read_text(), "live\n")
+
+    def test_staging_rejects_mode_mismatch(self):
+        for selection in ("joint", "trad-ira", "roth-ira", "live"):
+            for mode in ("live" if selection != "live" else "paper", "", "unknown"):
+                with self.subTest(selection=selection, mode=mode):
+                    self.selector.write_text(selection + "\n")
+                    self.login(selection).write_text(f"TWS_USERID=synthetic\nTWS_PASSWORD=synthetic\nTWS_TRADING_MODE={mode}\nTWS_READONLY_API=yes\n")
+                    (self.run / "login.env").write_text("previous")
+                    result = self.stage()
+                    self.assertEqual(result.returncode, 64, result.stderr)
+                    self.assertIn("TWS_TRADING_MODE", result.stderr)
+                    self.assertIn(selection, result.stderr)
+                    self.assertFalse((self.run / "login.env").exists())
+
+    def test_staging_live_requires_readonly(self):
+        self.selector.write_text("live\n")
+        self.login("live", readonly=False)
+        result = self.stage()
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("TWS_READONLY_API", result.stderr)
+
+    def test_unit_limits_failed_starts_and_pages(self):
+        unit = (DEPLOY / "systemd/ti-gateway.service").read_text()
+        section = unit.split("[Service]", 1)[0]
+        for line in ("StartLimitIntervalSec=600", "StartLimitBurst=3", "OnFailure=ti-unit-failed@%n.service"):
+            self.assertIn(line, section)
+        self.assertIn("RestartPreventExitStatus=64 65 77 78", unit)
+
+    def test_provision_refusal_before_any_install(self):
+        source = (DEPLOY / "provision.sh").read_text()
+        start = source.index("step_services() {")
+        function = source[start:source.index("\n}", start) + 2]
+        harness = r'''set -e
+here=$1
+log() { echo "$*"; }
+die() { echo "$*" >&2; exit 1; }
+require_native_programs() { :; }
+secrets_migrate() { echo migration-refused >&2; return 64; }
+install() { echo installed >&2; exit 99; }
+step_services
+'''
+        result = self.shell(function + "\n" + harness, str(DEPLOY))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("migration-refused", result.stderr)
+        self.assertNotIn("installed", result.stderr)
+        self.assertIn("before installing Gateway", result.stdout + result.stderr)
+
+    def test_provision_coordinated_install(self):
+        source = (DEPLOY / "provision.sh").read_text()
+        start = source.index("step_services() {")
+        body = source[start:source.index('log "directories and config"', start)]
+        self.assertIn("secrets_migrate", body)
+        for name in ("stage-gateway-login.sh", "render-ibc-config.sh", "ti-gateway.service"):
+            self.assertIn(name, body)
+        self.assertLess(body.index("secrets_migrate"), body.index("install "))
+        self.assertIn("systemctl daemon-reload", body)
+        self.assertIn("systemctl is-failed --quiet ti-gateway.service", source)
+
+    def test_systemd_rehearsal_stages_real_unit(self):
+        source = (DEPLOY / "rehearsal/inside-systemd.sh").read_text()
+        for text in ("/deploy/libexec/stage-gateway-login.sh", "gateway-probe.py", "systemctl start ti-gateway.service", "ti-gateway:ti-gateway:600", "systemctl stop ti-gateway.service", "test ! -e /run/ti-gateway/login.env", "os.listdir", 'read_bytes()'):
+            self.assertIn(text, source)
+
+    def test_operator_docs_match_consumption(self):
+        root = DEPLOY.parent
+        for name in ("docs/runbooks/gateway-login.md", "docs/manual/server.md"):
+            text = (root / name).read_text()
+            for phrase in ("unchanged first-edit template creates nothing", "next start of any kind", "healer", "ti-unlock", "systemd restart", "switch back to joint"):
+                with self.subTest(name=name, phrase=phrase):
+                    self.assertIn(phrase, text)
+        text = (root / "docs/runbooks/lightsail-deployment.md").read_text()
+        with self.subTest(name="lightsail handoff"):
+            self.assertNotIn("all unlocked secrets as private systemd credentials", text)
+            self.assertIn("ExecStartPre", text)
+        text = (DEPLOY / "etc/ibkr-login-joint.env.example").read_text()
+        with self.subTest(name="example handoff"):
+            self.assertNotIn("LoadCredential", text)
+            self.assertIn("when selected", text)
+
     def test_unit_credentials(self):
         unit = (DEPLOY / "systemd/ti-gateway.service").read_text()
         directives = [line for line in unit.splitlines() if line and not line.startswith("#")]
@@ -421,7 +596,7 @@ export SUDO_EDITOR=$etc/editor
                              for line in directives))
         self.assertIn("User=ti-gateway", directives)
         provision = (DEPLOY / "provision.sh").read_text()
-        self.assertIn('install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/', provision)
+        self.assertIn('install -m 0755 "$here/libexec/stage-gateway-login.sh" "$here/libexec/render-ibc-config.sh" /usr/local/libexec/trend-investing/', provision)
         self.assertIn("AssertPathExists=/run/trend-investing/secrets/secrets.env\n", unit)
 
 
@@ -429,6 +604,30 @@ class OptionalLoginFirstEditTests(test_roth.IRAFirstEditTests):
     """Apply the installed IRA lifecycle contract to every optional login."""
 
     names = (*test_roth.IRALoginSecretsTests.names, "ibkr-login-live.env")
+
+    def test_partial_plaintext_migration_completes_with_real_gpg(self):
+        for encrypted_new in (True, False):
+            with self.subTest(encrypted_new=encrypted_new):
+                name = "ibkr-login-joint.env" if encrypted_new else "ibkr-login.env"
+                self.seed(name)
+                plain = self.folder / ("ibkr-login.env" if encrypted_new else "ibkr-login-joint.env")
+                plain.write_text("SYNTHETIC=existing\n")
+                # The macOS harness replaces Linux shredding with removal of synthetic
+                # bytes; inside-secrets.sh checks the OS boundary (ADR 0028).
+                self.ok(self.command('shred() { test "$1" = -u; shift; rm "$@"; }; cmd_migrate',
+                                     phrases=(self.phrase, self.phrase)))
+                self.assertFalse(plain.exists())
+                self.assertFalse((self.folder / "ibkr-login.env.gpg").exists())
+                self.assertEqual(self.ok(self.decrypt("ibkr-login-joint.env")).stdout, "SYNTHETIC=existing\n")
+                (self.folder / "ibkr-login-joint.env.gpg").unlink()
+
+    def test_rotation_resume_includes_legacy_login(self):
+        self.seed("ibkr-login.env")
+        (self.folder / ".passphrase-change").write_text("change started\nrenaming\n")
+        self.ok(self.command("cmd_passphrase 1", phrases=(self.phrase, self.new_phrase, self.new_phrase)))
+        self.ok(self.decrypt("ibkr-login.env", self.new_phrase))
+        self.assertNotEqual(self.decrypt("ibkr-login.env", self.phrase).returncode, 0)
+        self.assertFalse((self.folder / ".passphrase-change").exists())
 
     def test_first_edit_refuses_existing_nonregular_paths_before_editor(self):
         for name in self.names:

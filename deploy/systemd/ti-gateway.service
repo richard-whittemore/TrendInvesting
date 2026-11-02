@@ -3,6 +3,11 @@ Description=IB Gateway under IBC (one gateway for all three engines)
 Documentation=https://github.com/IbcAlpha/IBC
 After=network-online.target
 Wants=network-online.target
+# Bound pre-start and renderer failures, then page (ADR 0019, Alerting;
+# docs/runbooks/gateway-login.md). ExecStartPre ignores RestartPreventExitStatus.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+OnFailure=ti-unit-failed@%n.service
 # The secrets rest on disk only encrypted; ti-unlock decrypts them after
 # each boot into a root-only tmpfs. A root pre-start stages only the
 # selected login in the runtime directory. Until unlock, systemd refuses

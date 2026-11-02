@@ -10,7 +10,6 @@ exec python3 -I - <<'PY'
 import os
 from pathlib import Path
 import pwd
-import shutil
 import stat
 import sys
 
@@ -48,11 +47,22 @@ try:
         info = os.fstat(login.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
             raise ValueError("not a nonempty regular file")
+        # Match the renderer's literal KEY=value parsing, including last-key wins
+        # (docs/runbooks/gateway-login.md). Never source the owner's secret.
+        content = login.read()
+        fields = dict(line.split(b"=", 1) for line in content.split(b"\n")
+                      if b"=" in line and not line.startswith(b"#"))
+        expected_mode = b"live" if selection == "live" else b"paper"
+        if b"\x00" in content or fields.get(b"TWS_TRADING_MODE") != expected_mode:
+            refuse(f"{login_name} selected by {selector} ({selection}) requires "
+                   f"TWS_TRADING_MODE={expected_mode.decode()}; correct it with sudo ti-secrets edit {login_name}")
+        if selection == "live" and b"TWS_READONLY_API" not in fields:
+            refuse(f"{login_name} requires explicit TWS_READONLY_API in live mode")
         owner = pwd.getpwnam("ti-gateway")
         destination = os.open("login.env", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                               0o600, dir_fd=runtime)
         with os.fdopen(destination, "wb") as staged:
-            shutil.copyfileobj(login, staged)
+            staged.write(content)
             staged.flush()
             if os.fstat(staged.fileno()).st_size == 0:
                 raise ValueError("empty copy")

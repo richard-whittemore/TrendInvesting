@@ -69,6 +69,11 @@ chmod 0600 /etc/trend-investing/secrets.env
 for f in ibkr-login-joint.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
   install -m 0600 "/deploy/etc/$f.example" "/etc/trend-investing/$f"
 done
+# Synthetic login isolation fixtures (ADR 0028; docs/runbooks/gateway-login.md).
+for selection in joint trad-ira; do
+  printf 'TWS_USERID=synthetic-%s\nTWS_PASSWORD=synthetic\nTWS_TRADING_MODE=paper\nTWS_READONLY_API=yes\n' "$selection" >"/etc/trend-investing/ibkr-login-$selection.env"
+  chmod 0600 "/etc/trend-investing/ibkr-login-$selection.env"
+done
 with_pass ti-secrets migrate >/dev/null || fail "ti-secrets migrate failed"
 test ! -e /etc/trend-investing/secrets.env || fail "the migration left secrets.env in plain text"
 test -z "$(on_disk "$marker")" || fail "the migrated secret is on disk: $(on_disk "$marker")"
@@ -156,6 +161,69 @@ systemctl stop ti-probe-locked.timer
 test -z "$(on_disk "$marker")" || fail "after the unlock the secret is on disk: $(on_disk "$marker")"
 grep -qxF "TI_GITHUB_ISSUES_TOKEN=$marker" "$unlocked/secrets.env" || fail "the unlocked secrets.env does not hold the secret"
 pass "a refused timer firing leaves the timer running; a wrong passphrase unlocks nothing; ti-unlock decrypts into a root-only tmpfs, the next firing runs, and the secret is nowhere on disk"
+
+# Exercise the real Gateway unit's root staging, ownership and filesystem
+# sandbox (ADR 0028; docs/runbooks/gateway-login.md). Only ExecStart changes;
+# the stand-in records access and waits, and never signals any process.
+useradd --system --no-create-home --shell /usr/sbin/nologin ti-gateway
+install -D -m 0755 /deploy/libexec/stage-gateway-login.sh /usr/local/libexec/trend-investing/stage-gateway-login.sh
+printf 'GATEWAY_MAJOR=1050\nTI_GATEWAY_RESTART_TIME=11:45 PM\nTI_GATEWAY_COLD_RESTART=09:00\n' >/etc/trend-investing/gateway.env
+printf 'trad-ira\n' >/etc/trend-investing/gateway-login
+cat >/usr/local/libexec/trend-investing/gateway-probe.py <<'PYCODE'
+import json
+import os
+from pathlib import Path
+import time
+
+runtime = Path(os.environ["RUNTIME_DIRECTORY"])
+result = {}
+try:
+    content = (runtime / "login.env").read_bytes()
+    result["staged_readable"] = True
+    result["selected_login"] = b"TWS_USERID=synthetic-trad-ira\n" in content
+except OSError:
+    result["staged_readable"] = False
+    result["selected_login"] = False
+try:
+    os.listdir("/run/trend-investing/secrets")
+    result["secrets_listable"] = True
+except PermissionError:
+    result["secrets_listable"] = False
+try:
+    Path("/run/trend-investing/secrets/ibkr-login-joint.env").read_bytes()
+    result["secrets_readable"] = True
+except PermissionError:
+    result["secrets_readable"] = False
+(runtime / "probe.json").write_text(json.dumps(result))
+while True:
+    time.sleep(1)
+PYCODE
+install -d /etc/systemd/system/ti-gateway.service.d
+cat >/etc/systemd/system/ti-gateway.service.d/probe.conf <<'UNIT'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/trend-investing/gateway-probe.py
+UNIT
+systemctl daemon-reload
+systemctl start ti-gateway.service || fail "real Gateway staging failed"
+for _ in $(seq 50); do test -e /run/ti-gateway/probe.json && break; sleep 0.1; done
+test -e /run/ti-gateway/probe.json || fail "Gateway stand-in did not record access"
+python3 -I - <<'PYCODE' || fail "Gateway credential isolation failed"
+import json
+from pathlib import Path
+assert json.loads(Path("/run/ti-gateway/probe.json").read_text()) == {
+    "staged_readable": True, "selected_login": True,
+    "secrets_listable": False, "secrets_readable": False,
+}
+PYCODE
+test "$(stat -c %U:%G:%a /run/ti-gateway/login.env)" = ti-gateway:ti-gateway:600 || fail "staged login owner or mode differs"
+cmp -s /run/ti-gateway/login.env "$unlocked/ibkr-login-trad-ira.env" || fail "staged login differs from the selected source"
+systemctl stop ti-gateway.service
+test ! -e /run/ti-gateway/login.env || fail "Gateway stop left the staged login"
+rm /etc/systemd/system/ti-gateway.service.d/probe.conf
+printf 'joint\n' >/etc/trend-investing/gateway-login
+systemctl daemon-reload
+pass "real Gateway unit stages only the selected login as ti-gateway 0600, hides unlocked secrets, and removes login.env at stop"
 
 # The stand-in channels: every POST's path, and its body on one line.
 cat >"$probe/channels.py" <<'PY'

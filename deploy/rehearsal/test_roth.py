@@ -167,7 +167,7 @@ cat "$stage/plain"''', name, phrases=(phrase or self.phrase,))
                 template = (self.folder / "editor-before").read_text()
                 lines = template.splitlines()
                 self.assertEqual(len([line for line in lines if line.startswith("#")]), 1)
-                self.assertIn("no service reads it yet", template.lower())
+                self.assertIn("ti-gateway reads this file when selected", template.lower())
                 self.assertEqual(dict(line.split("=", 1) for line in lines if not line.startswith("#")),
                                  {"TWS_USERID": "", "TWS_PASSWORD": "",
                                   "TWS_TRADING_MODE": "paper", "TWS_READONLY_API": "yes"})

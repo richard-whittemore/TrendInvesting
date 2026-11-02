@@ -201,7 +201,7 @@ valid_name() {
 # plain text, one NAME per line.
 encrypted_names() {
   local n f
-  for n in secrets.env ibkr-login-joint.env ibkr-login-trad-ira.env ibkr-login-roth-ira.env ibkr-login-live.env; do
+  for n in secrets.env ibkr-login.env ibkr-login-joint.env ibkr-login-trad-ira.env ibkr-login-roth-ira.env ibkr-login-live.env; do
     if test -f "$etc/$n.gpg"; then echo "$n"; fi
   done
   for f in "$etc"/accounts/*.env.gpg; do
@@ -212,7 +212,7 @@ encrypted_names() {
 }
 plain_names() {
   local n f
-  for n in secrets.env ibkr-login-joint.env ibkr-login-trad-ira.env ibkr-login-roth-ira.env ibkr-login-live.env; do
+  for n in secrets.env ibkr-login.env ibkr-login-joint.env ibkr-login-trad-ira.env ibkr-login-roth-ira.env ibkr-login-live.env; do
     if test -f "$etc/$n"; then echo "$n"; fi
   done
   for f in "$etc"/accounts/*.env; do
@@ -444,6 +444,14 @@ refuse_interrupted_change() {
   test ! -e "$journal" || die "a passphrase change was cut short ($journal): some files are under the old passphrase and some under the new. Finish it with sudo ti-secrets passphrase --resume (it asks for both); nothing changed"
 }
 
+# Ordinary reads and edits require the joint name (docs/runbooks/gateway-login.md).
+# Rotation recovery retains legacy enumeration to preserve ADR 0028's shared passphrase.
+refuse_legacy_login() {
+  if test -e "$etc/ibkr-login.env.gpg" || test -e "$etc/ibkr-login.env" || test -e "$run/ibkr-login.env"; then
+    die "legacy ibkr-login.env remains; run sudo ti-secrets migrate first (finish any interrupted passphrase change with sudo ti-secrets passphrase --resume)"
+  fi
+}
+
 refuse_plain_text() {
   local plain
   plain=$(plain_names | tr '\n' ' ')
@@ -451,6 +459,7 @@ refuse_plain_text() {
 }
 
 cmd_unlock() {
+  refuse_legacy_login
   local names stage n f phrase
   mapfile -t names < <(encrypted_names)
   test "${#names[@]}" -gt 0 || die "no encrypted secret file in $etc: run sudo deploy/provision.sh services"
@@ -523,6 +532,7 @@ set_editor_args() {
 }
 
 cmd_edit() {
+  refuse_legacy_login
   local name=$1 phrase work base editor tmp verify creating=0 unlocked=0
   test "$name" != ibkr-login.env || die "ibkr-login.env was renamed to ibkr-login-joint.env; run sudo ti-secrets migrate, then sudo ti-secrets edit ibkr-login-joint.env"
   valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login-joint.env, ibkr-login-trad-ira.env, ibkr-login-roth-ira.env, ibkr-login-live.env, accounts/<account>.env)"
@@ -560,7 +570,7 @@ cmd_edit() {
     rm -f -- "$work/.verify"
     if test "$name" = ibkr-login-live.env; then
       cat >"$work/.before" <<'TEMPLATE'
-# No service reads it yet.
+# ti-gateway reads this file when selected (docs/runbooks/gateway-login.md).
 TWS_USERID=
 TWS_PASSWORD=
 TWS_TRADING_MODE=live
@@ -569,7 +579,7 @@ TWS_SECOND_FACTOR_DEVICE=IB Key
 TEMPLATE
     else
       cat >"$work/.before" <<'TEMPLATE'
-# No service reads it yet.
+# ti-gateway reads this file when selected (docs/runbooks/gateway-login.md).
 TWS_USERID=
 TWS_PASSWORD=
 TWS_TRADING_MODE=paper
@@ -633,6 +643,7 @@ TEMPLATE
 # different, 2 or more the comparison failed, which is reported. Nothing is
 # changed.
 cmd_diff() {
+  refuse_legacy_login
   local name=$1 phrase work status=0
   valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login-{joint,trad-ira,roth-ira,live}.env, accounts/<account>.env)"
   test -t 1 || die "diff prints the secrets: run it with its output on the terminal, not redirected to a file or piped; nothing read"
@@ -671,6 +682,7 @@ journal_add() {
 # names, and does the rest.
 cmd_passphrase() {
   local resume=$1 names old new stage n tmp line i todo=() tmpfor=()
+  if test "$resume" = 0; then refuse_legacy_login; fi
   mapfile -t names < <(encrypted_names)
   test "${#names[@]}" -gt 0 || die "no encrypted secret file in $etc: run sudo deploy/provision.sh services"
   refuse_plain_text
@@ -730,24 +742,40 @@ cmd_passphrase() {
   log "the passphrase of all ${#names[@]} files is changed; the old one unlocks nothing now. Put the new one in your password manager: there is no recovery"
 }
 
-# Renames the joint login without decrypting it (docs/runbooks/gateway-login.md).
-# Run under the secrets lock; preflight every destination before changing any.
-# Move the unlocked copy first so a failed disk rename can be retried safely.
+# Renames the joint login under the secrets lock (docs/runbooks/gateway-login.md).
+# Preflight corresponding destinations; complementary encrypted/plain names are
+# resumable only after verifying their contents (ADR 0028). Preserve conflicts.
 migrate_login_name() {
-  local old=ibkr-login.env new=ibkr-login-joint.env suffix
-  if ! test -e "$etc/$old.gpg" && ! test -e "$etc/$old"; then return 0; fi
-  if test -e "$etc/$new.gpg" || test -e "$etc/$new"; then
-    die "$etc/$old.gpg (or $etc/$old) and $etc/$new.gpg (or $etc/$new) both exist; refusing login migration; preserve both and resolve which file to keep"
-  fi
+  local old=ibkr-login.env new=ibkr-login-joint.env suffix phrase stage encrypted plain
+  for suffix in .gpg ''; do
+    if test -e "$etc/$old$suffix" && test -e "$etc/$new$suffix"; then
+      die "$etc/$old$suffix and $etc/$new$suffix both exist; refusing login migration; preserve both and resolve which file to keep"
+    fi
+  done
   if test -e "$run/$old" && test -e "$run/$new"; then
     die "$run/$old and $run/$new both exist; refusing login migration"
   fi
+  encrypted='' plain=''
+  if test -e "$etc/$old.gpg" && test -e "$etc/$new"; then
+    encrypted=$etc/$old.gpg plain=$etc/$new
+  elif test -e "$etc/$new.gpg" && test -e "$etc/$old"; then
+    encrypted=$etc/$new.gpg plain=$etc/$old
+  fi
+  if test -n "$encrypted"; then
+    need_gpg
+    ensure_tmpfs
+    new_work stage
+    read_secret phrase "Passphrase to verify the partially renamed login: "
+    decrypt_to "$phrase" "$encrypted" "$stage/login" || die "cannot verify $encrypted; nothing changed"
+    cmp -s "$stage/login" "$plain" || die "$encrypted and $plain differ; refusing login migration; preserve both and resolve which file to keep"
+  fi
+  if ! test -e "$etc/$old.gpg" && ! test -e "$etc/$old" && ! test -e "$run/$old"; then return 0; fi
   if test -e "$run/$old"; then mv -- "$run/$old" "$run/$new"; fi
   for suffix in .gpg ''; do
     if test -e "$etc/$old$suffix"; then mv -- "$etc/$old$suffix" "$etc/$new$suffix"; fi
   done
   sync -- "$etc"
-  log "renamed $old to $new (encrypted and any unlocked copy); no passphrase needed for the rename"
+  log "renamed $old to $new (encrypted and any unlocked copy)"
 }
 
 cmd_migrate() {

@@ -13,7 +13,7 @@ Provisioning for the live server in `docs/live-trading/plan.md` section 3: one U
 | Piece | Where | Notes |
 |---|---|---|
 | Users | `ti-gateway` (Gateway and IBC), `ti-trader` (data step, engines, adapter, reporter, dashboard), `ti-operator` (writes the owner's instructions into the operator inboxes; group `ti-trader`; no unit runs as it) | System users, no login shell. Engines never run as the user that can see the IBKR login. |
-| Joint paper IBKR login | `/etc/trend-investing/ibkr-login-joint.env.gpg`, root:root 0600, encrypted; unlocked after each boot to `/run/trend-investing/secrets/ibkr-login-joint.env` | Outside the repository. Edited with `sudo ti-secrets edit ibkr-login-joint.env`. Handed to `ti-gateway.service` only, through systemd `LoadCredential`. IBC's `config.ini` is rendered from it into a tmpfs on each start, so the password is never on disk beside the code, never in the journal, never committed. |
+| Joint paper IBKR login | `/etc/trend-investing/ibkr-login-joint.env.gpg`, root:root 0600, encrypted; unlocked after each boot to `/run/trend-investing/secrets/ibkr-login-joint.env` | Outside the repository. Edited with `sudo ti-secrets edit ibkr-login-joint.env`. When selected, staged by the root `ExecStartPre` of `ti-gateway.service` into `/run/ti-gateway/login.env`, owned by `ti-gateway` with mode 0600. IBC's `config.ini` is rendered from it into a tmpfs on each start, so the password is never on disk beside the code, never in the journal, never committed. |
 | Other secrets | `/etc/trend-investing/secrets.env.gpg`, root:root 0600, encrypted; unlocked to `/run/trend-investing/secrets/secrets.env` | Edited with `sudo ti-secrets edit secrets.env`. The IRA account numbers, the Massive key, the reporter's `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PUSHOVER_APP_TOKEN`, `TI_PUSHOVER_USER_KEY` and `TI_HEARTBEAT_URL`, and the Flex reader's `TI_IBKR_FLEX_TOKEN`, `TI_IBKR_FLEX_QUERY_ID` and `TI_IBKR_FLEX_TRADES_QUERY_ID`. The Boost account's number is not here (next row). Names only in `deploy/etc/secrets.env.example`. Handed to each unit as a private credential file (`LoadCredential`), never in its environment. |
 | Each adapter's account | `/etc/trend-investing/accounts/boost.env.gpg`, root:root 0600 (directory 0700), encrypted; unlocked to `/run/trend-investing/secrets/accounts/boost.env` | Edited with `sudo ti-secrets edit accounts/boost.env`. The Boost account's number alone (`IBKR_ACCOUNT_BOOST`), the only file its adapter is handed. Names only in `deploy/etc/accounts/boost.env.example`. |
 | Programs | `/opt/trend-investing/bin/`: `ti-engine`, `ti-data`, `ti-reporter`, `ti-dashboard`, `operator`, `journal-query` | The server has no Go: each is built on the Mac and copied over (below). `operator` and `journal-query` are linked into `/usr/local/bin`, so `sudo -u ti-operator operator …` (an instruction: kill switch, clearance, acknowledgement), `sudo -u ti-trader operator approve …` and `sudo -u ti-trader journal-query …` work as the runbooks write them. |
@@ -32,14 +32,19 @@ files are `ibkr-login-trad-ira.env`, `ibkr-login-roth-ira.env` and
 `ibkr-login-live.env`; create them with `sudo SUDO_EDITOR=nano ti-secrets edit`
 followed by the filename. A first edit verifies the existing passphrase before
 creating the file. `sudo ti-gateway-login` shows the selection;
-`sudo ti-gateway-login live` changes it without restarting. Apply it with
-`sudo systemctl restart ti-gateway` when ready. The real login uses IB Key
+`sudo ti-gateway-login live` changes it without restarting. It applies at the
+next start of any kind, including the healer, `ti-unlock` and a systemd restart. Select only immediately before a planned restart.
+For live, restart at once with `sudo systemctl restart ti-gateway` and
+switch back to joint afterwards. The real login uses IB Key
 and reaches the joint account and both IRAs; its template keeps API orders
 read-only. Provisioning automatically renames the old `ibkr-login.env.gpg`
 and unlocked copy to the joint name without a passphrase, refusing if both
-names exist. No owner command is needed for that rename. The Gateway loads
-all unlocked secrets as private systemd credentials so optional logins may
-be absent; its renderer checks the selected file. See
+full sets exist and completing partial renames. No owner command is needed
+for the ordinary rename. The root `ExecStartPre` stages only the selected
+unlocked login into `/run/ti-gateway/login.env`, mode 0600 and owned by
+`ti-gateway`. The renderer reads that file, and `InaccessiblePaths` hides
+`/run/trend-investing/secrets` from the Gateway. Systemd removes the staged
+file at stop. See
 [gateway-login.md](gateway-login.md#login-files-and-selection).
 
 ## Setup
