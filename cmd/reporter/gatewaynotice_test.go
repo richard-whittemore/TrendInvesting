@@ -110,7 +110,7 @@ func TestGatewayIBKRUnreachableKeepsIncidentAndTiming(t *testing.T) {
 			if !reflect.DeepEqual(metadata, want) {
 				t.Fatalf("wording changed alert identity or routing: %+v", a)
 			}
-			for _, text := range []string{"Gateway healer", "only when an adapter stops at the end of a scheduled window", "outside any scheduled IBKR window", "over three hours", "IBKR's system status", "sudo systemctl restart ti-gateway", "1100/2110"} {
+			for _, text := range []string{"Gateway healer", "only when an adapter stops at the end of a scheduled window", "Inside a scheduled IBKR window the adapter waits", "outside a window, check IBKR's system status", "over three hours", "IBKR's system status", "sudo systemctl restart ti-gateway", "1100/2110"} {
 				if !strings.Contains(a.Body, text) {
 					t.Errorf("missing %q in remedy: %s", text, a.Body)
 				}

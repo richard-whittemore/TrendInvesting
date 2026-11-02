@@ -335,7 +335,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	// "The Gateway is logged out" and "Gateway healer"; ADR 0019, "Alerting").
 	if ev.ibkrUnreachable {
 		a.Title = fmt.Sprintf("%s: IB Gateway is logged in but IBKR's servers are unreachable", host)
-		a.Body = fmt.Sprintf("IBKR's servers have been unreachable from a logged-in Gateway for over three hours outside any scheduled IBKR window. The affected accounts' adapters are named in the check evidence below. Other accounts' trading status is not established by this check. The Gateway outage has been observed since about %s (checked at %s). "+
+		a.Body = fmt.Sprintf("IBKR's servers have been unreachable from a logged-in Gateway for over three hours (elapsed time, scheduled IBKR windows included). Inside a scheduled IBKR window the adapter waits and the Gateway healer restarts the Gateway when the window ends; outside a window, check IBKR's system status, then restart the Gateway. The affected accounts' adapters are named in the check evidence below. Other accounts' trading status is not established by this check. The Gateway outage has been observed since about %s (checked at %s). "+
 			"Remedy (docs/manual/server.md, \"Gateway healer\"): check IBKR's system status, then restart the Gateway (`sudo systemctl restart ti-gateway`). The Gateway healer acts only when an adapter stops at the end of a scheduled window. Approve a phone prompt if one comes, then start the affected adapters (docs/runbooks/gateway-login.md). The check said: %s",
 			h.Since.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339), said)
 	}
