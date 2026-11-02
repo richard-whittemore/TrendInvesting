@@ -24,7 +24,7 @@ set +x
 
 fail() {
   echo "REHEARSAL FAIL: $*" >&2
-  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u ti-adapter-boost -u 'ti-adapter@*' -u ti-data -u 'ti-data@*' -u ti-warmup -u ti-warmup-drill -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
+  journalctl -u 'ti-unit-failed@*' -u 'ti-engine@*' -u ti-gateway -u 'ti-gateway-heal@*' -u ti-adapter-boost -u 'ti-adapter@*' -u ti-data -u 'ti-data@*' -u ti-warmup -u ti-warmup-drill -u 'ti-reporter@*' -u ti-probe-massive --no-pager -o short-monotonic >&2 || true
   exit 1
 }
 pass() { echo "REHEARSAL ok: $*"; }
@@ -460,6 +460,11 @@ data_said=$(journalctl -u ti-data@trad-ira.service --no-pager -o cat)
 grep -q "waiting for the account's first run.*start the trad-ira engine once" <<<"$data_said" || fail "the IRA data job did not say it is waiting for the first run: $data_said"
 test -z "$(on_disk "$marker")" || fail "the secret is on disk at the end: $(on_disk "$marker")"
 pass "after the unlock the hook read its channels from the credential systemd handed it, the reporter's unit and the data job, no longer refused and with no run started, wait for the first run and succeed, and the secret is nowhere on disk"
+
+# The Gateway recovery path, using only container stand-ins.
+# shellcheck source=deploy/rehearsal/gateway-heal.sh
+. /deploy/rehearsal/gateway-heal.sh
+rehearse_gateway_heal
 
 # --- The owner's first dry-run day, step by step
 # (docs/runbooks/first-dry-run-day.md).

@@ -563,7 +563,7 @@ require_native_programs() {
     aarch64) want=183 ;;
     *) die "no Go build for $machine; not installing" ;;
   esac
-  for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start universe-rank; do
+  for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start ti-gateway-heal universe-rank; do
     test -f "$dist/$b" || continue
     got=$(elf_machine "$dist/$b")
     test "$got" = "$want" || die "$dist/$b is not a Linux program for this machine ($machine; its ELF machine is ${got:-none, not ELF}): build it with deploy/build-engine.sh for this machine and copy dist/ again; nothing installed"
@@ -631,10 +631,40 @@ install_adapter_settings() {
   done
 }
 
+# Keep the relay lock inode across upgrades: the healer flocks it read-only
+# under its sandbox (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
+install_adapter_lock() {
+  local path=$1
+  # Exclusive creation as the adapter user cannot replace a live lock inode
+  # or grant root metadata authority over an adapter-controlled path
+  # (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
+  runuser -u ti-trader -- python3 -I -c '
+import errno, os, stat, sys
+path = sys.argv[1]
+try:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+except OSError as exc:
+    if exc.errno != errno.EEXIST:
+        raise
+else:
+    os.close(fd)
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise SystemExit("refusing unsafe adapter lock: " + path)
+finally:
+    os.close(fd)
+' "$path"
+}
+
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
   log "directories and config"
+  # Root-only recovery accounting survives Gateway restarts; never overwrite
+  # its state on upgrades (docs/manual/server.md, Gateway healer).
+  install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/
   install -m 0755 "$here"/ira-replay.sh "$here"/ira-replay.py /usr/local/libexec/trend-investing/
@@ -665,7 +695,7 @@ CONF
   # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
   # PATH includes /usr/local/bin, where each is linked.
   local dist=${TI_DIST:-$here/../dist} b
-  for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start universe-rank; do
+  for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start ti-gateway-heal universe-rank; do
     if test -f "$dist/$b"; then
       install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
       log "installed $b from $dist"
@@ -708,6 +738,8 @@ CONF
     # can (ADR 0026, kill-switch amendment; docs/manual/operator.md).
     install -d -o ti-operator -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
+    # Only where a Linux Gateway runs: the lock serves the Gateway healer.
+    mac_mini || install_adapter_lock "/var/lib/trend-investing/adapters/$a/pending.json.lock"
     # The Flex reader's ledger of cash movements and its status file
     # (ti-flex@<instance>.service; docs/manual/reconciliation.md).
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/flex/$a"

@@ -59,9 +59,13 @@ cp "$repo/cmd/engine/testdata/momentum-dry-run.json" "$dist/momentum-dry-run.jso
 (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
   -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=rehearsal" \
   -o "$dist/ti-engine" ./cmd/engine)
-for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query gateway-start:ti-gateway-start universe-rank:universe-rank; do
+for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query gateway-start:ti-gateway-start gateway-heal:ti-gateway-heal universe-rank:universe-rank; do
   (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build -o "$dist/${tool#*:}" "./cmd/${tool%%:*}")
 done
+# Compile-time clock injection only for the systemd healer drill. The normal
+# ti-gateway-heal binary above remains the one provisioning installs.
+(cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
+  -tags gateway_heal_rehearsal -o "$dist/ti-gateway-heal-rehearsal" ./cmd/gateway-heal)
 id=$(docker "${args[@]}" ubuntu:24.04 bash /deploy/rehearsal/inside.sh)
 sd=""
 trap 'docker rm -f "$id" ${sd:+"$sd"} >/dev/null 2>&1 || true; rm -rf "$dist"' EXIT
@@ -78,7 +82,7 @@ docker start -a "$id"
 # systemd itself names and starts it on a templated unit's failure
 # (deploy/rehearsal/inside-systemd.sh). Not --privileged: it runs systemd as
 # the Mac mini container does (deploy/mac-mini/up.sh, which gives the reason
-# for each capability): every capability dropped and the same eleven added
+# for each capability): every capability dropped and the same twelve added
 # back, a cgroup namespace of its own whose tree is remounted writable before
 # systemd starts, and Docker's default seccomp filter kept. / is mounted
 # shared, as up.sh's mount-shared.service does, so that systemd can hand a
@@ -88,7 +92,7 @@ docker start -a "$id"
 # Massive, the runbook's port check and the New York clock; sudo is the
 # owner's, as the runbook types it.
 caps=(--cap-drop ALL)
-for cap in SYS_ADMIN SYS_CHROOT CHOWN FOWNER DAC_OVERRIDE SETUID SETGID SETPCAP AUDIT_WRITE KILL FSETID; do
+for cap in SYS_ADMIN SYS_CHROOT CHOWN FOWNER DAC_OVERRIDE DAC_READ_SEARCH SETUID SETGID SETPCAP AUDIT_WRITE KILL FSETID; do
   caps+=(--cap-add "$cap")
 done
 sd=$(docker create "${caps[@]}" --cgroupns=private --tmpfs /run --tmpfs /run/lock -e container=docker --platform "$platform" ubuntu:24.04 \

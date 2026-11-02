@@ -242,6 +242,9 @@ scenario() {
     # the real one prints this line, so the stand-in does too.
     runuser() {
       record runuser "$@"
+      # Relay lock creation is recorded only; the services case never runs
+      # Python on a host path (docs/manual/server.md, Gateway healer).
+      case "$*" in '-u ti-trader -- python3 -I -c '*) return 0 ;; esac
       case $(stat -c %a . 2>/dev/null || stat -f %Lp .) in
         *[1357]) ;;
         *) echo "installer.sh: 820: cd: can't cd to $PWD" >&2 ;;
@@ -511,6 +514,7 @@ called "ufw" || fail "Lightsail base no longer installs ufw"
 if called "journald.conf.d"; then fail "Lightsail base changed the journal's settings"; fi
 
 scenario "" x86_64 services || fail "Lightsail services failed: $(cat "$work/out")"
+called "runuser -u ti-trader -- python3 -I -c" || fail "adapter locks are not created as ti-trader, in isolated mode"
 for instance in trad-ira roth-ira; do
   called "install -d -m 0755 $work/units/ti-reporter@$instance.service.d" || fail "$instance reporter drop-in directory is not installed"
   grep -qx 'Environment=TI_HEARTBEAT=off' "$work/units/ti-reporter@$instance.service.d/heartbeat.conf" || fail "$instance reporter heartbeat is not disabled"
@@ -751,6 +755,7 @@ called "systemctl enable --now ti-clock-check.timer" || fail "Mac mini does not 
 grep -q '^Environment=TI_CLOCK_VERIFY=1' "$work/deploy/mac-mini/systemd/ti-clock-check.service" || fail "the clock check's unit does not compare with a reference"
 grep -q '^OnUnitActiveSec=15min' "$work/deploy/mac-mini/systemd/ti-clock-check.timer" || fail "the clock check's timer is not every 15 minutes"
 scenario "" x86_64 services || fail "Lightsail services failed: $(cat "$work/out")"
+called "runuser -u ti-trader -- python3 -I -c" || fail "adapter locks are not created as ti-trader, in isolated mode"
 if called "ti-clock-check"; then fail "Lightsail installs the Mac mini's clock check"; fi
 
 test "$failures" -eq 0 || exit 1

@@ -320,3 +320,16 @@ waits and reader cleanup within one second. An abandoned opener closes any
 late socket, and an unfinished opener or reader blocks session reuse.
 Automatic Gateway restart and making the reporter aware of the schedule
 remain separate work; its logged-out page can precede scheduled expiry.
+
+## Amendment — 2026-11-01: bounded Gateway healer
+
+The exit-3 Gateway-restart remedy is now carried out by the healer under the
+bounds in [the server manual's Gateway healer section](../manual/server.md#the-gateway-is-logged-out).
+This supersedes the 2026-10-31 amendment's owner-only restart remedy and its
+statement that automatic Gateway restart remains separate work. The healer
+restarts once per incident, subject to a two-hour limit, outside IBKR maintenance
+windows, the nightly reset hour, and the Sunday cold restart margin. After
+confirmed login it starts only its own failed adapter. The owner veto is
+`systemctl reset-failed <adapter>`; the same failed invocation must remain
+eligible at each re-check. The manual defines the remaining evidence, locking,
+and recovery-time bounds.
