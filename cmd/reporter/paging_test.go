@@ -149,8 +149,8 @@ func TestPagingGatewayJournalNotices(t *testing.T) {
 		{"reset_before_one", time.Date(2026, 10, 31, 0, 40, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 23, 50, 0, 0, newYork), "gateway-start: reset wait: login refused at 23:50 ET inside IBKR's nightly reset hour; waiting")}, nil, "reset wait", false},
 		{"reset_at_one", time.Date(2026, 10, 31, 1, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 23, 50, 0, 0, newYork), "gateway-start: reset wait: login refused at 23:50 ET inside IBKR's nightly reset hour; waiting")}, nil, "logged out", true},
 		{"later_start_overrides_reset", time.Date(2026, 10, 31, 0, 40, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 23, 50, 0, 0, newYork), "gateway-start: reset wait: login refused at 00:39 ET; waiting"), stamp(time.Date(2026, 10, 31, 0, 10, 0, 0, newYork), ibcStarting)}, nil, "logged out", true},
-		{"weekend_connectivity", time.Date(2026, 10, 31, 9, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 31, 3, 35, 0, 0, newYork), ibcCompleted)}, []string{stamp(time.Date(2026, 10, 31, 5, 44, 0, 0, newYork), linkLost)}, "logged out", false},
-		{"session_connectivity", time.Date(2026, 10, 30, 8, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 3, 35, 0, 0, newYork), ibcCompleted)}, []string{stamp(time.Date(2026, 10, 30, 3, 59, 0, 0, newYork), linkLost)}, "logged out", true},
+		{"weekend_connectivity", time.Date(2026, 10, 31, 9, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 31, 3, 35, 0, 0, newYork), ibcCompleted)}, []string{stamp(time.Date(2026, 10, 31, 5, 44, 0, 0, newYork), linkLost)}, "logged in but IBKR's servers are unreachable", false},
+		{"session_connectivity", time.Date(2026, 10, 30, 8, 0, 0, 0, newYork), []string{stamp(time.Date(2026, 10, 30, 3, 35, 0, 0, newYork), ibcCompleted)}, []string{stamp(time.Date(2026, 10, 30, 3, 59, 0, 0, newYork), linkLost)}, "logged in but IBKR's servers are unreachable", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newStandInGateway(t)

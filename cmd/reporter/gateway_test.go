@@ -59,8 +59,8 @@ echo "$*" >>'` + g.dir + `/argv'
 if [ -e '` + g.dir + `/rmwin' ]; then rm -f "$(cat '` + g.dir + `/rmwin')"; fi
 unit=""; pattern=""
 while [ $# -gt 0 ]; do case $1 in -u) unit=$2; shift;; -g) pattern=$2; shift;; esac; shift; done
-if [ -e '` + g.dir + `/fail' ]; then echo "Failed to open journal files" >&2; exit 1; fi
-if [ -e '` + g.dir + `/noaccess' ]; then echo "Hint: You are currently not seeing messages from other users and the system."; echo "-- No entries --"; exit 0; fi
+if [ -e '` + g.dir + `/fail' ] || [ -e '` + g.dir + `/fail-'"$unit" ]; then echo "Failed to open journal files" >&2; exit 1; fi
+if [ -e '` + g.dir + `/noaccess' ] || [ -e '` + g.dir + `/noaccess-'"$unit" ]; then echo "Hint: You are currently not seeing messages from other users and the system."; echo "-- No entries --"; exit 0; fi
 out=$(cat '` + g.dir + `'/"$unit" 2>/dev/null)
 out=$(printf '%s\n' "$out" | grep -E -- "$pattern")
 if [ -z "$out" ]; then echo "-- No entries --"; exit 1; fi
@@ -82,7 +82,7 @@ echo "SubState=$(cat "$d/substate" 2>/dev/null || echo running)"
 	if err := os.WriteFile(filepath.Join(g.dir, "systemctl"), []byte(systemctl), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	g.login()
+	g.login(tuesday(0, 0))
 	return g
 }
 
@@ -109,10 +109,10 @@ func (g standInGateway) flag(name string, on bool) {
 	}
 }
 
-// login and logout stamp far in the future, so they count as newer than any
-// outage a test has opened; tests of older evidence write their own stamps.
-func (g standInGateway) login()  { g.ibc("2099-01-01T00:00:00-0500 " + ibcCompleted) }
-func (g standInGateway) logout() { g.ibc("2099-01-01T00:00:00-0500 " + ibcRefused) }
+// Login evidence uses the synthetic firing clock, within the allowance in
+// docs/manual/server.md, "The Gateway is logged out".
+func (g standInGateway) login(at time.Time) { g.ibc(stamp(at, ibcCompleted)) }
+func (g standInGateway) logout()            { g.ibc(stamp(tuesday(0, 0), ibcRefused)) }
 
 func gatewayRun(t *testing.T, r http.RoundTripper, dir, check, account string, at time.Time, extra ...string) error {
 	t.Helper()
@@ -140,7 +140,7 @@ func gatewayPages(r *relay) int {
 	n := 0
 	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
 		for _, m := range r.to(host) {
-			if strings.Contains(m, "IB Gateway is logged out") && !strings.Contains(m, `"event_action":"resolve"`) {
+			if (strings.Contains(m, "IB Gateway is logged out") || strings.Contains(m, "IB Gateway is logged in but IBKR")) && !strings.Contains(m, `"event_action":"resolve"`) {
 				n++
 			}
 		}
@@ -219,7 +219,7 @@ func TestAGatewayThatLogsInAgainResolvesAndAFreshOutagePagesAnew(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	g.login()
+	g.login(tuesday(14, 20))
 	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(14, 20)); err != nil {
 		t.Fatal(err)
 	}
