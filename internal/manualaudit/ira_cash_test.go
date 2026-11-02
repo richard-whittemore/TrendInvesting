@@ -11,7 +11,8 @@ import (
 
 // TestMomentumManualCashReadingMatchesIRAConfigs keeps the owner's buy-budget
 // explanation tied to the shipped D5 choice (ADR 0026, point 2, "Budget").
-// No Borrow Margin uses settled cash: unsettled sale proceeds are not spent.
+// The shipped IRA configs select settled cash (execution.cash_rule); plan
+// decision D5's total cash remains open pending IBKR's confirmation.
 func TestMomentumManualCashReadingMatchesIRAConfigs(t *testing.T) {
 	root := repoRoot(t)
 	raw, err := os.ReadFile(filepath.Join(root, "docs", "manual", "momentum.md"))
