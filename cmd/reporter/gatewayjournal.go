@@ -30,7 +30,7 @@ const (
 	// gatewayJournalSince bounds how far back the journals are read.
 	gatewayJournalSince = "-14d"
 	// gatewayLinkLossAfter is how long an adapter's link to IBKR must have been
-	// lost, without one connection since, to count as the Gateway being logged
+	// lost in one invocation, without restoration or reconciliation, to count as the Gateway being logged
 	// out on its own evidence: IBKR's scheduled server resets and weekend
 	// maintenance drop the link for shorter spells while the Gateway is logged
 	// in, and a login failure shows in IBC's journal at once. A session dropped
@@ -73,13 +73,15 @@ var (
 	// resetWaitEvent reads reset-wait evidence separately from login events
 	// (ADR 0019, "Alerting"); other start-script messages cannot imply logout.
 	resetWaitEvent = regexp.MustCompile(`gateway-start: reset wait:`)
-	// The adapter's link lines (adapter/ibkr/connection.py _report and
-	// loop.py): connectivity-lost is code 1100/2110; "connected reason=restored"
-	// is IBKR's restoration (1101/1102); "reconciled" is a successful read of the
-	// account after a connect, which needs IBKR. A plain "connected" (the API
-	// handshake, logged at every reconnect, including every restore_timeout while
-	// Gateway has no IBKR) proves nothing about IBKR and is not matched.
-	linkEvent  = regexp.MustCompile(`ibkr link state=connectivity-lost|ibkr link state=connected reason=restored|ibkr reconciled client_id=`)
+	// Adapter starts end preceding loss evidence; only losses
+	// in the current invocation count (docs/manual/server.md, "The Gateway is
+	// logged out"; ADR 0019, "Alerting"). Within an invocation, only restoration
+	// (1101/1102) or reconciliation ends loss. Plain "connected" lines are API
+	// handshakes to the local Gateway, not IBKR recovery: during an IBKR outage
+	// the adapter reconnects every restore_timeout (five minutes), and the
+	// Gateway immediately reports 1100/2110 again. Clearing loss at each
+	// handshake would restart the three-hour clock forever and prevent paging.
+	linkEvent  = regexp.MustCompile(`ibkr adapter starting|ibkr link connected|ibkr link state=connectivity-lost|ibkr link state=connected|ibkr reconciled client_id=`)
 	lostAccess = regexp.MustCompile(`(?i)not seeing messages from other users|insufficient permissions|no journal files were opened`)
 	shortISO   = "2006-01-02T15:04:05-0700" // fractional seconds are accepted when parsing
 )
@@ -272,10 +274,12 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 	}
 }
 
-// lostSince finds when the current uninterrupted loss began: the first
-// connectivity-lost line after the newest restoration or reconciliation (zero
-// when there is none, or nothing is lost), that line, and the newest
-// restoration's time.
+// lostSince returns the current invocation's uninterrupted loss, its first
+// line, and the newest restoration/reconciliation time (docs/manual/server.md,
+// "The Gateway is logged out"; ADR 0019, "Alerting"). Lines must be filtered
+// by linkEvent in journal order. Starts end loss evidence without inventing
+// positive recovery evidence; repeated losses keep their first time even
+// across plain connects within an invocation.
 func lostSince(lines []string) (since time.Time, first string, restored time.Time, err error) {
 	for _, l := range lines {
 		at, err := lineTime(l)
@@ -288,7 +292,13 @@ func lostSince(lines []string) (since time.Time, first string, restored time.Tim
 			}
 			continue
 		}
-		since, first, restored = time.Time{}, "", at
+		if strings.Contains(l, "ibkr adapter starting") {
+			since, first = time.Time{}, ""
+		}
+		if strings.Contains(l, "state=connected reason=restored") || strings.Contains(l, "ibkr reconciled client_id=") {
+			since, first = time.Time{}, ""
+			restored = at
+		}
 	}
 	return since, first, restored, nil
 }

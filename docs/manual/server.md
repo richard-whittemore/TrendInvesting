@@ -883,9 +883,16 @@ has failed to tell you. Two things now cover it.
 **The reporter reads the login evidence.** Every five minutes the owning
 reporter reads IBC's journal and the adapter journals. IBC's newest login event
 being a refusal, login dialog or stopped retries counts as logged out. Adapter
-1100/2110 counts only after a continuous loss of at least three hours without
-restoration (1101/1102) or successful reconciliation. A plain API reconnect
-proves nothing. A silent IBKR session drop without an IBC event therefore takes
+1100/2110 counts only after at least three continuous hours of unrestored loss
+in the adapter's current invocation. A newer `ibkr adapter starting` ends loss
+evidence from earlier invocations, even if the new invocation exits before
+connecting; within an invocation, only restoration (`state=connected reason=restored`,
+1101/1102) or successful reconciliation (`ibkr reconciled client_id=`) ends loss.
+Plain `ibkr link connected` and `state=connected` API handshakes to the local
+Gateway do not end loss evidence: during an IBKR outage the adapter reconnects
+every five minutes and the Gateway reports 1100/2110 again, so repeated losses
+retain the first loss time across those connects.
+A silent IBKR session drop without an IBC event therefore takes
 about three hours plus the ten-minute detection grace to detect; paging eligibility
 can defer Pushover further. This detection limit still needs the owner's explicit
 agreement before live money. Missing IBC journal access fails the firing. An
