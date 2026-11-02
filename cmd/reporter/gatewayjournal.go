@@ -14,8 +14,10 @@ import (
 
 // The Gateway's journals say whether it is logged in (ADR 0019, "Alerting").
 // IBC's, ti-gateway, holds the login events; the adapter's holds the link
-// state. The reader fails closed: a journal it cannot read is an error that
-// fails the firing, never a login.
+// state. An unreadable adapter journal cannot suppress an IBC-established
+// outage; its error accompanies that alert. Otherwise an unreadable journal
+// fails the firing, never implying a login (docs/manual/server.md,
+// "The Gateway is logged out").
 
 // The journal read is bounded as the clock check is (clock.go); tests shorten it.
 var (
@@ -33,8 +35,12 @@ const (
 	// maintenance drop the link for shorter spells while the Gateway is logged
 	// in, and a login failure shows in IBC's journal at once. A session dropped
 	// silently on IBKR's side with no IBC event therefore pages only after
-	// about this time plus gatewayPagesAfter.
+	// about this time plus gatewayPagesAfter (docs/manual/server.md,
+	// "The Gateway is logged out"; ADR 0019, "Alerting").
 	gatewayLinkLossAfter = 3 * time.Hour
+	// gatewayLinkClockSkew allows small clock differences; later loss lines
+	// are diagnostic only (docs/manual/server.md, "The Gateway is logged out").
+	gatewayLinkClockSkew = 2 * time.Minute
 )
 
 // gatewayEvidence is what the journals show: logged out (out), or that they
@@ -43,6 +49,9 @@ type gatewayEvidence struct {
 	out, silent bool
 	resetWait   bool
 	said        string
+	// ibkrUnreachable selects wording only, from this firing's evidence; it
+	// never changes detection or persists (docs/manual/server.md, "Gateway healer").
+	ibkrUnreachable bool
 	// recoveredAt is the time of the newest positive event the journals show:
 	// IBC's completed login when it is IBC's newest login event, or the
 	// adapter's restored link or reconciliation. An open outage is closed only
@@ -211,14 +220,28 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 				reasons = append(reasons, "IBC's newest login event: "+ibc[n-1])
 			}
 		}
+		ibcOut := len(reasons) > 0
+		var diagnostics []string
 		for _, unit := range adapters {
 			lines, err := journalQuery(journalctl, unit, linkEvent)
 			if err != nil {
-				return gatewayEvidence{}, err
+				if !ibcOut {
+					return gatewayEvidence{}, err
+				}
+				diagnostics = append(diagnostics, err.Error())
+				continue
 			}
-			since, line, restored, err := lostSince(lines)
+			since, line, restored, ignored, err := lostSince(lines, now)
+			for _, l := range ignored {
+				diagnostics = append(diagnostics, fmt.Sprintf("%s: ignored future-dated connectivity-loss beyond the %s clock-skew allowance: %s", unit, gatewayLinkClockSkew, l))
+			}
 			if err != nil {
-				return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read %s's link events: %w", unit, err)
+				err = fmt.Errorf("reporter: the gateway check could not read %s's link events: %w", unit, err)
+				if !ibcOut {
+					return gatewayEvidence{}, err
+				}
+				diagnostics = append(diagnostics, err.Error())
+				continue
 			}
 			if restored.After(recovered) {
 				recovered = restored
@@ -227,27 +250,46 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) with no restoration since, for over %s: %s", unit, gatewayLinkLossAfter, line))
 			}
 		}
+		ev := gatewayEvidence{recoveredAt: recovered}
 		switch {
 		case len(reasons) > 0:
-			return gatewayEvidence{out: true, resetWait: resetWait, said: "gateway: logged out: " + strings.Join(reasons, "; "), recoveredAt: recovered}, nil
+			ev.out, ev.resetWait = true, resetWait
+			ev.ibkrUnreachable = !ibcOut && len(ibc) > 0
+			status := "logged out"
+			if ev.ibkrUnreachable {
+				status = "logged in but IBKR's servers are unreachable"
+			}
+			ev.said = "gateway: " + status + ": " + strings.Join(reasons, "; ")
 		case len(ibc) == 0:
-			return gatewayEvidence{silent: true, said: "gateway: no login evidence: the ti-gateway journal holds no login event in the last 14 days", recoveredAt: recovered}, nil
+			ev.silent = true
+			ev.said = "gateway: no login evidence: the ti-gateway journal holds no login event in the last 14 days"
+		default:
+			ev.said = "gateway: logged in (IBC's newest login event is a completed login)"
 		}
-		return gatewayEvidence{said: "gateway: logged in (IBC's newest login event is a completed login)", recoveredAt: recovered}, nil
+		if len(diagnostics) > 0 {
+			ev.said += "; " + strings.Join(diagnostics, "; ")
+		}
+		return ev, nil
 	}
 }
 
 // lostSince finds when the current uninterrupted loss began: the first
 // connectivity-lost line after the newest restoration or reconciliation (zero
 // when there is none, or nothing is lost), that line, and the newest
-// restoration's time.
-func lostSince(lines []string) (since time.Time, first string, restored time.Time, err error) {
+// restoration's time. Loss lines beyond the clock-skew allowance are returned
+// as diagnostics and cannot start or postpone a loss (docs/manual/server.md,
+// "The Gateway is logged out").
+func lostSince(lines []string, now time.Time) (since time.Time, first string, restored time.Time, ignored []string, err error) {
 	for _, l := range lines {
 		at, err := lineTime(l)
 		if err != nil {
-			return time.Time{}, "", time.Time{}, err
+			return time.Time{}, "", time.Time{}, ignored, err
 		}
 		if strings.Contains(l, "state=connectivity-lost") {
+			if at.After(now.Add(gatewayLinkClockSkew)) {
+				ignored = append(ignored, l)
+				continue
+			}
 			if since.IsZero() {
 				since, first = at, l
 			}
@@ -255,7 +297,7 @@ func lostSince(lines []string) (since time.Time, first string, restored time.Tim
 		}
 		since, first, restored = time.Time{}, "", at
 	}
-	return since, first, restored, nil
+	return since, first, restored, ignored, nil
 }
 
 // gatewayUnitSample is what systemd says of ti-gateway.service: how many times
