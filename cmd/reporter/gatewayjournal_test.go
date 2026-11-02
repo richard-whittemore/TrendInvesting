@@ -13,7 +13,6 @@
 // loss_start              loss,start        no/no/yes*               yes/yes/no
 // loss_start_conn         loss,start,conn   no/no/yes                yes/yes/no
 // loss_start_conn_loss    loss,start,conn,loss yes/yes/no             yes/yes/no
-// loss_start_failed       loss,start,failed no/no/yes*               yes/yes/no
 // loss_conn_loss          loss,conn,loss    yes/yes/no               yes/yes/no
 //
 // start = "ibkr adapter starting", conn = "ibkr link connected" (also the
