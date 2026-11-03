@@ -50,6 +50,7 @@ rehearsal=${TI_REHEARSAL:-0}
 target=${TI_TARGET:-lightsail}
 etc=/etc/trend-investing
 unit_dir=/etc/systemd/system
+gateway_home=/var/lib/ti-gateway
 # Absolute, because the vendor installers run from "/" (cd / && runuser ...).
 dl_cache=${TI_DOWNLOAD_CACHE-/var/cache/trend-investing}
 # The Mac mini's volumes that hold files owned by the service users.
@@ -668,6 +669,36 @@ finally:
 ' "$path"
 }
 
+# Bound the installed Gateway heap (docs/manual/server.md, "Memory").
+# GNU sed preserves the file's owner and mode; the running Gateway is untouched.
+set_gateway_heap() {
+  local options="$gateway_home/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
+  # sed -i.bak renames the original aside before the rewrite takes its place:
+  # a backup left behind means an interrupted rewrite, never an absent Gateway.
+  if test -e "$options.bak"; then
+    die "an interrupted heap rewrite left $options.bak; move it back to $options (keep its owner and mode), then rerun"
+  fi
+  test -f "$options" || return 0
+  test "$(grep -c '^-Xmx' "$options")" = 1 || die "expected one -Xmx line in $options"
+  # Fail closed: another way of sizing the heap could override or contradict
+  # the cap, and an initial heap is accepted only in megabytes or gigabytes.
+  if grep -qE '^-XX:(MaxHeapSize|InitialHeapSize|MinHeapSize|MaxRAM)' "$options"; then
+    die "another heap-sizing option in $options; the cap needs -Xmx alone"
+  fi
+  awk '
+    /^-Xms/ {
+      if ($0 !~ /^-Xms[0-9]+[mMgG]$/) exit 1
+      heap = substr($0, 5, length($0) - 5) + 0
+      if ($0 ~ /[gG]$/) heap *= 1024
+      if (heap > 512) exit 1
+    }
+  ' "$options" || die "initial heap above 512 MB, or not in m or g, in $options"
+  if grep -qx -- '-Xmx512m' "$options"; then return 0; fi
+  sed -i.bak 's/^-Xmx.*$/-Xmx512m/' "$options"
+  rm -f "$options.bak"
+  log "Gateway heap set to 512 MB (-Xmx512m); applies at its next start"
+}
+
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
@@ -685,6 +716,9 @@ step_services() {
   if ! mac_mini; then
     install -m 0644 "$here/systemd/ti-gateway.service" "$unit_dir/"
     if test "$rehearsal" != 1; then systemctl daemon-reload; fi
+  fi
+  if ! mac_mini; then
+    set_gateway_heap
   fi
   log "directories and config"
   # Root-only recovery accounting survives Gateway restarts; never overwrite

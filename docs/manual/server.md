@@ -33,6 +33,20 @@ is that a reporter on the same machine cannot notice the machine itself
 dying: that needs an outside watcher, a Healthchecks check that pages you
 when the reporter's pings stop ("The outside heartbeat", below).
 
+**Memory.** On Lightsail only, `sudo deploy/provision.sh services` caps the
+installed Gateway's heap at 512 MB (`-Xmx512m`). It refuses, changing
+nothing, a file with other than exactly one `-Xmx` line, with another
+heap-sizing option (`-XX:MaxHeapSize`, `-XX:InitialHeapSize`,
+`-XX:MinHeapSize`, `-XX:MaxRAM...`), or with an initial heap (`-Xms`) above
+512 MB or not written in `m` or `g`. The cap applies at the Gateway's next
+start; provisioning never restarts it. It prepares the planned second
+Gateway: the owner decided on 2026-11-03 that Boost and the Traditional IRA
+paper-trade on two Gateways on this server; today one Gateway runs.
+The server deliberately has no swap: `ti-secrets` and `ti-unlock` refuse
+while any swap is on ([ADR 0028](../adr/0028-server-secrets-rest-encrypted-and-are-unlocked-into-memory.md), no plain
+text on the disk). Memory pressure is met by the heap cap and the memory
+sampler, which decides whether an upgrade is needed.
+
 ## Users
 
 | User | Runs | Can see |

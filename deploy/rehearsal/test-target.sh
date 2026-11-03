@@ -43,7 +43,7 @@ fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
 
 # The provisioner's path variables each case sets under $work, so that a
 # redirection to one of them stays inside the test's tree.
-redirected_vars='etc unit_dir dl_cache twsapi_root adapter_venv adapter_root'
+redirected_vars='etc unit_dir dl_cache twsapi_root adapter_venv adapter_root gateway_home'
 # redirect_leaks FILE: prints, as "LINE: TEXT;", each line with a redirection of output
 # in FILE (outside a comment line) to a literal absolute path other than
 # /dev/null or /dev/stderr (bare, double- or single-quoted), to a path
@@ -73,6 +73,8 @@ redirect_leaks() {
 # A copy of deploy/, whose clock scripts record that they ran (and the clock
 # check fails when FAKE_CLOCK_BAD=1).
 cp -R "$here/.." "$work/deploy"
+# shellcheck disable=SC1091
+. "$here/../versions.env"
 cat >"$work/deploy/libexec/time-sync.sh" <<'STUB'
 #!/bin/bash
 echo "time-sync.sh" >>"$TEST_CALLS"
@@ -149,6 +151,22 @@ scenario() {
   # The volumes' roots, kept across cases (a case's files are set up first).
   mkdir -p "$work/vol/state" "$work/vol/opt"
   if test -n "${FAKE_BOOST_JSON:-}"; then printf '%s\n' "$FAKE_BOOST_JSON" >"$work/etc/adapters/boost.json"; fi
+  if test "${FAKE_VMOPTIONS_KEEP:-0}" != 1; then rm -rf "${work:?}/memory"; fi
+  mkdir -p "$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}"
+  if test "${FAKE_VMOPTIONS:-0}" != 0; then
+    local initial=-Xms64m maximum=-Xmx768m
+    case $FAKE_VMOPTIONS in
+      duplicate) maximum=-Xmx512m ;;
+      initial-*) initial=-Xms${FAKE_VMOPTIONS#initial-} ;;
+    esac
+    printf '%s\n' "$initial" "$maximum" '-Dother=keep' >"$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
+    case $FAKE_VMOPTIONS in
+      duplicate) printf '%s\n' '-Xmx2048m' >>"$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions" ;;
+      other-*) printf '%s\n' "${FAKE_VMOPTIONS#other}" >>"$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions" ;;
+    esac
+    cp "$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions" "$work/original-vmoptions"
+    chmod 0640 "$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
+  fi
   local status=0
   (
     cd "$work/cwd"
@@ -317,7 +335,13 @@ scenario() {
     touch() { guarded touch "$@"; }
     tee() { guarded tee "$@"; }
     truncate() { guarded truncate "$@"; }
-    dd() { guarded dd "$@"; }
+    dd() {
+      record dd "$@"
+      local path_opts=" " value_opts=" "
+      inside_work "$@" || refuse dd "$@"
+      local a
+      for a in "$@"; do case $a in of=*) touch "${a#of=}" ;; esac; done
+    }
     # sed changes a file only in place: -i alone, in a cluster (-ni, -Ei,
     # -i.bak) or as --in-place[=SUFFIX] or any unambiguous prefix of it (--i, --in, ...). Then every file it is given must be
     # inside the tree: each operand and each -f/--file script file, but not
@@ -371,8 +395,10 @@ scenario() {
       if test "$scripted" = 0 && test "${#operands[@]}" -gt 0; then operands=("${operands[@]:1}"); fi
       paths+=(${operands[@]+"${operands[@]}"})
       inside_work -- ${paths[@]+"${paths[@]}"} || refuse sed "$@"
+      record sed "$@"
       command sed "$@"
     }
+    gateway_home=$work/memory/gateway
     etc=$work/etc
     unit_dir=$work/units
     dl_cache=$work/cache
@@ -403,6 +429,9 @@ scenario() {
     # STEP may carry the step's arguments (reown NAME UID GID).
     # shellcheck disable=SC2086
     main $step
+    if test "${MEMORY_REPEAT:-0}" = 1; then
+      main "$step"
+    fi
   ) >"$work/out" 2>&1 || status=$?
   if test -z "${TEST_LEAK:-}" && grep -q '^REFUSED' "$work/calls"; then
     fail "provision.sh $step (TI_TARGET=${target:-unset}) ran a file command outside the test's tree: $(grep '^REFUSED' "$work/calls")"
@@ -765,6 +794,38 @@ grep -q '^OnUnitActiveSec=15min' "$work/deploy/mac-mini/systemd/ti-clock-check.t
 scenario "" x86_64 services || fail "Lightsail services failed: $(cat "$work/out")"
 called "runuser -u ti-trader -- python3 -I -c" || fail "adapter locks are not created as ti-trader, in isolated mode"
 if called "ti-clock-check"; then fail "Lightsail installs the Mac mini's clock check"; fi
+
+# Memory safeguards (docs/manual/server.md, "Memory").
+MEMORY_REPEAT=1 FAKE_VMOPTIONS=1 scenario "" x86_64 services || fail "memory services failed: $(cat "$work/out")"
+vmoptions=$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions
+printf '%s\n' '-Xms64m' '-Xmx512m' '-Dother=keep' >"$work/expected-vmoptions"
+cmp -s "$vmoptions" "$work/expected-vmoptions" || fail "Gateway heap or other options differ"
+test "$(grep -c '^sed -i.bak ' "$work/calls")" = 1 || fail "heap file rewritten more than once"
+test "$(grep -c 'Gateway heap.*512' "$work/out")" = 1 || fail "heap change not logged exactly once"
+python3 - "$vmoptions" <<'PYCODE' || fail "heap rewrite changed mode or ownership"
+import os, stat, sys
+s = os.stat(sys.argv[1])
+assert stat.S_IMODE(s.st_mode) == 0o640
+assert (s.st_uid, s.st_gid) == (os.getuid(), os.getgid())
+PYCODE
+if called "systemctl restart ti-gateway"; then fail "heap update restarted Gateway"; fi
+for options_case in duplicate initial-768m initial-768M initial-1g initial-1G initial-805306368 initial-786432k initial-1t \
+  other-XX:MaxHeapSize=2147483648 other-XX:InitialHeapSize=805306368 other-XX:MaxRAM=4g other-XX:MaxRAMPercentage=80; do
+  if FAKE_VMOPTIONS=$options_case scenario "" x86_64 services; then
+    fail "unsafe Gateway options accepted: $options_case"
+  fi
+  said "$vmoptions" || fail "heap refusal did not name the file: $options_case"
+  cmp -s "$vmoptions" "$work/original-vmoptions" || fail "refused heap file changed: $options_case"
+done
+mkdir -p "$(dirname "$vmoptions")"
+rm -f "$vmoptions"
+printf '%s\n' '-Xmx768m' >"$vmoptions.bak"
+if FAKE_VMOPTIONS_KEEP=1 scenario "" x86_64 services; then fail "interrupted heap rewrite accepted"; fi
+said "$vmoptions.bak" || fail "interrupted heap rewrite not named"
+scenario "" x86_64 services || fail "absent Gateway services failed"
+test ! -e "$vmoptions" || fail "absent vmoptions created"
+FAKE_VMOPTIONS=1 scenario mac-mini aarch64 services || fail "Mac memory services failed"
+grep -qx -- '-Xmx768m' "$vmoptions" || fail "Mac heap changed"
 
 test "$failures" -eq 0 || exit 1
 echo "target tests ok"
