@@ -61,7 +61,7 @@
     "birth": "YYYY-MM"
   },
   "execution": {
-    "cash_rule": "settled-cash",
+    "cash_rule": "total-cash",
     "share_quantity": "minimum-lot",
     "cash_buffer_fraction": 0.01,
     "max_fees_per_order": 2.00,
