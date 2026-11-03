@@ -27,7 +27,7 @@ class IRALoginSecretsTests(unittest.TestCase):
                               capture_output=True, text=True)
 
     def test_only_declared_login_names_are_accepted(self):
-        for name in ("ibkr-login.env", *self.names):
+        for name in ("ibkr-login-joint.env", *self.names):
             with self.subTest(name=name):
                 result = self.secrets('valid_name "$1"', ROOT, name)
                 self.assertEqual(result.returncode, 0, f"valid_name refused {name}")
@@ -38,14 +38,14 @@ class IRALoginSecretsTests(unittest.TestCase):
 
     def test_plain_and_encrypted_discovery_include_only_declared_logins(self):
         with tempfile.TemporaryDirectory() as folder:
-            for name in ("ibkr-login.env", *self.names, "ibkr-login-x.env"):
+            for name in ("ibkr-login-joint.env", *self.names, "ibkr-login-x.env"):
                 for suffix in ("", ".gpg"):
                     (Path(folder) / (name + suffix)).touch()
             for function in ("plain_names", "encrypted_names"):
                 with self.subTest(function=function):
                     result = self.secrets(function, folder)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(set(result.stdout.splitlines()), {"ibkr-login.env", *self.names})
+                    self.assertEqual(set(result.stdout.splitlines()), {"ibkr-login-joint.env", *self.names})
 
     def test_provisioning_never_creates_optional_logins(self):
         provision = (ROOT / "deploy/provision.sh").read_text()
@@ -59,7 +59,9 @@ class IRALoginSecretsTests(unittest.TestCase):
                 for name in self.names:
                     self.assertNotIn(name, unit.read_text(), str(unit))
         gateway = (ROOT / "deploy/systemd/ti-gateway.service").read_text()
-        self.assertIn("LoadCredential=ibkr-login:/run/trend-investing/secrets/ibkr-login.env", gateway)
+        self.assertIn("ExecStartPre=+/usr/local/libexec/trend-investing/stage-gateway-login.sh", gateway)
+        provision = (ROOT / "deploy/provision.sh").read_text()
+        self.assertIn('install -m 0644 /dev/stdin "$etc/gateway-login" <<\'CONF\'\njoint\nCONF', provision)
 
 
 class IRAFirstEditTests(unittest.TestCase):
@@ -165,7 +167,7 @@ cat "$stage/plain"''', name, phrases=(phrase or self.phrase,))
                 template = (self.folder / "editor-before").read_text()
                 lines = template.splitlines()
                 self.assertEqual(len([line for line in lines if line.startswith("#")]), 1)
-                self.assertIn("no service reads it yet", template.lower())
+                self.assertIn("ti-gateway reads this file when selected", template.lower())
                 self.assertEqual(dict(line.split("=", 1) for line in lines if not line.startswith("#")),
                                  {"TWS_USERID": "", "TWS_PASSWORD": "",
                                   "TWS_TRADING_MODE": "paper", "TWS_READONLY_API": "yes"})
@@ -220,6 +222,7 @@ cat "$stage/plain"''', name, phrases=(phrase or self.phrase,))
 
     def test_absent_optional_files_are_clean_for_status_unlock_lock_and_rotation(self):
         self.seed("ibkr-login.env")
+        self.ok(self.command("cmd_migrate"))
         result = self.ok(self.command('cmd_status'))
         self.assertNotIn("missing", result.stdout)
         for name in self.names:
@@ -232,6 +235,7 @@ cat "$stage/plain"''', name, phrases=(phrase or self.phrase,))
 
     def test_verification_uses_secrets_then_login_and_refuses_without_either(self):
         self.seed("ibkr-login.env")
+        self.ok(self.command("cmd_migrate"))
         secrets = self.folder / "secrets.env.gpg"
         secrets.write_bytes(b"damaged encrypted secret")
         before = self.snapshot()
@@ -241,7 +245,7 @@ cat "$stage/plain"''', name, phrases=(phrase or self.phrase,))
         self.assertEqual(self.snapshot(), before)
         secrets.unlink()
         self.ok(self.command('cmd_edit "$1"', self.names[0], phrases=(self.phrase,)))
-        (self.folder / "ibkr-login.env.gpg").unlink()
+        (self.folder / "ibkr-login-joint.env.gpg").unlink()
         before = self.snapshot()
         result = self.command('cmd_edit "$1"', self.names[1], phrases=(self.phrase,))
         self.assertNotEqual(result.returncode, 0)
@@ -251,7 +255,7 @@ cat "$stage/plain"''', name, phrases=(phrase or self.phrase,))
     def test_plain_optional_and_missing_other_names_remain_refused(self):
         for name in self.names:
             (self.folder / name).write_text("owner's plaintext\n")
-        for name in (*self.names, "ibkr-login.env", "accounts/missing.env", "ibkr-login-boost.env"):
+        for name in (*self.names, "ibkr-login-joint.env", "accounts/missing.env", "ibkr-login-boost.env"):
             with self.subTest(name=name):
                 before = self.snapshot()
                 result = self.command('cmd_edit "$1"', name, phrases=(self.phrase,))

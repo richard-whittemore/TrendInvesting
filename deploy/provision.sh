@@ -543,6 +543,16 @@ write_stub() {
 # that fails stops provisioning with the plain text kept.
 secrets_migrate() { "$here/secrets.sh" migrate; }
 
+# Preserve the owner's non-secret selection on every rerun
+# (docs/runbooks/gateway-login.md); gateway.env is separately rewritten.
+init_gateway_login() {
+  if ! test -e "$etc/gateway-login"; then
+    install -m 0644 /dev/stdin "$etc/gateway-login" <<'CONF'
+joint
+CONF
+  fi
+}
+
 # elf_machine FILE: FILE's ELF e_machine (62 x86-64, 183 AArch64), the two
 # little-endian bytes at offset 18; empty if FILE is not an ELF file.
 elf_machine() {
@@ -661,12 +671,30 @@ finally:
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
+  # Complete migration before installing Gateway files (ADR 0028;
+  # docs/runbooks/gateway-login.md). A refusal preserves the installed service.
+  if ! secrets_migrate; then
+    die "migration refused; stopping services before installing Gateway renderer, staging script, unit or selector"
+  fi
+  # Keep the Gateway handoff together, then load it immediately. Provisioning
+  # never restarts Gateway (docs/runbooks/gateway-login.md).
+  install -d -m 0755 "$etc" /usr/local/libexec/trend-investing
+  init_gateway_login
+  install -m 0755 "$here/gateway-login.sh" /usr/local/sbin/ti-gateway-login
+  install -m 0755 "$here/libexec/stage-gateway-login.sh" "$here/libexec/render-ibc-config.sh" /usr/local/libexec/trend-investing/
+  if ! mac_mini; then
+    install -m 0644 "$here/systemd/ti-gateway.service" "$unit_dir/"
+    if test "$rehearsal" != 1; then systemctl daemon-reload; fi
+  fi
   log "directories and config"
   # Root-only recovery accounting survives Gateway restarts; never overwrite
   # its state on upgrades (docs/manual/server.md, Gateway healer).
   install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
-  install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/
+  for b in "$here"/libexec/*.sh; do
+    case $(basename "$b") in stage-gateway-login.sh|render-ibc-config.sh) continue ;; esac
+    install -m 0755 "$b" /usr/local/libexec/trend-investing/
+  done
   install -m 0755 "$here"/ira-replay.sh "$here"/ira-replay.py /usr/local/libexec/trend-investing/
   install -m 0755 "$here/memory.py" /usr/local/libexec/trend-investing/
   install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/memory
@@ -708,7 +736,7 @@ CONF
       ln -sfn "/opt/trend-investing/bin/$b" "/usr/local/bin/$b"
     fi
   done
-  write_stub "$etc/ibkr-login.env" "$here/etc/ibkr-login.env.example"
+  write_stub "$etc/ibkr-login-joint.env" "$here/etc/ibkr-login-joint.env.example"
   write_stub "$etc/secrets.env" "$here/etc/secrets.env.example"
   # Each adapter's account number in a file of its own, handed only to that
   # adapter (ADR 0026 point 8: one engine per account).
@@ -782,7 +810,7 @@ CONF
   # link to /dev/null in its place, which a real file there would block.
   local unit instance
   for unit in "$here"/systemd/*.service "$here"/systemd/*.timer; do
-    if mac_mini && test "$(basename "$unit")" = ti-gateway.service; then continue; fi
+    if test "$(basename "$unit")" = ti-gateway.service; then continue; fi
     install -m 0644 "$unit" "$unit_dir/"
   done
   # All three Flex readers share one paced token (docs/live-trading/lessons-2026-10.md L3).
@@ -841,6 +869,9 @@ EOF
       systemctl mask ti-gateway.service
     else
       systemctl enable ti-gateway.service
+      if systemctl is-failed --quiet ti-gateway.service; then
+        log "ti-gateway is failed; owner must restart it with sudo systemctl restart ti-gateway after resolving its journal error"
+      fi
     fi
     # Both IRAs' data jobs too: until each engine's run.env exists
     # each firing is a quiet wait (ti-data@.service; docs/live-trading/

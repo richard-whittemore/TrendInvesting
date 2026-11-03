@@ -167,27 +167,31 @@ func TestEveryUnitThatLoadsASecretRefusesToStartWhileTheSecretsAreLocked(t *test
 		for _, a := range directive(t, path, "[Unit]", "AssertPathExists") {
 			asserted[a] = true
 		}
+		if filepath.Base(path) == "ti-gateway.service" && !asserted[unlockedSecrets] {
+			t.Error("the Gateway must assert secrets are unlocked before staging its selected login")
+		}
 		for _, load := range directive(t, path, "[Service]", "LoadCredential") {
 			loaders++
 			_, source, _ := strings.Cut(load, ":")
+			assertion := source
 			if !strings.HasPrefix(source, unlockedDir) {
 				t.Errorf("%s: LoadCredential=%s loads from outside %s, where ti-unlock decrypts the secrets", path, load, unlockedDir)
 			}
-			if !asserted[source] {
-				t.Errorf("%s: LoadCredential=%s but no AssertPathExists=%s: the unit would start, or fail at credential setup (Failed to set up credentials), which does not say the secrets are locked", path, load, source)
+			if !asserted[assertion] {
+				t.Errorf("%s: LoadCredential=%s but no AssertPathExists=%s: the unit would start, or fail at credential setup (Failed to set up credentials), which does not say the secrets are locked", path, load, assertion)
 			}
 		}
 		for _, d := range unitDirectives(t, path) {
-			if strings.Contains(d.value, "/etc/trend-investing/secrets.env") || strings.Contains(d.value, "/etc/trend-investing/ibkr-login.env") ||
+			if strings.Contains(d.value, "/etc/trend-investing/secrets.env") || strings.Contains(d.value, "/etc/trend-investing/ibkr-login-") ||
 				strings.Contains(d.value, "/etc/trend-investing/accounts/") {
 				t.Errorf("%s: %s=%s names a secret file on disk; only its encrypted copy rests there", path, d.key, d.value)
 			}
 		}
 	}
-	// The gateway, the engines, the Boost adapter, the IRAs' adapter
+	// The engines, the Boost adapter, the IRAs' adapter
 	// template, the data job and its IRA instances, the reporter, the
 	// failed-unit page and the Flex reader (secrets and account).
-	if loaders != 10 {
-		t.Errorf("%d LoadCredential= lines across the units, want 10", loaders)
+	if loaders != 9 {
+		t.Errorf("%d LoadCredential= lines across the units, want 9", loaders)
 	}
 }
