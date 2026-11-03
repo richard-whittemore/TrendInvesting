@@ -1,9 +1,9 @@
 # Trend Investing
 
-A stock-first research and trading platform for one owner's three IBKR
+A stock-first research and trading platform for one owner's IBKR
 accounts. It backtests declared strategies, and it runs the two that
 survived the research as automated engines on one small server (Boost
-today; the IRAs' Momentum once their Gateways are in place), where every
+today; the Traditional IRA's Momentum once its Gateway is in place), where every
 decision is written down before anything is sent. It is not a claim that any
 strategy will be profitable.
 
@@ -12,7 +12,7 @@ strategy will be profitable.
 | Account | Rule | Where it stands |
 | --- | --- | --- |
 | Joint taxable account, on margin | **Boost**: SPY held at 98%, raised to 147% for a few days after a sharp drop in an uptrend | In dry run on the server since late October 2026, on the joint account's own paper account since 2026-11-02; the paper gate is three cleanly decided sessions in a row (owner decision of 2026-10-24) |
-| Traditional IRA and Roth IRA | **Momentum**: each month, 25 large US stocks that rose most over the past year, with a bond sleeve that grows with the owner's age, in fractional shares (plan decision D7-F); buys keep 1% of the account in cash so No Borrow Margin is never crossed | Built and rehearsed (restart drills and a replayed month), not yet running on the server: each IRA's paper account has its own IBKR login and needs its own Gateway. No IRA order is sent before its own paper gate |
+| Traditional IRA | **Momentum**: each month, 25 large US stocks that rose most over the past year, with a bond sleeve that grows with the owner's age, in fractional shares (plan decision D7-F); buys spend the month's sale proceeds at once, settled or not (plan decision D5), and keep 1% of the account in cash so No Borrow Margin is never crossed | Built and rehearsed (restart drills and a replayed month), not yet running on the server: the IRA's paper account has its own IBKR login and needs its own Gateway. No IRA order is sent before its own paper gate. The Roth IRA is on hold (owner decision of 2026-11-03): its configuration is kept, and nothing runs for it |
 
 The research lines that produced them are still here and still run as
 backtests: a source-verified **Turtle** control adapted to stocks, a
