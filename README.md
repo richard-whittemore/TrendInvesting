@@ -10,8 +10,8 @@ strategy will be profitable.
 
 | Account | Rule | Where it stands |
 | --- | --- | --- |
-| Joint taxable account, on margin | **Boost**: SPY held at 98%, raised to 147% for a few days after a sharp drop in an uptrend | In dry run on the server since late October 2026; the paper gate is three cleanly decided sessions in a row (owner decision of 2026-10-24) |
-| Traditional IRA and Roth IRA | **Momentum**: each month, 25 large US stocks that rose most over the past year, with a bond sleeve that grows with the owner's age, in fractional shares (plan decision D7-F) | The Traditional IRA engine decides month-ends in dry run; no IRA order is sent before its own paper gate |
+| Joint taxable account, on margin | **Boost**: SPY held at 98%, raised to 147% for a few days after a sharp drop in an uptrend | In dry run on the server since late October 2026, on the joint account's own paper account since 2026-11-02; the paper gate is three cleanly decided sessions in a row (owner decision of 2026-10-24) |
+| Traditional IRA and Roth IRA | **Momentum**: each month, 25 large US stocks that rose most over the past year, with a bond sleeve that grows with the owner's age, in fractional shares (plan decision D7-F); buys keep 1% of the account in cash so No Borrow Margin is never crossed | Built and rehearsed (restart drills and a replayed month), not yet running on the server: each IRA's paper account has its own IBKR login and needs its own Gateway. No IRA order is sent before its own paper gate |
 
 The research lines that produced them are still here and still run as
 backtests: a source-verified **Turtle** control adapted to stocks, a
@@ -41,6 +41,15 @@ each piece does, which decision backs it, and what can go wrong. Its table
   clearances. All of it runs on one Lightsail server under systemd
   (`deploy/`), with a rehearsal container that replays a first day and a
   month before any change ships.
+- **IB Gateway** logs in with one IBKR login at a time. Each login has its
+  own encrypted file on the server, and a non-secret selector names the one
+  in use; the Gateway sees only that login. It waits out IBKR's nightly
+  reset and scheduled maintenance, and a **healer** restarts it once when
+  IBKR's connection never returns after a scheduled window.
+- **Alerts** go to a private issue tracker and a phone. Capital-safety
+  alerts reach the phone at once; operational ones (a unit down, the
+  Gateway logged out) reach it only when a session is near, and are handled
+  without the owner otherwise.
 
 `docs/architecture.md` draws the boundaries, `docs/adr/` records every
 decision, `docs/live-trading/plan.md` is the owner's plan and its gates, and
