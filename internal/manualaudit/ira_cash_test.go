@@ -11,8 +11,8 @@ import (
 
 // TestMomentumManualCashReadingMatchesIRAConfigs keeps the owner's buy-budget
 // explanation tied to the shipped D5 choice (ADR 0026, point 2, "Budget").
-// The shipped IRA configs select settled cash (execution.cash_rule); plan
-// decision D5's total cash remains open pending IBKR's confirmation.
+// Both IRA configs select total cash under owner decision 2026-11-02
+// (plan decision D5); paper trading must show IBKR acceptance.
 func TestMomentumManualCashReadingMatchesIRAConfigs(t *testing.T) {
 	root := repoRoot(t)
 	raw, err := os.ReadFile(filepath.Join(root, "docs", "manual", "momentum.md"))
@@ -54,18 +54,22 @@ func TestMomentumManualCashReadingMatchesIRAConfigs(t *testing.T) {
 	// Compare words, not line breaks, so rewrapping the step does not fail it.
 	flat := strings.Join(strings.Fields(budget), " ")
 	for _, want := range []string{
-		"account's settled cash",
+		"`execution.cash_rule` is `total-cash`",
+		"owner decision 2026-11-02, plan decision D5",
+		"settled and unsettled cash plus the rebalance's realised sale proceeds net of commission",
+		"after the sells finish",
+		"stays invested as in the backtest",
+		"1% cash buffer still applies",
 		"No Borrow Margin",
-		"Unsettled sale proceeds are therefore not spent",
-		"decision D5 chose `total-cash`",
-		"no later buy phase spends them",
+		"IBKR's acceptance of a buy funded by unsettled proceeds is shown by paper trading",
+		"a refusal is an order refused",
+		"two in a row stop the month's buys",
+		"never a borrowing",
+		"`settled-cash` is the alternative",
 		"ADR 0026, point 2",
 	} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("buy-budget step lacks %q", want)
 		}
-	}
-	if strings.Contains(budget, "account's total cash") {
-		t.Error("buy-budget step still promises total cash for the shipped IRA configs")
 	}
 }
