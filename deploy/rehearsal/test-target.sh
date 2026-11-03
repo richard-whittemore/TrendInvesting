@@ -812,7 +812,7 @@ scenario "" x86_64 services || fail "Lightsail services failed: $(cat "$work/out
 called "runuser -u ti-trader -- python3 -I -c" || fail "adapter locks are not created as ti-trader, in isolated mode"
 if called "ti-clock-check"; then fail "Lightsail installs the Mac mini's clock check"; fi
 
-# Memory safeguards: docs/decisions/2026-11-03-server-memory.md.
+# Memory safeguards (docs/manual/server.md, "Memory").
 MEMORY_REPEAT=1 FAKE_VMOPTIONS=1 scenario "" x86_64 services || fail "memory services failed: $(cat "$work/out")"
 test "$(grep -c '^fallocate ' "$work/calls")" = 1 || fail "swap was not allocated exactly once"
 called "fallocate -l 2G $work/memory/swapfile" || fail "swap size is not 2 GiB"
