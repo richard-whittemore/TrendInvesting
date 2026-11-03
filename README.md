@@ -2,7 +2,8 @@
 
 A stock-first research and trading platform for one owner's three IBKR
 accounts. It backtests declared strategies, and it runs the two that
-survived the research as automated engines on one small server, where every
+survived the research as automated engines on one small server (Boost
+today; the IRAs' Momentum once their Gateways are in place), where every
 decision is written down before anything is sent. It is not a claim that any
 strategy will be profitable.
 
