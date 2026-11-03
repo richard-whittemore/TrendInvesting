@@ -160,9 +160,10 @@ scenario() {
       initial-*) initial=-Xms${FAKE_VMOPTIONS#initial-} ;;
     esac
     printf '%s\n' "$initial" "$maximum" '-Dother=keep' >"$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
-    if test "$FAKE_VMOPTIONS" = duplicate; then
-      printf '%s\n' '-Xmx2048m' >>"$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
-    fi
+    case $FAKE_VMOPTIONS in
+      duplicate) printf '%s\n' '-Xmx2048m' >>"$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions" ;;
+      other-*) printf '%s\n' "${FAKE_VMOPTIONS#other}" >>"$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions" ;;
+    esac
     cp "$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions" "$work/original-vmoptions"
     chmod 0640 "$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
   fi
@@ -808,7 +809,8 @@ assert stat.S_IMODE(s.st_mode) == 0o640
 assert (s.st_uid, s.st_gid) == (os.getuid(), os.getgid())
 PYCODE
 if called "systemctl restart ti-gateway"; then fail "heap update restarted Gateway"; fi
-for options_case in duplicate initial-768m initial-768M initial-1g initial-1G; do
+for options_case in duplicate initial-768m initial-768M initial-1g initial-1G initial-805306368 initial-786432k initial-1t \
+  other-XX:MaxHeapSize=2147483648 other-XX:InitialHeapSize=805306368 other-XX:MaxRAM=4g other-XX:MaxRAMPercentage=80; do
   if FAKE_VMOPTIONS=$options_case scenario "" x86_64 services; then
     fail "unsafe Gateway options accepted: $options_case"
   fi

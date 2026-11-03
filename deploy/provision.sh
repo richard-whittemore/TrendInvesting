@@ -675,13 +675,19 @@ set_gateway_heap() {
   local options="$gateway_home/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
   test -f "$options" || return 0
   test "$(grep -c '^-Xmx' "$options")" = 1 || die "expected one -Xmx line in $options"
+  # Fail closed: another way of sizing the heap could override or contradict
+  # the cap, and an initial heap is accepted only in megabytes or gigabytes.
+  if grep -qE '^-XX:(MaxHeapSize|InitialHeapSize|MinHeapSize|MaxRAM)' "$options"; then
+    die "another heap-sizing option in $options; the cap needs -Xmx alone"
+  fi
   awk '
-    /^-Xms[0-9]+[mMgG]$/ {
+    /^-Xms/ {
+      if ($0 !~ /^-Xms[0-9]+[mMgG]$/) exit 1
       heap = substr($0, 5, length($0) - 5) + 0
       if ($0 ~ /[gG]$/) heap *= 1024
       if (heap > 512) exit 1
     }
-  ' "$options" || die "initial heap exceeds 512 MB in $options"
+  ' "$options" || die "initial heap above 512 MB, or not in m or g, in $options"
   if grep -qx -- '-Xmx512m' "$options"; then return 0; fi
   sed -i.bak 's/^-Xmx.*$/-Xmx512m/' "$options"
   rm -f "$options.bak"
