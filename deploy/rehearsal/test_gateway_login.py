@@ -225,6 +225,10 @@ class GatewayLoginTests(unittest.TestCase):
         # inside-secrets.sh covers GnuPG and tmpfs (ADR 0028). The mapfile shim
         # lets these function tests run on macOS's Bash 3 as well as Linux.
         source = (DEPLOY / "secrets.sh").read_text().split("\nneed_root\n")[0]
+        # No lock is taken here, so lockfd is empty; Linux Bash then rejects
+        # the editor's {lockfd}>&- redirect. Close a fixed descriptor instead,
+        # as test_roth.py does; the real script always holds the lock.
+        source = source.replace("{lockfd}>&-", "9>&-")
         harness = r'''
 etc=$1 run=$2 journal=$1/.passphrase-change fixture_phrase=$3
 mapfile() {
