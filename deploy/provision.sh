@@ -673,6 +673,11 @@ finally:
 # GNU sed preserves the file's owner and mode; the running Gateway is untouched.
 set_gateway_heap() {
   local options="$gateway_home/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
+  # sed -i.bak renames the original aside before the rewrite takes its place:
+  # a backup left behind means an interrupted rewrite, never an absent Gateway.
+  if test -e "$options.bak"; then
+    die "an interrupted heap rewrite left $options.bak; move it back to $options (keep its owner and mode), then rerun"
+  fi
   test -f "$options" || return 0
   test "$(grep -c '^-Xmx' "$options")" = 1 || die "expected one -Xmx line in $options"
   # Fail closed: another way of sizing the heap could override or contradict

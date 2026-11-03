@@ -151,7 +151,7 @@ scenario() {
   # The volumes' roots, kept across cases (a case's files are set up first).
   mkdir -p "$work/vol/state" "$work/vol/opt"
   if test -n "${FAKE_BOOST_JSON:-}"; then printf '%s\n' "$FAKE_BOOST_JSON" >"$work/etc/adapters/boost.json"; fi
-  rm -rf "${work:?}/memory"
+  if test "${FAKE_VMOPTIONS_KEEP:-0}" != 1; then rm -rf "${work:?}/memory"; fi
   mkdir -p "$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}"
   if test "${FAKE_VMOPTIONS:-0}" != 0; then
     local initial=-Xms64m maximum=-Xmx768m
@@ -817,6 +817,11 @@ for options_case in duplicate initial-768m initial-768M initial-1g initial-1G in
   said "$vmoptions" || fail "heap refusal did not name the file: $options_case"
   cmp -s "$vmoptions" "$work/original-vmoptions" || fail "refused heap file changed: $options_case"
 done
+mkdir -p "$(dirname "$vmoptions")"
+rm -f "$vmoptions"
+printf '%s\n' '-Xmx768m' >"$vmoptions.bak"
+if FAKE_VMOPTIONS_KEEP=1 scenario "" x86_64 services; then fail "interrupted heap rewrite accepted"; fi
+said "$vmoptions.bak" || fail "interrupted heap rewrite not named"
 scenario "" x86_64 services || fail "absent Gateway services failed"
 test ! -e "$vmoptions" || fail "absent vmoptions created"
 FAKE_VMOPTIONS=1 scenario mac-mini aarch64 services || fail "Mac memory services failed"
