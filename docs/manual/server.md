@@ -33,6 +33,16 @@ is that a reporter on the same machine cannot notice the machine itself
 dying: that needs an outside watcher, a Healthchecks check that pages you
 when the reporter's pings stop ("The outside heartbeat", below).
 
+**Memory.** Before two Gateways run on the 2 GB server,
+`sudo deploy/provision.sh services` provides a 2 GiB `/swapfile`
+(keeping any existing swap), sets `vm.swappiness=10` through
+`/etc/sysctl.d/90-trend-investing-swap.conf`, and caps the installed
+Gateway heap at 512 MB (`-Xmx512m`). The heap applies at the Gateway's
+next start; provisioning does not restart it. The memory sampler decides
+whether an upgrade is needed. These safeguards apply only to Lightsail
+(owner decision of 2026-11-03: Boost and the Traditional IRA paper-trade
+on two Gateways on this server; existing swap is never resized or removed).
+
 ## Users
 
 | User | Runs | Can see |

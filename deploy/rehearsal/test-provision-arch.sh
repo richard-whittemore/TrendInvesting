@@ -80,6 +80,9 @@ scenario() {
     ensure_operator_user() { record ensure_operator_user "$@"; }
     # The clock check reads the machine's time daemon, which the stand-ins do not model.
     if test "${FAKE_NO_CLOCK:-0}" = 1; then step_clock() { record step_clock; }; fi
+    # Memory behavior is exercised with guarded files in test-target.sh.
+    ensure_swapfile() { record ensure_swapfile; }
+    set_gateway_heap() { record set_gateway_heap; }
     etc=$work/etc
     unit_dir=$work/units
     if test "${FAKE_LIVE:-0}" = 1; then rehearsal=0; fi

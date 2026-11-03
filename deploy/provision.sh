@@ -50,6 +50,10 @@ rehearsal=${TI_REHEARSAL:-0}
 target=${TI_TARGET:-lightsail}
 etc=/etc/trend-investing
 unit_dir=/etc/systemd/system
+swapfile=/swapfile
+fstab=/etc/fstab
+sysctl_dir=/etc/sysctl.d
+gateway_home=/var/lib/ti-gateway
 # Absolute, because the vendor installers run from "/" (cd / && runuser ...).
 dl_cache=${TI_DOWNLOAD_CACHE-/var/cache/trend-investing}
 # The Mac mini's volumes that hold files owned by the service users.
@@ -668,6 +672,44 @@ finally:
 ' "$path"
 }
 
+# Memory safety before a second Gateway (docs/manual/server.md, "Memory").
+# Existing swap is never resized or reformatted; keep the sysctl file once made.
+ensure_swapfile() {
+  local active
+  active=$(swapon --show --noheadings --raw --output NAME) || die "could not inspect active swap"
+  if test -z "$active" && ! test -e "$swapfile"; then
+    log "creating 2 GiB swapfile"
+    fallocate -l 2G "$swapfile" || dd if=/dev/zero of="$swapfile" bs=1M count=2048
+    chmod 600 "$swapfile"
+    mkswap "$swapfile"
+  fi
+  if test -e "$swapfile"; then
+    if ! printf '%s\n' "$active" | grep -Fxq -- "$swapfile"; then
+      swapon "$swapfile"
+    fi
+    if ! grep -Fxq '/swapfile none swap sw 0 0' "$fstab"; then
+      printf '%s\n' '/swapfile none swap sw 0 0' >>"$fstab"
+    fi
+  fi
+  mkdir -p "$sysctl_dir"
+  if ! test -e "$sysctl_dir/90-trend-investing-swap.conf"; then
+    printf '%s\n' 'vm.swappiness=10' >"$sysctl_dir/90-trend-investing-swap.conf"
+  fi
+  sysctl -p "$sysctl_dir/90-trend-investing-swap.conf"
+}
+
+# Bound the installed Gateway heap (docs/manual/server.md, "Memory").
+# GNU sed preserves the file's owner and mode; the running Gateway is untouched.
+set_gateway_heap() {
+  local options="$gateway_home/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
+  test -f "$options" || return 0
+  if grep -qx -- '-Xmx512m' "$options"; then return 0; fi
+  test "$(grep -c '^-Xmx' "$options")" = 1 || die "expected one -Xmx line in $options"
+  sed -i.bak 's/^-Xmx.*$/-Xmx512m/' "$options"
+  rm -f "$options.bak"
+  log "Gateway heap set to 512 MB (-Xmx512m); applies at its next start"
+}
+
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
@@ -685,6 +727,10 @@ step_services() {
   if ! mac_mini; then
     install -m 0644 "$here/systemd/ti-gateway.service" "$unit_dir/"
     if test "$rehearsal" != 1; then systemctl daemon-reload; fi
+  fi
+  if ! mac_mini; then
+    ensure_swapfile
+    set_gateway_heap
   fi
   log "directories and config"
   # Root-only recovery accounting survives Gateway restarts; never overwrite

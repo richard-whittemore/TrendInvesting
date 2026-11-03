@@ -43,7 +43,7 @@ fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
 
 # The provisioner's path variables each case sets under $work, so that a
 # redirection to one of them stays inside the test's tree.
-redirected_vars='etc unit_dir dl_cache twsapi_root adapter_venv adapter_root'
+redirected_vars='etc unit_dir dl_cache twsapi_root adapter_venv adapter_root swapfile fstab sysctl_dir gateway_home'
 # redirect_leaks FILE: prints, as "LINE: TEXT;", each line with a redirection of output
 # in FILE (outside a comment line) to a literal absolute path other than
 # /dev/null or /dev/stderr (bare, double- or single-quoted), to a path
@@ -73,6 +73,8 @@ redirect_leaks() {
 # A copy of deploy/, whose clock scripts record that they ran (and the clock
 # check fails when FAKE_CLOCK_BAD=1).
 cp -R "$here/.." "$work/deploy"
+# shellcheck disable=SC1091
+. "$here/../versions.env"
 cat >"$work/deploy/libexec/time-sync.sh" <<'STUB'
 #!/bin/bash
 echo "time-sync.sh" >>"$TEST_CALLS"
@@ -149,6 +151,21 @@ scenario() {
   # The volumes' roots, kept across cases (a case's files are set up first).
   mkdir -p "$work/vol/state" "$work/vol/opt"
   if test -n "${FAKE_BOOST_JSON:-}"; then printf '%s\n' "$FAKE_BOOST_JSON" >"$work/etc/adapters/boost.json"; fi
+  rm -rf "${work:?}/memory"
+  mkdir -p "$work/memory/sysctl" "$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}"
+  : >"$work/memory/fstab"
+  : >"$work/memory/active"
+  case ${FAKE_SWAP:-} in
+    existing | active-file) echo preserved >"$work/memory/swapfile" ;;
+  esac
+  case ${FAKE_SWAP:-} in
+    active) echo /other-swap >"$work/memory/active" ;;
+    active-file) echo "$work/memory/swapfile" >"$work/memory/active" ;;
+  esac
+  if test "${FAKE_VMOPTIONS:-0}" = 1; then
+    printf '%s\n' '-Xms64m' '-Xmx768m' '-Dother=keep' >"$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
+    chmod 0640 "$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions"
+  fi
   local status=0
   (
     cd "$work/cwd"
@@ -225,6 +242,20 @@ scenario() {
     ufw() { record ufw "$@"; }
     tailscale() { record tailscale "$@"; return 1; }
     ip() { record ip "$@"; return 1; }
+    swapon() {
+      if test "${1:-}" = --show; then cat "$work/memory/active"; return; fi
+      record swapon "$@"
+      printf '%s\n' "$1" >>"$work/memory/active"
+    }
+    mkswap() { record mkswap "$@"; }
+    sysctl() { record sysctl "$@"; }
+    fallocate() {
+      record fallocate "$@"
+      local path_opts=" " value_opts=l
+      inside_work "$@" || refuse fallocate "$@"
+      test "${FAKE_FALLOCATE_FAIL:-0}" != 1 || return 1
+      touch "${@: -1}"
+    }
     mount() { record mount "$@"; return 1; }
     umount() { record umount "$@"; return 1; }
     curl() { record curl "$@"; return 1; }
@@ -317,7 +348,13 @@ scenario() {
     touch() { guarded touch "$@"; }
     tee() { guarded tee "$@"; }
     truncate() { guarded truncate "$@"; }
-    dd() { guarded dd "$@"; }
+    dd() {
+      record dd "$@"
+      local path_opts=" " value_opts=" "
+      inside_work "$@" || refuse dd "$@"
+      local a
+      for a in "$@"; do case $a in of=*) touch "${a#of=}" ;; esac; done
+    }
     # sed changes a file only in place: -i alone, in a cluster (-ni, -Ei,
     # -i.bak) or as --in-place[=SUFFIX] or any unambiguous prefix of it (--i, --in, ...). Then every file it is given must be
     # inside the tree: each operand and each -f/--file script file, but not
@@ -371,8 +408,13 @@ scenario() {
       if test "$scripted" = 0 && test "${#operands[@]}" -gt 0; then operands=("${operands[@]:1}"); fi
       paths+=(${operands[@]+"${operands[@]}"})
       inside_work -- ${paths[@]+"${paths[@]}"} || refuse sed "$@"
+      record sed "$@"
       command sed "$@"
     }
+    swapfile=$work/memory/swapfile
+    fstab=$work/memory/fstab
+    sysctl_dir=$work/memory/sysctl
+    gateway_home=$work/memory/gateway
     etc=$work/etc
     unit_dir=$work/units
     dl_cache=$work/cache
@@ -403,6 +445,10 @@ scenario() {
     # STEP may carry the step's arguments (reown NAME UID GID).
     # shellcheck disable=SC2086
     main $step
+    if test "${MEMORY_REPEAT:-0}" = 1; then
+      printf '%s\n' '# preserve existing config' >>"$sysctl_dir/90-trend-investing-swap.conf"
+      main "$step"
+    fi
   ) >"$work/out" 2>&1 || status=$?
   if test -z "${TEST_LEAK:-}" && grep -q '^REFUSED' "$work/calls"; then
     fail "provision.sh $step (TI_TARGET=${target:-unset}) ran a file command outside the test's tree: $(grep '^REFUSED' "$work/calls")"
@@ -765,6 +811,49 @@ grep -q '^OnUnitActiveSec=15min' "$work/deploy/mac-mini/systemd/ti-clock-check.t
 scenario "" x86_64 services || fail "Lightsail services failed: $(cat "$work/out")"
 called "runuser -u ti-trader -- python3 -I -c" || fail "adapter locks are not created as ti-trader, in isolated mode"
 if called "ti-clock-check"; then fail "Lightsail installs the Mac mini's clock check"; fi
+
+# Memory safeguards: docs/decisions/2026-11-03-server-memory.md.
+MEMORY_REPEAT=1 FAKE_VMOPTIONS=1 scenario "" x86_64 services || fail "memory services failed: $(cat "$work/out")"
+test "$(grep -c '^fallocate ' "$work/calls")" = 1 || fail "swap was not allocated exactly once"
+called "fallocate -l 2G $work/memory/swapfile" || fail "swap size is not 2 GiB"
+called "chmod 600 $work/memory/swapfile" || fail "swap permissions were not restricted"
+test "$(grep -c '^mkswap ' "$work/calls")" = 1 || fail "swap was not formatted exactly once"
+test "$(grep -c '^swapon ' "$work/calls")" = 1 || fail "swap was not enabled exactly once"
+test "$(grep -cFx '/swapfile none swap sw 0 0' "$work/memory/fstab")" = 1 || fail "fstab entry missing or duplicated"
+grep -qx 'vm.swappiness=10' "$work/memory/sysctl/90-trend-investing-swap.conf" || fail "swappiness config missing"
+called "sysctl -p $work/memory/sysctl/90-trend-investing-swap.conf" || fail "swappiness not applied"
+grep -qx '# preserve existing config' "$work/memory/sysctl/90-trend-investing-swap.conf" || fail "existing sysctl config overwritten"
+vmoptions=$work/memory/gateway/Jts/ibgateway/${GATEWAY_MAJOR}/ibgateway.vmoptions
+printf '%s\n' '-Xms64m' '-Xmx512m' '-Dother=keep' >"$work/expected-vmoptions"
+cmp -s "$vmoptions" "$work/expected-vmoptions" || fail "Gateway heap or other options differ"
+test "$(grep -c '^sed -i.bak ' "$work/calls")" = 1 || fail "heap file rewritten more than once"
+test "$(grep -c 'Gateway heap.*512' "$work/out")" = 1 || fail "heap change not logged exactly once"
+python3 - "$vmoptions" <<'PYCODE' || fail "heap rewrite changed mode or ownership"
+import os, stat, sys
+s = os.stat(sys.argv[1])
+assert stat.S_IMODE(s.st_mode) == 0o640
+assert (s.st_uid, s.st_gid) == (os.getuid(), os.getgid())
+PYCODE
+if called "systemctl restart ti-gateway"; then fail "heap update restarted Gateway"; fi
+FAKE_FALLOCATE_FAIL=1 scenario "" x86_64 services || fail "swap fallback failed"
+called "dd if=/dev/zero of=$work/memory/swapfile bs=1M count=2048" || fail "swap allocation has no dd fallback"
+for swap in active active-file existing; do
+  FAKE_SWAP=$swap scenario "" x86_64 services || fail "existing swap failed: $swap"
+  if called "fallocate " || called "mkswap "; then fail "existing swap allocated or formatted: $swap"; fi
+  if test "$swap" = existing; then
+    called "swapon $work/memory/swapfile" || fail "inactive swapfile not enabled"
+  elif called "swapon "; then fail "active swap changed: $swap"; fi
+  if test "$swap" != active; then
+    grep -qx preserved "$work/memory/swapfile" || fail "existing swap contents changed"
+  fi
+done
+scenario "" x86_64 services || fail "absent Gateway services failed"
+test ! -e "$vmoptions" || fail "absent vmoptions created"
+FAKE_VMOPTIONS=1 scenario mac-mini aarch64 services || fail "Mac memory services failed"
+grep -qx -- '-Xmx768m' "$vmoptions" || fail "Mac heap changed"
+test ! -e "$work/memory/swapfile" || fail "Mac swap created"
+test ! -e "$work/memory/sysctl/90-trend-investing-swap.conf" || fail "Mac swappiness changed"
+if called "swapon " || called "sysctl " || called "fallocate "; then fail "Mac ran memory safeguards"; fi
 
 test "$failures" -eq 0 || exit 1
 echo "target tests ok"
