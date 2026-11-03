@@ -19,7 +19,7 @@ IRA rows below cannot trade yet:
 | Account | Rule | Chapter |
 | --- | --- | --- |
 | Joint taxable account, on margin | **Boost**: SPY at 98%, raised to 147% for a few days after a sharp drop in an uptrend | [boost](boost.md) |
-| Roth IRA and Traditional IRA | **Momentum**: each month, 25 large US stocks that rose most over the past year, with a bond sleeve that grows with your age | [momentum](momentum.md), [glide path](glide-path.md) |
+| Traditional IRA (the Roth IRA is on hold, owner decision of 2026-11-03) | **Momentum**: each month, 25 large US stocks that rose most over the past year, with a bond sleeve that grows with your age | [momentum](momentum.md), [glide path](glide-path.md) |
 
 Everything runs on one Lightsail server ([server](server.md)): IB Gateway
 logged in to IBKR, a daily data job that fetches prices from Massive, and
