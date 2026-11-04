@@ -812,7 +812,7 @@ class GatewayInstanceTests(unittest.TestCase):
         writable = {path for line in unit.splitlines() if line.startswith("ReadWritePaths=")
                     for path in line.split("=", 1)[1].split()}
         self.assertEqual(writable, {"/var/lib/ti-gateway-%i", "/var/log/ti-gateway-%i",
-                                    "/var/lib/ti-gateway/Jts/ibgateway"})
+                                    "-/var/lib/ti-gateway/Jts/ibgateway"})
         provision = (DEPLOY / "provision.sh").read_text()
         self.assertNotIn("init_gateway_instance", provision)
         self.assertNotIn("instance-copy", provision)

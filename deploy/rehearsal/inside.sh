@@ -174,7 +174,7 @@ grep -qx 'Environment=TI_GATEWAY_APP_HOME=/var/lib/ti-gateway' /etc/systemd/syst
 # and this instance's directories (server.md, "The Traditional IRA's Gateway").
 grep -qx 'ProtectSystem=strict' /etc/systemd/system/ti-gateway@.service || fail "instance filesystem protection differs"
 writable=$(awk '/^ReadWritePaths=/ {sub(/^ReadWritePaths=/, ""); for (i=1; i<=NF; i++) print $i}' /etc/systemd/system/ti-gateway@.service | sort -u)
-expected=$(printf '%s\n' /var/lib/ti-gateway/Jts/ibgateway /var/lib/ti-gateway-%i /var/log/ti-gateway-%i | sort -u)
+expected=$(printf '%s\n' -/var/lib/ti-gateway/Jts/ibgateway /var/lib/ti-gateway-%i /var/log/ti-gateway-%i | sort -u)
 test "$writable" = "$expected" || fail "instance writable paths differ"
 pass "instance Gateway installed disabled, sharing the application and restarter writes, with separate settings, logs, state and API port"
 

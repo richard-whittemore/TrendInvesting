@@ -60,12 +60,14 @@ PrivateTmp=true
 # Share the joint installation; only Jts/ibgateway is writable within it,
 # for Gateway's own .install4j/restarter.log. Settings, logs and state are
 # this instance's own; restart times are staggered so the two do not restart
-# together (docs/manual/server.md, "The Traditional IRA's Gateway").
+# together (docs/manual/server.md, "The Traditional IRA's Gateway"). The
+# leading "-" lets the unit start before the joint installation exists
+# (systemd.exec, ReadWritePaths); the Gateway itself then cannot start.
 ProtectSystem=strict
 InaccessiblePaths=/run/trend-investing/secrets
 ProtectHome=true
 ReadWritePaths=/var/lib/ti-gateway-%i /var/log/ti-gateway-%i
-ReadWritePaths=/var/lib/ti-gateway/Jts/ibgateway
+ReadWritePaths=-/var/lib/ti-gateway/Jts/ibgateway
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
