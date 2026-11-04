@@ -51,7 +51,8 @@ type Systemctl interface {
 	Act(action, unit string) error
 }
 
-// Guard excludes the account's relay until release (ADR 0026 point 8; adapter/ibkr/relay.py's lifetime pending lock).
+// Guard excludes every relay until release, including other accounts sharing
+// Gateway (ADR 0026 point 8; adapter/ibkr/relay.py's lifetime pending lock).
 type Guard interface {
 	Acquire() (release func(), err error)
 }
@@ -73,7 +74,7 @@ func (h healer) say(row, step string) error {
 
 // Run reserves a restart durably before issuing it and never clears that
 // reservation, including after a failed command (server.md, Gateway healer).
-// Store.Lock serializes recovery for one Gateway, including adapter starts.
+// Store.Lock serializes recovery across accounts, including adapter starts.
 func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, ctl Systemctl, guard Guard, log func(string) error) error {
 	h := healer{log: log}
 	if !AllowedAdapter(unit) {

@@ -2,8 +2,8 @@
 
 # CASE TABLE (one test per row; no processes are signalled):
 # joint present -> selected config: test_selector_joint
-# trad-ira present -> selected config: test_selector_trad_ira
-# roth-ira present -> selected config: test_selector_roth_ira
+# trad-ira in joint selector -> own unit named: test_selector_trad_ira
+# roth-ira in joint selector -> own unit named: test_selector_roth_ira
 # live present -> selected config: test_selector_live
 # selected file absent -> 64, file and selector named: test_selected_absent
 # selected file empty -> 64, file and selector named: test_selected_empty
@@ -141,10 +141,17 @@ class GatewayLoginTests(unittest.TestCase):
         self.selected("joint")
 
     def test_selector_trad_ira(self):
-        self.selected("trad-ira")
+        self.refused_ira_selection("trad-ira")
 
     def test_selector_roth_ira(self):
-        self.selected("roth-ira")
+        self.refused_ira_selection("roth-ira")
+
+    def refused_ira_selection(self, instance):
+        self.login(instance)
+        self.selector.write_text(instance + "\n")
+        for result in (self.stage(), self.command(), self.command(instance)):
+            self.assertEqual(result.returncode, 64, result.stderr)
+            self.assertIn(f"ti-gateway@{instance}.service", result.stderr)
 
     def test_selector_live(self):
         self.selected("live")
@@ -558,7 +565,7 @@ cmd_diff ibkr-login.env
         self.assertEqual(self.selector.read_text(), "live\n")
 
     def test_staging_rejects_mode_mismatch(self):
-        for selection in ("joint", "trad-ira", "roth-ira", "live"):
+        for selection in ("joint", "live"):
             for mode in ("live" if selection != "live" else "paper", "", "unknown"):
                 with self.subTest(selection=selection, mode=mode):
                     self.selector.write_text(selection + "\n")
@@ -798,38 +805,127 @@ class GatewayInstanceTests(unittest.TestCase):
                                     capture_output=True)
             self.assertEqual(result.returncode, 64)
 
-    def test_instance_install_copies_only_binaries_and_keeps_settings(self):
+    def copy_instance(self, marker=True, active=False, linked=False, fail_copy=False):
         source = (DEPLOY / "provision.sh").read_text()
-        self.assertIn("init_gateway_instance() {", source)
-        function = source.split("init_gateway_instance() {", 1)[1].split("\n}\n", 1)[0]
+        function = "init_gateway_instance() {" + source.split("init_gateway_instance() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
         home = self.root / "joint"
-        install = home / "Jts/ibgateway/1050"
-        install.mkdir(parents=True)
-        (install / "ibgateway").write_text("binary")
-        (install / "ibgateway").chmod(0o755)
-        (home / "Jts/jts.ini").write_text("joint settings")
-        instance = self.root / "instance"
-        # Linux install/runuser ownership is checked in the systemd rehearsal.
-        body = "init_gateway_instance() {" + function + "\n}\n"
-        result = self.shell('set -eu\ninstall() { if test "$1" = -d; then command mkdir -p "${@: -1}"; else : >"${@: -1}"; fi; }\n' + body +
-                            '\ngateway_home=$1; GATEWAY_MAJOR=1050; GATEWAY_SHA256=fixture; init_gateway_instance "$2"',
-                            str(home), str(instance))
+        application = home / "Jts/ibgateway/1050"
+        application.mkdir(parents=True, exist_ok=True)
+        (application / "ibgateway").write_text("binary")
+        (application / "ibgateway").chmod(0o755)
+        if marker:
+            (application / ".installed-fixture").touch()
+        instance = self.root / "ti-gateway-trad-ira"
+        instance.mkdir(exist_ok=True)
+        if linked:
+            (instance / "Jts").symlink_to(home / "Jts", target_is_directory=True)
+        harness = r'''set -eu
+log() { echo "$*"; }
+die() { echo "$*" >&2; exit 1; }
+runuser() { test "$1 $2 $3" = '-u ti-gateway --'; shift 3; "$@"; }
+systemctl() { test "$*" = 'is-active --quiet ti-gateway@trad-ira.service'; return ACTIVE; }
+sync() { test -f "$2/ibgateway"; test ! -e "$2/.ti-instance-installed-fixture"; echo synced >>"$events"; }
+cp() { test ! -e "$2/.ti-instance-installed-fixture"; echo copied >>"$events"; COPY; }
+export -f sync cp
+'''.replace('ACTIVE', '0' if active else '1').replace('COPY', 'return 1' if fail_copy else 'command cp "$@"')
+        result = self.shell(harness + function + '\ngateway_home=$1; export events=$3; GATEWAY_MAJOR=1050; GATEWAY_SHA256=fixture; init_gateway_instance "$2"', str(home), str(instance), str(self.root / "events"))
+        return result, instance / "Jts/ibgateway/1050"
+
+    def test_copy_defers_without_source_marker(self):
+        result, target = self.copy_instance(marker=False)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((instance / "Jts/ibgateway/1050/ibgateway").read_text(), "binary")
-        self.assertFalse((instance / "Jts/jts.ini").exists())
-        (instance / "Jts/jts.ini").write_text("instance settings")
-        self.assertEqual((home / "Jts/jts.ini").read_text(), "joint settings")
-        # A previous interrupted copy can leave the launcher without its jars.
-        # Reprovisioning must complete the application and retain both settings.
-        (install / "application.jar").write_text("application fixture")
-        (instance / "Jts/ibgateway/1050/.ti-instance-installed-fixture").unlink()
-        result = self.shell('set -eu\ninstall() { if test "$1" = -d; then command mkdir -p "${@: -1}"; else : >"${@: -1}"; fi; }\n' + body +
-                            '\ngateway_home=$1; GATEWAY_MAJOR=1050; GATEWAY_SHA256=fixture; init_gateway_instance "$2"',
-                            str(home), str(instance))
+        self.assertIn("copy deferred", result.stdout)
+        self.assertFalse(target.exists())
+
+    def test_copy_defers_while_running(self):
+        result, target = self.copy_instance(active=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((instance / "Jts/ibgateway/1050/application.jar").exists())
-        self.assertEqual((instance / "Jts/jts.ini").read_text(), "instance settings")
-        self.assertEqual((home / "Jts/jts.ini").read_text(), "joint settings")
+        self.assertIn("copy deferred: the Gateway is running", result.stdout)
+        self.assertFalse(target.exists())
+
+    def test_running_copy_deferral_without_source_marker(self):
+        result, target = self.copy_instance(marker=False, active=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("copy deferred: the Gateway is running", result.stdout)
+        self.assertFalse(target.exists())
+
+    def test_copy_refuses_symlinked_jts(self):
+        result, target = self.copy_instance(linked=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink", result.stderr)
+        self.assertFalse((self.root / "events").exists())
+
+    def test_copy_marker_after_copy_and_sync(self):
+        result, target = self.copy_instance()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "events").read_text(), "copied\nsynced\n")
+        self.assertTrue((target / ".ti-instance-installed-fixture").exists())
+        self.assertEqual((target / "ibgateway").read_text(), "binary")
+        self.assertFalse((target.parents[1] / "jts.ini").exists())
+        settings = target.parents[1] / "jts.ini"
+        settings.write_text("instance settings")
+        (self.root / "joint/Jts/jts.ini").write_text("joint settings")
+        (target / ".ti-instance-installed-fixture").unlink()
+        (self.root / "joint/Jts/ibgateway/1050/application.jar").write_text("jar")
+        result, target = self.copy_instance()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(settings.read_text(), "instance settings")
+        self.assertEqual((target / "application.jar").read_text(), "jar")
+        self.assertEqual((self.root / "joint/Jts/jts.ini").read_text(), "joint settings")
+
+    def test_failed_copy_has_no_marker(self):
+        result, target = self.copy_instance(fail_copy=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((target / ".ti-instance-installed-fixture").exists())
+
+    def test_instance_port_required(self):
+        self.login()
+        self.assertEqual(self.stage().returncode, 0)
+        for port in (None, ""):
+            env = {**os.environ, "TI_GATEWAY_INSTANCE": "trad-ira", "RUNTIME_DIRECTORY": str(self.run), "IBC_TEMPLATE": str(self.template)}
+            env.pop("TI_GATEWAY_API_PORT", None)
+            if port is not None:
+                env["TI_GATEWAY_API_PORT"] = port
+            result = subprocess.run(["bash", str(DEPLOY / "libexec/render-ibc-config.sh")], env=env, capture_output=True)
+            self.assertEqual(result.returncode, 64)
+
+    def test_adapter_port_guard(self):
+        import json
+        settings = self.etc / "gateway-trad-ira.env"
+        settings.write_text("TI_GATEWAY_API_PORT=4003\n")
+        config = self.etc / "trad-ira.json"
+        script = DEPLOY / "libexec/check-adapter-port.py"
+        self.assertTrue(script.exists())
+        for port, status in ((4002, 64), (4003, 0)):
+            config.write_text(json.dumps({"port": port}))
+            result = subprocess.run([sys.executable, str(script), str(config), str(settings)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, status, result.stderr)
+            if status:
+                self.assertIn(str(config), result.stderr)
+                self.assertIn("4003", result.stderr)
+        unit = (DEPLOY / "systemd/ti-adapter@.service").read_text()
+        self.assertIn("ExecStartPre=/usr/bin/python3 /usr/local/libexec/trend-investing/check-adapter-port.py /etc/trend-investing/adapters/%i.json /etc/trend-investing/gateway-%i.env", unit)
+
+    def test_staggered_display_and_restart_settings(self):
+        source = (DEPLOY / "provision.sh").read_text().split('"$etc/gateway-trad-ira.env"', 1)[1].split('CONF', 2)[1]
+        for line in ("TI_GATEWAY_DISPLAY=100", "TI_GATEWAY_RESTART_TIME=11:55 PM", "TI_GATEWAY_COLD_RESTART=09:20"):
+            self.assertIn(line, source)
+
+    def test_mac_masks_template_and_uses_external_adapter_override(self):
+        source = (DEPLOY / "provision.sh").read_text()
+        self.assertIn("systemctl mask ti-gateway.service ti-gateway@.service", source)
+        self.assertIn('ti-gateway@.service) mac_mini && continue', source)
+        start = source.index("install_mac_adapter_unit() {")
+        function = source[start:source.index("\n}\n", start) + 2]
+        result = self.shell(function + '\nhere=$1; unit_dir=$2; install_mac_adapter_unit', str(DEPLOY), str(self.etc))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = (self.etc / "ti-adapter@.service").read_text()
+        self.assertNotIn("Wants=ti-gateway@", text)
+        self.assertNotIn("After=ti-gateway@", text)
+        self.assertIn("After=ti-engine@%i.service", text)
+        self.assertIn("/etc/trend-investing/adapters/%i.json 4002", text)
+        self.assertIn('test "%i" != boost', text)
+
 
     def test_instance_install_rehearsal_skips_unavailable_binary(self):
         source = (DEPLOY / "provision.sh").read_text()

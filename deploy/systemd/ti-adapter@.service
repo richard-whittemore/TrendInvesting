@@ -44,6 +44,7 @@ EnvironmentFile=/etc/trend-investing/engines/%i.env
 # engine first; the adapter refuses to start without its log.
 EnvironmentFile=/var/lib/trend-investing/engines/%i/run.env
 ExecStartPre=/bin/sh -c 'test "%i" != boost || { echo "ti-adapter@boost: the Boost account has its own adapter unit, ti-adapter-boost.service; this template is for the IRAs only" >&2; exit 1; }'
+ExecStartPre=/usr/bin/python3 /usr/local/libexec/trend-investing/check-adapter-port.py /etc/trend-investing/adapters/%i.json /etc/trend-investing/gateway-%i.env
 # The account number is read from the instance's line (TI_ADAPTER_ACCOUNT_KEY,
 # IBKR_ACCOUNT_TRAD_IRA for trad-ira) of its own root-only account file,
 # handed to this service as a private copy; nothing else (no other account's

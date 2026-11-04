@@ -80,44 +80,58 @@ func TestStateIsDurablePrivateAndSerialized(t *testing.T) {
 		t.Fatal("broken state accepted")
 	}
 }
-func TestRelayLocksExcludeOwnAccountAndRelease(t *testing.T) {
-	root := t.TempDir()
-	for _, name := range []string{"boost", "trad-ira", "roth-ira"} {
-		dir := filepath.Join(root, name)
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "pending.json.lock"), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	guard := relayGuard{root: root, account: "trad-ira"}
-	f, err := os.OpenFile(filepath.Join(root, "trad-ira", "pending.json.lock"), os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = f.Close() }()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = guard.Acquire(); err == nil {
-		t.Fatal("active relay allowed restart")
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
-		t.Fatal(err)
-	}
-	release, err := guard.Acquire()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-		t.Fatal("healer did not exclude relay")
-	}
-	release()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		t.Fatal("relay lock leaked", err)
+func TestEveryGatewayRecoveryLocksEveryRelay(t *testing.T) {
+	for _, account := range []string{"boost", "trad-ira"} {
+		t.Run(account, func(t *testing.T) {
+			root := t.TempDir()
+			for _, name := range []string{"boost", "trad-ira", "roth-ira"} {
+				dir := filepath.Join(root, name)
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "pending.json.lock"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			guard := relayGuard{root: root, account: account}
+			for _, name := range []string{"boost", "trad-ira", "roth-ira"} {
+				f, err := os.Open(filepath.Join(root, name, "pending.json.lock"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = f.Close() })
+				if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+					t.Fatal(err)
+				}
+				release, err := guard.Acquire()
+				if release != nil {
+					release()
+				}
+				if !errors.Is(err, gatewayheal.ErrOrderBusy) {
+					t.Fatalf("%s active: %v", name, err)
+				}
+				if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+					t.Fatal(err)
+				}
+				release, err = guard.Acquire()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+					t.Errorf("%s not locked", name)
+				}
+				release()
+				if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+					t.Fatal(err)
+				}
+				if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }
+
 func TestInputsRefuseMissingScheduleAndNonregularCounter(t *testing.T) {
 	root := t.TempDir()
 	r := files{schedule: filepath.Join(root, "schedule"), counter: filepath.Join(root, "counter"), gatewayEnv: filepath.Join(root, "gateway.env")}
@@ -516,7 +530,9 @@ func TestHealerPathsAndOwnRelay(t *testing.T) {
 					if err := os.MkdirAll(path(paths.state), 0o700); err != nil {
 						t.Fatal(err)
 					}
-					put(filepath.Join(root, "adapters", tc.name, "pending.json.lock"), "")
+					for _, name := range []string{"boost", "trad-ira", "roth-ira"} {
+						put(filepath.Join(root, "adapters", name, "pending.json.lock"), "")
+					}
 					scenario := &isolatedRecovery{t: t, unit: tc.unit, gateway: tc.gateway, at: time.Date(2026, 11, 2, 15, 0, 0, 0, time.UTC)}
 					scenario.failed = gatewayheal.Status{Active: "failed", Code: 1, Exit: 3, Invocation: "failed-run", Finished: scenario.at.Add(-time.Minute)}
 					scenario.current = gatewayheal.Status{Active: "active", Invocation: "old-login"}

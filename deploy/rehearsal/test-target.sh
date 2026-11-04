@@ -262,7 +262,7 @@ scenario() {
       record runuser "$@"
       # Relay lock creation is recorded only; the services case never runs
       # Python on a host path (docs/manual/server.md, Gateway healer).
-      case "$*" in '-u ti-trader -- python3 -I -c '*) return 0 ;; esac
+      case "$*" in '-u ti-trader -- python3 -I -c '*|*' instance-heap '*) return 0 ;; esac
       case $(stat -c %a . 2>/dev/null || stat -f %Lp .) in
         *[1357]) ;;
         *) echo "installer.sh: 820: cd: can't cd to $PWD" >&2 ;;
@@ -644,7 +644,11 @@ called "systemctl restart systemd-journald.service" || fail "Mac mini base does 
 grep -q 'Storage=persistent' "$work/deploy/provision.sh" || fail "the provisioner never sets Storage=persistent"
 
 scenario mac-mini aarch64 services || fail "Mac mini services failed: $(cat "$work/out")"
-called "systemctl mask ti-gateway.service" || fail "Mac mini does not mask the Gateway unit"
+called "systemctl mask ti-gateway.service ti-gateway@.service" || fail "Mac mini does not mask both Gateway units"
+if called "/systemd/ti-gateway@.service "; then fail "Mac mini installs the Gateway template, which masking cannot replace"; fi
+test -f "$work/units/ti-adapter@.service" || fail "Mac mini misses the external Gateway adapter override"
+if grep -q '^Wants=ti-gateway@' "$work/units/ti-adapter@.service"; then fail "Mac mini adapter wants an instance Gateway"; fi
+grep -q '/etc/trend-investing/adapters/%i.json 4002$' "$work/units/ti-adapter@.service" || fail "Mac mini adapter does not check its external port"
 if called "systemctl enable ti-gateway.service"; then fail "Mac mini enables the Gateway unit"; fi
 if called "/systemd/ti-gateway.service"; then fail "Mac mini installs the Gateway unit, which masking cannot replace"; fi
 called "systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer" || fail "Mac mini does not start the timers"
@@ -652,7 +656,9 @@ called "systemctl enable ti-dashboard.service" || fail "Mac mini does not enable
 called "systemctl disable ti-engine@boost.service" || fail "Mac mini does not keep the engines disabled"
 called "systemctl disable ti-adapter-boost.service" || fail "Mac mini does not keep the adapter disabled"
 grep -q '"host": "host.docker.internal"' "$work/etc/adapters/boost.json" || fail "Mac mini's adapter configuration does not point at host.docker.internal: $(cat "$work/etc/adapters/boost.json")"
-grep -q '"port": 4002' "$work/etc/adapters/boost.json" || fail "Mac mini's adapter configuration lost the paper port"
+for account in boost trad-ira roth-ira; do
+  grep -q '"port": 4002' "$work/etc/adapters/$account.json" || fail "Mac mini's $account adapter lost the external Gateway port"
+done
 
 owner='{"host": "owner-set", "port": 4002}'
 FAKE_BOOST_JSON=$owner scenario mac-mini aarch64 services || fail "Mac mini services with an owner's file failed"

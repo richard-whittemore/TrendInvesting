@@ -632,7 +632,7 @@ install_adapter_settings() {
     name=$(basename "${f%.example}")
     test ! -e "$adapter_root/$name" || continue
     if mac_mini; then
-      sed 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' "$f" >"$adapter_root/.$name.new"
+      sed -e 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' -e 's/"port": 400[34]/"port": 4002/' "$f" >"$adapter_root/.$name.new"
     else
       cat "$f" >"$adapter_root/.$name.new"
     fi
@@ -699,6 +699,16 @@ set_gateway_heap() {
   log "Gateway heap set to 512 MB (-Xmx512m); applies at its next start"
 }
 
+# The Mac adapter uses the external Gateway (docs/manual/server.md,
+# "The Traditional IRA's Gateway"). Replace the whole unit so no instance
+# Gateway dependency survives; systemd dependencies cannot be removed in drop-ins.
+install_mac_adapter_unit() {
+  sed -e '/^Wants=ti-gateway@%i.service$/d' \
+      -e 's/^After=ti-gateway@%i.service /After=/' \
+      -e 's|/etc/trend-investing/gateway-%i.env$|4002|' \
+      "$here/systemd/ti-adapter@.service" >"$unit_dir/ti-adapter@.service"
+}
+
 # Copy only the installed application, never Jts settings (server.md,
 # "The Traditional IRA's Gateway"). Existing instance settings survive upgrades.
 init_gateway_instance() {
@@ -709,22 +719,28 @@ init_gateway_instance() {
   local instance_home=$1
   local source="$gateway_home/Jts/ibgateway/${GATEWAY_MAJOR}"
   local target="$instance_home/Jts/ibgateway/${GATEWAY_MAJOR}"
-  if ! test -x "$source/ibgateway"; then
-    # The application arrives with provision.sh gateway; the instance copy
-    # follows at the next services step (server.md, "The Traditional IRA's Gateway").
-    log "no Gateway application yet: the trad-ira Gateway's copy is made at the next services step after provision.sh gateway"
+  local instance=${instance_home##*/ti-gateway-}
+  if systemctl is-active --quiet "ti-gateway@$instance.service"; then
+    log "copy deferred: the Gateway is running"
     return 0
   fi
-  install -d -o ti-gateway -g ti-gateway -m 0700 "$instance_home/Jts"
-  local marker="$target/.ti-instance-installed-${GATEWAY_SHA256}"
-  if ! test -f "$marker"; then
-    install -d -o ti-gateway -g ti-gateway -m 0700 "$target"
-    cp -a "$source/." "$target/"
-    # Mark completion last, so an interrupted copy is repaired at the next
-    # provisioning without rewriting a complete running application
-    # (server.md, The Traditional IRA's Gateway).
-    install -o ti-gateway -g ti-gateway -m 0644 /dev/null "$marker"
+  if ! test -f "$source/.installed-${GATEWAY_SHA256}" || ! test -x "$source/ibgateway"; then
+    log "copy deferred: the joint Gateway application is not installed for the current checksum"
+    return 0
   fi
+  test ! -L "$instance_home" || die "refusing symlink instance home: $instance_home"
+  test ! -L "$instance_home/Jts" || die "refusing symlink Jts: $instance_home/Jts"
+  # All writes below the service-owned home use its identity (server.md,
+  # "The Traditional IRA's Gateway"). Sync precedes the completion marker.
+  runuser -u ti-gateway -- bash -eu -c '
+    source=$1 target=$2 marker=$3
+    if ! test -f "$marker"; then
+      mkdir -p "$target"
+      cp -a "$source/." "$target/"
+      sync -f "$target"
+      touch "$marker"
+    fi
+  ' instance-copy "$source" "$target" "$target/.ti-instance-installed-${GATEWAY_SHA256}"
 }
 
 step_services() {
@@ -754,14 +770,20 @@ step_services() {
   install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal
   if ! mac_mini; then
     install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal/trad-ira
-    install -d -o ti-gateway -g ti-gateway -m 0700 /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira
+    local directory
+    for directory in /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira; do
+      test ! -L "$directory" || die "refusing symlink instance directory: $directory"
+      install -d -o ti-gateway -g ti-gateway -m 0700 "$directory"
+    done
     init_gateway_instance /var/lib/ti-gateway-trad-ira
-    (gateway_home=/var/lib/ti-gateway-trad-ira; set_gateway_heap)
+    runuser -u ti-gateway -- bash -eu -c "$(declare -f set_gateway_heap log die)
+      gateway_home=\$1 GATEWAY_MAJOR=\$2; set_gateway_heap" instance-heap /var/lib/ti-gateway-trad-ira "$GATEWAY_MAJOR"
     install -m 0644 /dev/stdin "$etc/gateway-trad-ira.env" <<CONF
 GATEWAY_MAJOR=${GATEWAY_MAJOR}
-TI_GATEWAY_RESTART_TIME=11:45 PM
-TI_GATEWAY_COLD_RESTART=09:00
+TI_GATEWAY_RESTART_TIME=11:55 PM
+TI_GATEWAY_COLD_RESTART=09:20
 TI_GATEWAY_API_PORT=4003
+TI_GATEWAY_DISPLAY=100
 CONF
   fi
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
@@ -769,6 +791,7 @@ CONF
     case $(basename "$b") in stage-gateway-login.sh|render-ibc-config.sh) continue ;; esac
     install -m 0755 "$b" /usr/local/libexec/trend-investing/
   done
+  install -m 0755 "$here/libexec/check-adapter-port.py" /usr/local/libexec/trend-investing/
   install -m 0755 "$here"/ira-replay.sh "$here"/ira-replay.py /usr/local/libexec/trend-investing/
   install -m 0755 "$here/memory.py" /usr/local/libexec/trend-investing/
   install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/memory
@@ -884,7 +907,10 @@ CONF
   # link to /dev/null in its place, which a real file there would block.
   local unit instance
   for unit in "$here"/systemd/*.service "$here"/systemd/*.timer; do
-    if test "$(basename "$unit")" = ti-gateway.service; then continue; fi
+    case $(basename "$unit") in
+      ti-gateway.service) continue ;;
+      ti-gateway@.service) mac_mini && continue ;;
+    esac
     install -m 0644 "$unit" "$unit_dir/"
   done
   # All three Flex readers share one paced token (docs/live-trading/lessons-2026-10.md L3).
@@ -915,8 +941,11 @@ CONF
 Environment=TI_HEARTBEAT=off
 EOF
   done
-  if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
-    rm -f "$unit_dir/ti-gateway.service"
+  if mac_mini; then
+    for unit in ti-gateway.service ti-gateway@.service; do
+      if test -f "$unit_dir/$unit" && ! test -L "$unit_dir/$unit"; then rm -f "$unit_dir/$unit"; fi
+    done
+    install_mac_adapter_unit
   fi
   # On the Mac mini no time daemon runs in the container (step_clock), so the
   # clock is compared with a reference every 15 minutes too, not only when
@@ -940,7 +969,7 @@ EOF
     if mac_mini; then
       # The Gateway is the Mac app; masked, nothing can start this unit (an
       # engine's or the adapter's Wants= on it is then ignored).
-      systemctl mask ti-gateway.service
+      systemctl mask ti-gateway.service ti-gateway@.service
     else
       systemctl enable ti-gateway.service
       if systemctl is-failed --quiet ti-gateway.service; then

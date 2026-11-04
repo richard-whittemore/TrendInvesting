@@ -1104,6 +1104,11 @@ func TestInstancePathsAndJointCommand(t *testing.T) {
 	for _, home := range []string{"", "/var/lib/ti-gateway-trad-ira", "/var/lib/ti-gateway-roth-ira"} {
 		env := map[string]string{"GATEWAY_MAJOR": "1050", "RUNTIME_DIRECTORY": "/run/ti-gateway", "TI_GATEWAY_HOME": home}
 		if home != "" {
+			env["TI_GATEWAY_INSTANCE"] = strings.TrimPrefix(filepath.Base(home), "ti-gateway-")
+			env["TI_GATEWAY_DISPLAY"] = "100"
+			if strings.HasSuffix(home, "roth-ira") {
+				env["TI_GATEWAY_DISPLAY"] = "101"
+			}
 			env["RUNTIME_DIRECTORY"] = "/run/" + filepath.Base(home)
 			env["TI_GATEWAY_STATE_FILE"] = home + "/login-failures"
 		}
@@ -1113,8 +1118,22 @@ func TestInstancePathsAndJointCommand(t *testing.T) {
 			wantHome = "/var/lib/ti-gateway"
 		}
 		want := []string{"xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", "/opt/ibc/scripts/ibcstart.sh", "1050", "--gateway", "--tws-path=" + wantHome + "/Jts", "--tws-settings-path=" + wantHome + "/Jts", "--ibc-path=/opt/ibc", "--ibc-ini=" + env["RUNTIME_DIRECTORY"] + "/config.ini", "--on2fatimeout=restart"}
+		if home != "" {
+			want = append([]string{"xvfb-run", "-n", env["TI_GATEWAY_DISPLAY"]}, want[2:]...)
+		}
 		if strings.Join(c.Command, "|") != strings.Join(want, "|") || c.StateFile != wantHome+"/login-failures" {
 			t.Fatalf("home=%q command=%v state=%s", home, c.Command, c.StateFile)
+		}
+	}
+}
+
+func TestInstanceDisplayRequiredAndValidated(t *testing.T) {
+	for _, display := range []string{"", "-1", "0", "1000", "abc", "1 2"} {
+		env := map[string]string{"TI_GATEWAY_INSTANCE": "trad-ira", "TI_GATEWAY_DISPLAY": display}
+		cfg, _ := configFromEnv(func(k string) string { return env[k] })
+		var output bytes.Buffer
+		if code := run(cfg, &output, &output); code != 64 || !strings.Contains(output.String(), "TI_GATEWAY_DISPLAY") {
+			t.Fatalf("display=%q code=%d output=%s", display, code, output.String())
 		}
 	}
 }

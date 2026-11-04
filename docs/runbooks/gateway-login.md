@@ -29,12 +29,12 @@ Owner decision, 2026-11-02: each IBKR login has its own encrypted file
 | Selector | Login file | Purpose |
 | --- | --- | --- |
 | `joint` | `ibkr-login-joint.env` | Boost's joint paper login |
-| `trad-ira` | `ibkr-login-trad-ira.env` | Traditional IRA paper login |
-| `roth-ira` | `ibkr-login-roth-ira.env` | Roth IRA paper login |
 | `live` | `ibkr-login-live.env` | The owner's real login, reaching the joint account and both IRAs |
 
 `/etc/trend-investing/gateway-login` is non-secret and contains exactly one
-of those words, with an optional final newline. Provisioning creates it once
+of `joint` or `live`, with an optional final newline. IRA logins are refused
+there: use `ti-gateway@trad-ira.service` or `ti-gateway@roth-ira.service`,
+which read their own `ibkr-login-<i>.env` directly. Provisioning creates it once
 as `joint` and never overwrites it. It is separate from `gateway.env`, which
 provisioning rewrites. A missing or invalid selector refuses Gateway startup
 with exit 64; it never falls back to another login.
@@ -86,8 +86,6 @@ Show or switch the selection without editing any secret:
 ```sh
 sudo ti-gateway-login
 sudo ti-gateway-login joint
-sudo ti-gateway-login trad-ira
-sudo ti-gateway-login roth-ira
 sudo ti-gateway-login live
 ```
 

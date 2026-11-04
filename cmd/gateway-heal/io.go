@@ -238,8 +238,9 @@ func (s diskState) Save(state gatewayheal.State) error {
 	return dir.Sync()
 }
 
-// relayGuard holds the account's flock inode from adapter/ibkr/relay.py across
-// Gateway restart and login (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
+// relayGuard holds the same flock inodes as adapter/ibkr/relay.py across the
+// Gateway restart and login. A running relay, even another account's, blocks
+// restarting Gateway (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
 type relayGuard struct{ root, account string }
 
 func (g relayGuard) Acquire() (func(), error) {
@@ -248,27 +249,40 @@ func (g relayGuard) Acquire() (func(), error) {
 	default:
 		return nil, errors.New("unknown relay account")
 	}
-	dir := filepath.Join(g.root, g.account)
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return nil, err
+	var releases []func()
+	release := func() {
+		for _, done := range releases {
+			done()
+		}
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() {
-		return nil, errors.New("invalid adapter directory")
-	}
-	release, err := lockFile(filepath.Join(dir, "pending.json.lock"), stat.Uid, false, gatewayheal.ErrOrderBusy)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := regularRead(filepath.Join(dir, "pending.json.handover"))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		release()
-		return nil, err
-	}
-	if err == nil && !gatewayheal.HandoverClear(raw) {
-		release()
-		return nil, fmt.Errorf("%s: unsettled hand-over: %w", g.account, gatewayheal.ErrOrderBusy)
+	for _, name := range []string{"boost", "trad-ira", "roth-ira"} {
+		dir := filepath.Join(g.root, name)
+		info, err := os.Lstat(dir)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.IsDir() {
+			release()
+			return nil, errors.New("invalid adapter directory")
+		}
+		done, err := lockFile(filepath.Join(dir, "pending.json.lock"), stat.Uid, false, gatewayheal.ErrOrderBusy)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		releases = append(releases, done)
+		raw, err := regularRead(filepath.Join(dir, "pending.json.handover"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			release()
+			return nil, err
+		}
+		if err == nil && !gatewayheal.HandoverClear(raw) {
+			release()
+			return nil, fmt.Errorf("%s: unsettled hand-over: %w", name, gatewayheal.ErrOrderBusy)
+		}
+
 	}
 	return release, nil
 }
