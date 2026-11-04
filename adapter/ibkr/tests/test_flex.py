@@ -1705,6 +1705,123 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn(TOKEN, said)
         self.assertNotIn(ACCOUNT, said)
 
+    def test_flex_credentials_come_from_one_file(self):
+        token = "TI_IBKR_FLEX_TOKEN"
+        cash = "TI_IBKR_FLEX_QUERY_ID"
+        trades = "TI_IBKR_FLEX_TRADES_QUERY_ID"
+        cases = (
+            ("none", {}, "secrets file", None),
+            ("all", {token: "local-token", cash: "local-cash", trades: "local-trades"}, "account file", None),
+            ("cash only", {token: "local-token", cash: "local-cash"}, "account file", None),
+            ("query without token", {cash: "local-cash"}, None, token),
+            ("token only", {token: "local-token"}, None, cash),
+        )
+        for shared in (True, False):
+            for name, local, source, missing in cases:
+                with self.subTest(shared=shared, account=name):
+                    self.secrets.write_text("".join("{}={}\n".format(k, v) for k, v in
+                        {token: "shared-token", cash: "shared-cash", trades: "shared-trades"}.items())
+                        if shared else "MASSIVE_API_KEY=synthetic\n")
+                    self.account.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT) +
+                        "".join("{}={}\n".format(k, v) for k, v in local.items()))
+                    expected_missing = missing or (token if not local and not shared else None)
+                    with unittest.mock.patch.object(flex, "read_once", return_value=True) as read:
+                        code, said = self.run_command(FakeFlex())
+                    for value in ("local-token", "local-cash", "local-trades",
+                                  "shared-token", "shared-cash", "shared-trades"):
+                        self.assertNotIn(value, said)
+                    if expected_missing:
+                        self.assertEqual(code, 1)
+                        read.assert_not_called()
+                        self.assertIn(expected_missing, said)
+                        self.assertIn("exactly one filled-in", said)
+                    else:
+                        self.assertEqual(code, 0)
+                        self.assertIn(source, said)
+                        read.assert_called_once()
+                        expected = local if local else {token: "shared-token", cash: "shared-cash",
+                                                       trades: "shared-trades"}
+                        self.assertEqual(read.call_args.args[:3], (expected[token], expected[cash], ACCOUNT))
+                        self.assertEqual(read.call_args.kwargs["trades_query_id"], expected.get(trades))
+
+    def test_malformed_account_flex_lines_are_refused_without_fallback(self):
+        keys = ("TI_IBKR_FLEX_TOKEN", "TI_IBKR_FLEX_QUERY_ID", "TI_IBKR_FLEX_TRADES_QUERY_ID")
+        for key in keys:
+            for bad in ("", '"synthetic"', "'synthetic'", "syn thetic", " synthetic", "synthetic ",
+                        "synthetic\n{}=second-synthetic".format(key)):
+                with self.subTest(key=key, bad=bad):
+                    self.account.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT) + "".join(
+                        "{}={}\n".format(k, bad if k == key else "synthetic") for k in keys))
+                    service = FakeFlex()
+                    code, said = self.run_command(service)
+                    self.assertEqual((code, service.calls), (1, []))
+                    self.assertIn(key, said)
+                    self.assertNotIn("synthetic", said)
+
+    def test_an_ira_never_reads_the_shared_flex_values(self):
+        # An IRA's paper account has its own IBKR login, so its reader refuses rather than use secrets.env's
+        # token, which belongs to Boost's login (docs/manual/reconciliation.md, "What you set up once").
+        for instance in ("trad-ira", "roth-ira"):
+            with self.subTest(instance=instance):
+                self.account.write_text("IBKR_ACCOUNT_TRAD_IRA=DU0000777\nIBKR_ACCOUNT_ROTH_IRA=DU0000778\n")
+                with unittest.mock.patch.object(flex, "read_once", return_value=True) as read:
+                    code, said = self.run_command(FakeFlex(), instance=instance)
+                self.assertEqual(code, 1)
+                read.assert_not_called()
+                self.assertIn("account file", said)
+                self.assertIn("TI_IBKR_FLEX_TOKEN", said)
+                self.assertNotIn(TOKEN, said)
+
+    def test_a_flex_line_that_is_not_exactly_a_known_key_is_refused(self):
+        # A typo, an indent or an export prefix must not drop a value silently or fall back to secrets.env.
+        good = "TI_IBKR_FLEX_TOKEN=synthetic\nTI_IBKR_FLEX_QUERY_ID=synthetic\n"
+        for bad in ("  TI_IBKR_FLEX_TOKEN=synthetic\n  TI_IBKR_FLEX_QUERY_ID=synthetic\n",
+                    "export TI_IBKR_FLEX_TOKEN=synthetic\nexport TI_IBKR_FLEX_QUERY_ID=synthetic\n",
+                    good + "TI_IBKR_FLEX_TRADES_QUERY_ID =synthetic\n",
+                    good + "TI_IBKR_FLEX_TRADE_QUERY_ID=synthetic\n",
+                    good + "\tTI_IBKR_FLEX_TRADES_QUERY_ID=synthetic\n"):
+            for instance in ("boost", "trad-ira"):
+                with self.subTest(bad=bad, instance=instance):
+                    self.account.write_text("IBKR_ACCOUNT_BOOST={}\nIBKR_ACCOUNT_TRAD_IRA=DU0000777\n".format(
+                        ACCOUNT) + bad)
+                    with unittest.mock.patch.object(flex, "read_once", return_value=True) as read:
+                        code, said = self.run_command(FakeFlex(), instance=instance)
+                    self.assertEqual(code, 1, said)
+                    read.assert_not_called()
+                    self.assertIn("TI_IBKR_FLEX", said)
+                    self.assertNotIn("synthetic", said)
+
+    def test_the_shipped_ira_template_filled_in_is_read(self):
+        # The example's comments name the Flex keys; only assignments count (deploy/etc/accounts/trad-ira.env.example).
+        template = (repo / "deploy/etc/accounts/trad-ira.env.example").read_text()
+        self.assertIn("TI_IBKR_FLEX", "".join(l for l in template.splitlines() if l.startswith("#")))
+        self.account.write_text(template.replace("IBKR_ACCOUNT_TRAD_IRA=", "IBKR_ACCOUNT_TRAD_IRA=DU0000777") +
+                                "TI_IBKR_FLEX_TOKEN=local-token\nTI_IBKR_FLEX_QUERY_ID=local-cash\n"
+                                "TI_IBKR_FLEX_TRADES_QUERY_ID=local-trades\n")
+        with unittest.mock.patch.object(flex, "read_once", return_value=True) as read:
+            code, said = self.run_command(FakeFlex(), instance="trad-ira")
+        self.assertEqual(code, 0, said)
+        self.assertEqual(read.call_args.args[:3], ("local-token", "local-cash", "DU0000777"))
+        self.assertEqual(read.call_args.kwargs["trades_query_id"], "local-trades")
+
+    def test_a_rejected_account_token_points_at_the_account_file(self):
+        self.account.write_text(self.account.read_text() +
+                                "TI_IBKR_FLEX_TOKEN={}\nTI_IBKR_FLEX_QUERY_ID={}\n".format(TOKEN, QUERY))
+        code, said = self.run_command(FakeFlex(send="send_expired.xml"))
+        self.assertEqual(code, 1)
+        status = json.loads(Path(str(self.ledger) + flex.STATUS_SUFFIX).read_text())
+        self.assertIn("account file", status["reason"])
+        self.assertNotIn("in the secrets file", status["reason"])
+        self.assertNotIn(TOKEN, said + status["reason"])
+
+    def test_trades_query_without_account_token_is_refused(self):
+        self.account.write_text(self.account.read_text() + "TI_IBKR_FLEX_TRADES_QUERY_ID=local-trades\n")
+        service = FakeFlex()
+        code, said = self.run_command(service)
+        self.assertEqual((code, service.calls), (1, []))
+        self.assertIn("TI_IBKR_FLEX_TOKEN", said)
+        self.assertNotIn("local-trades", said)
+
     def test_the_reading_stamps_the_clock_its_caller_gives(self):
         # The CLI passes its clock to the reader, so a reading on a named day does not depend on the real date.
         code, said = self.run_command(FakeFlex(), now=datetime(2027, 1, 16, 2, 30, tzinfo=timezone.utc))
@@ -1714,6 +1831,8 @@ class CommandTests(unittest.TestCase):
 
     def test_the_instance_names_its_account_line(self):
         # The IRA instance reads its own line, so a statement for the Boost account is refused as another's.
+        self.account.write_text(self.account.read_text() +
+                                "TI_IBKR_FLEX_TOKEN={}\nTI_IBKR_FLEX_QUERY_ID={}\n".format(TOKEN, QUERY))
         code, said = self.run_command(FakeFlex(), instance="trad-ira")
         self.assertEqual(code, 1)
         self.assertIn("not this instance's account", said)
