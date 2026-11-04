@@ -555,8 +555,11 @@ class AdapterTemplateTests(unittest.TestCase):
     def test_the_template_refuses_the_boost_instance(self):
         text = TEMPLATE.read_text()
         pre = [l for l in unit_lines(text) if l.startswith("ExecStartPre=")]
-        self.assertEqual(len(pre), 1)
+        # The Boost refusal comes first; the port check against the IRA's own Gateway follows it
+        # (docs/manual/server.md, "The Traditional IRA's Gateway").
+        self.assertEqual(len(pre), 2)
         self.assertIn('test "%i" != boost', pre[0])
+        self.assertIn("check-adapter-port.py", pre[1])
 
     def test_client_ids_are_unique_and_the_iras_settings_name_its_account_line(self):
         ids = {}
