@@ -234,6 +234,7 @@ PYCODE
 FAKE_LIVE=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "instance services failed"
 called 'runuser -u ti-gateway -- install -d -m 0700 /var/lib/ti-gateway-trad-ira/Jts' || fail "instance settings directory not prepared as its own user"
 if called 'install -d -o ti-gateway -g ti-gateway -m 0700 /var/lib/ti-gateway-trad-ira/Jts'; then fail "root created the settings folder under the service-owned home"; fi
+grep -q 'test ! -L /var/lib/ti-gateway-trad-ira/Jts' "$here/../provision.sh" || fail "provisioning does not refuse a linked instance settings folder"
 called "$work/deploy/systemd/ti-gateway@.service" || fail "instance template not installed"
 called "$work/etc/gateway-trad-ira.env" || fail "instance environment not installed"
 called '/var/lib/ti-gateway-heal/trad-ira' || fail "instance healer state not prepared"

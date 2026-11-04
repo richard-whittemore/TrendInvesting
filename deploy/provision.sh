@@ -757,6 +757,7 @@ step_services() {
     # Below the service-owned home, only the service's own user writes, so no
     # link it plants can redirect a root operation (server.md, "The
     # Traditional IRA's Gateway").
+    test ! -L /var/lib/ti-gateway-trad-ira/Jts || die "refusing symlink instance settings folder: /var/lib/ti-gateway-trad-ira/Jts"
     runuser -u ti-gateway -- install -d -m 0700 /var/lib/ti-gateway-trad-ira/Jts
     install -m 0644 /dev/stdin "$etc/gateway-trad-ira.env" <<CONF
 GATEWAY_MAJOR=${GATEWAY_MAJOR}

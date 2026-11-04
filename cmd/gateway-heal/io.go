@@ -150,15 +150,27 @@ func (s diskState) Lock() (func(), error) {
 	if dir == "" {
 		dir = s.dir
 	}
+	// Both the shared lock's directory and this Gateway's state directory
+	// must be real root-owned 0700 directories, so no link can point one
+	// Gateway's reservation at another's (server.md, Gateway healer).
+	for _, d := range []string{dir, s.dir} {
+		if err := s.privateDir(d); err != nil {
+			return nil, err
+		}
+	}
+	return lockFile(filepath.Join(dir, "lock"), s.uid, true, gatewayheal.ErrAnotherHealer)
+}
+
+func (s diskState) privateDir(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0o700 || stat.Uid != s.uid {
-		return nil, errors.New("healer directory must be root-owned mode 0o700")
+		return errors.New("healer directory must be root-owned mode 0o700")
 	}
-	return lockFile(filepath.Join(dir, "lock"), s.uid, true, gatewayheal.ErrAnotherHealer)
+	return nil
 }
 func (s diskState) Load() (gatewayheal.State, error) {
 	var state gatewayheal.State

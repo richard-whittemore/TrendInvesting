@@ -894,9 +894,12 @@ before. `ti-adapter@trad-ira.service` uses `ti-gateway@trad-ira.service`,
 `/var/lib/ti-gateway-trad-ira/login-failures`. The Roth follows the same naming
 if provisioned later. Each healer reads its Gateway's environment file
 (`gateway.env` for Boost, `gateway-<instance>.env` for an IRA). Unknown adapters
-are refused. Reservations (`last-restart.json`) and locks stay within the
-selected healer directory; neither account's trigger reads or writes the other's
-Gateway state or restarts the other Gateway.
+are refused. Reservations (`last-restart.json`) stay within the selected
+healer directory (`/var/lib/ti-gateway-heal` for Boost,
+`/var/lib/ti-gateway-heal/<instance>/` for an IRA); neither account's trigger
+reads or writes the other's reservation or restarts the other Gateway. One
+lock, `/var/lib/ti-gateway-heal/lock`, is shared by every healer, so only one
+recovery runs on the server at a time.
 
 | Case | Healer action / journal row |
 |---|---|
@@ -907,7 +910,7 @@ Gateway state or restarts the other Gateway.
 | Login counter nonempty before restart, or refused-login/retries-stopped/reset-wait evidence | `login-problem`: nothing; leave login recovery to the existing handling |
 | Gateway shows LOGGED_OUT, is inactive, or lacks current login evidence | `logged-out`: nothing |
 | Owner resets the adapter's failed state, or its invocation changes | `owner-stopped`: nothing; recovery requires the same invocation still in `failed` state at every re-check |
-| Another healer holds the selected Gateway's lock | `another-healer`: wait for the lock within the same ten-minute recovery deadline |
+| Another healer, for either Gateway, holds the shared lock | `another-healer`: wait for the lock within the same ten-minute recovery deadline |
 | Evidence cannot be read or validated, including the restart ledger | `evidence-error`: stop without another action; fix the named evidence fault |
 | Exact remedy absent, or incident-loss evidence missing or unusable | `no-remedy`: nothing; the invocation cannot establish this recovery incident |
 | Any other adapter exit | `other-exit`: nothing |
@@ -952,14 +955,14 @@ engine. Units and their fixed pending paths must remain as provisioned.
 
 The joint reservation is `/var/lib/ti-gateway-heal/last-restart.json`; an
 instance uses `/var/lib/ti-gateway-heal/<i>/last-restart.json`. Both are
-root-owned mode 0600 in root-owned 0700 directories under root-owned `/var/lib`. A per-Gateway lock serializes healer instances;
+root-owned mode 0600 in root-owned 0700 directories under root-owned `/var/lib`. The one shared lock serializes every healer, whichever Gateway it restarts;
 the file and its directory are synced before the restart. After systemctl returns,
 on success or failure, the healer saves the later of the reservation and completion
 times as `LastRestart`; the two-hour limit counts from that time. A command failure or
 a crash consumes the allowance rather than risking a duplicate. Never delete
 this state to force a retry. Each healer starts only its own adapter.
 Contending healers wait for the
-Gateway lock within the same ten-minute deadline used for recovery, after any
+shared lock within the same ten-minute deadline used for recovery, after any
 maintenance-window wait. Once serialized, a Gateway invocation newer than this
 adapter's loss, active and logged in, permits an `already-restarted` adapter start
 without consuming or bypassing the two-hour limit on restarts. Every start

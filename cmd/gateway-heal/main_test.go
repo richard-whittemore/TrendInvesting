@@ -78,6 +78,25 @@ func TestRecoveryIsSerializedAcrossGateways(t *testing.T) {
 	release()
 }
 
+// TestALinkedStateDirectoryIsRefused keeps each Gateway's reservation its own
+// (server.md, Gateway healer): with the lock shared, the state directory is
+// still checked, so a link from the IRA's state to the joint's is refused.
+func TestALinkedStateDirectoryIsRefused(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(root, "trad-ira")
+	if err := os.Symlink(root, linked); err != nil {
+		t.Fatal(err)
+	}
+	store := diskState{dir: linked, lockDir: root, uid: uint32(os.Getuid())}
+	if unlock, err := store.Lock(); err == nil {
+		unlock()
+		t.Fatal("a linked state directory was accepted")
+	}
+}
+
 func TestStateIsDurablePrivateAndSerialized(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
