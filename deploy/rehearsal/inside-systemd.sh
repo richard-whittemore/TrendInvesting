@@ -71,7 +71,9 @@ for f in ibkr-login-joint.env accounts/boost.env accounts/trad-ira.env accounts/
 done
 # Synthetic login isolation fixtures (ADR 0028; docs/runbooks/gateway-login.md).
 for selection in joint trad-ira live; do
-  printf 'TWS_USERID=synthetic-%s\nTWS_PASSWORD=synthetic\nTWS_TRADING_MODE=paper\nTWS_READONLY_API=yes\n' "$selection" >"/etc/trend-investing/ibkr-login-$selection.env"
+  mode=paper
+  test "$selection" != live || mode=live
+  printf 'TWS_USERID=synthetic-%s\nTWS_PASSWORD=synthetic\nTWS_TRADING_MODE=%s\nTWS_READONLY_API=yes\n' "$selection" "$mode" >"/etc/trend-investing/ibkr-login-$selection.env"
   chmod 0600 "/etc/trend-investing/ibkr-login-$selection.env"
 done
 with_pass ti-secrets migrate >/dev/null || fail "ti-secrets migrate failed"
