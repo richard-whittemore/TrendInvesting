@@ -40,7 +40,7 @@ func run(unit string) error {
 	if err != nil {
 		return err
 	}
-	store := diskState{dir: paths.state, uid: 0}
+	store := diskState{dir: paths.state, lockDir: "/var/lib/ti-gateway-heal", uid: 0}
 	runner := &commandRunner{now: clockForRun.Now, execute: executeCommand}
 	ctl := systemd{run: runner.run, setDeadline: func(at time.Time) { runner.deadline = at }}
 	log := func(s string) error { _, err := fmt.Fprintln(os.Stdout, s); return err }

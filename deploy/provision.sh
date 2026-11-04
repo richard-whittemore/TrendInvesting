@@ -715,12 +715,15 @@ step_services() {
   # Preserve the owner's joint login choice; stale selectors must be resolved
   # before installation (docs/manual/server.md, The Traditional IRA's Gateway).
   if test -e "$etc/gateway-login"; then
-    local selection
-    selection=$(cat "$etc/gateway-login") || die "cannot read Gateway selector; run sudo ti-gateway-login joint"
-    case "$selection" in
-      joint|live) ;;
-      *) die "unsupported Gateway selector; run sudo ti-gateway-login joint before provisioning services" ;;
-    esac
+    # The exact bytes the staging script accepts: joint or live, with at most
+    # one final newline (docs/runbooks/gateway-login.md).
+    local accepted=0 word
+    for word in joint live; do
+      if cmp -s "$etc/gateway-login" <(printf '%s' "$word") || cmp -s "$etc/gateway-login" <(printf '%s\n' "$word"); then
+        accepted=1
+      fi
+    done
+    test "$accepted" = 1 || die "unsupported Gateway selector; run sudo ti-gateway-login joint before provisioning services"
   fi
   # Complete migration before installing Gateway files (ADR 0028;
   # docs/runbooks/gateway-login.md). A refusal preserves the installed service.
@@ -747,10 +750,14 @@ step_services() {
   if ! mac_mini; then
     install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal/trad-ira
     local directory
-    for directory in /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira/Jts; do
+    for directory in /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira; do
       test ! -L "$directory" || die "refusing symlink instance directory: $directory"
       install -d -o ti-gateway -g ti-gateway -m 0700 "$directory"
     done
+    # Below the service-owned home, only the service's own user writes, so no
+    # link it plants can redirect a root operation (server.md, "The
+    # Traditional IRA's Gateway").
+    runuser -u ti-gateway -- install -d -m 0700 /var/lib/ti-gateway-trad-ira/Jts
     install -m 0644 /dev/stdin "$etc/gateway-trad-ira.env" <<CONF
 GATEWAY_MAJOR=${GATEWAY_MAJOR}
 TI_GATEWAY_RESTART_TIME=11:55 PM

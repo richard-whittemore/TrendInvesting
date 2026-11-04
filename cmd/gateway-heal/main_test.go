@@ -44,6 +44,40 @@ func TestSystemctlAndJournalAreInvocationScoped(t *testing.T) {
 		t.Fatal("empty invocation accepted")
 	}
 }
+
+// TestRecoveryIsSerializedAcrossGateways holds every healer to one recovery
+// lock, whichever Gateway's state it keeps (server.md, Gateway healer): a
+// trad-ira recovery that holds every relay's lock must keep Boost's healer
+// from starting its adapter meanwhile.
+func TestRecoveryIsSerializedAcrossGateways(t *testing.T) {
+	root := t.TempDir()
+	instance := filepath.Join(root, "trad-ira")
+	for _, dir := range []string{root, instance} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uid := uint32(os.Getuid())
+	ira := diskState{dir: instance, lockDir: root, uid: uid}
+	boost := diskState{dir: root, lockDir: root, uid: uid}
+	unlock, err := ira.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := boost.Lock(); err == nil || !strings.Contains(err.Error(), "another healer") {
+		t.Fatalf("Boost's healer ran during the IRA's recovery: %v", err)
+	}
+	unlock()
+	release, err := boost.Lock()
+	if err != nil {
+		t.Fatalf("Boost's healer could not run after the IRA's recovery ended: %v", err)
+	}
+	release()
+}
+
 func TestStateIsDurablePrivateAndSerialized(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {

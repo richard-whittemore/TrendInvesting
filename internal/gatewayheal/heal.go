@@ -74,7 +74,8 @@ func (h healer) say(row, step string) error {
 
 // Run reserves a restart durably before issuing it and never clears that
 // reservation, including after a failed command (server.md, Gateway healer).
-// Store.Lock serializes recovery across accounts, including adapter starts.
+// Store.Lock serializes recovery across accounts and Gateways, including
+// adapter starts: every healer takes the one server-wide lock.
 func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, ctl Systemctl, guard Guard, log func(string) error) error {
 	h := healer{log: log}
 	if !AllowedAdapter(unit) {

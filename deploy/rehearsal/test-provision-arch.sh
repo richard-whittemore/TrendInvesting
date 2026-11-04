@@ -74,7 +74,12 @@ scenario() {
     # The TWS API step ends at its first unpacking command, once the pin it
     # fetched is recorded.
     python3() { record python3 "$@"; return 1; }
-    runuser() { record runuser "$@"; return 1; }
+    runuser() {
+      record runuser "$@"
+      # The IRA Gateway's settings folder, made as its own user, succeeds.
+      case "$*" in '-u ti-gateway -- install -d -m 0700 '*) return 0 ;; esac
+      return 1
+    }
     # The service users are test-target.sh's subject, not this test's.
     ensure_user() { record ensure_user "$@"; }
     ensure_operator_user() { record ensure_operator_user "$@"; }
@@ -227,7 +232,8 @@ PYCODE
 # Installation leaves the owner's new Gateway disabled (server.md,
 # "The Traditional IRA's Gateway"); Boost retains its existing enable policy.
 FAKE_LIVE=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "instance services failed"
-called 'install -d -o ti-gateway -g ti-gateway -m 0700 /var/lib/ti-gateway-trad-ira/Jts' || fail "instance settings directory not prepared"
+called 'runuser -u ti-gateway -- install -d -m 0700 /var/lib/ti-gateway-trad-ira/Jts' || fail "instance settings directory not prepared as its own user"
+if called 'install -d -o ti-gateway -g ti-gateway -m 0700 /var/lib/ti-gateway-trad-ira/Jts'; then fail "root created the settings folder under the service-owned home"; fi
 called "$work/deploy/systemd/ti-gateway@.service" || fail "instance template not installed"
 called "$work/etc/gateway-trad-ira.env" || fail "instance environment not installed"
 called '/var/lib/ti-gateway-heal/trad-ira' || fail "instance healer state not prepared"
@@ -244,6 +250,15 @@ for selection in trad-ira roth-ira unknown ''; do
   if called 'install '; then fail "stale selector installed files"; fi
   test "$(cat "$work/etc/gateway-login")" = "$selection" || fail "selector was rewritten"
 done
+# The staging script removes at most one final newline, so provisioning refuses
+# the same bytes it would (docs/runbooks/gateway-login.md).
+for raw in 'joint\n\n' 'live\n\n' ' joint\n' 'joint \n'; do
+  printf "$raw" >"$work/etc/gateway-login"
+  if FAKE_DIST=$work/amd64 scenario "" x86_64 services; then fail "services accepted selector bytes the staging script refuses"; fi
+  if called 'install '; then fail "malformed selector installed files"; fi
+done
+printf 'joint' >"$work/etc/gateway-login"
+FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "services refused joint with no final newline"
 for selection in joint live; do
   printf '%s\n' "$selection" >"$work/etc/gateway-login"
   FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "services refused $selection selector"

@@ -135,13 +135,22 @@ func regularRead(path string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, 1024*1024+1))
 }
 
+// diskState keeps one Gateway's recovery state in dir. Its lock lives in
+// lockDir, shared by every Gateway's healer, so one recovery runs at a time on
+// the server, adapter starts included (server.md, Gateway healer); an empty
+// lockDir means dir.
 type diskState struct {
-	dir string
-	uid uint32
+	dir     string
+	lockDir string
+	uid     uint32
 }
 
 func (s diskState) Lock() (func(), error) {
-	info, err := os.Lstat(s.dir)
+	dir := s.lockDir
+	if dir == "" {
+		dir = s.dir
+	}
+	info, err := os.Lstat(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +158,7 @@ func (s diskState) Lock() (func(), error) {
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0o700 || stat.Uid != s.uid {
 		return nil, errors.New("healer directory must be root-owned mode 0o700")
 	}
-	return lockFile(filepath.Join(s.dir, "lock"), s.uid, true, gatewayheal.ErrAnotherHealer)
+	return lockFile(filepath.Join(dir, "lock"), s.uid, true, gatewayheal.ErrAnotherHealer)
 }
 func (s diskState) Load() (gatewayheal.State, error) {
 	var state gatewayheal.State
