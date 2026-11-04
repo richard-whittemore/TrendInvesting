@@ -913,9 +913,14 @@ developer.
    the token and cash query must both be there; the reader never borrows a
    missing value from secrets.env. The trades query may be omitted; if present,
    its line must be filled in. Duplicate lines, empty values, quotes and spaces
-   are refused. With no Flex lines in the account file, the reader uses
-   secrets.env as before. Each reading's log says **account file** or
-   **secrets file**, never the values.
+   are refused, and so is any line naming `TI_IBKR_FLEX` that is not exactly
+   one of the three keys (an indent, an `export` prefix, a typo). With no Flex
+   lines in the account file, Boost's reader uses secrets.env as before; an
+   IRA's reader refuses instead, because secrets.env's token belongs to Boost's
+   login. Each reading's log says **account file** or **secrets file**, never
+   the values, and a rejected token's status names the file to fix. The IRA's
+   adapter is handed the same account file (systemd `LoadCredential`) and
+   reads only its account line; it never uses the Flex lines.
 4. For the morning delivery's executions proof, a second query:
    **Performance & Reports → Flex Queries → Trade Confirmation Flex Query →
    +**. Give it a name, tick **Trade Confirmations** and, inside it, select
