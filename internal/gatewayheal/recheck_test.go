@@ -176,7 +176,7 @@ func TestGatewayAlreadyRestartedRecoversOnlyOwnAdapter(t *testing.T) {
 	for _, unit := range AdapterUnits {
 		r := allFailedRig()
 		r.state = State{LastRestart: r.at.Add(-time.Minute), Incident: "failed-run"}
-		r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.loss.Add(time.Second)}
+		r.statuses[gatewayForAdapter(unit)] = Status{Active: "active", Invocation: "new-login", Started: r.loss.Add(time.Second)}
 		prior := r.state
 		if err := Run(unit, r, r, r, r, r, r, r.Log); err != nil {
 			t.Fatal(err)

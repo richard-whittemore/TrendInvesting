@@ -152,6 +152,23 @@ if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" != 1; then
 fi
 pass "gateway, IBC and tailscale installed from checksummed downloads"
 
+# The second Gateway remains installed but disabled (server.md,
+# "The Traditional IRA's Gateway"). Only installed application bytes are copied.
+test -f /etc/systemd/system/ti-gateway@.service || fail "instance Gateway template missing"
+test -f /etc/trend-investing/gateway-trad-ira.env || fail "instance Gateway environment missing"
+grep -qx 'TI_GATEWAY_API_PORT=4003' /etc/trend-investing/gateway-trad-ira.env || fail "instance API port differs"
+for directory in /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira; do
+  test "$(stat -c %U:%G "$directory")" = ti-gateway:ti-gateway || fail "instance directory ownership differs"
+done
+test "$(stat -c %U:%a /var/lib/ti-gateway-heal/trad-ira)" = root:700 || fail "instance healer state is not root-only"
+test ! -e /etc/systemd/system/multi-user.target.wants/ti-gateway@trad-ira.service || fail "instance Gateway was enabled"
+if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" != 1; then
+  test -x /var/lib/ti-gateway-trad-ira/Jts/ibgateway/1050/ibgateway || fail "instance application missing"
+  grep -qx -- '-Xmx512m' /var/lib/ti-gateway-trad-ira/Jts/ibgateway/1050/ibgateway.vmoptions || fail "instance heap cap differs"
+  test ! /var/lib/ti-gateway-trad-ira/Jts/ibgateway/1050/ibgateway -ef /var/lib/ti-gateway/Jts/ibgateway/1050/ibgateway || fail "instance application shares its inode"
+fi
+pass "instance Gateway installed disabled, with separate directories, API port and capped heap"
+
 # A corrupt cached download is discarded and fetched again; a download whose
 # checksum differs from the pin is refused.
 cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
@@ -564,7 +581,7 @@ test -x /opt/trend-investing/adapter-venv/bin/python3 || install -m 0755 /dev/nu
 cd /etc/systemd/system
 verify_log=$(mktemp)
 verify_status=0
-systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer ti-data@trad-ira.service ti-data@trad-ira.timer ti-data@roth-ira.service ti-data@roth-ira.timer \
+systemd-analyze verify ti-gateway.service ti-gateway@trad-ira.service ti-data.service ti-data.timer ti-data@trad-ira.service ti-data@trad-ira.timer ti-data@roth-ira.service ti-data@roth-ira.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
   ti-reporter@boost.service ti-reporter@boost.timer \
   ti-unit-failed@ti-engine@boost.service.service ti-unit-failed@ti-adapter-boost.service.service ti-unit-failed@ti-reporter@boost.service.service \

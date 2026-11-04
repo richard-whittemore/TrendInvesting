@@ -81,7 +81,7 @@ test -z "$(on_disk "$marker")" || fail "the migrated secret is on disk: $(on_dis
 # Every unit that loads a secret, installed as provision.sh installs it, with
 # what its Condition= lines want in place (stand-ins), so that only the
 # locked secrets stand in its way.
-for u in ti-gateway.service ti-engine@.service ti-adapter-boost.service ti-adapter@.service ti-data.service ti-data@.service ti-reporter@.service ti-flex@.service ti-unit-failed@.service; do
+for u in ti-gateway.service ti-gateway@.service ti-engine@.service ti-adapter-boost.service ti-adapter@.service ti-data.service ti-data@.service ti-reporter@.service ti-flex@.service ti-unit-failed@.service; do
   cp "/deploy/systemd/$u" /etc/systemd/system/
 done
 install -D -m 0755 /dist/ti-engine /opt/trend-investing/bin/ti-engine
@@ -111,6 +111,7 @@ refused() {
   test "$(systemctl show -p ActiveState --value "$1")" != failed || fail "$1 is failed, not refused"
 }
 refused ti-gateway.service secrets.env
+refused ti-gateway@trad-ira.service secrets.env
 refused ti-engine@boost.service secrets.env
 refused ti-adapter-boost.service accounts/boost.env
 # A template's unit file names its instance's file by %i, as systemctl cat shows it.
@@ -218,6 +219,31 @@ assert json.loads(Path("/run/ti-gateway/probe.json").read_text()) == {
 PYCODE
 test "$(stat -c %U:%G:%a /run/ti-gateway/login.env)" = ti-gateway:ti-gateway:600 || fail "staged login owner or mode differs"
 cmp -s /run/ti-gateway/login.env "$unlocked/ibkr-login-trad-ira.env" || fail "staged login differs from the selected source"
+# A second real unit stages its direct login while the joint unit stays active
+# (server.md, "The Traditional IRA's Gateway"). The selector is deliberately joint.
+printf 'joint\n' >/etc/trend-investing/gateway-login
+cp /etc/trend-investing/gateway.env /etc/trend-investing/gateway-trad-ira.env
+printf 'TI_GATEWAY_API_PORT=4003\n' >>/etc/trend-investing/gateway-trad-ira.env
+install -d /etc/systemd/system/ti-gateway@trad-ira.service.d
+cp /etc/systemd/system/ti-gateway.service.d/probe.conf /etc/systemd/system/ti-gateway@trad-ira.service.d/probe.conf
+systemctl daemon-reload
+systemctl start ti-gateway@trad-ira.service || fail "instance Gateway staging failed"
+for _ in $(seq 50); do test -e /run/ti-gateway-trad-ira/probe.json && break; sleep 0.1; done
+python3 -I - <<'PY_INSTANCE' || fail "instance Gateway isolation failed"
+import json
+from pathlib import Path
+assert json.loads(Path("/run/ti-gateway-trad-ira/probe.json").read_text()) == {
+    "staged_readable": True, "selected_login": True,
+    "secrets_listable": False, "secrets_readable": False,
+}
+PY_INSTANCE
+systemctl is-active --quiet ti-gateway.service || fail "instance interrupted joint Gateway"
+test "$(stat -c %U:%G:%a /run/ti-gateway-trad-ira/login.env)" = ti-gateway:ti-gateway:600 || fail "instance login owner/mode"
+cmp -s /run/ti-gateway-trad-ira/login.env "$unlocked/ibkr-login-trad-ira.env" || fail "instance staged wrong login"
+systemctl stop ti-gateway@trad-ira.service
+test ! -e /run/ti-gateway-trad-ira/login.env || fail "instance left staged login"
+test -e /run/ti-gateway/login.env || fail "instance stop removed joint login"
+rm /etc/systemd/system/ti-gateway@trad-ira.service.d/probe.conf
 systemctl stop ti-gateway.service
 test ! -e /run/ti-gateway/login.env || fail "Gateway stop left the staged login"
 rm /etc/systemd/system/ti-gateway.service.d/probe.conf

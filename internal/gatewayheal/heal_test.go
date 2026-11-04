@@ -104,7 +104,7 @@ func (r *rig) Act(action, unit string) error {
 		if !r.locked {
 			panic("restart without order exclusion")
 		}
-		r.statuses[GatewayUnit] = Status{Active: "active", Invocation: "new-login", Started: r.at}
+		r.statuses[unit] = Status{Active: "active", Invocation: "new-login", Started: r.at}
 		if !r.login {
 			r.journals["new-login"] = nil
 		}
@@ -499,5 +499,56 @@ func TestGatewayHoldsGlobalLockUntilMutationReturns(t *testing.T) {
 	assertRun(t, r, "eligible", "restart "+GatewayUnit, "start "+AdapterUnits[0])
 	if r.globalLocked {
 		t.Fatal("global lock leaked")
+	}
+}
+
+func TestOwnGatewayCaseTable(t *testing.T) {
+	for _, unit := range AdapterUnits[:2] {
+		for _, window := range []bool{false, true} {
+			for _, bound := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/window=%v/bound=%v", unit, window, bound), func(t *testing.T) {
+					r := fixture()
+					gateway := GatewayUnit
+					other := "ti-gateway@trad-ira.service"
+					if unit != AdapterUnits[0] {
+						gateway, other = other, gateway
+					}
+					r.statuses[unit] = r.statuses[AdapterUnits[0]]
+					r.statuses[gateway] = Status{Active: "active", Invocation: "old-login"}
+					r.onStatus = func(got string) {
+						if got == other {
+							t.Fatalf("accessed other Gateway %s", got)
+						}
+					}
+					r.onAct = func(action, got string) {
+						if action == "restart" {
+							r.statuses[got] = Status{Active: "active", Invocation: "new-login", Started: r.at}
+						}
+					}
+					if window {
+						r.input.Schedule = []byte(`{"windows":[{"days":["Mon"],"start":"15:00","end":"16:00","zone":"UTC"}]}`)
+					}
+					if bound {
+						r.input.Counter = []byte("1793631600\n1793631601\n1793631602\n")
+					}
+					if err := Run(unit, r, r, r, r, r, r, r.Log); err != nil {
+						t.Fatal(err)
+					}
+					if bound {
+						if len(r.calls) != 0 || r.state != (State{}) {
+							t.Fatalf("bound mutated: %v %+v", r.calls, r.state)
+						}
+					} else {
+						want := []string{"restart " + gateway, "start " + unit}
+						if !reflect.DeepEqual(r.calls, want) || r.state.Incident != "failed-run" {
+							t.Fatalf("calls=%v state=%+v", r.calls, r.state)
+						}
+					}
+					if window && (len(r.waits) == 0 || r.waits[0] != time.Hour) {
+						t.Fatalf("waits=%v", r.waits)
+					}
+				})
+			}
+		}
 	}
 }

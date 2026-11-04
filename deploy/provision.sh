@@ -699,6 +699,34 @@ set_gateway_heap() {
   log "Gateway heap set to 512 MB (-Xmx512m); applies at its next start"
 }
 
+# Copy only the installed application, never Jts settings (server.md,
+# "The Traditional IRA's Gateway"). Existing instance settings survive upgrades.
+init_gateway_instance() {
+  if test "${rehearsal:-0}" = 1 && test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
+    log "rehearsal: instance application copy skipped with the x86_64 installer"
+    return 0
+  fi
+  local instance_home=$1
+  local source="$gateway_home/Jts/ibgateway/${GATEWAY_MAJOR}"
+  local target="$instance_home/Jts/ibgateway/${GATEWAY_MAJOR}"
+  if ! test -x "$source/ibgateway"; then
+    # The application arrives with provision.sh gateway; the instance copy
+    # follows at the next services step (server.md, "The Traditional IRA's Gateway").
+    log "no Gateway application yet: the trad-ira Gateway's copy is made at the next services step after provision.sh gateway"
+    return 0
+  fi
+  install -d -o ti-gateway -g ti-gateway -m 0700 "$instance_home/Jts"
+  local marker="$target/.ti-instance-installed-${GATEWAY_SHA256}"
+  if ! test -f "$marker"; then
+    install -d -o ti-gateway -g ti-gateway -m 0700 "$target"
+    cp -a "$source/." "$target/"
+    # Mark completion last, so an interrupted copy is repaired at the next
+    # provisioning without rewriting a complete running application
+    # (server.md, The Traditional IRA's Gateway).
+    install -o ti-gateway -g ti-gateway -m 0644 /dev/null "$marker"
+  fi
+}
+
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
@@ -724,6 +752,18 @@ step_services() {
   # Root-only recovery accounting survives Gateway restarts; never overwrite
   # its state on upgrades (docs/manual/server.md, Gateway healer).
   install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal
+  if ! mac_mini; then
+    install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal/trad-ira
+    install -d -o ti-gateway -g ti-gateway -m 0700 /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira
+    init_gateway_instance /var/lib/ti-gateway-trad-ira
+    (gateway_home=/var/lib/ti-gateway-trad-ira; set_gateway_heap)
+    install -m 0644 /dev/stdin "$etc/gateway-trad-ira.env" <<CONF
+GATEWAY_MAJOR=${GATEWAY_MAJOR}
+TI_GATEWAY_RESTART_TIME=11:45 PM
+TI_GATEWAY_COLD_RESTART=09:00
+TI_GATEWAY_API_PORT=4003
+CONF
+  fi
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   for b in "$here"/libexec/*.sh; do
     case $(basename "$b") in stage-gateway-login.sh|render-ibc-config.sh) continue ;; esac
@@ -971,6 +1011,8 @@ step_firewall() {
   # (render-ibc-config.sh: AcceptIncomingConnectionAction=reject).
   ufw deny in proto tcp to any port 4001 >/dev/null
   ufw deny in proto tcp to any port 4002 >/dev/null
+  ufw deny in proto tcp to any port 4003 >/dev/null
+  ufw deny in proto tcp to any port 4004 >/dev/null
   ufw allow in on tailscale0 >/dev/null
   ufw --force enable >/dev/null
   log "also close port 22 in the Lightsail firewall tab (owner step)"

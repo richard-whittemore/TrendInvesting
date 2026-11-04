@@ -1,9 +1,25 @@
 # Runbook: the gateway will not log in
 
-The IBKR Gateway runs on the server under IBC (`ti-gateway`), and the
-engines' adapter talks to IBKR through it (ADR 0025). Setup and the
+Boost's IBKR Gateway runs on the server under IBC (`ti-gateway`). The
+Traditional IRA uses its own `ti-gateway@trad-ira` on port 4003 (ADR 0025). Setup and the
 reconnect drill are in `lightsail-deployment.md`; this runbook is what to
 do when it will not log in, and what the engines do meanwhile.
+
+## The Traditional IRA's Gateway
+
+The instance stages `/run/trend-investing/secrets/ibkr-login-trad-ira.env`
+directly; `ti-gateway-login` changes only the joint service's selection.
+Start/stop it with `sudo systemctl start ti-gateway@trad-ira.service` or
+`sudo systemctl stop ti-gateway@trad-ira.service`; check
+`sudo journalctl -u ti-gateway@trad-ira.service --since today` and port 4003.
+Its counter and reset-wait state are in
+`/var/lib/ti-gateway-trad-ira/login-failures`; never clear the joint's counter
+to recover this login. Its healer reservation is under
+`/var/lib/ti-gateway-heal/trad-ira/`. See
+[The Traditional IRA's Gateway](../manual/server.md#the-traditional-iras-gateway)
+for installation, adapter port migration and status checks. Reporter Gateway
+checks still cover the joint only. The procedures below describe the joint
+selector; use the instance unit and paths above for Traditional IRA diagnosis.
 
 ## Login files and selection
 

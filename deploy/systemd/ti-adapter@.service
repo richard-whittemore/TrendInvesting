@@ -1,14 +1,14 @@
 [Unit]
 Description=IBKR adapter for account %i, an IRA's momentum engine (sends only in paper, with paper_sending_enabled on)
-# One adapter per account, each with its own client ID on the one IB Gateway
+# One adapter per account, each with its own client ID and IB Gateway
 # (ADR 0026 point 8; docs/live-trading/lessons-2026-10.md L6): ti-adapter@trad-ira
 # (client ID 12), and ti-adapter@roth-ira once that account has a
 # configuration. Boost's adapter keeps its own unit, ti-adapter-boost.service,
 # which this template leaves unchanged; the template refuses the boost
 # instance (ExecStartPre below), so the Boost account can never get a second
 # adapter.
-After=ti-gateway.service ti-engine@%i.service
-Wants=ti-gateway.service
+After=ti-gateway@%i.service ti-engine@%i.service
+Wants=ti-gateway@%i.service
 # When this unit fails, ti-unit-failed@%n sends one urgent page through the
 # reporter's channels naming it, the failed run's last journal line and the
 # manual row to read (ADR 0019, "Alerting"; docs/manual/server.md, "A failed

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -79,7 +80,7 @@ func TestStateIsDurablePrivateAndSerialized(t *testing.T) {
 		t.Fatal("broken state accepted")
 	}
 }
-func TestRelayLocksExcludeAllAccountsAndRelease(t *testing.T) {
+func TestRelayLocksExcludeOwnAccountAndRelease(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"boost", "trad-ira", "roth-ira"} {
 		dir := filepath.Join(root, name)
@@ -90,7 +91,7 @@ func TestRelayLocksExcludeAllAccountsAndRelease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	guard := relayGuard{root: root}
+	guard := relayGuard{root: root, account: "trad-ira"}
 	f, err := os.OpenFile(filepath.Join(root, "trad-ira", "pending.json.lock"), os.O_RDWR, 0o600)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +195,7 @@ func TestAbandonedHandoversStillPreventRestart(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "boost", "pending.json.handover"), []byte(`{"synthetic-order":"handing-over"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if release, err := (relayGuard{root: root}).Acquire(); !errors.Is(err, gatewayheal.ErrOrderBusy) {
+	if release, err := (relayGuard{root: root, account: "boost"}).Acquire(); !errors.Is(err, gatewayheal.ErrOrderBusy) {
 		if release != nil {
 			release()
 		}
@@ -227,7 +228,7 @@ func TestMissingRelayLockIsNeverCreated(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	release, err := (relayGuard{root: root}).Acquire()
+	release, err := (relayGuard{root: root, account: "boost"}).Acquire()
 	if release != nil {
 		release()
 	}
@@ -459,5 +460,185 @@ func TestExternalCommandFailureIncludesBoundedStderr(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Synthetic files exercise the recovery paths in server.md, Gateway healer.
+// Only the selected Gateway may receive a read, restart or durable reservation.
+func TestHealerPathsAndOwnRelay(t *testing.T) {
+	for _, tc := range []struct{ unit, name, home, state, env, gateway string }{
+		{"ti-adapter-boost.service", "boost", "/var/lib/ti-gateway", "/var/lib/ti-gateway-heal", "/etc/trend-investing/gateway.env", "ti-gateway.service"},
+		{"ti-adapter@trad-ira.service", "trad-ira", "/var/lib/ti-gateway-trad-ira", "/var/lib/ti-gateway-heal/trad-ira", "/etc/trend-investing/gateway-trad-ira.env", "ti-gateway@trad-ira.service"},
+	} {
+		for _, window := range []bool{false, true} {
+			for _, bound := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/window=%v/bound=%v", tc.name, window, bound), func(t *testing.T) {
+					paths, err := pathsForAdapter(tc.unit)
+					if err != nil || paths.state != tc.state || paths.counter != tc.home+"/login-failures" || paths.env != tc.env || paths.account != tc.name {
+						t.Fatalf("paths=%+v err=%v", paths, err)
+					}
+					root := t.TempDir()
+					path := func(absolute string) string { return filepath.Join(root, strings.TrimPrefix(absolute, "/")) }
+					put := func(name, content string) {
+						t.Helper()
+						if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					counter := ""
+					if bound {
+						counter = "1793631600\n1793631601\n1793631602\n"
+					}
+					put(path(paths.counter), counter)
+					put(path(paths.env), "TI_GATEWAY_COLD_RESTART=09:00\n")
+					schedule := path("/etc/trend-investing/ibkr-maintenance.json")
+					raw := `{"windows":[]}`
+					if window {
+						raw = `{"windows":[{"days":["Mon"],"start":"15:00","end":"16:00","zone":"UTC"}]}`
+					}
+					put(schedule, raw)
+					// Peer state is deliberately malformed: reading it must fail the run.
+					peerCounter := "/var/lib/ti-gateway-trad-ira/login-failures"
+					peerState := "/var/lib/ti-gateway-heal/trad-ira/last-restart.json"
+					if tc.name != "boost" {
+						peerCounter = "/var/lib/ti-gateway/login-failures"
+						peerState = "/var/lib/ti-gateway-heal/last-restart.json"
+					}
+					put(path(peerCounter), "peer counter sentinel")
+					put(path(peerState), "peer reservation sentinel")
+					peerInfo, err := os.Stat(path(peerState))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.MkdirAll(path(paths.state), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					put(filepath.Join(root, "adapters", tc.name, "pending.json.lock"), "")
+					scenario := &isolatedRecovery{t: t, unit: tc.unit, gateway: tc.gateway, at: time.Date(2026, 11, 2, 15, 0, 0, 0, time.UTC)}
+					scenario.failed = gatewayheal.Status{Active: "failed", Code: 1, Exit: 3, Invocation: "failed-run", Finished: scenario.at.Add(-time.Minute)}
+					scenario.current = gatewayheal.Status{Active: "active", Invocation: "old-login"}
+					scenario.loss = scenario.at.Add(-10 * time.Minute)
+					reader := files{schedule: schedule, counter: path(paths.counter), gatewayEnv: path(paths.env)}
+					store := diskState{dir: path(paths.state), uid: uint32(os.Getuid())}
+					guard := relayGuard{root: filepath.Join(root, "adapters"), account: paths.account}
+					if err := gatewayheal.Run(tc.unit, scenario, reader, store, scenario, scenario, guard, func(string) error { return nil }); err != nil {
+						t.Fatal(err)
+					}
+					want := []string{"restart " + tc.gateway, "start " + tc.unit}
+					if bound {
+						want = nil
+					}
+					if !reflect.DeepEqual(scenario.calls, want) {
+						t.Fatalf("calls=%v want=%v", scenario.calls, want)
+					}
+					entries, err := os.ReadDir(store.dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var names []string
+					for _, entry := range entries {
+						if entry.IsDir() {
+							continue
+						}
+						names = append(names, entry.Name())
+					}
+					expected := []string{"last-restart.json", "lock"}
+					if bound {
+						expected = []string{"lock"}
+					}
+					if !reflect.DeepEqual(names, expected) {
+						t.Fatalf("state files=%v want=%v", names, expected)
+					}
+					for name, wantRaw := range map[string]string{paths.counter: counter, peerCounter: "peer counter sentinel", peerState: "peer reservation sentinel"} {
+						got, err := os.ReadFile(path(name))
+						if err != nil || string(got) != wantRaw {
+							t.Fatalf("state changed: %s", name)
+						}
+					}
+					after, err := os.Stat(path(peerState))
+					if err != nil || !after.ModTime().Equal(peerInfo.ModTime()) {
+						t.Fatal("peer state rewritten")
+					}
+					if window && (len(scenario.waits) != 1 || scenario.waits[0] != time.Hour) {
+						t.Fatalf("waits=%v", scenario.waits)
+					}
+				})
+			}
+		}
+	}
+	for _, unit := range []string{"", "ti-adapter@../boost.service", "ti-adapter@unknown.service", "ti-gateway.service"} {
+		if _, err := pathsForAdapter(unit); err == nil {
+			t.Fatalf("accepted %q", unit)
+		}
+	}
+}
+
+type isolatedRecovery struct {
+	t               *testing.T
+	unit, gateway   string
+	at, loss        time.Time
+	current, failed gatewayheal.Status
+	calls           []string
+	waits           []time.Duration
+}
+
+func (r *isolatedRecovery) Now() time.Time { return r.at }
+func (r *isolatedRecovery) Wait(d time.Duration) error {
+	r.waits = append(r.waits, d)
+	r.at = r.at.Add(d)
+	return nil
+}
+func (r *isolatedRecovery) Status(unit string) (gatewayheal.Status, error) {
+	if unit == r.unit {
+		return r.failed, nil
+	}
+	if unit != r.gateway {
+		r.t.Fatalf("queried other Gateway %s", unit)
+	}
+	return r.current, nil
+}
+func (r *isolatedRecovery) Act(action, unit string) error {
+	if (action == "restart" && unit != r.gateway) || (action == "start" && unit != r.unit) {
+		r.t.Fatalf("cross-account action %s %s", action, unit)
+	}
+	r.calls = append(r.calls, action+" "+unit)
+	if action == "restart" {
+		r.current = gatewayheal.Status{Active: "active", Invocation: "new-login", Started: r.at}
+	}
+	return nil
+}
+func (r *isolatedRecovery) Lines(unit, _ string) ([]string, error) {
+	if unit == r.unit {
+		return []string{gatewayheal.Remedy}, nil
+	}
+	if unit != r.gateway {
+		r.t.Fatalf("read other Gateway journal %s", unit)
+	}
+	return []string{"IBC: Login has completed"}, nil
+}
+func (r *isolatedRecovery) Loss(unit, _ string) (time.Time, error) {
+	if unit != r.unit {
+		r.t.Fatalf("read other adapter %s", unit)
+	}
+	return r.loss, nil
+}
+
+func TestRelayGuardRefusesMissingAccount(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "boost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "boost", "pending.json.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, err := (relayGuard{root: root}).Acquire()
+	if release != nil {
+		release()
+	}
+	if err == nil {
+		t.Fatal("missing account silently acquired Boost's relay lock")
 	}
 }

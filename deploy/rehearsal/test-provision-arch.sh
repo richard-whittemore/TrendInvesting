@@ -82,6 +82,7 @@ scenario() {
     if test "${FAKE_NO_CLOCK:-0}" = 1; then step_clock() { record step_clock; }; fi
     # Memory behavior is exercised with guarded files in test-target.sh.
     set_gateway_heap() { record set_gateway_heap; }
+    init_gateway_instance() { record init_gateway_instance "$@"; }
     etc=$work/etc
     unit_dir=$work/units
     if test "${FAKE_LIVE:-0}" = 1; then rehearsal=0; fi
@@ -223,6 +224,17 @@ assert "render-ibc-config.sh" in calls[staging]
 assert unit == staging + 1
 assert not any(call.startswith("systemctl restart ti-gateway") for call in calls)
 PYCODE
+
+# Installation leaves the owner's new Gateway disabled (server.md,
+# "The Traditional IRA's Gateway"); Boost retains its existing enable policy.
+FAKE_LIVE=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "instance services failed"
+called 'init_gateway_instance /var/lib/ti-gateway-trad-ira' || fail "instance application not prepared"
+called "$work/deploy/systemd/ti-gateway@.service" || fail "instance template not installed"
+called "$work/etc/gateway-trad-ira.env" || fail "instance environment not installed"
+called '/var/lib/ti-gateway-heal/trad-ira' || fail "instance healer state not prepared"
+if grep -E 'systemctl (enable|start).*ti-gateway@' "$work/calls"; then
+  fail "provisioning enabled or started an instance Gateway"
+fi
 
 # --- services refuses a Go program built for another architecture.
 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "Lightsail services refused an x86_64 dist/: $(cat "$work/out")"

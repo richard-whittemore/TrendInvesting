@@ -169,7 +169,7 @@ func configFromEnv(getenv func(string) string) (c config, warn []string) {
 	if ibc := getenv("TI_GATEWAY_IBC"); ibc != "" {
 		c.Command = []string{ibc}
 	} else if major, runtime := getenv("GATEWAY_MAJOR"), getenv("RUNTIME_DIRECTORY"); major != "" && runtime != "" {
-		home := "/var/lib/ti-gateway"
+		home := pick("TI_GATEWAY_HOME", "/var/lib/ti-gateway")
 		c.Command = []string{"xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
 			"/opt/ibc/scripts/ibcstart.sh", major, "--gateway",
 			"--tws-path=" + home + "/Jts", "--tws-settings-path=" + home + "/Jts",

@@ -728,5 +728,120 @@ class OptionalLoginFirstEditTests(test_roth.IRAFirstEditTests):
                 self.assertEqual(self.ok(self.decrypt(name)).stdout, first + "TWS_PASSWORD=synthetic-password\n")
 
 
+class GatewayInstanceTests(unittest.TestCase):
+    setUp = GatewayLoginTests.setUp
+    shell = GatewayLoginTests.shell
+    stage = GatewayLoginTests.stage
+    render = GatewayLoginTests.render
+    login = GatewayLoginTests.login
+
+    def test_instance_logins_and_ports_do_not_collide(self):
+        self.template.write_text(self.template.read_text() + "OverrideTwsApiPort=\n")
+        self.selector.write_text("invalid-selector-must-not-be-read")
+        script = (DEPLOY / "libexec/stage-gateway-login.sh").read_text().replace(
+            'pwd.getpwnam("ti-gateway")', f'pwd.getpwnam({pwd.getpwuid(os.getuid()).pw_name!r})')
+        for instance, port in (("trad-ira", "4003"), ("roth-ira", "4004")):
+            self.login(instance)
+            runtime = self.root / instance
+            runtime.mkdir()
+            env = {**os.environ, "TI_GATEWAY_INSTANCE": instance,
+                   "TI_GATEWAY_API_PORT": port, "RUNTIME_DIRECTORY": str(runtime),
+                   "TI_GATEWAY_LOGIN_FILE": str(self.selector),
+                   "TI_GATEWAY_SECRETS_DIRECTORY": str(self.cred), "IBC_TEMPLATE": str(self.template)}
+            staged = subprocess.run(["bash", "-c", script], env=env, capture_output=True)
+            self.assertEqual(staged.returncode, 0, "instance staging failed")
+            rendered = subprocess.run(["bash", str(DEPLOY / "libexec/render-ibc-config.sh")],
+                                      env=env, capture_output=True)
+            self.assertEqual(rendered.returncode, 0, "instance render failed")
+            config = (runtime / "config.ini").read_text()
+            self.assertTrue(f"IbLoginId=fixture-{instance}\n" in config)
+            self.assertTrue(f"OverrideTwsApiPort={port}\n" in config)
+        self.assertTrue((self.root / "trad-ira/login.env").exists())
+        self.assertFalse((self.run / "login.env").exists())
+
+    def test_instance_unit_and_provisioning(self):
+        unit = (DEPLOY / "systemd/ti-gateway@.service").read_text()
+        for line in ("EnvironmentFile=/etc/trend-investing/gateway-%i.env",
+                     "Environment=TI_GATEWAY_INSTANCE=%i", "Environment=HOME=/var/lib/ti-gateway-%i",
+                     "RuntimeDirectory=ti-gateway-%i", "StateDirectory=ti-gateway-%i",
+                     "LogsDirectory=ti-gateway-%i", "PrivateTmp=true", "KillMode=control-group"):
+            self.assertIn(line, unit)
+        adapter = (DEPLOY / "systemd/ti-adapter@.service").read_text()
+        self.assertIn("After=ti-gateway@%i.service ti-engine@%i.service", adapter)
+        self.assertIn("Wants=ti-gateway@%i.service", adapter)
+        self.assertIn("Wants=ti-gateway.service", (DEPLOY / "systemd/ti-adapter-boost.service").read_text())
+        provision = (DEPLOY / "provision.sh").read_text()
+        for port in (4003, 4004):
+            self.assertIn(f"ufw deny in proto tcp to any port {port}", provision)
+        self.assertNotRegex(provision, r"systemctl (?:enable|start).*ti-gateway@")
+        self.assertIn('"$etc/gateway-trad-ira.env"', provision)
+        self.assertIn("TI_GATEWAY_API_PORT=4003", provision)
+        self.assertIn("/var/lib/ti-gateway-heal/trad-ira", provision)
+
+    def test_joint_renderer_leaves_port_unchanged(self):
+        self.login()
+        self.template.write_text(self.template.read_text() + "OverrideTwsApiPort=4002\n")
+        self.assertEqual(self.render().returncode, 0)
+        self.assertTrue("OverrideTwsApiPort=4002\n" in (self.run / "config.ini").read_text())
+
+    def test_instance_rejects_unknown_and_port_invalid(self):
+        self.login()
+        for instance in ("boost", "live", "unknown", "../joint"):
+            with mock.patch.dict(os.environ, {"TI_GATEWAY_INSTANCE": instance}):
+                self.assertEqual(self.stage().returncode, 64)
+                self.assertFalse((self.run / "login.env").exists())
+        self.assertEqual(self.stage().returncode, 0)
+        for port in ("0", "65536", "abc"):
+            result = subprocess.run(["bash", str(DEPLOY / "libexec/render-ibc-config.sh")],
+                                    env={**os.environ, "RUNTIME_DIRECTORY": str(self.run),
+                                         "IBC_TEMPLATE": str(self.template), "TI_GATEWAY_API_PORT": port},
+                                    capture_output=True)
+            self.assertEqual(result.returncode, 64)
+
+    def test_instance_install_copies_only_binaries_and_keeps_settings(self):
+        source = (DEPLOY / "provision.sh").read_text()
+        self.assertIn("init_gateway_instance() {", source)
+        function = source.split("init_gateway_instance() {", 1)[1].split("\n}\n", 1)[0]
+        home = self.root / "joint"
+        install = home / "Jts/ibgateway/1050"
+        install.mkdir(parents=True)
+        (install / "ibgateway").write_text("binary")
+        (install / "ibgateway").chmod(0o755)
+        (home / "Jts/jts.ini").write_text("joint settings")
+        instance = self.root / "instance"
+        # Linux install/runuser ownership is checked in the systemd rehearsal.
+        body = "init_gateway_instance() {" + function + "\n}\n"
+        result = self.shell('set -eu\ninstall() { if test "$1" = -d; then command mkdir -p "${@: -1}"; else : >"${@: -1}"; fi; }\n' + body +
+                            '\ngateway_home=$1; GATEWAY_MAJOR=1050; GATEWAY_SHA256=fixture; init_gateway_instance "$2"',
+                            str(home), str(instance))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((instance / "Jts/ibgateway/1050/ibgateway").read_text(), "binary")
+        self.assertFalse((instance / "Jts/jts.ini").exists())
+        (instance / "Jts/jts.ini").write_text("instance settings")
+        self.assertEqual((home / "Jts/jts.ini").read_text(), "joint settings")
+        # A previous interrupted copy can leave the launcher without its jars.
+        # Reprovisioning must complete the application and retain both settings.
+        (install / "application.jar").write_text("application fixture")
+        (instance / "Jts/ibgateway/1050/.ti-instance-installed-fixture").unlink()
+        result = self.shell('set -eu\ninstall() { if test "$1" = -d; then command mkdir -p "${@: -1}"; else : >"${@: -1}"; fi; }\n' + body +
+                            '\ngateway_home=$1; GATEWAY_MAJOR=1050; GATEWAY_SHA256=fixture; init_gateway_instance "$2"',
+                            str(home), str(instance))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((instance / "Jts/ibgateway/1050/application.jar").exists())
+        self.assertEqual((instance / "Jts/jts.ini").read_text(), "instance settings")
+        self.assertEqual((home / "Jts/jts.ini").read_text(), "joint settings")
+
+    def test_instance_install_rehearsal_skips_unavailable_binary(self):
+        source = (DEPLOY / "provision.sh").read_text()
+        function = source.split("init_gateway_instance() {", 1)[1].split("\n}\n", 1)[0]
+        body = "init_gateway_instance() {" + function + "\n}\n"
+        result = self.shell('set -eu\nlog() { :; }\n' + body +
+                            '\ngateway_home=$1; GATEWAY_MAJOR=1050; GATEWAY_SHA256=fixture; '
+                            'rehearsal=1; TI_REHEARSAL_SKIP_INSTALLER=1; init_gateway_instance "$2"',
+                            str(self.root / "absent"), str(self.root / "instance"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "instance").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

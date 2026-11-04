@@ -1099,3 +1099,22 @@ func TestBlockedRendererStopsOnSignal(t *testing.T) {
 		})
 	}
 }
+
+func TestInstancePathsAndJointCommand(t *testing.T) {
+	for _, home := range []string{"", "/var/lib/ti-gateway-trad-ira", "/var/lib/ti-gateway-roth-ira"} {
+		env := map[string]string{"GATEWAY_MAJOR": "1050", "RUNTIME_DIRECTORY": "/run/ti-gateway", "TI_GATEWAY_HOME": home}
+		if home != "" {
+			env["RUNTIME_DIRECTORY"] = "/run/" + filepath.Base(home)
+			env["TI_GATEWAY_STATE_FILE"] = home + "/login-failures"
+		}
+		c, _ := configFromEnv(func(k string) string { return env[k] })
+		wantHome := home
+		if wantHome == "" {
+			wantHome = "/var/lib/ti-gateway"
+		}
+		want := []string{"xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", "/opt/ibc/scripts/ibcstart.sh", "1050", "--gateway", "--tws-path=" + wantHome + "/Jts", "--tws-settings-path=" + wantHome + "/Jts", "--ibc-path=/opt/ibc", "--ibc-ini=" + env["RUNTIME_DIRECTORY"] + "/config.ini", "--on2fatimeout=restart"}
+		if strings.Join(c.Command, "|") != strings.Join(want, "|") || c.StateFile != wantHome+"/login-failures" {
+			t.Fatalf("home=%q command=%v state=%s", home, c.Command, c.StateFile)
+		}
+	}
+}

@@ -127,8 +127,11 @@ class ConfigurationTests(unittest.TestCase):
         for values in (boost, ira):
             config(**{k: v for k, v in values.items()})
         self.assertEqual((ira["client_id"], ira["mode"], ira["paper_sending_enabled"]), (12, "dry-run", False))
+        # The IRA's paper login has its own Gateway on its own port (server.md,
+        # "The Traditional IRA's Gateway").
+        self.assertEqual((boost["port"], ira["port"]), (4002, 4003))
         self.assertEqual({k for k in set(boost) | set(ira) if boost.get(k) != ira.get(k)},
-                         {"client_id", "account_snapshot_version", "resolve_contracts"})
+                         {"client_id", "port", "account_snapshot_version", "resolve_contracts"})
 
 
 class SnapshotRecordTests(unittest.TestCase):

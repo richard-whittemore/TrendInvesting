@@ -1,0 +1,66 @@
+[Unit]
+Description=IB Gateway under IBC for %i
+Documentation=https://github.com/IbcAlpha/IBC
+After=network-online.target
+Wants=network-online.target
+# Bound pre-start and renderer failures, then page (ADR 0019, Alerting;
+# docs/runbooks/gateway-login.md). ExecStartPre ignores RestartPreventExitStatus.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+OnFailure=ti-unit-failed@%n.service
+# The secrets rest on disk only encrypted; ti-unlock decrypts them after
+# each boot into a root-only tmpfs. A root pre-start stages only the
+# instance login in the runtime directory. Until unlock, systemd refuses
+# to start it ("Assertion failed")
+# (ADR 0028; docs/manual/server.md, "Unlocking the
+# secrets after a boot").
+AssertPathExists=/run/trend-investing/secrets/secrets.env
+
+[Service]
+Type=simple
+User=ti-gateway
+Group=ti-gateway
+Environment=TZ=America/New_York
+EnvironmentFile=/etc/trend-investing/gateway-%i.env
+Environment=TI_GATEWAY_INSTANCE=%i
+Environment=HOME=/var/lib/ti-gateway-%i
+Environment=TI_GATEWAY_HOME=/var/lib/ti-gateway-%i
+Environment=TI_GATEWAY_STATE_FILE=/var/lib/ti-gateway-%i/login-failures
+RuntimeDirectory=ti-gateway-%i
+RuntimeDirectoryMode=0700
+LogsDirectory=ti-gateway-%i
+StateDirectory=ti-gateway-%i
+# The + command runs as root outside the service filesystem sandbox (ADR 0028;
+# docs/runbooks/gateway-login.md). Gateway sees only the staged login.
+ExecStartPre=+/usr/local/libexec/trend-investing/stage-gateway-login.sh
+# Renders IBC's config.ini, then starts the gateway (see the script for why
+# the render is not an ExecStartPre).
+ExecStart=/usr/local/libexec/trend-investing/start-gateway.sh
+# IBC exits non-zero when the weekly second factor times out; start again so
+# the next phone prompt arrives rather than leaving the gateway down.
+Restart=always
+RestartSec=30
+# Except on the renderer's configuration exits: 78 = the login file is not
+# filled in yet (owner step), 64 = it holds an unknown key or value, 65 = the
+# IBC template lacks a key; and 77 = the bound on login attempts is reached
+# (ti-gateway-start, cmd/gateway-start, which start-gateway.sh runs), where
+# another try risks IBKR locking the login. None
+# fixes itself, so do not loop on them. 75 (one refused login) restarts.
+RestartPreventExitStatus=64 65 77 78
+TimeoutStopSec=60
+# ti-gateway-start stops only xvfb-run, its own child, after a refused login;
+# this default, stated so it cannot be dropped, is what ends IBC's java and
+# Xvfb when the program exits, so the next start finds no stale Gateway.
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+InaccessiblePaths=/run/trend-investing/secrets
+ProtectHome=true
+ReadWritePaths=/var/lib/ti-gateway-%i /var/log/ti-gateway-%i
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
