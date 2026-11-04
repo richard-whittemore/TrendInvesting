@@ -1697,14 +1697,20 @@ def _append(costs_file, costs, records):
     _write_whole(costs_file, kept + "".join(_line(r) for r in records))
 
 
-def read_key(path, key):
-    """The bare value of key's one line in the KEY=VALUE file at path; StatementRefused, never echoing a value."""
+def read_key(path, key, strict=False):
+    """The bare value of key's one line, or StatementRefused without echoing a value.
+
+    Strict account-local Flex values retain whitespace for refusal per docs/manual/reconciliation.md,
+    "What you set up once"; other callers keep the existing surrounding-whitespace tolerance.
+    """
     try:
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
     except OSError as err:
         raise StatementRefused("cannot read the secrets file {}: {}".format(path, err.strerror or err)) from None
-    found = [line.split("=", 1)[1].strip() for line in lines if "=" in line and line.split("=", 1)[0] == key]
+    found = [line.split("=", 1)[1] for line in lines if "=" in line and line.split("=", 1)[0] == key]
+    if not strict:
+        found = [value.strip() for value in found]
     if len(found) != 1 or not found[0]:
         raise StatementRefused("the secrets file {} does not hold exactly one filled-in {} line".format(path, key))
     if re.search(r"[\s\"']", found[0]):
@@ -1725,6 +1731,29 @@ def read_optional_key(path, key):
     if not found or (len(found) == 1 and not found[0].split("=", 1)[1].strip()):
         return None
     return read_key(path, key)
+
+
+def read_flex_credentials(account_path, secrets_path):
+    """Select one file's Flex values per docs/manual/reconciliation.md, "What you set up once".
+
+    Account-local Flex lines never borrow a token or query from the shared file; values never enter diagnostics.
+    """
+    try:
+        with open(account_path, encoding="utf-8") as f:
+            keys = {line.split("=", 1)[0] for line in f.read().splitlines()
+                    if line.startswith("TI_IBKR_FLEX_")}
+    except OSError as err:
+        raise StatementRefused("cannot read the account file {}: {}".format(
+            account_path, err.strerror or err)) from None
+    if keys:
+        token = read_key(account_path, "TI_IBKR_FLEX_TOKEN", strict=True)
+        query_id = read_key(account_path, "TI_IBKR_FLEX_QUERY_ID", strict=True)
+        trades = (read_key(account_path, "TI_IBKR_FLEX_TRADES_QUERY_ID", strict=True)
+                  if "TI_IBKR_FLEX_TRADES_QUERY_ID" in keys else None)
+        return token, query_id, trades, "account file"
+    return (read_key(secrets_path, "TI_IBKR_FLEX_TOKEN"),
+            read_key(secrets_path, "TI_IBKR_FLEX_QUERY_ID"),
+            read_optional_key(secrets_path, "TI_IBKR_FLEX_TRADES_QUERY_ID"), "secrets file")
 
 
 INSTANCES = ("boost", "trad-ira", "roth-ira")
@@ -1775,12 +1804,11 @@ def command(args, err, get=_get, sleep=time.sleep, now=lambda: datetime.now(time
         print("refused: a reading needs {}".format(", ".join(missing)), file=err)
         return 1
     try:
-        token = read_key(args.secrets, "TI_IBKR_FLEX_TOKEN")
-        query_id = read_key(args.secrets, "TI_IBKR_FLEX_QUERY_ID")
-        trades_query_id = read_optional_key(args.secrets, "TI_IBKR_FLEX_TRADES_QUERY_ID")
+        token, query_id, trades_query_id, source = read_flex_credentials(args.account_secrets, args.secrets)
         account_id = read_key(args.account_secrets, account_key(args.instance))
     except StatementRefused as refusal:
         print("refused: {}".format(mask(str(refusal))), file=err)
         return 1
+    print("flex: Flex values from the {}".format(source), file=err)
     return 0 if read_once(token, query_id, account_id, args.engine_log, args.ledger, get=get, sleep=sleep,
                           now=now, err=err, trades_query_id=trades_query_id) else 1

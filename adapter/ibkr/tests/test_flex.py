@@ -1705,6 +1705,67 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn(TOKEN, said)
         self.assertNotIn(ACCOUNT, said)
 
+    def test_flex_credentials_come_from_one_file(self):
+        token = "TI_IBKR_FLEX_TOKEN"
+        cash = "TI_IBKR_FLEX_QUERY_ID"
+        trades = "TI_IBKR_FLEX_TRADES_QUERY_ID"
+        cases = (
+            ("none", {}, "secrets file", None),
+            ("all", {token: "local-token", cash: "local-cash", trades: "local-trades"}, "account file", None),
+            ("cash only", {token: "local-token", cash: "local-cash"}, "account file", None),
+            ("query without token", {cash: "local-cash"}, None, token),
+            ("token only", {token: "local-token"}, None, cash),
+        )
+        for shared in (True, False):
+            for name, local, source, missing in cases:
+                with self.subTest(shared=shared, account=name):
+                    self.secrets.write_text("".join("{}={}\n".format(k, v) for k, v in
+                        {token: "shared-token", cash: "shared-cash", trades: "shared-trades"}.items())
+                        if shared else "MASSIVE_API_KEY=synthetic\n")
+                    self.account.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT) +
+                        "".join("{}={}\n".format(k, v) for k, v in local.items()))
+                    expected_missing = missing or (token if not local and not shared else None)
+                    with unittest.mock.patch.object(flex, "read_once", return_value=True) as read:
+                        code, said = self.run_command(FakeFlex())
+                    for value in ("local-token", "local-cash", "local-trades",
+                                  "shared-token", "shared-cash", "shared-trades"):
+                        self.assertNotIn(value, said)
+                    if expected_missing:
+                        self.assertEqual(code, 1)
+                        read.assert_not_called()
+                        self.assertIn(expected_missing, said)
+                        self.assertIn("exactly one filled-in", said)
+                    else:
+                        self.assertEqual(code, 0)
+                        self.assertIn(source, said)
+                        read.assert_called_once()
+                        expected = local if local else {token: "shared-token", cash: "shared-cash",
+                                                       trades: "shared-trades"}
+                        self.assertEqual(read.call_args.args[:3], (expected[token], expected[cash], ACCOUNT))
+                        self.assertEqual(read.call_args.kwargs["trades_query_id"], expected.get(trades))
+
+    def test_malformed_account_flex_lines_are_refused_without_fallback(self):
+        keys = ("TI_IBKR_FLEX_TOKEN", "TI_IBKR_FLEX_QUERY_ID", "TI_IBKR_FLEX_TRADES_QUERY_ID")
+        for key in keys:
+            for bad in ("", '"synthetic"', "'synthetic'", "syn thetic", " synthetic", "synthetic ",
+                        "synthetic\n{}=second-synthetic".format(key)):
+                with self.subTest(key=key, bad=bad):
+                    self.account.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT) + "".join(
+                        "{}={}\n".format(k, bad if k == key else "synthetic") for k in keys))
+                    service = FakeFlex()
+                    code, said = self.run_command(service)
+                    self.assertEqual((code, service.calls), (1, []))
+                    self.assertIn(key, said)
+                    self.assertNotIn("synthetic", said)
+
+    def test_trades_query_without_account_token_is_refused(self):
+        self.account.write_text(self.account.read_text() + "TI_IBKR_FLEX_TRADES_QUERY_ID=local-trades\n")
+        service = FakeFlex()
+        code, said = self.run_command(service)
+        self.assertEqual((code, service.calls), (1, []))
+        self.assertIn("TI_IBKR_FLEX_TOKEN", said)
+        self.assertNotIn("local-trades", said)
+
     def test_the_reading_stamps_the_clock_its_caller_gives(self):
         # The CLI passes its clock to the reader, so a reading on a named day does not depend on the real date.
         code, said = self.run_command(FakeFlex(), now=datetime(2027, 1, 16, 2, 30, tzinfo=timezone.utc))

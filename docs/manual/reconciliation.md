@@ -900,11 +900,22 @@ developer.
    Service Configuration**, turn the service on and **generate a token**.
    Note the token and its expiry date; IBKR ends a token at its expiry, and
    you generate a new one then.
-3. Put both in the server's secrets file, never anywhere else: `sudo ti-secrets
+3. For Boost's login, put both in the server's secrets file: `sudo ti-secrets
    edit secrets.env`, the lines `TI_IBKR_FLEX_TOKEN=` and
    `TI_IBKR_FLEX_QUERY_ID=` (no quotes, no spaces). The token is a password
    to your account's reports: never paste it into a chat, an issue or a
-   command line.
+   command line. An account with its own IBKR login, such as the Traditional
+   IRA's paper account, puts its three Flex lines (`TI_IBKR_FLEX_TOKEN`,
+   `TI_IBKR_FLEX_QUERY_ID`, `TI_IBKR_FLEX_TRADES_QUERY_ID`) in
+   `accounts/<account>.env`, beside `IBKR_ACCOUNT_<X>`, **not in secrets.env**:
+   `sudo ti-secrets edit accounts/trad-ira.env`. A Flex query covers only the
+   accounts of the login that made it. If the account file has any Flex lines,
+   the token and cash query must both be there; the reader never borrows a
+   missing value from secrets.env. The trades query may be omitted; if present,
+   its line must be filled in. Duplicate lines, empty values, quotes and spaces
+   are refused. With no Flex lines in the account file, the reader uses
+   secrets.env as before. Each reading's log says **account file** or
+   **secrets file**, never the values.
 4. For the morning delivery's executions proof, a second query:
    **Performance & Reports → Flex Queries → Trade Confirmation Flex Query →
    +**. Give it a name, tick **Trade Confirmations** and, inside it, select
@@ -914,8 +925,8 @@ developer.
    itself (above, "The trades query's dates"). Leave the date format
    (`yyyyMMdd`), the time format (`HHmmss`) and the separator (`;`) at
    their defaults. Save it,
-   note its **Query ID**, and put it in the secrets file beside the others:
-   `sudo ti-secrets edit secrets.env`, the line
+   note its **Query ID**, and put it in the same file as its token and cash
+   query (step 3), the line
    `TI_IBKR_FLEX_TRADES_QUERY_ID=`. The same Flex token reads it. Adding a
    Trades section to the cash query instead does not work (above, "Only a
    Trade Confirmation query can prove the evening").
