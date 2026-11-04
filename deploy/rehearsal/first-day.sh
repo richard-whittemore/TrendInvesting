@@ -471,7 +471,10 @@ install -D -m 0644 /deploy/etc/adapters/trad-ira.json.example /etc/trend-investi
 cp /deploy/systemd/ti-adapter@.service /etc/systemd/system/
 # The IRA adapter wants its own Gateway (docs/manual/server.md, "The
 # Traditional IRA's Gateway"): a stand-in of that instance's name on its port.
-grep -qxF 'TI_GATEWAY_API_PORT=4003' /etc/trend-investing/gateway-trad-ira.env || fail "provisioning wrote no trad-ira Gateway port"
+# As provision.sh services installs them: the port check and the instance's env.
+install -m 0755 /deploy/libexec/check-adapter-port.py /usr/local/libexec/trend-investing/
+printf 'GATEWAY_MAJOR=1050\nTI_GATEWAY_RESTART_TIME=11:55 PM\nTI_GATEWAY_COLD_RESTART=09:20\nTI_GATEWAY_API_PORT=4003\nTI_GATEWAY_DISPLAY=100\n' \
+  >/etc/trend-investing/gateway-trad-ira.env
 cat >/etc/systemd/system/ti-gateway@trad-ira.service <<UNIT
 [Unit]
 Description=Stand-in IB Gateway for trad-ira (rehearsal): listens on 4003
