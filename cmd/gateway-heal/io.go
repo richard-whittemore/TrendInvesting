@@ -70,7 +70,7 @@ func (s systemd) Status(unit string) (gatewayheal.Status, error) {
 		out.Finished = statusTimeForRun(out.Finished)
 	}
 	stamp := props["ExecMainStartTimestamp"]
-	if stamp == "" && out.Invocation != "" && !(out.Active == "failed" && out.Code == 0) {
+	if stamp == "" && out.Invocation != "" && (out.Active != "failed" || out.Code != 0) {
 		// A unit that has run reports its start; without it the evidence is
 		// incomplete and must not read as time zero (server.md, Gateway healer).
 		return out, fmt.Errorf("%s: missing ExecMainStartTimestamp for invocation %s", unit, out.Invocation)
