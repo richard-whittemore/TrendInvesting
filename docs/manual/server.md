@@ -818,10 +818,12 @@ fixed displays prevent accidental state/display collisions.
 Run `sudo deploy/provision.sh services` after installing the pinned Gateway
 application (`provision.sh gateway`). This creates `gateway-trad-ira.env` under
 `/etc/trend-investing/`, creates the instance directories and installs the
-template without enabling it. The IRA's Gateway runs the joint's installed
-application read-only, with its own settings, logs and state. Upgrading the
-Gateway (`provision.sh gateway`) upgrades both, and each picks up the new build
-at its next restart.
+template without enabling it. The IRA's Gateway shares the joint's installed
+application, with its own settings, logs and state. For a Gateway upgrade to a
+new build, stop **both** Gateways before running `sudo deploy/provision.sh gateway`.
+Keep both stopped while running `sudo deploy/provision.sh services`, which
+writes `GATEWAY_MAJOR` into both `gateway.env` and `gateway-trad-ira.env`.
+Then start each Gateway; both start on the new build.
 Runtime/config/staged login, settings/counter/reset wait and logs live under
 `/run/ti-gateway-trad-ira`, `/var/lib/ti-gateway-trad-ira` and
 `/var/log/ti-gateway-trad-ira`, respectively. The joint's settings and state
@@ -834,8 +836,13 @@ Instances also require a valid `TI_GATEWAY_API_PORT`.
 
 Provisioning refuses symlinked instance directories, including `Jts`, and
 creates the instance's `Jts` settings directory owned by `ti-gateway`.
-`ProtectSystem=strict` leaves `/var/lib/ti-gateway` read-only to the instance;
-only the instance directories are writable. If the existing joint selector
+Under `ProtectSystem=strict`, the instance may write within the joint's
+installation only in `/var/lib/ti-gateway/Jts/ibgateway`: Gateway's own
+install4j restarter writes `1050/.install4j/restarter.log` there (observed on
+the server at 23:45 ET on 2026-11-03). The instance's own directories are also
+writable; the joint's settings, logs and state remain separate. Restart times
+are staggered so the two Gateways do not restart together.
+If the existing joint selector
 names anything other than `joint` or `live`, `provision.sh services` refuses
 before installing files. Run `sudo ti-gateway-login joint` to select the joint
 login, or select `live` if intended; provisioning never rewrites that choice.

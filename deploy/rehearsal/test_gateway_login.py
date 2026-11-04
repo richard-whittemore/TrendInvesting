@@ -805,17 +805,68 @@ class GatewayInstanceTests(unittest.TestCase):
                                     capture_output=True)
             self.assertEqual(result.returncode, 64)
 
-    def test_instance_uses_shared_readonly_application(self):
+    def test_instance_shares_only_application_writes(self):
         unit = (DEPLOY / "systemd/ti-gateway@.service").read_text()
         self.assertIn("Environment=TI_GATEWAY_APP_HOME=/var/lib/ti-gateway", unit)
         self.assertIn("ProtectSystem=strict", unit)
-        self.assertIn("ReadWritePaths=/var/lib/ti-gateway-%i /var/log/ti-gateway-%i", unit)
-        self.assertNotIn("ReadWritePaths=/var/lib/ti-gateway ", unit)
+        writable = {path for line in unit.splitlines() if line.startswith("ReadWritePaths=")
+                    for path in line.split("=", 1)[1].split()}
+        self.assertEqual(writable, {"/var/lib/ti-gateway-%i", "/var/log/ti-gateway-%i",
+                                    "/var/lib/ti-gateway/Jts/ibgateway"})
         provision = (DEPLOY / "provision.sh").read_text()
         self.assertNotIn("init_gateway_instance", provision)
         self.assertNotIn("instance-copy", provision)
         self.assertNotIn("instance-heap", provision)
         self.assertIn("/var/lib/ti-gateway-trad-ira/Jts", provision)
+
+    def test_installer_rehearsal_accepts_shared_application(self):
+        # Execute the installed-layout checks without root or an IBKR login
+        # (docs/manual/server.md, "The Traditional IRA's Gateway"). Only GNU
+        # stat's ownership/mode output is simulated; paths and inodes are real.
+        source = (DEPLOY / "rehearsal/inside.sh").read_text()
+        block = source[source.index("# The second Gateway remains"):source.index("# A corrupt cached download")]
+        import re
+        block = re.sub(r"/(?:etc|var|run)/", lambda m: str(self.root) + m[0], block)
+        unit = self.root / "etc/systemd/system/ti-gateway@.service"
+        unit.parent.mkdir(parents=True)
+        text = (DEPLOY / "systemd/ti-gateway@.service").read_text()
+        text = re.sub(r"/(?:etc|var|run)/", lambda m: str(self.root) + m[0], text)
+        unit.write_text(text)
+        env = self.root / "etc/trend-investing/gateway-trad-ira.env"
+        env.parent.mkdir()
+        env.write_text("TI_GATEWAY_API_PORT=4003\n")
+        settings = self.root / "var/lib/ti-gateway-trad-ira/Jts"
+        for name in ("run/ti-gateway-trad-ira", "var/log/ti-gateway-trad-ira",
+                     "var/lib/ti-gateway/Jts", "var/lib/ti-gateway-heal/trad-ira",
+                     "var/lib/ti-gateway-trad-ira/Jts"):
+            (self.root / name).mkdir(parents=True)
+        harness = """set -eu
+fail() { echo "$*" >&2; exit 1; }
+pass() { :; }
+stat() {
+  case "$2" in
+    %U:%G) echo ti-gateway:ti-gateway ;;
+    %U:%a) echo root:700 ;;
+    *) return 1 ;;
+  esac
+}
+export TI_REHEARSAL_SKIP_INSTALLER=0
+"""
+        result = self.shell(harness + block)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wrong_owner = harness.replace("echo ti-gateway:ti-gateway", "echo root:root")
+        self.assertNotEqual(self.shell(wrong_owner + block).returncode, 0)
+        settings.rmdir()
+        settings.symlink_to(self.root / "var/lib/ti-gateway/Jts", target_is_directory=True)
+        self.assertNotEqual(self.shell(harness + block).returncode, 0)
+        settings.unlink()
+        settings.mkdir()
+        env.write_text("TI_GATEWAY_API_PORT=4003\nTI_GATEWAY_APP_HOME=/another/application\n")
+        self.assertNotEqual(self.shell(harness + block).returncode, 0)
+        env.write_text("TI_GATEWAY_API_PORT=4003\n")
+        for writable in ("/var/lib/ti-gateway", "/var/lib/ti-gateway/Jts"):
+            unit.write_text(text + f"\nReadWritePaths={self.root}{writable}\n")
+            self.assertNotEqual(self.shell(harness + block).returncode, 0)
 
     def test_instance_port_required(self):
         self.login()
@@ -835,13 +886,16 @@ class GatewayInstanceTests(unittest.TestCase):
         config = self.etc / "trad-ira.json"
         script = DEPLOY / "libexec/check-adapter-port.py"
         self.assertTrue(script.exists())
-        for port, status in ((4002, 64), (4003, 0)):
-            config.write_text(json.dumps({"port": port}))
-            result = subprocess.run([sys.executable, str(script), str(config), str(settings)], text=True, capture_output=True)
-            self.assertEqual(result.returncode, status, result.stderr)
-            if status:
-                self.assertIn(str(config), result.stderr)
-                self.assertIn("4003", result.stderr)
+        for value in ("4003", '"4003"', "'4003'", '  "4003"  ', "  '4003'  ", " 4003 "):
+            for port, status in ((4002, 64), (4003, 0)):
+                with self.subTest(value=value, port=port):
+                    settings.write_text(f"TI_GATEWAY_API_PORT={value}\n" if value == "4003" else f"  TI_GATEWAY_API_PORT = {value}\n")
+                    config.write_text(json.dumps({"port": port}))
+                    result = subprocess.run([sys.executable, str(script), str(config), str(settings)], text=True, capture_output=True)
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    if status:
+                        self.assertIn(str(config), result.stderr)
+                        self.assertIn("4003", result.stderr)
         unit = (DEPLOY / "systemd/ti-adapter@.service").read_text()
         self.assertIn("ExecStartPre=/usr/bin/python3 /usr/local/libexec/trend-investing/check-adapter-port.py /etc/trend-investing/adapters/%i.json /etc/trend-investing/gateway-%i.env", unit)
 

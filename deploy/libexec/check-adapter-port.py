@@ -12,8 +12,16 @@ def main():
         if str(gateway) == "4002":
             expected = 4002
         else:
-            ports = [line.split("=", 1)[1] for line in gateway.read_text().splitlines()
-                     if line.startswith("TI_GATEWAY_API_PORT=")]
+            # Match EnvironmentFile's surrounding whitespace and one matching
+            # quote pair (systemd.exec(5), EnvironmentFile=).
+            ports = []
+            for line in gateway.read_text().splitlines():
+                key, separator, value = line.partition("=")
+                if separator and key.strip() == "TI_GATEWAY_API_PORT":
+                    value = value.strip()
+                    if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
+                        value = value[1:-1]
+                    ports.append(value)
             if len(ports) != 1 or not re.fullmatch(r"[0-9]{1,5}", ports[0]):
                 raise ValueError()
             expected = int(ports[0])

@@ -49,18 +49,23 @@ RestartSec=30
 # fixes itself, so do not loop on them. 75 (one refused login) restarts.
 RestartPreventExitStatus=64 65 77 78
 TimeoutStopSec=60
-# ti-gateway-start stops only xvfb-run, its own child, after a refused login;
-# this default, stated so it cannot be dropped, is what ends IBC's java and
-# Xvfb when the program exits, so the next start finds no stale Gateway.
+# After a refused login, ti-gateway-start stops xvfb-run, its own child;
+# KillMode=control-group ends IBC's java and Xvfb when the program exits.
+# During a reset wait the program ends and waits for the child's process
+# group itself, since the unit stays active (cmd/gateway-start/main.go;
+# docs/development.md, "Ending processes").
 KillMode=control-group
 NoNewPrivileges=true
 PrivateTmp=true
-# The joint application in /var/lib/ti-gateway is read-only under
-# ProtectSystem=strict (docs/manual/server.md, The Traditional IRA's Gateway).
+# Share the joint installation; only Jts/ibgateway is writable within it,
+# for Gateway's own .install4j/restarter.log. Settings, logs and state are
+# this instance's own; restart times are staggered so the two do not restart
+# together (docs/manual/server.md, "The Traditional IRA's Gateway").
 ProtectSystem=strict
 InaccessiblePaths=/run/trend-investing/secrets
 ProtectHome=true
 ReadWritePaths=/var/lib/ti-gateway-%i /var/log/ti-gateway-%i
+ReadWritePaths=/var/lib/ti-gateway/Jts/ibgateway
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
