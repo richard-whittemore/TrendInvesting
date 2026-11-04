@@ -280,7 +280,8 @@ MIN_REQUEST_GAP = 1.0
 REQUESTS_PER_MINUTE = 10
 RATE_BACKOFF = (10, 30, 60)
 QUERY_GAP = 5
-# Every account's reader uses the one Flex token, so one reading at a time holds it: an exclusive flock on the Flex
+# One reading runs at a time on the server, whichever account's token it uses (an account with its own IBKR login
+# has its own token; docs/manual/reconciliation.md, "What you set up once"): an exclusive flock on the Flex
 # state root (the folder holding each account's ledger folder; token_root), taken after the account's own lock and
 # held for the whole reading. Its holder waits TOKEN_COOLDOWN on the steady clock before its first request, so its
 # requests never share a minute with the holder's before it, even one killed straight after a request. A reading
@@ -1750,7 +1751,8 @@ def read_flex_credentials(account_path, secrets_path, instance="boost"):
     """
     try:
         with open(account_path, encoding="utf-8") as f:
-            lines = [line for line in f.read().splitlines() if "TI_IBKR_FLEX" in line]
+            lines = [line for line in f.read().splitlines()
+                     if "TI_IBKR_FLEX" in line and not line.lstrip().startswith("#")]
     except OSError as err:
         raise StatementRefused("cannot read the account file {}: {}".format(
             account_path, err.strerror or err)) from None

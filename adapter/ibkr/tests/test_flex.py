@@ -1791,6 +1791,19 @@ class CommandTests(unittest.TestCase):
                     self.assertIn("TI_IBKR_FLEX", said)
                     self.assertNotIn("synthetic", said)
 
+    def test_the_shipped_ira_template_filled_in_is_read(self):
+        # The example's comments name the Flex keys; only assignments count (deploy/etc/accounts/trad-ira.env.example).
+        template = (repo / "deploy/etc/accounts/trad-ira.env.example").read_text()
+        self.assertIn("TI_IBKR_FLEX", "".join(l for l in template.splitlines() if l.startswith("#")))
+        self.account.write_text(template.replace("IBKR_ACCOUNT_TRAD_IRA=", "IBKR_ACCOUNT_TRAD_IRA=DU0000777") +
+                                "TI_IBKR_FLEX_TOKEN=local-token\nTI_IBKR_FLEX_QUERY_ID=local-cash\n"
+                                "TI_IBKR_FLEX_TRADES_QUERY_ID=local-trades\n")
+        with unittest.mock.patch.object(flex, "read_once", return_value=True) as read:
+            code, said = self.run_command(FakeFlex(), instance="trad-ira")
+        self.assertEqual(code, 0, said)
+        self.assertEqual(read.call_args.args[:3], ("local-token", "local-cash", "DU0000777"))
+        self.assertEqual(read.call_args.kwargs["trades_query_id"], "local-trades")
+
     def test_a_rejected_account_token_points_at_the_account_file(self):
         self.account.write_text(self.account.read_text() +
                                 "TI_IBKR_FLEX_TOKEN={}\nTI_IBKR_FLEX_QUERY_ID={}\n".format(TOKEN, QUERY))
