@@ -658,3 +658,23 @@ func TestRelayGuardRefusesMissingAccount(t *testing.T) {
 		t.Fatal("missing account silently acquired Boost's relay lock")
 	}
 }
+
+func TestPreStartFailureReportsOtherExit(t *testing.T) {
+	for _, unit := range []string{"ti-adapter-boost.service", "ti-adapter@trad-ira.service"} {
+		t.Run(unit, func(t *testing.T) {
+			calls := 0
+			ctl := systemd{run: func(name string, args ...string) ([]byte, error) {
+				calls++
+				if name != "systemctl" || !containsArg(args, "show") {
+					t.Fatalf("unexpected action: %s %v", name, args)
+				}
+				return []byte("ActiveState=failed\nExecMainCode=0\nExecMainStatus=0\nInvocationID=abcdef\nExecMainExitTimestamp=\nExecMainStartTimestamp=\n"), nil
+			}}
+			var lines []string
+			err := gatewayheal.Run(unit, nil, nil, nil, ctl, ctl, nil, func(line string) error { lines = append(lines, line); return nil })
+			if err != nil || calls != 1 || !reflect.DeepEqual(lines, []string{"gateway-heal: row=other-exit step=no-action"}) {
+				t.Fatalf("err=%v calls=%d lines=%v", err, calls, lines)
+			}
+		})
+	}
+}

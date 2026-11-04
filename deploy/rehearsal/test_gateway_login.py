@@ -805,78 +805,17 @@ class GatewayInstanceTests(unittest.TestCase):
                                     capture_output=True)
             self.assertEqual(result.returncode, 64)
 
-    def copy_instance(self, marker=True, active=False, linked=False, fail_copy=False):
-        source = (DEPLOY / "provision.sh").read_text()
-        function = "init_gateway_instance() {" + source.split("init_gateway_instance() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
-        home = self.root / "joint"
-        application = home / "Jts/ibgateway/1050"
-        application.mkdir(parents=True, exist_ok=True)
-        (application / "ibgateway").write_text("binary")
-        (application / "ibgateway").chmod(0o755)
-        if marker:
-            (application / ".installed-fixture").touch()
-        instance = self.root / "ti-gateway-trad-ira"
-        instance.mkdir(exist_ok=True)
-        if linked:
-            (instance / "Jts").symlink_to(home / "Jts", target_is_directory=True)
-        harness = r'''set -eu
-log() { echo "$*"; }
-die() { echo "$*" >&2; exit 1; }
-runuser() { test "$1 $2 $3" = '-u ti-gateway --'; shift 3; "$@"; }
-systemctl() { test "$*" = 'is-active --quiet ti-gateway@trad-ira.service'; return ACTIVE; }
-sync() { test -f "$2/ibgateway"; test ! -e "$2/.ti-instance-installed-fixture"; echo synced >>"$events"; }
-cp() { test ! -e "$2/.ti-instance-installed-fixture"; echo copied >>"$events"; COPY; }
-export -f sync cp
-'''.replace('ACTIVE', '0' if active else '1').replace('COPY', 'return 1' if fail_copy else 'command cp "$@"')
-        result = self.shell(harness + function + '\ngateway_home=$1; export events=$3; GATEWAY_MAJOR=1050; GATEWAY_SHA256=fixture; init_gateway_instance "$2"', str(home), str(instance), str(self.root / "events"))
-        return result, instance / "Jts/ibgateway/1050"
-
-    def test_copy_defers_without_source_marker(self):
-        result, target = self.copy_instance(marker=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("copy deferred", result.stdout)
-        self.assertFalse(target.exists())
-
-    def test_copy_defers_while_running(self):
-        result, target = self.copy_instance(active=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("copy deferred: the Gateway is running", result.stdout)
-        self.assertFalse(target.exists())
-
-    def test_running_copy_deferral_without_source_marker(self):
-        result, target = self.copy_instance(marker=False, active=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("copy deferred: the Gateway is running", result.stdout)
-        self.assertFalse(target.exists())
-
-    def test_copy_refuses_symlinked_jts(self):
-        result, target = self.copy_instance(linked=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("symlink", result.stderr)
-        self.assertFalse((self.root / "events").exists())
-
-    def test_copy_marker_after_copy_and_sync(self):
-        result, target = self.copy_instance()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.root / "events").read_text(), "copied\nsynced\n")
-        self.assertTrue((target / ".ti-instance-installed-fixture").exists())
-        self.assertEqual((target / "ibgateway").read_text(), "binary")
-        self.assertFalse((target.parents[1] / "jts.ini").exists())
-        settings = target.parents[1] / "jts.ini"
-        settings.write_text("instance settings")
-        (self.root / "joint/Jts/jts.ini").write_text("joint settings")
-        (target / ".ti-instance-installed-fixture").unlink()
-        (self.root / "joint/Jts/ibgateway/1050/application.jar").write_text("jar")
-        result, target = self.copy_instance()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(settings.read_text(), "instance settings")
-        self.assertEqual((target / "application.jar").read_text(), "jar")
-        self.assertEqual((self.root / "joint/Jts/jts.ini").read_text(), "joint settings")
-
-    def test_failed_copy_has_no_marker(self):
-        result, target = self.copy_instance(fail_copy=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((target / ".ti-instance-installed-fixture").exists())
+    def test_instance_uses_shared_readonly_application(self):
+        unit = (DEPLOY / "systemd/ti-gateway@.service").read_text()
+        self.assertIn("Environment=TI_GATEWAY_APP_HOME=/var/lib/ti-gateway", unit)
+        self.assertIn("ProtectSystem=strict", unit)
+        self.assertIn("ReadWritePaths=/var/lib/ti-gateway-%i /var/log/ti-gateway-%i", unit)
+        self.assertNotIn("ReadWritePaths=/var/lib/ti-gateway ", unit)
+        provision = (DEPLOY / "provision.sh").read_text()
+        self.assertNotIn("init_gateway_instance", provision)
+        self.assertNotIn("instance-copy", provision)
+        self.assertNotIn("instance-heap", provision)
+        self.assertIn("/var/lib/ti-gateway-trad-ira/Jts", provision)
 
     def test_instance_port_required(self):
         self.login()
@@ -927,16 +866,6 @@ export -f sync cp
         self.assertIn('test "%i" != boost', text)
 
 
-    def test_instance_install_rehearsal_skips_unavailable_binary(self):
-        source = (DEPLOY / "provision.sh").read_text()
-        function = source.split("init_gateway_instance() {", 1)[1].split("\n}\n", 1)[0]
-        body = "init_gateway_instance() {" + function + "\n}\n"
-        result = self.shell('set -eu\nlog() { :; }\n' + body +
-                            '\ngateway_home=$1; GATEWAY_MAJOR=1050; GATEWAY_SHA256=fixture; '
-                            'rehearsal=1; TI_REHEARSAL_SKIP_INSTALLER=1; init_gateway_instance "$2"',
-                            str(self.root / "absent"), str(self.root / "instance"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((self.root / "instance").exists())
 
 
 if __name__ == "__main__":

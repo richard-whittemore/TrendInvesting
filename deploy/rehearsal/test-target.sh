@@ -262,7 +262,7 @@ scenario() {
       record runuser "$@"
       # Relay lock creation is recorded only; the services case never runs
       # Python on a host path (docs/manual/server.md, Gateway healer).
-      case "$*" in '-u ti-trader -- python3 -I -c '*|*' instance-heap '*) return 0 ;; esac
+      case "$*" in '-u ti-trader -- python3 -I -c '*) return 0 ;; esac
       case $(stat -c %a . 2>/dev/null || stat -f %Lp .) in
         *[1357]) ;;
         *) echo "installer.sh: 820: cd: can't cd to $PWD" >&2 ;;

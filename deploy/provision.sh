@@ -709,43 +709,19 @@ install_mac_adapter_unit() {
       "$here/systemd/ti-adapter@.service" >"$unit_dir/ti-adapter@.service"
 }
 
-# Copy only the installed application, never Jts settings (server.md,
-# "The Traditional IRA's Gateway"). Existing instance settings survive upgrades.
-init_gateway_instance() {
-  if test "${rehearsal:-0}" = 1 && test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
-    log "rehearsal: instance application copy skipped with the x86_64 installer"
-    return 0
-  fi
-  local instance_home=$1
-  local source="$gateway_home/Jts/ibgateway/${GATEWAY_MAJOR}"
-  local target="$instance_home/Jts/ibgateway/${GATEWAY_MAJOR}"
-  local instance=${instance_home##*/ti-gateway-}
-  if systemctl is-active --quiet "ti-gateway@$instance.service"; then
-    log "copy deferred: the Gateway is running"
-    return 0
-  fi
-  if ! test -f "$source/.installed-${GATEWAY_SHA256}" || ! test -x "$source/ibgateway"; then
-    log "copy deferred: the joint Gateway application is not installed for the current checksum"
-    return 0
-  fi
-  test ! -L "$instance_home" || die "refusing symlink instance home: $instance_home"
-  test ! -L "$instance_home/Jts" || die "refusing symlink Jts: $instance_home/Jts"
-  # All writes below the service-owned home use its identity (server.md,
-  # "The Traditional IRA's Gateway"). Sync precedes the completion marker.
-  runuser -u ti-gateway -- bash -eu -c '
-    source=$1 target=$2 marker=$3
-    if ! test -f "$marker"; then
-      mkdir -p "$target"
-      cp -a "$source/." "$target/"
-      sync -f "$target"
-      touch "$marker"
-    fi
-  ' instance-copy "$source" "$target" "$target/.ti-instance-installed-${GATEWAY_SHA256}"
-}
-
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
+  # Preserve the owner's joint login choice; stale selectors must be resolved
+  # before installation (docs/manual/server.md, The Traditional IRA's Gateway).
+  if test -e "$etc/gateway-login"; then
+    local selection
+    selection=$(cat "$etc/gateway-login") || die "cannot read Gateway selector; run sudo ti-gateway-login joint"
+    case "$selection" in
+      joint|live) ;;
+      *) die "unsupported Gateway selector; run sudo ti-gateway-login joint before provisioning services" ;;
+    esac
+  fi
   # Complete migration before installing Gateway files (ADR 0028;
   # docs/runbooks/gateway-login.md). A refusal preserves the installed service.
   if ! secrets_migrate; then
@@ -771,13 +747,10 @@ step_services() {
   if ! mac_mini; then
     install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal/trad-ira
     local directory
-    for directory in /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira; do
+    for directory in /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira/Jts; do
       test ! -L "$directory" || die "refusing symlink instance directory: $directory"
       install -d -o ti-gateway -g ti-gateway -m 0700 "$directory"
     done
-    init_gateway_instance /var/lib/ti-gateway-trad-ira
-    runuser -u ti-gateway -- bash -eu -c "$(declare -f set_gateway_heap log die)
-      gateway_home=\$1 GATEWAY_MAJOR=\$2; set_gateway_heap" instance-heap /var/lib/ti-gateway-trad-ira "$GATEWAY_MAJOR"
     install -m 0644 /dev/stdin "$etc/gateway-trad-ira.env" <<CONF
 GATEWAY_MAJOR=${GATEWAY_MAJOR}
 TI_GATEWAY_RESTART_TIME=11:55 PM

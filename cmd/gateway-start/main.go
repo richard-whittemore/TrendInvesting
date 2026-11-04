@@ -187,7 +187,7 @@ func configFromEnv(getenv func(string) string) (c config, warn []string) {
 		c.Command = append([]string{"xvfb-run"}, displayArgs...)
 		c.Command = append(c.Command, "--server-args=-screen 0 1024x768x24",
 			"/opt/ibc/scripts/ibcstart.sh", major, "--gateway",
-			"--tws-path="+home+"/Jts", "--tws-settings-path="+home+"/Jts",
+			"--tws-path="+pick("TI_GATEWAY_APP_HOME", home)+"/Jts", "--tws-settings-path="+home+"/Jts",
 			"--ibc-path=/opt/ibc", "--ibc-ini="+filepath.Join(runtime, "config.ini"),
 			"--on2fatimeout=restart")
 	}

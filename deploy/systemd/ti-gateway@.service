@@ -25,6 +25,7 @@ EnvironmentFile=/etc/trend-investing/gateway-%i.env
 Environment=TI_GATEWAY_INSTANCE=%i
 Environment=HOME=/var/lib/ti-gateway-%i
 Environment=TI_GATEWAY_HOME=/var/lib/ti-gateway-%i
+Environment=TI_GATEWAY_APP_HOME=/var/lib/ti-gateway
 Environment=TI_GATEWAY_STATE_FILE=/var/lib/ti-gateway-%i/login-failures
 RuntimeDirectory=ti-gateway-%i
 RuntimeDirectoryMode=0700
@@ -54,6 +55,8 @@ TimeoutStopSec=60
 KillMode=control-group
 NoNewPrivileges=true
 PrivateTmp=true
+# The joint application in /var/lib/ti-gateway is read-only under
+# ProtectSystem=strict (docs/manual/server.md, The Traditional IRA's Gateway).
 ProtectSystem=strict
 InaccessiblePaths=/run/trend-investing/secrets
 ProtectHome=true

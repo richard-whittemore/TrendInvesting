@@ -82,7 +82,6 @@ scenario() {
     if test "${FAKE_NO_CLOCK:-0}" = 1; then step_clock() { record step_clock; }; fi
     # Memory behavior is exercised with guarded files in test-target.sh.
     set_gateway_heap() { record set_gateway_heap; }
-    init_gateway_instance() { record init_gateway_instance "$@"; }
     etc=$work/etc
     unit_dir=$work/units
     if test "${FAKE_LIVE:-0}" = 1; then rehearsal=0; fi
@@ -228,13 +227,29 @@ PYCODE
 # Installation leaves the owner's new Gateway disabled (server.md,
 # "The Traditional IRA's Gateway"); Boost retains its existing enable policy.
 FAKE_LIVE=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "instance services failed"
-called 'init_gateway_instance /var/lib/ti-gateway-trad-ira' || fail "instance application not prepared"
+called 'install -d -o ti-gateway -g ti-gateway -m 0700 /var/lib/ti-gateway-trad-ira/Jts' || fail "instance settings directory not prepared"
 called "$work/deploy/systemd/ti-gateway@.service" || fail "instance template not installed"
 called "$work/etc/gateway-trad-ira.env" || fail "instance environment not installed"
 called '/var/lib/ti-gateway-heal/trad-ira' || fail "instance healer state not prepared"
 if grep -E 'systemctl (enable|start).*ti-gateway@' "$work/calls"; then
   fail "provisioning enabled or started an instance Gateway"
 fi
+
+# Reject stale selectors before installation (docs/manual/server.md, The Traditional IRA's Gateway).
+mkdir -p "$work/etc"
+for selection in trad-ira roth-ira unknown ''; do
+  printf '%s\n' "$selection" >"$work/etc/gateway-login"
+  if FAKE_DIST=$work/amd64 scenario "" x86_64 services; then fail "services accepted a stale selector"; fi
+  said 'sudo ti-gateway-login joint' || fail "selector refusal lacks the recovery command"
+  if called 'install '; then fail "stale selector installed files"; fi
+  test "$(cat "$work/etc/gateway-login")" = "$selection" || fail "selector was rewritten"
+done
+for selection in joint live; do
+  printf '%s\n' "$selection" >"$work/etc/gateway-login"
+  FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "services refused $selection selector"
+  test "$(cat "$work/etc/gateway-login")" = "$selection" || fail "valid selector was rewritten"
+done
+rm "$work/etc/gateway-login"
 
 # --- services refuses a Go program built for another architecture.
 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "Lightsail services refused an x86_64 dist/: $(cat "$work/out")"

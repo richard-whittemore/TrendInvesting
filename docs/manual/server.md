@@ -817,24 +817,28 @@ fixed displays prevent accidental state/display collisions.
 
 Run `sudo deploy/provision.sh services` after installing the pinned Gateway
 application (`provision.sh gateway`). This creates `gateway-trad-ira.env` under
-`/etc/trend-investing/`, copies the installed application into the instance's
-Jts tree, caps its heap at 512m, and installs the template without enabling it.
+`/etc/trend-investing/`, creates the instance directories and installs the
+template without enabling it. The IRA's Gateway runs the joint's installed
+application read-only, with its own settings, logs and state. Upgrading the
+Gateway (`provision.sh gateway`) upgrades both, and each picks up the new build
+at its next restart.
 Runtime/config/staged login, settings/counter/reset wait and logs live under
 `/run/ti-gateway-trad-ira`, `/var/lib/ti-gateway-trad-ira` and
-`/var/log/ti-gateway-trad-ira`, respectively. The joint's files remain separate.
+`/var/log/ti-gateway-trad-ira`, respectively. The joint's settings and state
+remain separate.
 The joint command stays `xvfb-run -a`. Instances require `TI_GATEWAY_DISPLAY`,
 an integer from 1 to 999: Traditional IRA uses **100** (`xvfb-run -n 100`);
 reserve **101** for Roth if provisioned. `PrivateTmp` hides display lock files
 between services, so instances must use distinct fixed numbers.
 Instances also require a valid `TI_GATEWAY_API_PORT`.
 
-The copy is deferred until the joint application's `.installed-<checksum>`
-marker matches the pinned `GATEWAY_SHA256`, and whenever the instance is active.
-Root creates only the top-level instance directories and refuses symlinks.
-Directory creation and copying beneath the instance home run as `ti-gateway`;
-a symlinked `Jts` is refused. The copied tree is synced before its completion
-marker is written. Existing instance settings survive copies. The copy uses
-the joint installation's bundled Java runtime by absolute path, read-only.
+Provisioning refuses symlinked instance directories, including `Jts`, and
+creates the instance's `Jts` settings directory owned by `ti-gateway`.
+`ProtectSystem=strict` leaves `/var/lib/ti-gateway` read-only to the instance;
+only the instance directories are writable. If the existing joint selector
+names anything other than `joint` or `live`, `provision.sh services` refuses
+before installing files. Run `sudo ti-gateway-login joint` to select the joint
+login, or select `live` if intended; provisioning never rewrites that choice.
 
 Traditional IRA restarts at **11:55 PM** nightly and **09:20** on Sunday,
 New York time; the joint keeps 11:45 PM and 09:00. The nightly time stays
