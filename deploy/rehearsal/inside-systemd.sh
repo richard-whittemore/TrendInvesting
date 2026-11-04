@@ -70,7 +70,7 @@ for f in ibkr-login-joint.env accounts/boost.env accounts/trad-ira.env accounts/
   install -m 0600 "/deploy/etc/$f.example" "/etc/trend-investing/$f"
 done
 # Synthetic login isolation fixtures (ADR 0028; docs/runbooks/gateway-login.md).
-for selection in joint trad-ira; do
+for selection in joint trad-ira live; do
   printf 'TWS_USERID=synthetic-%s\nTWS_PASSWORD=synthetic\nTWS_TRADING_MODE=paper\nTWS_READONLY_API=yes\n' "$selection" >"/etc/trend-investing/ibkr-login-$selection.env"
   chmod 0600 "/etc/trend-investing/ibkr-login-$selection.env"
 done
@@ -169,7 +169,9 @@ pass "a refused timer firing leaves the timer running; a wrong passphrase unlock
 useradd --system --no-create-home --shell /usr/sbin/nologin ti-gateway
 install -D -m 0755 /deploy/libexec/stage-gateway-login.sh /usr/local/libexec/trend-investing/stage-gateway-login.sh
 printf 'GATEWAY_MAJOR=1050\nTI_GATEWAY_RESTART_TIME=11:45 PM\nTI_GATEWAY_COLD_RESTART=09:00\n' >/etc/trend-investing/gateway.env
-printf 'trad-ira\n' >/etc/trend-investing/gateway-login
+# The joint unit's selector names joint or live only; each IRA login has its
+# own Gateway instance (docs/manual/server.md, "The Traditional IRA's Gateway").
+printf 'live\n' >/etc/trend-investing/gateway-login
 cat >/usr/local/libexec/trend-investing/gateway-probe.py <<'PYCODE'
 import json
 import os
@@ -181,7 +183,8 @@ result = {}
 try:
     content = (runtime / "login.env").read_bytes()
     result["staged_readable"] = True
-    result["selected_login"] = b"TWS_USERID=synthetic-trad-ira\n" in content
+    expected = os.environ.get("TI_GATEWAY_INSTANCE") or "live"
+    result["selected_login"] = "TWS_USERID=synthetic-{}\n".format(expected).encode() in content
 except OSError:
     result["staged_readable"] = False
     result["selected_login"] = False
@@ -218,7 +221,7 @@ assert json.loads(Path("/run/ti-gateway/probe.json").read_text()) == {
 }
 PYCODE
 test "$(stat -c %U:%G:%a /run/ti-gateway/login.env)" = ti-gateway:ti-gateway:600 || fail "staged login owner or mode differs"
-cmp -s /run/ti-gateway/login.env "$unlocked/ibkr-login-trad-ira.env" || fail "staged login differs from the selected source"
+cmp -s /run/ti-gateway/login.env "$unlocked/ibkr-login-live.env" || fail "staged login differs from the selected source"
 # A second real unit stages its direct login while the joint unit stays active
 # (server.md, "The Traditional IRA's Gateway"). The selector is deliberately joint.
 printf 'joint\n' >/etc/trend-investing/gateway-login
