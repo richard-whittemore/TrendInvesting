@@ -280,7 +280,8 @@ MIN_REQUEST_GAP = 1.0
 REQUESTS_PER_MINUTE = 10
 RATE_BACKOFF = (10, 30, 60)
 QUERY_GAP = 5
-# Every account's reader uses the one Flex token, so one reading at a time holds it: an exclusive flock on the Flex
+# One reading runs at a time on the server, whichever account's token it uses (an account with its own IBKR login
+# has its own token; docs/manual/reconciliation.md, "What you set up once"): an exclusive flock on the Flex
 # state root (the folder holding each account's ledger folder; token_root), taken after the account's own lock and
 # held for the whole reading. Its holder waits TOKEN_COOLDOWN on the steady clock before its first request, so its
 # requests never share a minute with the holder's before it, even one killed straight after a request. A reading
@@ -1419,7 +1420,8 @@ def record_resolutions(ledger_path, decisions, wait=LOCK_WAIT, sleep=time.sleep)
 
 
 def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_get, sleep=time.sleep,
-              now=lambda: datetime.now(timezone.utc), err=None, trades_query_id=None, monotonic=time.monotonic):
+              now=lambda: datetime.now(timezone.utc), err=None, trades_query_id=None, monotonic=time.monotonic,
+              credentials="secrets file"):
     """One reading (see the module): True when the statement was read, every new transfer written, every new cost
     written and the executions proof written read or none, False when the reader, its costs or its proof were set
     aside. Either way the status file beside ledger_path, the costs ledger's own beside it, and the executions proof,
@@ -1501,7 +1503,7 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
                 ok = True
             except (StatementRefused, FlexRejected, FlexUnavailable, ResolveRefused, OSError) as refused:
                 # Each sets the reader aside, named; anything else is a defect and stops the command.
-                status.update(_set_aside(refused, token, account_id))
+                status.update(_set_aside(refused, token, account_id, credentials))
                 if isinstance(refused, AmbiguousTransfer):
                     status["ambiguous"] = sorted(refused.ids)
                 say("flex: set aside: " + status["reason"])
@@ -1517,7 +1519,8 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
                 say("flex: the costs status cannot be written: " + str(unwritten))
                 ok = False
             if held:
-                proof = _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say, pacer)
+                proof = _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say, pacer,
+                                              credentials)
             else:
                 proof = {"state": PROOF_SET_ASIDE, "checked_at": checked_at, "account_id": account_id, "code": None,
                          "reason": busy}
@@ -1529,7 +1532,8 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
     return ok and costs_status["state"] == "read" and proof["state"] != PROOF_SET_ASIDE
 
 
-def _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say, pacer=None):
+def _read_executions_once(status, trades_query_id, token, account_id, get, sleep, now, say, pacer=None,
+                          credentials="secrets file"):
     """The executions proof of this reading (step 5 of the module): from the Trade Confirmation query when one is
     named, asked for now; "none" when none is named. A refusal sets the proof aside alone."""
     proof = {"checked_at": status["checked_at"], "account_id": account_id}
@@ -1551,7 +1555,7 @@ def _read_executions_once(status, trades_query_id, token, account_id, get, sleep
                                    "it must be a Trade Confirmation Flex query (docs/manual/reconciliation.md)")
         _check_requested_period(executions, asked)
     except (StatementRefused, FlexRejected, FlexUnavailable, OSError) as refused:
-        proof.update(_set_aside(refused, token, account_id), state=PROOF_SET_ASIDE)
+        proof.update(_set_aside(refused, token, account_id, credentials), state=PROOF_SET_ASIDE)
         say("flex: executions proof set aside: " + proof["reason"])
         return proof
     proof.update(state=PROOF_READ, query="trades", section=executions.section, from_date=executions.from_date,
@@ -1633,12 +1637,13 @@ def _covered_to(statement, coverage):
     return covered_to
 
 
-def _set_aside(refused, token, account_id):
-    """The status fields of a reading set aside by refused: its state, its reason (masked) and IBKR's code."""
+def _set_aside(refused, token, account_id, credentials="secrets file"):
+    """The status fields of a reading set aside by refused: its state, its reason (masked) and IBKR's code.
+    credentials names the file the Flex values came from, the one to fix after a rejection."""
     reason = mask(str(refused), token, account_id)
     if isinstance(refused, FlexRejected):
-        reason += "; check the token and query ID in the secrets file (TI_IBKR_FLEX_TOKEN, " \
-                  "TI_IBKR_FLEX_QUERY_ID) and the token's expiry in Client Portal"
+        reason += "; check the token and query ID in the {} (TI_IBKR_FLEX_TOKEN, " \
+                  "TI_IBKR_FLEX_QUERY_ID) and the token's expiry in Client Portal".format(credentials)
     state = ("coverage-gap" if isinstance(refused, CoverageGap)
              else "ambiguous-transfer" if isinstance(refused, AmbiguousTransfer) else "set-aside")
     return {"state": state, "reason": reason, "code": getattr(refused, "code", None)}
@@ -1697,14 +1702,20 @@ def _append(costs_file, costs, records):
     _write_whole(costs_file, kept + "".join(_line(r) for r in records))
 
 
-def read_key(path, key):
-    """The bare value of key's one line in the KEY=VALUE file at path; StatementRefused, never echoing a value."""
+def read_key(path, key, strict=False):
+    """The bare value of key's one line, or StatementRefused without echoing a value.
+
+    Strict account-local Flex values retain whitespace for refusal per docs/manual/reconciliation.md,
+    "What you set up once"; other callers keep the existing surrounding-whitespace tolerance.
+    """
     try:
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
     except OSError as err:
         raise StatementRefused("cannot read the secrets file {}: {}".format(path, err.strerror or err)) from None
-    found = [line.split("=", 1)[1].strip() for line in lines if "=" in line and line.split("=", 1)[0] == key]
+    found = [line.split("=", 1)[1] for line in lines if "=" in line and line.split("=", 1)[0] == key]
+    if not strict:
+        found = [value.strip() for value in found]
     if len(found) != 1 or not found[0]:
         raise StatementRefused("the secrets file {} does not hold exactly one filled-in {} line".format(path, key))
     if re.search(r"[\s\"']", found[0]):
@@ -1725,6 +1736,45 @@ def read_optional_key(path, key):
     if not found or (len(found) == 1 and not found[0].split("=", 1)[1].strip()):
         return None
     return read_key(path, key)
+
+
+FLEX_KEYS = ("TI_IBKR_FLEX_TOKEN", "TI_IBKR_FLEX_QUERY_ID", "TI_IBKR_FLEX_TRADES_QUERY_ID")
+
+
+def read_flex_credentials(account_path, secrets_path, instance="boost"):
+    """Select one file's Flex values per docs/manual/reconciliation.md, "What you set up once".
+
+    Account-local Flex lines never borrow a token or query from the shared file; values never enter diagnostics.
+    Any line naming TI_IBKR_FLEX that is not exactly a known KEY=VALUE is refused, so a typo, an indent or an
+    export prefix never drops a value or falls back. An IRA's paper account has its own IBKR login, so an IRA
+    reads only its account file: secrets.env's Flex values are Boost's login's.
+    """
+    try:
+        with open(account_path, encoding="utf-8") as f:
+            lines = [line for line in f.read().splitlines()
+                     if "TI_IBKR_FLEX" in line and not line.lstrip().startswith("#")]
+    except OSError as err:
+        raise StatementRefused("cannot read the account file {}: {}".format(
+            account_path, err.strerror or err)) from None
+    for line in lines:
+        if "=" not in line or line.split("=", 1)[0] not in FLEX_KEYS:
+            raise StatementRefused("the account file {} has a TI_IBKR_FLEX line that is not exactly KEY=VALUE "
+                                   "with one of {} as the key (no indent, no export, no space)".format(
+                                       account_path, ", ".join(FLEX_KEYS)))
+    keys = {line.split("=", 1)[0] for line in lines}
+    if not keys and instance != "boost":
+        raise StatementRefused("the account file {} holds no TI_IBKR_FLEX_TOKEN line: this account's Flex token "
+                               "and queries come from its own IBKR login, never from the secrets file".format(
+                                   account_path))
+    if keys:
+        token = read_key(account_path, "TI_IBKR_FLEX_TOKEN", strict=True)
+        query_id = read_key(account_path, "TI_IBKR_FLEX_QUERY_ID", strict=True)
+        trades = (read_key(account_path, "TI_IBKR_FLEX_TRADES_QUERY_ID", strict=True)
+                  if "TI_IBKR_FLEX_TRADES_QUERY_ID" in keys else None)
+        return token, query_id, trades, "account file"
+    return (read_key(secrets_path, "TI_IBKR_FLEX_TOKEN"),
+            read_key(secrets_path, "TI_IBKR_FLEX_QUERY_ID"),
+            read_optional_key(secrets_path, "TI_IBKR_FLEX_TRADES_QUERY_ID"), "secrets file")
 
 
 INSTANCES = ("boost", "trad-ira", "roth-ira")
@@ -1775,12 +1825,12 @@ def command(args, err, get=_get, sleep=time.sleep, now=lambda: datetime.now(time
         print("refused: a reading needs {}".format(", ".join(missing)), file=err)
         return 1
     try:
-        token = read_key(args.secrets, "TI_IBKR_FLEX_TOKEN")
-        query_id = read_key(args.secrets, "TI_IBKR_FLEX_QUERY_ID")
-        trades_query_id = read_optional_key(args.secrets, "TI_IBKR_FLEX_TRADES_QUERY_ID")
+        token, query_id, trades_query_id, source = read_flex_credentials(args.account_secrets, args.secrets,
+                                                                          args.instance)
         account_id = read_key(args.account_secrets, account_key(args.instance))
     except StatementRefused as refusal:
         print("refused: {}".format(mask(str(refusal))), file=err)
         return 1
+    print("flex: Flex values from the {}".format(source), file=err)
     return 0 if read_once(token, query_id, account_id, args.engine_log, args.ledger, get=get, sleep=sleep,
-                          now=now, err=err, trades_query_id=trades_query_id) else 1
+                          now=now, err=err, trades_query_id=trades_query_id, credentials=source) else 1

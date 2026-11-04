@@ -325,6 +325,15 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("U9999999", self.err.getvalue())
         self.assertEqual(self.made, [])
 
+    def test_account_id_read_ignores_the_accounts_flex_lines(self):
+        self.secrets.write_text(self.secrets.read_text() +
+            "TI_IBKR_FLEX_TOKEN=synthetic-token\nTI_IBKR_FLEX_QUERY_ID=synthetic-cash\n"
+            "TI_IBKR_FLEX_TRADES_QUERY_ID=synthetic-trades\n")
+        self.assertEqual(self.run_main(self.argv()), 0, self.err.getvalue())
+        self.assertEqual(self.made[-1].account_id, ACCOUNT)
+        for value in ("synthetic-token", "synthetic-cash", "synthetic-trades"):
+            self.assertNotIn(value, self.err.getvalue())
+
     def test_the_account_line_is_read_bare_and_one_with_quotes_or_inner_spaces_is_refused(self):
         # Surrounding whitespace (a trailing space, a CRLF line end) is not
         # part of the account; quotes or a space inside it are refused, by
