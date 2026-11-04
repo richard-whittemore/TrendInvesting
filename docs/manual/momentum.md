@@ -218,7 +218,7 @@ configuration error.
 | --- | --- | --- | --- | --- |
 | Exposure (`max_exposure`) | An order that **increases** exposure must not leave holdings, valued at the previous close, above this share of net liquidation. A sell is never refused by it | 1.5 (150%) | at most 1 (100%): an IRA configuration above 1 is refused | refused; Degraded on the instrument (`margin-exposure`, `ira-exposure`) |
 | Orders per decision (`max_orders_per_decision`) | Orders that are not risk-reducing at one decision time | 1 | from the IRA configuration (none exists yet) | the plan's buys refused; Degraded (`order-count`) |
-| Order size (`max_order_fraction`) | One order's value as a share of net liquidation | 1 (100%) | from the IRA configuration | refused; Degraded (`order-size`) |
+| Order size (`max_order_fraction`) | One order's value as a share of net liquidation | 1.5 (150%), equal to the exposure limit ([boost](boost.md#the-hard-limits-for-this-account)) | from the IRA configuration | refused; Degraded (`order-size`) |
 | Price band (`price_band`) | The order's reference price must be within this share of IBKR's latest recorded price (the mark), recorded at or after the close | 0.05 | from the IRA configuration | refused; Degraded (`price-band`); an IRA buy with no mark is withheld alone (`missing-mark`), with an urgent page and no degradation |
 | Cash buffer (momentum IRAs only) | Hold back `cash_buffer_fraction × net liquidation` before buy scaling | — | default 0.01; 0–0.05 inclusive | budget floored at zero; buys scaled or skipped; sells unaffected |
 | Cash (IRAs only) | A buy's worst-case cost must fit the cash still available | — | always | refused; Degraded (`insufficient-cash`) |

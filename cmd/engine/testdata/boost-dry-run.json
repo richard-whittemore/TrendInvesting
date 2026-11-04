@@ -16,7 +16,7 @@
   "limits": {
     "max_exposure": 1.5,
     "max_orders_per_decision": 1,
-    "max_order_fraction": 1,
+    "max_order_fraction": 1.5,
     "price_band": 0.05,
     "excess_liquidity_warning": 0.4,
     "excess_liquidity_urgent": 0.2,

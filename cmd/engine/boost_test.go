@@ -19,8 +19,8 @@ import (
 
 // boostConfigPath is a Boost configuration for a dry-run joint account
 // (plan.md section 2: SPY, 98% invested, BOOST_SIZE 1.5, RSI(2) below 10,
-// SMA 200, exit SMA 5). MaxOrderFraction is 1, so the first decision from
-// cash buys 98% of net liquidation in one order.
+// SMA 200, exit SMA 5). MaxOrderFraction is 1.5, as shipped, so the first
+// decision from cash buys 98% of net liquidation in one order.
 const boostConfigPath = "testdata/boost-dry-run.json"
 
 // boostAsOf is the close of the first synthetic session, so every session

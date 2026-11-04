@@ -248,6 +248,16 @@ passes** (Boost's step to 147% is about 49% of V; a risk-off month moves about
 half an IRA into IEF). A value that refuses a backtested order is a
 configuration error.
 
+*Amendment, 2026-11-04 (owner decision).* Boost's order-size limit is 1.5,
+equal to its exposure limit, not 1. A run that starts holding no SPY while
+the boost is latched steps from nothing to 147% of V in one order: a dry
+run's decision that plans the boost (its paper account never fills), and a
+first paper or live day that starts inside a boost. A limit of 1 refused that order on
+the dry run's 2026-11-03 session, which by the rule above is a
+configuration error. At 1.5 the order-size limit refuses no buy that the
+exposure limit allows, so for Boost the exposure limit, the price band and
+the order count are the bounds on a buy.
+
 **Risk-reducing orders** (point 4) are exempt from the order count, the order
 size and the price band. They stay subject to the journalled-decision check,
 the no-short sizing in point 2.5, and the kill switch, which refuses them
