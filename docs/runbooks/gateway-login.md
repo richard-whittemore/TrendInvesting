@@ -1,9 +1,25 @@
 # Runbook: the gateway will not log in
 
-The IBKR Gateway runs on the server under IBC (`ti-gateway`), and the
-engines' adapter talks to IBKR through it (ADR 0025). Setup and the
+Boost's IBKR Gateway runs on the server under IBC (`ti-gateway`). The
+Traditional IRA uses its own `ti-gateway@trad-ira` on port 4003 (ADR 0025). Setup and the
 reconnect drill are in `lightsail-deployment.md`; this runbook is what to
 do when it will not log in, and what the engines do meanwhile.
+
+## The Traditional IRA's Gateway
+
+The instance stages `/run/trend-investing/secrets/ibkr-login-trad-ira.env`
+directly; `ti-gateway-login` changes only the joint service's selection.
+Start/stop it with `sudo systemctl start ti-gateway@trad-ira.service` or
+`sudo systemctl stop ti-gateway@trad-ira.service`; check
+`sudo journalctl -u ti-gateway@trad-ira.service --since today` and port 4003.
+Its counter and reset-wait state are in
+`/var/lib/ti-gateway-trad-ira/login-failures`; never clear the joint's counter
+to recover this login. Its healer reservation is under
+`/var/lib/ti-gateway-heal/trad-ira/`. See
+[The Traditional IRA's Gateway](../manual/server.md#the-traditional-iras-gateway)
+for installation, adapter port migration and status checks. Reporter Gateway
+checks still cover the joint only. The procedures below describe the joint
+selector; use the instance unit and paths above for Traditional IRA diagnosis.
 
 ## Login files and selection
 
@@ -13,12 +29,12 @@ Owner decision, 2026-11-02: each IBKR login has its own encrypted file
 | Selector | Login file | Purpose |
 | --- | --- | --- |
 | `joint` | `ibkr-login-joint.env` | Boost's joint paper login |
-| `trad-ira` | `ibkr-login-trad-ira.env` | Traditional IRA paper login |
-| `roth-ira` | `ibkr-login-roth-ira.env` | Roth IRA paper login |
 | `live` | `ibkr-login-live.env` | The owner's real login, reaching the joint account and both IRAs |
 
 `/etc/trend-investing/gateway-login` is non-secret and contains exactly one
-of those words, with an optional final newline. Provisioning creates it once
+of `joint` or `live`, with an optional final newline. IRA logins are refused
+there: use `ti-gateway@trad-ira.service` or `ti-gateway@roth-ira.service`,
+which read their own `ibkr-login-<i>.env` directly. Provisioning creates it once
 as `joint` and never overwrites it. It is separate from `gateway.env`, which
 provisioning rewrites. A missing or invalid selector refuses Gateway startup
 with exit 64; it never falls back to another login.
@@ -70,8 +86,6 @@ Show or switch the selection without editing any secret:
 ```sh
 sudo ti-gateway-login
 sudo ti-gateway-login joint
-sudo ti-gateway-login trad-ira
-sudo ti-gateway-login roth-ira
 sudo ti-gateway-login live
 ```
 

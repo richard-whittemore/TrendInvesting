@@ -632,7 +632,7 @@ install_adapter_settings() {
     name=$(basename "${f%.example}")
     test ! -e "$adapter_root/$name" || continue
     if mac_mini; then
-      sed 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' "$f" >"$adapter_root/.$name.new"
+      sed -e 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' -e 's/"port": 400[34]/"port": 4002/' "$f" >"$adapter_root/.$name.new"
     else
       cat "$f" >"$adapter_root/.$name.new"
     fi
@@ -699,9 +699,32 @@ set_gateway_heap() {
   log "Gateway heap set to 512 MB (-Xmx512m); applies at its next start"
 }
 
+# The Mac adapter uses the external Gateway (docs/manual/server.md,
+# "The Traditional IRA's Gateway"). Replace the whole unit so no instance
+# Gateway dependency survives; systemd dependencies cannot be removed in drop-ins.
+install_mac_adapter_unit() {
+  sed -e '/^Wants=ti-gateway@%i.service$/d' \
+      -e 's/^After=ti-gateway@%i.service /After=/' \
+      -e 's|/etc/trend-investing/gateway-%i.env$|4002|' \
+      "$here/systemd/ti-adapter@.service" >"$unit_dir/ti-adapter@.service"
+}
+
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
+  # Preserve the owner's joint login choice; stale selectors must be resolved
+  # before installation (docs/manual/server.md, The Traditional IRA's Gateway).
+  if test -e "$etc/gateway-login"; then
+    # The exact bytes the staging script accepts: joint or live, with at most
+    # one final newline (docs/runbooks/gateway-login.md).
+    local accepted=0 word
+    for word in joint live; do
+      if cmp -s "$etc/gateway-login" <(printf '%s' "$word") || cmp -s "$etc/gateway-login" <(printf '%s\n' "$word"); then
+        accepted=1
+      fi
+    done
+    test "$accepted" = 1 || die "unsupported Gateway selector; run sudo ti-gateway-login joint before provisioning services"
+  fi
   # Complete migration before installing Gateway files (ADR 0028;
   # docs/runbooks/gateway-login.md). A refusal preserves the installed service.
   if ! secrets_migrate; then
@@ -724,11 +747,32 @@ step_services() {
   # Root-only recovery accounting survives Gateway restarts; never overwrite
   # its state on upgrades (docs/manual/server.md, Gateway healer).
   install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal
+  if ! mac_mini; then
+    install -d -o root -g root -m 0700 /var/lib/ti-gateway-heal/trad-ira
+    local directory
+    for directory in /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira; do
+      test ! -L "$directory" || die "refusing symlink instance directory: $directory"
+      install -d -o ti-gateway -g ti-gateway -m 0700 "$directory"
+    done
+    # Below the service-owned home, only the service's own user writes, so no
+    # link it plants can redirect a root operation (server.md, "The
+    # Traditional IRA's Gateway").
+    test ! -L /var/lib/ti-gateway-trad-ira/Jts || die "refusing symlink instance settings folder: /var/lib/ti-gateway-trad-ira/Jts"
+    runuser -u ti-gateway -- install -d -m 0700 /var/lib/ti-gateway-trad-ira/Jts
+    install -m 0644 /dev/stdin "$etc/gateway-trad-ira.env" <<CONF
+GATEWAY_MAJOR=${GATEWAY_MAJOR}
+TI_GATEWAY_RESTART_TIME=11:55 PM
+TI_GATEWAY_COLD_RESTART=09:20
+TI_GATEWAY_API_PORT=4003
+TI_GATEWAY_DISPLAY=100
+CONF
+  fi
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   for b in "$here"/libexec/*.sh; do
     case $(basename "$b") in stage-gateway-login.sh|render-ibc-config.sh) continue ;; esac
     install -m 0755 "$b" /usr/local/libexec/trend-investing/
   done
+  install -m 0755 "$here/libexec/check-adapter-port.py" /usr/local/libexec/trend-investing/
   install -m 0755 "$here"/ira-replay.sh "$here"/ira-replay.py /usr/local/libexec/trend-investing/
   install -m 0755 "$here/memory.py" /usr/local/libexec/trend-investing/
   install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/memory
@@ -844,7 +888,10 @@ CONF
   # link to /dev/null in its place, which a real file there would block.
   local unit instance
   for unit in "$here"/systemd/*.service "$here"/systemd/*.timer; do
-    if test "$(basename "$unit")" = ti-gateway.service; then continue; fi
+    case $(basename "$unit") in
+      ti-gateway.service) continue ;;
+      ti-gateway@.service) mac_mini && continue ;;
+    esac
     install -m 0644 "$unit" "$unit_dir/"
   done
   # All three Flex readers share one paced token (docs/live-trading/lessons-2026-10.md L3).
@@ -875,8 +922,11 @@ CONF
 Environment=TI_HEARTBEAT=off
 EOF
   done
-  if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
-    rm -f "$unit_dir/ti-gateway.service"
+  if mac_mini; then
+    for unit in ti-gateway.service ti-gateway@.service; do
+      if test -f "$unit_dir/$unit" && ! test -L "$unit_dir/$unit"; then rm -f "$unit_dir/$unit"; fi
+    done
+    install_mac_adapter_unit
   fi
   # On the Mac mini no time daemon runs in the container (step_clock), so the
   # clock is compared with a reference every 15 minutes too, not only when
@@ -900,7 +950,7 @@ EOF
     if mac_mini; then
       # The Gateway is the Mac app; masked, nothing can start this unit (an
       # engine's or the adapter's Wants= on it is then ignored).
-      systemctl mask ti-gateway.service
+      systemctl mask ti-gateway.service ti-gateway@.service
     else
       systemctl enable ti-gateway.service
       if systemctl is-failed --quiet ti-gateway.service; then
@@ -971,6 +1021,8 @@ step_firewall() {
   # (render-ibc-config.sh: AcceptIncomingConnectionAction=reject).
   ufw deny in proto tcp to any port 4001 >/dev/null
   ufw deny in proto tcp to any port 4002 >/dev/null
+  ufw deny in proto tcp to any port 4003 >/dev/null
+  ufw deny in proto tcp to any port 4004 >/dev/null
   ufw allow in on tailscale0 >/dev/null
   ufw --force enable >/dev/null
   log "also close port 22 in the Lightsail firewall tab (owner step)"

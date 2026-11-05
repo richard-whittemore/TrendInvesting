@@ -2,7 +2,6 @@
 Description=Bounded Gateway link recovery for failed adapter %i
 # ADR 0025's scheduled-interruption remedy; docs/manual/server.md, Gateway
 # healer. The existing failed-unit hook remains the paging path.
-After=ti-gateway.service
 ConditionFileIsExecutable=/opt/trend-investing/bin/ti-gateway-heal
 
 [Service]

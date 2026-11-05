@@ -12,14 +12,14 @@ provisioner and units: [mac-mini](mac-mini.md) says what differs there.*
 
 One virtual machine at AWS Lightsail: Ubuntu 24.04 LTS, x86_64 (IBKR ships
 IB Gateway for Linux x64 only), US East, the 2 GB plan (plan sections 3 and
-8). Everything that trades runs on it: one IB Gateway shared by all three
-accounts, the market-data step, one engine and one IBKR adapter per account
-(only Boost's exist today), the reporter and the dashboard. It is reachable only over
+8). Everything that trades runs on it: a joint IB Gateway for Boost and a separate paper Gateway for the
+Traditional IRA, the market-data step, one engine and one IBKR adapter per account
+(the Roth remains on hold), the reporter and the dashboard. It is reachable only over
 Tailscale, your private network: the firewall refuses everything else. The
 Gateway's API port (4002 for paper, 4001 for live) is for programs on the
 server itself, the engines and adapters, and the Gateway refuses every other
 client: the rendered IBC settings reject incoming connections from any address
-but the server's own and trust none. The firewall also denies those two ports,
+but the server's own and trust none. The firewall also denies ports 4001–4004,
 but that is a second layer, not the guard: Tailscale's own rules let tailnet
 traffic through before the firewall looks. On a server set up earlier, apply
 all of this with: `git pull`, `sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh` into `/usr/local/libexec/trend-investing`. `services` reinstalls the five programs (`ti-data`, `ti-reporter`, `ti-dashboard`, `operator`, `journal-query`) found in the checkout's `dist/`, and never `ti-engine`. `dist/` on this server holds the builds copied from the Mac at the first install and has not been changed since. That holds until the first `ti-release`; after that, run `services` only with `dist/` moved aside (or do upgrades only through `ti-release`). If you are unsure, move `dist/` aside before running `services` (the programs already installed then stay)), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
@@ -39,9 +39,8 @@ nothing, a file with other than exactly one `-Xmx` line, with another
 heap-sizing option (`-XX:MaxHeapSize`, `-XX:InitialHeapSize`,
 `-XX:MinHeapSize`, `-XX:MaxRAM...`), or with an initial heap (`-Xms`) above
 512 MB or not written in `m` or `g`. The cap applies at the Gateway's next
-start; provisioning never restarts it. It prepares the planned second
-Gateway: the owner decided on 2026-11-03 that Boost and the Traditional IRA
-paper-trade on two Gateways on this server; today one Gateway runs.
+start; provisioning never restarts it. The same cap applies to the Traditional
+IRA Gateway. Provisioning installs that instance disabled; the owner starts it.
 The server deliberately has no swap: `ti-secrets` and `ti-unlock` refuse
 while any swap is on ([ADR 0028](../adr/0028-server-secrets-rest-encrypted-and-are-unlocked-into-memory.md), no plain
 text on the disk). Memory pressure is met by the heap cap and the memory
@@ -148,7 +147,8 @@ the same disk as the files, and a snapshot would carry both.
 | `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to its adapter (`ti-adapter@roth-ira.service`, client ID 13) and Flex reader (`ti-flex@roth-ira.service`) |
 
 The Gateway's non-secret selector is `/etc/trend-investing/gateway-login`:
-`joint`, `trad-ira`, `roth-ira` or `live`. Provisioning creates it once as
+`joint` or `live`. The IRA logins belong to `ti-gateway@trad-ira.service` and
+`ti-gateway@roth-ira.service`; the joint selector refuses them. Provisioning creates it once as
 `joint` and never overwrites it. `sudo ti-gateway-login` shows it;
 `sudo ti-gateway-login live` selects the real login, which reaches all three
 accounts. The selection applies at the Gateway's next start of any kind,
@@ -805,6 +805,78 @@ ends with the last check's time and result ([alerts and
 dashboard](alerts-and-dashboard.md), "Alerts this chapter explains"). Running it
 by hand is how you confirm the fix.
 
+## The Traditional IRA's Gateway
+
+`ti-gateway@trad-ira.service` runs alongside Boost's unchanged
+`ti-gateway.service`, under the same `ti-gateway` user. It connects the
+Traditional IRA adapter to localhost port **4003**, using only
+`/run/trend-investing/secrets/ibkr-login-trad-ira.env`. The joint login selector
+(`ti-gateway-login`) does not affect this instance. The shared service user is
+not a security boundary between Gateways; separate service directories and
+fixed displays prevent accidental state/display collisions.
+
+Run `sudo deploy/provision.sh services` after installing the pinned Gateway
+application (`provision.sh gateway`). This creates `gateway-trad-ira.env` under
+`/etc/trend-investing/`, creates the instance directories and installs the
+template without enabling it. The IRA's Gateway shares the joint's installed
+application, with its own settings, logs and state. For a Gateway upgrade to a
+new build, stop **both** Gateways before running `sudo deploy/provision.sh gateway`.
+Keep both stopped while running `sudo deploy/provision.sh services`, which
+writes `GATEWAY_MAJOR` into both `gateway.env` and `gateway-trad-ira.env`.
+Then start each Gateway; both start on the new build.
+Runtime/config/staged login, settings/counter/reset wait and logs live under
+`/run/ti-gateway-trad-ira`, `/var/lib/ti-gateway-trad-ira` and
+`/var/log/ti-gateway-trad-ira`, respectively. The joint's settings and state
+remain separate.
+The joint command stays `xvfb-run -a`. Instances require `TI_GATEWAY_DISPLAY`,
+an integer from 1 to 999: Traditional IRA uses **100** (`xvfb-run -n 100`);
+reserve **101** for Roth if provisioned. `PrivateTmp` hides display lock files
+between services, so instances must use distinct fixed numbers.
+Instances also require a valid `TI_GATEWAY_API_PORT`.
+
+Provisioning refuses symlinked instance directories, including `Jts`, and
+creates the instance's `Jts` settings directory owned by `ti-gateway`.
+Under `ProtectSystem=strict`, the instance may write within the joint's
+installation only in `/var/lib/ti-gateway/Jts/ibgateway`: Gateway's own
+install4j restarter writes `1050/.install4j/restarter.log` there (observed on
+the server at 23:45 ET on 2026-11-03). The instance's own directories are also
+writable; the joint's settings, logs and state remain separate. Restart times
+are staggered so the two Gateways do not restart together.
+If the existing joint selector
+names anything other than `joint` or `live`, `provision.sh services` refuses
+before installing files. Run `sudo ti-gateway-login joint` to select the joint
+login, or select `live` if intended; provisioning never rewrites that choice.
+
+Traditional IRA restarts at **11:55 PM** nightly and **09:20** on Sunday,
+New York time; the joint keeps 11:45 PM and 09:00. The nightly time stays
+inside the joint's IBKR reset window, **23:40–01:00 ET**, so the bounded
+reset-wait policy applies while the two Java processes restart separately.
+
+After unlocking the secrets, use:
+
+```sh
+sudo systemctl start ti-gateway@trad-ira.service
+sudo systemctl status ti-gateway@trad-ira.service
+sudo journalctl -u ti-gateway@trad-ira.service --since today
+sudo ss -ltn 'sport = :4003'
+sudo systemctl stop ti-gateway@trad-ira.service
+```
+
+Confirm `Login has completed` before starting `ti-adapter@trad-ira.service`.
+Existing adapter JSON files are preserved by provisioning: if already present,
+set `port` to `4003` in `/etc/trend-investing/adapters/trad-ira.json` before
+starting that adapter. Its `ExecStartPre` refuses a JSON port that differs
+from `TI_GATEWAY_API_PORT` in `/etc/trend-investing/gateway-trad-ira.env`,
+naming the configuration file and expected port. New examples already use this port. The Roth example
+reserves **4004**; its Gateway is not provisioned or enabled in this slice.
+On the Mac mini both Linux Gateway units are masked. The adapter template
+unit override removes the instance Gateway dependency and requires port **4002**
+against the external Mac Gateway; existing JSON files must be set accordingly.
+Run `sudo deploy/provision.sh firewall` to deny inbound 4003/4004 as well as
+4001/4002. The same IBC local-client restriction applies to both Gateways.
+The reporter's Gateway checks still observe only the joint Gateway; check the
+IRA's unit and journal directly. Flex credentials remain unchanged.
+
 ## The Gateway is logged out
 
 **Gateway healer.** When an adapter exits 3 and its own invocation journal
@@ -815,16 +887,30 @@ binary and hooks with `deploy/provision.sh services`; installation needs the
 owner's yes. It is not enabled as a boot job. The Mac mini's masked Gateway
 cannot qualify; its Gateway remains the owner's macOS app.
 
+Recovery routes are fixed: `ti-adapter-boost.service` uses `ti-gateway.service`,
+`/var/lib/ti-gateway-heal/` and `/var/lib/ti-gateway/login-failures`, exactly as
+before. `ti-adapter@trad-ira.service` uses `ti-gateway@trad-ira.service`,
+`/var/lib/ti-gateway-heal/trad-ira/` and
+`/var/lib/ti-gateway-trad-ira/login-failures`. The Roth follows the same naming
+if provisioned later. Each healer reads its Gateway's environment file
+(`gateway.env` for Boost, `gateway-<instance>.env` for an IRA). Unknown adapters
+are refused. Reservations (`last-restart.json`) stay within the selected
+healer directory (`/var/lib/ti-gateway-heal` for Boost,
+`/var/lib/ti-gateway-heal/<instance>/` for an IRA); neither account's trigger
+reads or writes the other's reservation or restarts the other Gateway. One
+lock, `/var/lib/ti-gateway-heal/lock`, is shared by every healer, so only one
+recovery runs on the server at a time.
+
 | Case | Healer action / journal row |
 |---|---|
-| Exit 3 with the remedy, outside windows, logged in, no recent restart | `eligible`: reserve the restart, restart `ti-gateway.service` once, wait at most ten minutes for “Login has completed” in the new invocation, then start only its own adapter by unit name; this is the same unattended login as the scheduled restarts |
+| Exit 3 with the remedy, outside windows, logged in, no recent restart | `eligible`: reserve the restart, restart the adapter's own Gateway once, wait at most ten minutes for “Login has completed” in the new invocation, then start only its own adapter by unit name; this is the same unattended login as the scheduled restarts |
 | A Gateway invocation newer than this adapter’s loss has completed login | `already-restarted`: re-check the gates and start only its own adapter, without another restart |
 | Restart needed, but one occurred in the last two hours | `rate-limit`: nothing; the existing operational page stands |
 | Inside the adapter schedule, 23:40–01:00 ET, or the Sunday cold restart with a 10-minute margin either side | `window`: wait for the union to end, then re-check once; a changed schedule can still refuse recovery |
 | Login counter nonempty before restart, or refused-login/retries-stopped/reset-wait evidence | `login-problem`: nothing; leave login recovery to the existing handling |
 | Gateway shows LOGGED_OUT, is inactive, or lacks current login evidence | `logged-out`: nothing |
 | Owner resets the adapter's failed state, or its invocation changes | `owner-stopped`: nothing; recovery requires the same invocation still in `failed` state at every re-check |
-| Another healer holds the shared lock | `another-healer`: wait for the lock within the same ten-minute recovery deadline |
+| Another healer, for either Gateway, holds the shared lock | `another-healer`: wait for the lock within the same ten-minute recovery deadline |
 | Evidence cannot be read or validated, including the restart ledger | `evidence-error`: stop without another action; fix the named evidence fault |
 | Exact remedy absent, or incident-loss evidence missing or unusable | `no-remedy`: nothing; the invocation cannot establish this recovery incident |
 | Any other adapter exit | `other-exit`: nothing |
@@ -837,7 +923,7 @@ The invariant is no login attempt that gateway-start would refuse, no action
 inside a scheduled window, the nightly reset hour, or the Sunday cold restart
 margin, once per incident, and
 no restart between order hand-over and its journal record. The healer never
-clears `/var/lib/ti-gateway/login-failures`. It conservatively refuses **any
+clears its Gateway's `login-failures` file. It conservatively refuses **any
 nonempty counter file**, including retained reset allowances and old attempt
 lines before the restart. `gateway-start` writes a provisional attempt before
 launch, then durably clears the attempts before publishing “Login has completed”
@@ -848,15 +934,16 @@ malformed schedule, counter read errors, and unreadable journals fail closed.
 The schedule is `/etc/trend-investing/ibkr-maintenance.json`, as used by the
 installed adapters, plus the mandatory nightly hour even if removed from that
 file. The Sunday cold restart comes from `TI_GATEWAY_COLD_RESTART` in
-`/etc/trend-investing/gateway.env`, with a 10-minute margin either side;
+`/etc/trend-investing/gateway.env` for the joint, or
+`/etc/trend-investing/gateway-<i>.env` for an instance, with a 10-minute margin either side;
 unreadable or malformed settings refuse recovery. Owner edits to the adapter
 schedule cannot remove either Gateway window. Repeated DST boundaries use the
 shared schedule parser's later end.
 
-It takes every adapter's `pending.json.lock` for Boost and both IRAs and checks
-`pending.json.handover` under those locks. An active adapter on another account
-therefore blocks automatic recovery too. The locks remain held through login
-and are released before starting the adapter. Provisioning creates these locks
+Every recovery takes every adapter's `pending.json.lock` and checks each
+`pending.json.handover` under its lock (ADR 0026 point 8), whichever Gateway
+it restarts. Any active relay or unsettled hand-over blocks recovery.
+The locks remain held through login and are released before starting the adapter. Provisioning creates these locks
 exclusively as the adapter user, mode 0600,
 without following links or replacing existing files. A non-following descriptor
 check refuses nonregular files, wrong ownership or modes; no root chown/chmod
@@ -866,8 +953,9 @@ adapter directories are read-only in its sandbox and its only capability is
 mark also refuses recovery; the healer never edits order records or restarts an
 engine. Units and their fixed pending paths must remain as provisioned.
 
-The reservation is `/var/lib/ti-gateway-heal/last-restart.json`, root-owned mode
-0600 in a root-owned 0700 directory directly under root-owned `/var/lib`. A shared lock serializes healer instances;
+The joint reservation is `/var/lib/ti-gateway-heal/last-restart.json`; an
+instance uses `/var/lib/ti-gateway-heal/<i>/last-restart.json`. Both are
+root-owned mode 0600 in root-owned 0700 directories under root-owned `/var/lib`. The one shared lock serializes every healer, whichever Gateway it restarts;
 the file and its directory are synced before the restart. After systemctl returns,
 on success or failure, the healer saves the later of the reservation and completion
 times as `LastRestart`; the two-hour limit counts from that time. A command failure or
@@ -879,10 +967,10 @@ maintenance-window wait. Once serialized, a Gateway invocation newer than this
 adapter's loss, active and logged in, permits an `already-restarted` adapter start
 without consuming or bypassing the two-hour limit on restarts. Every start
 rechecks the shared gates and the same failed adapter invocation.
-Only `systemctl --job-mode=fail restart ti-gateway.service` and
+Only `systemctl --job-mode=fail restart <own Gateway unit>` and
 `systemctl --job-mode=fail start <adapter unit>` are mutation commands; no PID or
 process group is signalled. Reads retain their deadlines. Submitted mutations
-have no client timeout: the healer holds its global lock, and its relay locks
+have no client timeout: the healer holds its Gateway lock, and every relay lock
 for a restart, until systemctl returns. Systemd rejects conflicting jobs and
 bounds target starts by its default start timeout (90 seconds) and stops by
 each unit's 60 seconds. A submitted job may

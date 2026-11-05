@@ -127,8 +127,11 @@ class ConfigurationTests(unittest.TestCase):
         for values in (boost, ira):
             config(**{k: v for k, v in values.items()})
         self.assertEqual((ira["client_id"], ira["mode"], ira["paper_sending_enabled"]), (12, "dry-run", False))
+        # The IRA's paper login has its own Gateway on its own port (server.md,
+        # "The Traditional IRA's Gateway").
+        self.assertEqual((boost["port"], ira["port"]), (4002, 4003))
         self.assertEqual({k for k in set(boost) | set(ira) if boost.get(k) != ira.get(k)},
-                         {"client_id", "account_snapshot_version", "resolve_contracts"})
+                         {"client_id", "port", "account_snapshot_version", "resolve_contracts"})
 
 
 class SnapshotRecordTests(unittest.TestCase):
@@ -552,8 +555,11 @@ class AdapterTemplateTests(unittest.TestCase):
     def test_the_template_refuses_the_boost_instance(self):
         text = TEMPLATE.read_text()
         pre = [l for l in unit_lines(text) if l.startswith("ExecStartPre=")]
-        self.assertEqual(len(pre), 1)
+        # The Boost refusal comes first; the port check against the IRA's own Gateway follows it
+        # (docs/manual/server.md, "The Traditional IRA's Gateway").
+        self.assertEqual(len(pre), 2)
         self.assertIn('test "%i" != boost', pre[0])
+        self.assertIn("check-adapter-port.py", pre[1])
 
     def test_client_ids_are_unique_and_the_iras_settings_name_its_account_line(self):
         ids = {}

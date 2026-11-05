@@ -74,7 +74,8 @@ func (h healer) say(row, step string) error {
 
 // Run reserves a restart durably before issuing it and never clears that
 // reservation, including after a failed command (server.md, Gateway healer).
-// Store.Lock serializes recovery across accounts, including adapter starts.
+// Store.Lock serializes recovery across accounts and Gateways, including
+// adapter starts: every healer takes the one server-wide lock.
 func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, ctl Systemctl, guard Guard, log func(string) error) error {
 	h := healer{log: log}
 	if !AllowedAdapter(unit) {
@@ -128,7 +129,7 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	if err != nil {
 		return err
 	}
-	gateway, err := ctl.Status(GatewayUnit)
+	gateway, err := ctl.Status(gatewayForAdapter(unit))
 	if err != nil {
 		return err
 	}
@@ -191,7 +192,7 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	if row != "" {
 		return h.say(row, "before-restart")
 	}
-	restartErr := ctl.Act("restart", GatewayUnit)
+	restartErr := ctl.Act("restart", gatewayForAdapter(unit))
 	// Keep the durable reservation and advance it after either command result;
 	// the two-hour limit uses the later time (server.md, Gateway healer).
 	completed := clock.Now()
@@ -201,7 +202,7 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 	if err := errors.Join(restartErr, store.Save(State{LastRestart: completed, Incident: failed.Invocation})); err != nil {
 		return err
 	}
-	restarted, err := ctl.Status(GatewayUnit)
+	restarted, err := ctl.Status(gatewayForAdapter(unit))
 	if err != nil {
 		return err
 	}
@@ -212,14 +213,14 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 		return err
 	}
 	for clock.Now().Before(checks.deadline) {
-		current, err := ctl.Status(GatewayUnit)
+		current, err := ctl.Status(gatewayForAdapter(unit))
 		if err != nil {
 			return err
 		}
 		if current.Invocation != restarted.Invocation || current.Started != restarted.Started {
 			return h.say("logged-out", "gateway-changed")
 		}
-		lines, err := journal.Lines(GatewayUnit, restarted.Invocation)
+		lines, err := journal.Lines(gatewayForAdapter(unit), restarted.Invocation)
 		if err != nil {
 			return err
 		}
@@ -284,7 +285,7 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	if gateway.Active != "active" || gateway.Invocation == "" {
 		return "logged-out", nil
 	}
-	current, err := c.ctl.Status(GatewayUnit)
+	current, err := c.ctl.Status(gatewayForAdapter(unit))
 	if err != nil {
 		return "", err
 	}
@@ -301,7 +302,7 @@ func (c actionChecks) check(unit string, failed, gateway Status) (string, error)
 	}
 	// Login evidence for this invocation: a logout or refusal withdraws
 	// permission (ADR 0019, Alerting; server.md, Gateway healer).
-	lines, err := c.journal.Lines(GatewayUnit, gateway.Invocation)
+	lines, err := c.journal.Lines(gatewayForAdapter(unit), gateway.Invocation)
 	if err != nil {
 		return "", err
 	}
@@ -493,7 +494,7 @@ func WindowEnd(raw []byte, now time.Time, extra ...[]byte) (time.Time, error) {
 // ValidateAction limits mutations to the two named unit operations permitted
 // by docs/development.md, Ending processes, and server.md, Gateway healer.
 func ValidateAction(action, unit string) error {
-	if (action == "restart" && unit == GatewayUnit) || (action == "start" && AllowedAdapter(unit)) {
+	if (action == "restart" && allowedGateway(unit)) || (action == "start" && AllowedAdapter(unit)) {
 		return nil
 	}
 	return fmt.Errorf("unapproved unit operation")
@@ -534,4 +535,26 @@ func HandoverClear(raw []byte) bool {
 	_, closingErr := dec.Token()
 	_, trailingErr := dec.Token()
 	return closingErr == nil && errors.Is(trailingErr, io.EOF)
+}
+
+// gatewayForAdapter selects the account's recovery target (server.md, Gateway healer).
+// Callers must reject unknown adapters before performing effects.
+func gatewayForAdapter(unit string) string {
+	if unit == AdapterUnits[0] {
+		return GatewayUnit
+	}
+	for _, name := range AdapterUnits[1:] {
+		if unit == name {
+			return "ti-gateway@" + strings.TrimSuffix(strings.TrimPrefix(unit, "ti-adapter@"), ".service") + ".service"
+		}
+	}
+	return ""
+}
+func allowedGateway(unit string) bool {
+	for _, adapter := range AdapterUnits {
+		if gatewayForAdapter(adapter) == unit {
+			return true
+		}
+	}
+	return false
 }

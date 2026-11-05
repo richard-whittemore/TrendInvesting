@@ -76,7 +76,10 @@ func TestGatewayHealerSandboxAndRehearsalContract(t *testing.T) {
 		}
 	}
 	drill := read("deploy/rehearsal/gateway-heal.sh")
-	for _, want := range []string{"row=rate-limit step=no-action", "ti-unit-failed@ti-adapter-boost.service.service", "heal-clock-offset-seconds", "provisional attempt", "CapabilityBoundingSet", "ReadOnlyPaths", "pending.json.lock"} {
+	for _, want := range []string{"row=rate-limit step=no-action", "adapter=ti-adapter-boost.service", "page_hook=ti-unit-failed@$adapter.service",
+		"adapter=ti-adapter@$account.service", "gateway=ti-gateway@$account.service",
+		"rehearse_gateway_heal_account boost", "rehearse_gateway_heal_account trad-ira",
+		"IRA changed joint reservation", "IRA changed joint login counter", "IRA restarted joint Gateway", "heal-clock-offset-seconds", "provisional attempt", "CapabilityBoundingSet", "ReadOnlyPaths", "pending.json.lock"} {
 		if !strings.Contains(drill, want) {
 			t.Errorf("drill lacks %q", want)
 		}

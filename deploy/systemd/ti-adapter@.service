@@ -1,14 +1,14 @@
 [Unit]
 Description=IBKR adapter for account %i, an IRA's momentum engine (sends only in paper, with paper_sending_enabled on)
-# One adapter per account, each with its own client ID on the one IB Gateway
+# One adapter per account, each with its own client ID and IB Gateway
 # (ADR 0026 point 8; docs/live-trading/lessons-2026-10.md L6): ti-adapter@trad-ira
 # (client ID 12), and ti-adapter@roth-ira once that account has a
 # configuration. Boost's adapter keeps its own unit, ti-adapter-boost.service,
 # which this template leaves unchanged; the template refuses the boost
 # instance (ExecStartPre below), so the Boost account can never get a second
 # adapter.
-After=ti-gateway.service ti-engine@%i.service
-Wants=ti-gateway.service
+After=ti-gateway@%i.service ti-engine@%i.service
+Wants=ti-gateway@%i.service
 # When this unit fails, ti-unit-failed@%n sends one urgent page through the
 # reporter's channels naming it, the failed run's last journal line and the
 # manual row to read (ADR 0019, "Alerting"; docs/manual/server.md, "A failed
@@ -44,6 +44,7 @@ EnvironmentFile=/etc/trend-investing/engines/%i.env
 # engine first; the adapter refuses to start without its log.
 EnvironmentFile=/var/lib/trend-investing/engines/%i/run.env
 ExecStartPre=/bin/sh -c 'test "%i" != boost || { echo "ti-adapter@boost: the Boost account has its own adapter unit, ti-adapter-boost.service; this template is for the IRAs only" >&2; exit 1; }'
+ExecStartPre=/usr/bin/python3 /usr/local/libexec/trend-investing/check-adapter-port.py /etc/trend-investing/adapters/%i.json /etc/trend-investing/gateway-%i.env
 # The account number is read from the instance's line (TI_ADAPTER_ACCOUNT_KEY,
 # IBKR_ACCOUNT_TRAD_IRA for trad-ira) of its own root-only account file,
 # handed to this service as a private copy; nothing else (no other account's

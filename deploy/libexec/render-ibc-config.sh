@@ -50,6 +50,22 @@ if test "$mode" = live && test "$readonly_present" = 0; then
 fi
 case $readonly_api in yes|no) ;; *) echo "render-ibc-config: TWS_READONLY_API must be yes or no" >&2; exit 64 ;; esac
 
+if test -n "${TI_GATEWAY_INSTANCE:-}" && test -z "${TI_GATEWAY_API_PORT:-}"; then
+  echo "render-ibc-config: TI_GATEWAY_API_PORT is required for a Gateway instance" >&2
+  exit 64
+fi
+
+# IBC config.ini's OverrideTwsApiPort isolates paper Gateways (server.md,
+# "The Traditional IRA's Gateway"). An unset override preserves the template.
+if test -n "${TI_GATEWAY_API_PORT:-}"; then
+  if ! [[ $TI_GATEWAY_API_PORT =~ ^[0-9]{1,5}$ ]] ||
+     (( 10#$TI_GATEWAY_API_PORT < 1 || 10#$TI_GATEWAY_API_PORT > 65535 )); then
+    echo "render-ibc-config: invalid API port" >&2
+    exit 64
+  fi
+  export IBC_V_OverrideTwsApiPort=$TI_GATEWAY_API_PORT
+fi
+
 # The Gateway itself refuses API clients that are not on the server (127.0.0.1
 # is always allowed): IBC rejects the "incoming connection" dialog and trusts no
 # other address. The firewall is not the guard, because Tailscale's own input

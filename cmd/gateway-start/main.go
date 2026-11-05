@@ -84,6 +84,7 @@ const (
 )
 
 type config struct {
+	ConfigError   string
 	Render        []string // renders IBC's config; empty skips it
 	Command       []string // IBC's command
 	StateFile     string
@@ -127,8 +128,9 @@ const (
 	maxBound = 60
 )
 
-// configFromEnv reads the settings, falling back to the default (never to
-// "unbounded") for any that is invalid; the second result says which.
+// configFromEnv reads bounded login settings and the instance display
+// (docs/manual/server.md, The Traditional IRA's Gateway). Invalid instance
+// displays refuse startup; optional login settings use their bounded defaults.
 func configFromEnv(getenv func(string) string) (c config, warn []string) {
 	intIn := func(name string, lo, hi, def int) int {
 		v := getenv(name)
@@ -148,7 +150,19 @@ func configFromEnv(getenv func(string) string) (c config, warn []string) {
 		}
 		return def
 	}
+	displayArgs := []string{"-a"}
+	configError := ""
+	if getenv("TI_GATEWAY_INSTANCE") != "" {
+		display := getenv("TI_GATEWAY_DISPLAY")
+		n, err := strconv.Atoi(display)
+		if err != nil || n < 1 || n > 999 || !regexp.MustCompile(`^\d{1,3}$`).MatchString(display) {
+			configError = "TI_GATEWAY_DISPLAY must be an integer from 1 to 999 for an instance"
+		} else {
+			displayArgs = []string{"-n", strconv.Itoa(n)}
+		}
+	}
 	c = config{
+		ConfigError:   configError,
 		Render:        []string{pick("TI_GATEWAY_RENDER", defaultRender)},
 		StateFile:     pick("TI_GATEWAY_STATE_FILE", defaultState),
 		Max:           intIn("TI_GATEWAY_LOGIN_MAX_FAILURES", 1, defaultMax, defaultMax),
@@ -169,12 +183,13 @@ func configFromEnv(getenv func(string) string) (c config, warn []string) {
 	if ibc := getenv("TI_GATEWAY_IBC"); ibc != "" {
 		c.Command = []string{ibc}
 	} else if major, runtime := getenv("GATEWAY_MAJOR"), getenv("RUNTIME_DIRECTORY"); major != "" && runtime != "" {
-		home := "/var/lib/ti-gateway"
-		c.Command = []string{"xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
+		home := pick("TI_GATEWAY_HOME", "/var/lib/ti-gateway")
+		c.Command = append([]string{"xvfb-run"}, displayArgs...)
+		c.Command = append(c.Command, "--server-args=-screen 0 1024x768x24",
 			"/opt/ibc/scripts/ibcstart.sh", major, "--gateway",
-			"--tws-path=" + home + "/Jts", "--tws-settings-path=" + home + "/Jts",
-			"--ibc-path=/opt/ibc", "--ibc-ini=" + filepath.Join(runtime, "config.ini"),
-			"--on2fatimeout=restart"}
+			"--tws-path="+pick("TI_GATEWAY_APP_HOME", home)+"/Jts", "--tws-settings-path="+home+"/Jts",
+			"--ibc-path=/opt/ibc", "--ibc-ini="+filepath.Join(runtime, "config.ini"),
+			"--on2fatimeout=restart")
 	}
 	return c, warn
 }
@@ -380,6 +395,10 @@ func run(cfg config, stdout, stderr io.Writer) int {
 	// cannot reports that IBC cannot be started, in the words the health check
 	// reads (cmd/reporter keys on "cannot start IBC") when the journal works.
 	cannot := func(format string, a ...any) { say("cannot start IBC: "+format, a...) }
+	if cfg.ConfigError != "" {
+		cannot("%s", cfg.ConfigError)
+		return 64
+	}
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigs)

@@ -6,7 +6,7 @@ umask 022
 selector=/etc/trend-investing/gateway-login
 die() { echo "ti-gateway-login: $*" >&2; exit 64; }
 test ! -d "$selector" || die "$selector is a directory; expected a selector file"
-test $# -le 1 || die 'usage: sudo ti-gateway-login [joint|trad-ira|roth-ira|live]'
+test $# -le 1 || die 'usage: sudo ti-gateway-login [joint|live]'
 if test $# -eq 0; then
   test -r "$selector" || die "missing or unreadable $selector; run sudo deploy/provision.sh services"
   selection=$(cat "$selector" && printf '.') || exit 64
@@ -17,8 +17,9 @@ else
   selection=$1
 fi
 case $selection in
-  joint|trad-ira|roth-ira|live) ;;
-  *) die "$selector must contain one word: joint | trad-ira | roth-ira | live" ;;
+  joint|live) ;;
+  trad-ira|roth-ira) die "$selector: use ti-gateway@$selection.service for this login" ;;
+  *) die "$selector must contain one word: joint | live" ;;
 esac
 if test $# -eq 0; then
   # Reject bytes that Bash drops when reading the selector (the one-word

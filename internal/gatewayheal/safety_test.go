@@ -290,6 +290,7 @@ func TestCounterReadAtDeadlineDoesNotWaitAgain(t *testing.T) {
 func allFailedRig() *rig {
 	r := fixture()
 	for _, unit := range AdapterUnits[1:] {
+		r.statuses[gatewayForAdapter(unit)] = r.statuses[GatewayUnit]
 		r.statuses[unit] = Status{Active: "failed", Code: 1, Exit: 3, Invocation: unit + "-failure", Finished: r.at.Add(-time.Minute)}
 		r.journals[unit+"-failure"] = []string{Remedy}
 	}
@@ -303,7 +304,7 @@ func TestGatewayEachTriggerStartsOnlyOwnAdapter(t *testing.T) {
 			if err := Run(trigger, r, r, r, r, r, r, r.Log); err != nil {
 				t.Fatal(err)
 			}
-			assertSafetyTrace(t, r, eligibleRows("reserve-restart", "restart", "wait-login", "login-completed", "adapter-start"), []string{"restart " + GatewayUnit, "start " + trigger})
+			assertSafetyTrace(t, r, eligibleRows("reserve-restart", "restart", "wait-login", "login-completed", "adapter-start"), []string{"restart " + gatewayForAdapter(trigger), "start " + trigger})
 		})
 	}
 }
@@ -419,5 +420,31 @@ func TestColdWindowQuotesAndBoundaryUnion(t *testing.T) {
 				t.Fatalf("waits=%v, want %v", r.waits, waits)
 			}
 		})
+	}
+}
+
+// TestNoGatewayOutsideTheAdapterMapIsRestartable holds the healer to restarting
+// only an adapter's own Gateway (server.md, Gateway healer): an unknown adapter
+// maps to no Gateway, and a restart of any unit outside the map is refused.
+func TestNoGatewayOutsideTheAdapterMapIsRestartable(t *testing.T) {
+	if got := gatewayForAdapter("ti-adapter@other.service"); got != "" {
+		t.Errorf("an unknown adapter maps to %q, want no Gateway", got)
+	}
+	for _, unit := range []string{"ti-gateway@other.service", "ti-gateway@.service", "ti-engine@boost.service", ""} {
+		if err := ValidateAction("restart", unit); err == nil {
+			t.Errorf("restart of %q was allowed", unit)
+		}
+	}
+	for adapter, gateway := range map[string]string{
+		"ti-adapter-boost.service":    "ti-gateway.service",
+		"ti-adapter@trad-ira.service": "ti-gateway@trad-ira.service",
+		"ti-adapter@roth-ira.service": "ti-gateway@roth-ira.service",
+	} {
+		if got := gatewayForAdapter(adapter); got != gateway {
+			t.Errorf("%s maps to %q, want %q", adapter, got, gateway)
+		}
+		if err := ValidateAction("restart", gateway); err != nil {
+			t.Errorf("restart of %s refused: %v", gateway, err)
+		}
 	}
 }

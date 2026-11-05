@@ -2,8 +2,8 @@
 
 # CASE TABLE (one test per row; no processes are signalled):
 # joint present -> selected config: test_selector_joint
-# trad-ira present -> selected config: test_selector_trad_ira
-# roth-ira present -> selected config: test_selector_roth_ira
+# trad-ira in joint selector -> own unit named: test_selector_trad_ira
+# roth-ira in joint selector -> own unit named: test_selector_roth_ira
 # live present -> selected config: test_selector_live
 # selected file absent -> 64, file and selector named: test_selected_absent
 # selected file empty -> 64, file and selector named: test_selected_empty
@@ -141,10 +141,17 @@ class GatewayLoginTests(unittest.TestCase):
         self.selected("joint")
 
     def test_selector_trad_ira(self):
-        self.selected("trad-ira")
+        self.refused_ira_selection("trad-ira")
 
     def test_selector_roth_ira(self):
-        self.selected("roth-ira")
+        self.refused_ira_selection("roth-ira")
+
+    def refused_ira_selection(self, instance):
+        self.login(instance)
+        self.selector.write_text(instance + "\n")
+        for result in (self.stage(), self.command(), self.command(instance)):
+            self.assertEqual(result.returncode, 64, result.stderr)
+            self.assertIn(f"ti-gateway@{instance}.service", result.stderr)
 
     def test_selector_live(self):
         self.selected("live")
@@ -558,7 +565,7 @@ cmd_diff ibkr-login.env
         self.assertEqual(self.selector.read_text(), "live\n")
 
     def test_staging_rejects_mode_mismatch(self):
-        for selection in ("joint", "trad-ira", "roth-ira", "live"):
+        for selection in ("joint", "live"):
             for mode in ("live" if selection != "live" else "paper", "", "unknown"):
                 with self.subTest(selection=selection, mode=mode):
                     self.selector.write_text(selection + "\n")
@@ -726,6 +733,193 @@ class OptionalLoginFirstEditTests(test_roth.IRAFirstEditTests):
                 self.ok(self.command('cmd_edit "$1"', name, phrases=(self.phrase,), edit="second"))
                 self.assertEqual((self.folder / "editor-before").read_text(), first)
                 self.assertEqual(self.ok(self.decrypt(name)).stdout, first + "TWS_PASSWORD=synthetic-password\n")
+
+
+class GatewayInstanceTests(unittest.TestCase):
+    setUp = GatewayLoginTests.setUp
+    shell = GatewayLoginTests.shell
+    stage = GatewayLoginTests.stage
+    render = GatewayLoginTests.render
+    login = GatewayLoginTests.login
+
+    def test_instance_logins_and_ports_do_not_collide(self):
+        self.template.write_text(self.template.read_text() + "OverrideTwsApiPort=\n")
+        self.selector.write_text("invalid-selector-must-not-be-read")
+        script = (DEPLOY / "libexec/stage-gateway-login.sh").read_text().replace(
+            'pwd.getpwnam("ti-gateway")', f'pwd.getpwnam({pwd.getpwuid(os.getuid()).pw_name!r})')
+        for instance, port in (("trad-ira", "4003"), ("roth-ira", "4004")):
+            self.login(instance)
+            runtime = self.root / instance
+            runtime.mkdir()
+            env = {**os.environ, "TI_GATEWAY_INSTANCE": instance,
+                   "TI_GATEWAY_API_PORT": port, "RUNTIME_DIRECTORY": str(runtime),
+                   "TI_GATEWAY_LOGIN_FILE": str(self.selector),
+                   "TI_GATEWAY_SECRETS_DIRECTORY": str(self.cred), "IBC_TEMPLATE": str(self.template)}
+            staged = subprocess.run(["bash", "-c", script], env=env, capture_output=True)
+            self.assertEqual(staged.returncode, 0, "instance staging failed")
+            rendered = subprocess.run(["bash", str(DEPLOY / "libexec/render-ibc-config.sh")],
+                                      env=env, capture_output=True)
+            self.assertEqual(rendered.returncode, 0, "instance render failed")
+            config = (runtime / "config.ini").read_text()
+            self.assertTrue(f"IbLoginId=fixture-{instance}\n" in config)
+            self.assertTrue(f"OverrideTwsApiPort={port}\n" in config)
+        self.assertTrue((self.root / "trad-ira/login.env").exists())
+        self.assertFalse((self.run / "login.env").exists())
+
+    def test_instance_unit_and_provisioning(self):
+        unit = (DEPLOY / "systemd/ti-gateway@.service").read_text()
+        for line in ("EnvironmentFile=/etc/trend-investing/gateway-%i.env",
+                     "Environment=TI_GATEWAY_INSTANCE=%i", "Environment=HOME=/var/lib/ti-gateway-%i",
+                     "RuntimeDirectory=ti-gateway-%i", "StateDirectory=ti-gateway-%i",
+                     "LogsDirectory=ti-gateway-%i", "PrivateTmp=true", "KillMode=control-group"):
+            self.assertIn(line, unit)
+        adapter = (DEPLOY / "systemd/ti-adapter@.service").read_text()
+        self.assertIn("After=ti-gateway@%i.service ti-engine@%i.service", adapter)
+        self.assertIn("Wants=ti-gateway@%i.service", adapter)
+        self.assertIn("Wants=ti-gateway.service", (DEPLOY / "systemd/ti-adapter-boost.service").read_text())
+        provision = (DEPLOY / "provision.sh").read_text()
+        for port in (4003, 4004):
+            self.assertIn(f"ufw deny in proto tcp to any port {port}", provision)
+        self.assertNotRegex(provision, r"systemctl (?:enable|start).*ti-gateway@")
+        self.assertIn('"$etc/gateway-trad-ira.env"', provision)
+        self.assertIn("TI_GATEWAY_API_PORT=4003", provision)
+        self.assertIn("/var/lib/ti-gateway-heal/trad-ira", provision)
+
+    def test_joint_renderer_leaves_port_unchanged(self):
+        self.login()
+        self.template.write_text(self.template.read_text() + "OverrideTwsApiPort=4002\n")
+        self.assertEqual(self.render().returncode, 0)
+        self.assertTrue("OverrideTwsApiPort=4002\n" in (self.run / "config.ini").read_text())
+
+    def test_instance_rejects_unknown_and_port_invalid(self):
+        self.login()
+        for instance in ("boost", "live", "unknown", "../joint"):
+            with mock.patch.dict(os.environ, {"TI_GATEWAY_INSTANCE": instance}):
+                self.assertEqual(self.stage().returncode, 64)
+                self.assertFalse((self.run / "login.env").exists())
+        self.assertEqual(self.stage().returncode, 0)
+        for port in ("0", "65536", "abc"):
+            result = subprocess.run(["bash", str(DEPLOY / "libexec/render-ibc-config.sh")],
+                                    env={**os.environ, "RUNTIME_DIRECTORY": str(self.run),
+                                         "IBC_TEMPLATE": str(self.template), "TI_GATEWAY_API_PORT": port},
+                                    capture_output=True)
+            self.assertEqual(result.returncode, 64)
+
+    def test_instance_shares_only_application_writes(self):
+        unit = (DEPLOY / "systemd/ti-gateway@.service").read_text()
+        self.assertIn("Environment=TI_GATEWAY_APP_HOME=/var/lib/ti-gateway", unit)
+        self.assertIn("ProtectSystem=strict", unit)
+        writable = {path for line in unit.splitlines() if line.startswith("ReadWritePaths=")
+                    for path in line.split("=", 1)[1].split()}
+        self.assertEqual(writable, {"/var/lib/ti-gateway-%i", "/var/log/ti-gateway-%i",
+                                    "-/var/lib/ti-gateway/Jts/ibgateway"})
+        provision = (DEPLOY / "provision.sh").read_text()
+        self.assertNotIn("init_gateway_instance", provision)
+        self.assertNotIn("instance-copy", provision)
+        self.assertNotIn("instance-heap", provision)
+        self.assertIn("/var/lib/ti-gateway-trad-ira/Jts", provision)
+
+    def test_installer_rehearsal_accepts_shared_application(self):
+        # Execute the installed-layout checks without root or an IBKR login
+        # (docs/manual/server.md, "The Traditional IRA's Gateway"). Only GNU
+        # stat's ownership/mode output is simulated; paths and inodes are real.
+        source = (DEPLOY / "rehearsal/inside.sh").read_text()
+        block = source[source.index("# The second Gateway remains"):source.index("# A corrupt cached download")]
+        import re
+        block = re.sub(r"/(?:etc|var|run)/", lambda m: str(self.root) + m[0], block)
+        unit = self.root / "etc/systemd/system/ti-gateway@.service"
+        unit.parent.mkdir(parents=True)
+        text = (DEPLOY / "systemd/ti-gateway@.service").read_text()
+        text = re.sub(r"/(?:etc|var|run)/", lambda m: str(self.root) + m[0], text)
+        unit.write_text(text)
+        env = self.root / "etc/trend-investing/gateway-trad-ira.env"
+        env.parent.mkdir()
+        env.write_text("TI_GATEWAY_API_PORT=4003\n")
+        settings = self.root / "var/lib/ti-gateway-trad-ira/Jts"
+        for name in ("run/ti-gateway-trad-ira", "var/log/ti-gateway-trad-ira",
+                     "var/lib/ti-gateway/Jts", "var/lib/ti-gateway-heal/trad-ira",
+                     "var/lib/ti-gateway-trad-ira/Jts"):
+            (self.root / name).mkdir(parents=True)
+        harness = """set -eu
+fail() { echo "$*" >&2; exit 1; }
+pass() { :; }
+stat() {
+  case "$2" in
+    %U:%G) echo ti-gateway:ti-gateway ;;
+    %U:%a) echo root:700 ;;
+    *) return 1 ;;
+  esac
+}
+export TI_REHEARSAL_SKIP_INSTALLER=0
+"""
+        result = self.shell(harness + block)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wrong_owner = harness.replace("echo ti-gateway:ti-gateway", "echo root:root")
+        self.assertNotEqual(self.shell(wrong_owner + block).returncode, 0)
+        settings.rmdir()
+        settings.symlink_to(self.root / "var/lib/ti-gateway/Jts", target_is_directory=True)
+        self.assertNotEqual(self.shell(harness + block).returncode, 0)
+        settings.unlink()
+        settings.mkdir()
+        env.write_text("TI_GATEWAY_API_PORT=4003\nTI_GATEWAY_APP_HOME=/another/application\n")
+        self.assertNotEqual(self.shell(harness + block).returncode, 0)
+        env.write_text("TI_GATEWAY_API_PORT=4003\n")
+        for writable in ("/var/lib/ti-gateway", "/var/lib/ti-gateway/Jts"):
+            unit.write_text(text + f"\nReadWritePaths={self.root}{writable}\n")
+            self.assertNotEqual(self.shell(harness + block).returncode, 0)
+
+    def test_instance_port_required(self):
+        self.login()
+        self.assertEqual(self.stage().returncode, 0)
+        for port in (None, ""):
+            env = {**os.environ, "TI_GATEWAY_INSTANCE": "trad-ira", "RUNTIME_DIRECTORY": str(self.run), "IBC_TEMPLATE": str(self.template)}
+            env.pop("TI_GATEWAY_API_PORT", None)
+            if port is not None:
+                env["TI_GATEWAY_API_PORT"] = port
+            result = subprocess.run(["bash", str(DEPLOY / "libexec/render-ibc-config.sh")], env=env, capture_output=True)
+            self.assertEqual(result.returncode, 64)
+
+    def test_adapter_port_guard(self):
+        import json
+        settings = self.etc / "gateway-trad-ira.env"
+        settings.write_text("TI_GATEWAY_API_PORT=4003\n")
+        config = self.etc / "trad-ira.json"
+        script = DEPLOY / "libexec/check-adapter-port.py"
+        self.assertTrue(script.exists())
+        for value in ("4003", '"4003"', "'4003'", '  "4003"  ', "  '4003'  ", " 4003 "):
+            for port, status in ((4002, 64), (4003, 0)):
+                with self.subTest(value=value, port=port):
+                    settings.write_text(f"TI_GATEWAY_API_PORT={value}\n" if value == "4003" else f"  TI_GATEWAY_API_PORT = {value}\n")
+                    config.write_text(json.dumps({"port": port}))
+                    result = subprocess.run([sys.executable, str(script), str(config), str(settings)], text=True, capture_output=True)
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    if status:
+                        self.assertIn(str(config), result.stderr)
+                        self.assertIn("4003", result.stderr)
+        unit = (DEPLOY / "systemd/ti-adapter@.service").read_text()
+        self.assertIn("ExecStartPre=/usr/bin/python3 /usr/local/libexec/trend-investing/check-adapter-port.py /etc/trend-investing/adapters/%i.json /etc/trend-investing/gateway-%i.env", unit)
+
+    def test_staggered_display_and_restart_settings(self):
+        source = (DEPLOY / "provision.sh").read_text().split('"$etc/gateway-trad-ira.env"', 1)[1].split('CONF', 2)[1]
+        for line in ("TI_GATEWAY_DISPLAY=100", "TI_GATEWAY_RESTART_TIME=11:55 PM", "TI_GATEWAY_COLD_RESTART=09:20"):
+            self.assertIn(line, source)
+
+    def test_mac_masks_template_and_uses_external_adapter_override(self):
+        source = (DEPLOY / "provision.sh").read_text()
+        self.assertIn("systemctl mask ti-gateway.service ti-gateway@.service", source)
+        self.assertIn('ti-gateway@.service) mac_mini && continue', source)
+        start = source.index("install_mac_adapter_unit() {")
+        function = source[start:source.index("\n}\n", start) + 2]
+        result = self.shell(function + '\nhere=$1; unit_dir=$2; install_mac_adapter_unit', str(DEPLOY), str(self.etc))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = (self.etc / "ti-adapter@.service").read_text()
+        self.assertNotIn("Wants=ti-gateway@", text)
+        self.assertNotIn("After=ti-gateway@", text)
+        self.assertIn("After=ti-engine@%i.service", text)
+        self.assertIn("/etc/trend-investing/adapters/%i.json 4002", text)
+        self.assertIn('test "%i" != boost', text)
+
+
 
 
 if __name__ == "__main__":

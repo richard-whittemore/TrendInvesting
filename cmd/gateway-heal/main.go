@@ -36,11 +36,15 @@ func run(unit string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("root is required")
 	}
-	store := diskState{dir: "/var/lib/ti-gateway-heal", uid: 0}
+	paths, err := pathsForAdapter(unit)
+	if err != nil {
+		return err
+	}
+	store := diskState{dir: paths.state, lockDir: "/var/lib/ti-gateway-heal", uid: 0}
 	runner := &commandRunner{now: clockForRun.Now, execute: executeCommand}
 	ctl := systemd{run: runner.run, setDeadline: func(at time.Time) { runner.deadline = at }}
 	log := func(s string) error { _, err := fmt.Fprintln(os.Stdout, s); return err }
-	return gatewayheal.Run(unit, clockForRun, files{schedule: "/etc/trend-investing/ibkr-maintenance.json", counter: "/var/lib/ti-gateway/login-failures", gatewayEnv: "/etc/trend-investing/gateway.env"}, store, ctl, ctl, relayGuard{root: "/var/lib/trend-investing/adapters"}, log)
+	return gatewayheal.Run(unit, clockForRun, files{schedule: "/etc/trend-investing/ibkr-maintenance.json", counter: paths.counter, gatewayEnv: paths.env}, store, ctl, ctl, relayGuard{root: "/var/lib/trend-investing/adapters", account: paths.account}, log)
 }
 
 // commandRunner bounds reads, including pipe drain, by remaining recovery time.
@@ -187,4 +191,19 @@ func (w *journalReduction) result() []byte {
 		w.pending = nil
 	}
 	return []byte(strings.Join([]string{w.login, w.problem, w.remedy}, "\n"))
+}
+
+type adapterPaths struct{ state, counter, env, account string }
+
+// pathsForAdapter isolates recovery accounting (server.md, Gateway healer).
+// Unknown adapters cannot select filesystem paths.
+func pathsForAdapter(unit string) (adapterPaths, error) {
+	if !gatewayheal.AllowedAdapter(unit) {
+		return adapterPaths{}, fmt.Errorf("unknown adapter")
+	}
+	if unit == "ti-adapter-boost.service" {
+		return adapterPaths{"/var/lib/ti-gateway-heal", "/var/lib/ti-gateway/login-failures", "/etc/trend-investing/gateway.env", "boost"}, nil
+	}
+	instance := strings.TrimSuffix(strings.TrimPrefix(unit, "ti-adapter@"), ".service")
+	return adapterPaths{"/var/lib/ti-gateway-heal/" + instance, "/var/lib/ti-gateway-" + instance + "/login-failures", "/etc/trend-investing/gateway-" + instance + ".env", instance}, nil
 }

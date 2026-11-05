@@ -27,14 +27,23 @@ except FileNotFoundError:
     pass
 
 selector = os.environ.get("TI_GATEWAY_LOGIN_FILE", "/etc/trend-investing/gateway-login")
-try:
-    raw = Path(selector).read_bytes()
-except OSError:
-    refuse(f"missing or unreadable selector {selector}; run sudo deploy/provision.sh services")
-selection = raw.removesuffix(b"\n")
-if selection not in (b"joint", b"trad-ira", b"roth-ira", b"live"):
-    refuse(f"{selector} must contain one word: joint | trad-ira | roth-ira | live")
-selection = selection.decode("ascii")
+instance = os.environ.get("TI_GATEWAY_INSTANCE", "")
+if instance:
+    if instance not in ("trad-ira", "roth-ira"):
+        refuse("unknown Gateway instance")
+    selection = instance
+    selector = "Gateway instance"
+else:
+    try:
+        raw = Path(selector).read_bytes()
+    except OSError:
+        refuse(f"missing or unreadable selector {selector}; run sudo deploy/provision.sh services")
+    selection = raw.removesuffix(b"\n")
+    if selection in (b"trad-ira", b"roth-ira"):
+        refuse(f"{selector}: use ti-gateway@{selection.decode('ascii')}.service for this login")
+    if selection not in (b"joint", b"live"):
+        refuse(f"{selector} must contain one word: joint | live")
+    selection = selection.decode("ascii")
 login_name = f"ibkr-login-{selection}.env"
 secrets = os.environ.get("TI_GATEWAY_SECRETS_DIRECTORY", "/run/trend-investing/secrets")
 try:

@@ -70,7 +70,7 @@ func (s systemd) Status(unit string) (gatewayheal.Status, error) {
 		out.Finished = statusTimeForRun(out.Finished)
 	}
 	stamp := props["ExecMainStartTimestamp"]
-	if stamp == "" && out.Invocation != "" {
+	if stamp == "" && out.Invocation != "" && (out.Active != "failed" || out.Code != 0) {
 		// A unit that has run reports its start; without it the evidence is
 		// incomplete and must not read as time zero (server.md, Gateway healer).
 		return out, fmt.Errorf("%s: missing ExecMainStartTimestamp for invocation %s", unit, out.Invocation)
@@ -135,21 +135,42 @@ func regularRead(path string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, 1024*1024+1))
 }
 
+// diskState keeps one Gateway's recovery state in dir. Its lock lives in
+// lockDir, shared by every Gateway's healer, so one recovery runs at a time on
+// the server, adapter starts included (server.md, Gateway healer); an empty
+// lockDir means dir.
 type diskState struct {
-	dir string
-	uid uint32
+	dir     string
+	lockDir string
+	uid     uint32
 }
 
 func (s diskState) Lock() (func(), error) {
-	info, err := os.Lstat(s.dir)
+	dir := s.lockDir
+	if dir == "" {
+		dir = s.dir
+	}
+	// Both the shared lock's directory and this Gateway's state directory
+	// must be real root-owned 0700 directories, so no link can point one
+	// Gateway's reservation at another's (server.md, Gateway healer).
+	for _, d := range []string{dir, s.dir} {
+		if err := s.privateDir(d); err != nil {
+			return nil, err
+		}
+	}
+	return lockFile(filepath.Join(dir, "lock"), s.uid, true, gatewayheal.ErrAnotherHealer)
+}
+
+func (s diskState) privateDir(dir string) error {
+	info, err := os.Lstat(dir)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0o700 || stat.Uid != s.uid {
-		return nil, errors.New("healer directory must be root-owned mode 0o700")
+		return errors.New("healer directory must be root-owned mode 0o700")
 	}
-	return lockFile(filepath.Join(s.dir, "lock"), s.uid, true, gatewayheal.ErrAnotherHealer)
+	return nil
 }
 func (s diskState) Load() (gatewayheal.State, error) {
 	var state gatewayheal.State
@@ -241,9 +262,14 @@ func (s diskState) Save(state gatewayheal.State) error {
 // relayGuard holds the same flock inodes as adapter/ibkr/relay.py across the
 // Gateway restart and login. A running relay, even another account's, blocks
 // restarting Gateway (ADR 0026 point 8; docs/manual/server.md, Gateway healer).
-type relayGuard struct{ root string }
+type relayGuard struct{ root, account string }
 
 func (g relayGuard) Acquire() (func(), error) {
+	switch g.account {
+	case "boost", "trad-ira", "roth-ira":
+	default:
+		return nil, errors.New("unknown relay account")
+	}
 	var releases []func()
 	release := func() {
 		for _, done := range releases {

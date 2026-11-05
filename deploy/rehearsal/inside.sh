@@ -152,6 +152,32 @@ if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" != 1; then
 fi
 pass "gateway, IBC and tailscale installed from checksummed downloads"
 
+# The second Gateway remains installed but disabled (server.md,
+# "The Traditional IRA's Gateway"). It shares the joint's installation and
+# restarter log writes, with separate settings, logs and state.
+test -f /etc/systemd/system/ti-gateway@.service || fail "instance Gateway template missing"
+test -f /etc/trend-investing/gateway-trad-ira.env || fail "instance Gateway environment missing"
+grep -qx 'TI_GATEWAY_API_PORT=4003' /etc/trend-investing/gateway-trad-ira.env || fail "instance API port differs"
+for directory in /run/ti-gateway-trad-ira /var/lib/ti-gateway-trad-ira /var/log/ti-gateway-trad-ira; do
+  test "$(stat -c %U:%G "$directory")" = ti-gateway:ti-gateway || fail "instance directory ownership differs"
+done
+test "$(stat -c %U:%a /var/lib/ti-gateway-heal/trad-ira)" = root:700 || fail "instance healer state is not root-only"
+test ! -e /etc/systemd/system/multi-user.target.wants/ti-gateway@trad-ira.service || fail "instance Gateway was enabled"
+test -d /var/lib/ti-gateway-trad-ira/Jts || fail "instance settings missing"
+test ! -L /var/lib/ti-gateway-trad-ira/Jts || fail "instance settings are symlinked"
+test ! /var/lib/ti-gateway-trad-ira/Jts -ef /var/lib/ti-gateway/Jts || fail "instance settings share the joint directory"
+test "$(stat -c %U:%G /var/lib/ti-gateway-trad-ira/Jts)" = ti-gateway:ti-gateway || fail "instance settings ownership differs"
+test ! -e /var/lib/ti-gateway-trad-ira/Jts/ibgateway || fail "instance has a private application copy"
+! grep -Eq '^[[:space:]]*TI_GATEWAY_APP_HOME[[:space:]]*=' /etc/trend-investing/gateway-trad-ira.env || fail "instance env overrides the unit application path"
+grep -qx 'Environment=TI_GATEWAY_APP_HOME=/var/lib/ti-gateway' /etc/systemd/system/ti-gateway@.service || fail "unit does not select the shared application"
+# ProtectSystem=strict allows only the shared restarter's application tree
+# and this instance's directories (server.md, "The Traditional IRA's Gateway").
+grep -qx 'ProtectSystem=strict' /etc/systemd/system/ti-gateway@.service || fail "instance filesystem protection differs"
+writable=$(awk '/^ReadWritePaths=/ {sub(/^ReadWritePaths=/, ""); for (i=1; i<=NF; i++) print $i}' /etc/systemd/system/ti-gateway@.service | sort -u)
+expected=$(printf '%s\n' -/var/lib/ti-gateway/Jts/ibgateway /var/lib/ti-gateway-%i /var/log/ti-gateway-%i | sort -u)
+test "$writable" = "$expected" || fail "instance writable paths differ"
+pass "instance Gateway installed disabled, sharing the application and restarter writes, with separate settings, logs, state and API port"
+
 # A corrupt cached download is discarded and fetched again; a download whose
 # checksum differs from the pin is refused.
 cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
@@ -564,7 +590,7 @@ test -x /opt/trend-investing/adapter-venv/bin/python3 || install -m 0755 /dev/nu
 cd /etc/systemd/system
 verify_log=$(mktemp)
 verify_status=0
-systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer ti-data@trad-ira.service ti-data@trad-ira.timer ti-data@roth-ira.service ti-data@roth-ira.timer \
+systemd-analyze verify ti-gateway.service ti-gateway@trad-ira.service ti-data.service ti-data.timer ti-data@trad-ira.service ti-data@trad-ira.timer ti-data@roth-ira.service ti-data@roth-ira.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
   ti-reporter@boost.service ti-reporter@boost.timer \
   ti-unit-failed@ti-engine@boost.service.service ti-unit-failed@ti-adapter-boost.service.service ti-unit-failed@ti-reporter@boost.service.service \
