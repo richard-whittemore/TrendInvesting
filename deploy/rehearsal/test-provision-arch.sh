@@ -254,7 +254,7 @@ done
 # The staging script removes at most one final newline, so provisioning refuses
 # the same bytes it would (docs/runbooks/gateway-login.md).
 for raw in 'joint\n\n' 'live\n\n' ' joint\n' 'joint \n'; do
-  printf "$raw" >"$work/etc/gateway-login"
+  printf '%b' "$raw" >"$work/etc/gateway-login"
   if FAKE_DIST=$work/amd64 scenario "" x86_64 services; then fail "services accepted selector bytes the staging script refuses"; fi
   if called 'install '; then fail "malformed selector installed files"; fi
 done
