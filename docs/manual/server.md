@@ -1085,7 +1085,9 @@ is due; its failure page remains open and the outside heartbeat is withheld.
 A readable journal with no evidence opens no incident; an already open outage
 requires a completed login, restoration or reconciliation at least as new as
 its first observation to resolve. Adapter stops and restarts are not recovery
-evidence.
+evidence. The one exception is an IRA's own Gateway that you have switched off
+(stopped and not enabled): its incident resolves, which does not mean IBKR was
+reached ([The Traditional IRA's Gateway](#the-traditional-iras-gateway)).
 
 The resulting Gateway incident is **operational**, following the
 [paging invariant](alerts-and-dashboard.md#paging-invariant): ntfy and an alerts
