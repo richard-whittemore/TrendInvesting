@@ -77,6 +77,7 @@ echo "$@" >>"$d/systemctl-argv"
 if [ -e "$d/systemctl-raw" ]; then cat "$d/systemctl-raw"; exit 0; fi
 echo "NRestarts=$(cat "$d/nrestarts" 2>/dev/null || echo 0)"
 echo "ActiveState=$(cat "$d/activestate" 2>/dev/null || echo active)"
+echo "UnitFileState=$(cat "$d/unitfilestate" 2>/dev/null || echo enabled)"
 echo "SubState=$(cat "$d/substate" 2>/dev/null || echo running)"
 `
 	if err := os.WriteFile(filepath.Join(g.dir, "systemctl"), []byte(systemctl), 0o700); err != nil {

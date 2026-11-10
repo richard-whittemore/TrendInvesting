@@ -905,6 +905,24 @@ A reporter whose Gateway environment file is absent (Roth today) quietly skips
 this check. An existing but unreadable or invalid file fails that firing, so a
 configuration fault cannot silently disable monitoring. Flex credentials remain unchanged.
 
+An instance Gateway that is stopped (`ActiveState=inactive`) and not enabled
+(`UnitFileState=disabled`, `masked` or `masked-runtime`) is treated as switched
+off by the owner. Provisioning installs the unit disabled, and the owner runs
+it with `systemctl start`. A failed or stopping (`deactivating`) Gateway keeps
+its check, as does every state other than `inactive`. Other recognized unit
+file states, including `enabled` and `enabled-runtime`, also keep the check.
+For a switched-off instance the reporter prints one plain line saying the check
+was skipped and why. An old refused login then sends no new page or reminder.
+Any open Gateway incident for that instance is resolved through the usual
+delivery path, which closes its alert issue. This resolution does not mean
+IBKR was reached. A failed resolution is retried at the next firing.
+If systemd cannot be read, or its unit file state is empty or unrecognized,
+the firing fails and cannot treat the Gateway as switched off. Journal evidence
+still pages and reminds as usual, and the failed sample breaks the restart
+rule's quiet streak without changing its baseline. The joint Gateway always
+keeps its check. Failed units also page through the failure hook and the
+reporter's `-units` check.
+
 For an IRA page, use `sudo systemctl restart ti-gateway@trad-ira` when the
 remedy calls for a restart, and read its healer with
 `journalctl -u ti-gateway-heal@ti-adapter@trad-ira.service.service`. The healer's template
@@ -1080,7 +1098,9 @@ is due; its failure page remains open and the outside heartbeat is withheld.
 A readable journal with no evidence opens no incident; an already open outage
 requires a completed login, restoration or reconciliation at least as new as
 its first observation to resolve. Adapter stops and restarts are not recovery
-evidence.
+evidence. The one exception is an IRA's own Gateway that you have switched off
+(stopped and not enabled): its incident resolves, which does not mean IBKR was
+reached ([The Traditional IRA's Gateway](#the-traditional-iras-gateway)).
 
 The resulting Gateway incident is **operational**, following the
 [paging invariant](alerts-and-dashboard.md#paging-invariant): ntfy and an alerts
