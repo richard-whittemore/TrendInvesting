@@ -610,6 +610,19 @@ The logs are the evidence: never edit or delete one (ADR 0018). An IRA's
 configuration holds your birth month, and the first record of every IRA log
 repeats it, so IRA logs stay on the server and are never committed.
 
+## Automatic security updates
+
+Ubuntu installs security updates by itself each night and never reboots for
+them. After an update, Ubuntu's `needrestart` normally restarts any service
+still using the old library. It is set never to restart the trading units
+(everything named `ti-…`) on its own; if you run `apt upgrade` yourself, it
+lists them unticked, and you leave them so: on 2026-11-05 at 01:31 ET it restarted the
+Gateway, which logged back in two minutes later, but a Gateway restart can
+need your phone. The trading units take the updated library at their next
+nightly or owner-run restart. The rule is
+`/etc/needrestart/conf.d/50-trend-investing.conf`, written by
+`provision.sh base`.
+
 ## Backups
 
 Plan section 7 says the logs and journals are "copied off it nightly" and

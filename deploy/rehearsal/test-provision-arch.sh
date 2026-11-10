@@ -40,6 +40,7 @@ cp -R "$here/.." "$work/deploy"
 scenario() {
   local target=$1 arch=$2 step=$3
   : >"$work/calls"
+  rm -f "$work"/calls.*
   local status=0
   (
     export TEST_CALLS="$work/calls"
@@ -54,7 +55,12 @@ scenario() {
     systemd_running() { false; }
     id() { if test "${1:-}" = -u; then echo 0; fi; }
     record() { echo "$*" >>"$TEST_CALLS"; }
-    install() { record install "$@"; }
+    install() {
+      record install "$@"
+      # What the provisioner writes from a here-document, kept by its whole
+      # destination path (two steps write a 50-trend-investing.conf).
+      if test "${3:-}" = /dev/stdin || test "${5:-}" = /dev/stdin; then dest=${*: -1}; cat >"$TEST_CALLS.${dest//\//_}"; fi
+    }
     systemctl() { record systemctl "$@"; }
     secrets_migrate() {
       record secrets-migrate
@@ -147,6 +153,15 @@ if called "runuser"; then fail "the skip ran the installer"; fi
 scenario "" x86_64 base || fail "Lightsail base failed: $(cat "$work/out")"
 called " tzdata " || fail "Lightsail base does not install tzdata"
 if called "tzdata-legacy"; then fail "Lightsail base still installs tzdata-legacy"; fi
+# A library update never restarts a trading unit: needrestart would restart
+# the Gateway, which may need the owner's phone (docs/manual/server.md,
+# "Automatic security updates").
+called "/etc/needrestart/conf.d/50-trend-investing.conf" || fail "Lightsail base does not keep needrestart off the trading units"
+# shellcheck disable=SC2016 # the Perl line is matched literally
+grep -qxF '$nrconf{override_rc}->{qr(^ti-)} = 0;' "$work/calls._etc_needrestart_conf.d_50-trend-investing.conf" || fail "the needrestart file does not exclude ti-* units: $(cat "$work/calls._etc_needrestart_conf.d_50-trend-investing.conf" 2>/dev/null)"
+nr=$(grep -n '50-trend-investing.conf' "$work/calls" | head -1 | cut -d: -f1)
+apt=$(grep -n '^apt-get install' "$work/calls" | head -1 | cut -d: -f1)
+test -n "$nr" && test -n "$apt" && test "$nr" -lt "$apt" || fail "needrestart's exclusion is not written before base installs packages (line $nr, apt-get $apt)"
 called "fetch $TAILSCALE_URL" || fail "Lightsail base no longer fetches Tailscale"
 scenario mac-mini aarch64 base || fail "Mac mini base failed: $(cat "$work/out")"
 called " tzdata " || fail "Mac mini base does not install tzdata"
