@@ -186,7 +186,25 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 		return err
 	}
 	now := clock()
-	ev, checkErr := check(now)
+	unit, sampleErr := sample()
+	// Owner intent gates instance evidence before reading old login failures
+	// (docs/manual/server.md, "The Traditional IRA's Gateway"). An uncertain
+	// systemd sample cannot authorize either a skip or an incident resolution.
+	if target.instance != "" && sampleErr != nil {
+		return sampleErr
+	}
+	skipped := target.instance != "" && unit.skipped != ""
+	var ev gatewayEvidence
+	var checkErr error
+	if skipped {
+		if note != nil {
+			note(unit.skipped)
+		}
+		h.Restarts, h.Baseline, h.Quiet = nil, nil, 0
+		h.StartFailing, h.RestartOnly = false, false
+	} else {
+		ev, checkErr = check(now)
+	}
 	if checkErr != nil && !ev.out {
 		return checkErr
 	}
@@ -194,18 +212,16 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 	// firing after its decision, including during grace or maintenance
 	// (docs/manual/server.md, "The Gateway is logged out"; ADR 0019, "Alerting").
 	defer func() { retErr = errors.Join(retErr, checkErr) }()
-	// A systemctl that fails does not suppress what the journal evidences: the
-	// page is decided and delivered below on the journal alone, and the failure
-	// is then the firing's error.
-	unit, sampleErr := sample()
+	// For the joint Gateway, a systemctl failure still permits the journal
+	// evidence to page below, and then fails the firing (ADR 0019, "Alerting").
 	defer func() { retErr = errors.Join(retErr, sampleErr) }()
 	out, said := ev.out, ev.said
 	restartOut, restartClosed := false, false
-	if sampleErr == nil {
+	if sampleErr == nil && !skipped {
 		var detail string
 		restartOut, restartClosed, detail = h.advanceRestartRule(unit)
 		said += strings.ReplaceAll(detail, gatewayUnit, target.unit())
-	} else {
+	} else if sampleErr != nil {
 		// A firing whose sample failed leaves the baseline alone and counts no
 		// quiet firing (it breaks the streak); while a failing start is open the
 		// outage stays open whatever the journal shows.
@@ -261,7 +277,8 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 			return err
 		}
 	}
-	// An open outage is closed only by a completed login or a restored link
+	// Unless owner intent skips the instance, an open outage is closed only
+	// by a completed login or a restored link
 	// NEWER than its start. Silence in the journals, or events older than the
 	// outage that remain once the evidence of it has rotated away, prove
 	// nothing; none is opened from them either.
@@ -271,7 +288,7 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 	open := h.Since != nil || (deliveredAnywhere(seen, key) && !h.Resolving)
 	// An equal time counts as newer: the journal's times are to the
 	// microsecond, and a login in the same instant as the firing is a login.
-	if !out && open && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
+	if !skipped && !out && open && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
 		out = true
 		said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as logged out. " + said
 		if h.Since == nil {
@@ -284,8 +301,12 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 		// handled at the window's close, not before. The bookkeeping of that
 		// never stands between an outage and its page: a fault in it is
 		// reported with the firing's errors and nothing else waits on it.
-		if holdFor(report.KindGatewayLoggedOut, window).IsZero() {
-			retErr = errors.Join(retErr, closeGatewayHold(unitState, scope, true, now, note, target.name()))
+		if skipped || holdFor(report.KindGatewayLoggedOut, window).IsZero() {
+			holdNote := note
+			if skipped {
+				holdNote = nil
+			}
+			retErr = errors.Join(retErr, closeGatewayHold(unitState, scope, true, now, holdNote, target.name()))
 			h.Held = nil
 		}
 		h.Since, h.RestartOnly = nil, false

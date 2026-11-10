@@ -126,6 +126,17 @@ also uses the normal failed-unit page, shared by its hook and all reporter
 instances so they do not page it twice. Near a session it has the same
 capital-safety classification as a failed joint Gateway.
 
+A provisioned instance is checked only when its Gateway unit is enabled
+(including enabled-runtime), or is active, activating or reloading. When the
+owner disables or masks an instance and it is inactive or failed, the reporter
+prints one line saying the check was skipped and why. An old refused login
+then sends no new page or reminder. Any open Gateway incident for that instance
+is resolved through the usual delivery path, which closes its alert issue.
+A failed resolution is retried at the next firing. If systemd cannot be read,
+the firing fails and the incident stays open. The joint Gateway always keeps
+its check. Failed units still page through the failure hook and the reporter's
+`-units` check, even when this login check is skipped.
+
 An IBC logout or refused login keeps the logged-out wording and remedy,
 regardless of adapter evidence. An adapter journal read or parse failure cannot
 suppress that IBC-established outage: decide and deliver the outage when due,

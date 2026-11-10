@@ -309,10 +309,12 @@ func lostSince(lines []string) (since time.Time, first string, restored time.Tim
 }
 
 // gatewayUnitSample is what systemd says of the selected Gateway: how many times
-// it has restarted, and whether it is active.
+// it has restarted, whether it is active, and whether owner intent skips the
+// instance check (docs/manual/server.md, "The Traditional IRA's Gateway").
 type gatewayUnitSample struct {
 	restarts int
-	active   bool // ActiveState=active
+	active   bool   // ActiveState=active
+	skipped  string // Owner intent for an instance that is off (server.md, "The Traditional IRA's Gateway").
 }
 
 // gatewayRestartsPage is how far NRestarts must stand above the quiet baseline
@@ -340,8 +342,13 @@ func gatewayUnitSampler(systemctl string, targets ...gatewayTarget) func() (gate
 	return func() (gatewayUnitSample, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), gatewayCheckTimeout)
 		defer cancel()
+		args := []string{"show", "-p", "NRestarts", "-p", "ActiveState", "-p", "SubState"}
+		if target.instance != "" {
+			args = append(args, "-p", "UnitFileState")
+		}
+		args = append(args, unit)
 		//nolint:gosec // G204: the binary is the operator's -systemctl flag and the unit a fixed name.
-		cmd := exec.CommandContext(ctx, systemctl, "show", "-p", "NRestarts", "-p", "ActiveState", "-p", "SubState", unit)
+		cmd := exec.CommandContext(ctx, systemctl, args...)
 		cmd.WaitDelay = gatewayCheckWaitDelay
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -350,7 +357,7 @@ func gatewayUnitSampler(systemctl string, targets ...gatewayTarget) func() (gate
 			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not ask systemd about %s: %w (it said: %s)", unit, err, strings.TrimSpace(stderr.String()))
 		}
 		var s gatewayUnitSample
-		state, sub := "", ""
+		state, sub, fileState := "", "", ""
 		haveRestarts := false
 		for _, l := range strings.Split(string(raw), "\n") {
 			k, v, _ := strings.Cut(strings.TrimSpace(l), "=")
@@ -359,6 +366,8 @@ func gatewayUnitSampler(systemctl string, targets ...gatewayTarget) func() (gate
 				state = v
 			case "SubState":
 				sub = v
+			case "UnitFileState":
+				fileState = v
 			case "NRestarts":
 				n, err := strconv.Atoi(v)
 				if err != nil || n < 0 {
@@ -369,6 +378,14 @@ func gatewayUnitSampler(systemctl string, targets ...gatewayTarget) func() (gate
 		}
 		if !haveRestarts || sub == "" || !knownActiveStates[state] {
 			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not trust what systemd said of %s (NRestarts present: %v, SubState %q, ActiveState %q)", unit, haveRestarts, sub, state)
+		}
+		if target.instance != "" {
+			if fileState == "" {
+				return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not trust UnitFileState for %s", unit)
+			}
+			if fileState != "enabled" && fileState != "enabled-runtime" && state != "active" && state != "activating" && state != "reloading" {
+				s.skipped = fmt.Sprintf("gateway (%s): skipped: %s is %s and not running", target.instance, unit, fileState)
+			}
 		}
 		s.active = state == "active"
 		return s, nil
