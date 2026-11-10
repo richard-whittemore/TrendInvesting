@@ -44,7 +44,7 @@ func (g gatewayTarget) present(a report.Alert) report.Alert {
 	a.Key = report.GatewayKey(g.scope(a.AccountID))
 	a.Title = strings.Replace(a.Title, gatewayName, g.name(), 1)
 	a.Body = strings.NewReplacer(
-		"every account's engine is blind and cannot trade", "the "+g.instance+" account's engine is blind and cannot trade",
+		"every account this Gateway serves is blind and cannot trade", "the "+g.instance+" account's engine is blind and cannot trade",
 		"/var/lib/ti-gateway/login-failures", "/var/lib/ti-gateway-"+g.instance+"/login-failures",
 		"`sudo systemctl restart ti-gateway`", "`sudo systemctl restart ti-gateway@"+g.instance+"`",
 		"`journalctl -u ti-gateway`", "`journalctl -u ti-gateway@"+g.instance+"`",
@@ -101,7 +101,7 @@ func selectGateway(account, owner, instanceEnv, state, reporterState, adapters s
 	values := map[string]string{}
 	for n, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")

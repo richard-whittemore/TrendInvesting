@@ -880,6 +880,10 @@ The IRA's pages say “IB Gateway (trad-ira) is logged out” or “IB Gateway
 (trad-ira) is logged in but IBKR's servers are unreachable”. A failed IRA
 Gateway also pages through its failure hook, with the next reporter firing as
 backup. The shared failure record prevents duplicate pages from those paths.
+On the Mac mini there is no `gateway-trad-ira.env`, so `ti-reporter@trad-ira` skips the
+Gateway check and Boost's check reads only Boost's adapter: a lost IBKR link seen
+only by the IRA's adapter there is not paged. Paper trading runs on the server; on
+the Mac mini, watch the IRA adapter's journal by hand if it is ever run.
 
 The IRA's restart windows come from `/etc/trend-investing/gateway-trad-ira.env`;
 its outage and delivery record is `host-gateway-trad-ira.json` in the reports

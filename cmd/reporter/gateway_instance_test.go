@@ -208,6 +208,7 @@ func TestGatewaySelectionKeepsSchedulesStateAndAdaptersSeparate(t *testing.T) {
 		{"trad-ira", "boost", path, "TI_GATEWAY_COLD_RESTART='09:20", true, false},
 		{"trad-ira", "boost", path, "TI_GATEWAY_COLD_RESTART=x", true, false},
 		{"trad-ira", "boost", path, "# defaults\n", false, true},
+		{"trad-ira", "boost", path, "; systemd comment\nTI_GATEWAY_COLD_RESTART=09:20\n", false, true},
 	} {
 		t.Run(fmt.Sprintf("%s/%s/%s", tc.account, tc.file, tc.contents), func(t *testing.T) {
 			if tc.contents != "" {
