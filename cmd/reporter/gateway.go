@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
@@ -165,6 +166,10 @@ func loadHostGateway(path string) (hostGateway, error) {
 // is reminded every gatewayRemindEvery, and a firing that finds it logged in
 // resolves the page and forgets it, so the next outage pages anew.
 func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, window func() time.Time, unitState string, note func(string), senders []sender, setAside []channelFault, clock func() time.Time, policies ...*pagingPolicy) (retErr error) {
+	return (gatewayTarget{}).step(path, check, sample, host, sched, window, unitState, note, senders, setAside, clock, policies...)
+}
+
+func (target gatewayTarget) step(path string, check gatewayChecker, sample func() (gatewayUnitSample, error), host string, sched gatewaySchedule, window func() time.Time, unitState string, note func(string), senders []sender, setAside []channelFault, clock func() time.Time, policies ...*pagingPolicy) (retErr error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reporter: the gateway state's lock: %w", err)
@@ -199,7 +204,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	if sampleErr == nil {
 		var detail string
 		restartOut, restartClosed, detail = h.advanceRestartRule(unit)
-		said += detail
+		said += strings.ReplaceAll(detail, gatewayUnit, target.unit())
 	} else {
 		// A firing whose sample failed leaves the baseline alone and counts no
 		// quiet firing (it breaks the streak); while a failing start is open the
@@ -207,7 +212,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		h.Quiet = 0
 		if h.StartFailing {
 			restartOut = true
-			said += " ti-gateway.service keeps failing to start; systemd could not be asked at this firing."
+			said += " " + target.unit() + " keeps failing to start; systemd could not be asked at this firing."
 		}
 	}
 	out = out || restartOut
@@ -238,7 +243,8 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		}
 		return writeAtomic(path, raw)
 	}
-	key := report.GatewayKey(host)
+	scope := target.scope(host)
+	key := report.GatewayKey(scope)
 	observed, escalation := sent[channelKey("observed", key)], sent[channelKey("escalation", key)]
 	if pruneReceipts(seen, sent, repeats, now) {
 		// Expiring an earlier receipt cannot erase an open incident's clocks
@@ -279,7 +285,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 		// never stands between an outage and its page: a fault in it is
 		// reported with the firing's errors and nothing else waits on it.
 		if holdFor(report.KindGatewayLoggedOut, window).IsZero() {
-			retErr = errors.Join(retErr, closeGatewayHold(unitState, host, true, now, note))
+			retErr = errors.Join(retErr, closeGatewayHold(unitState, scope, true, now, note, target.name()))
 			h.Held = nil
 		}
 		h.Since, h.RestartOnly = nil, false
@@ -323,7 +329,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	if hold := holdFor(report.KindGatewayLoggedOut, window); !hold.IsZero() {
 		// The shared hold is written first, then this file's: a stop between
 		// leaves the shared hold, which the close always looks for.
-		retErr = errors.Join(retErr, holdGateway(unitState, host, hold, now))
+		retErr = errors.Join(retErr, holdGateway(unitState, scope, hold, now))
 		h.Held = &hold
 		return errors.Join(retErr, record())
 	}
@@ -342,6 +348,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	if ev.resetWait {
 		a = report.GatewayResetWaitAlert(host, now, said)
 	}
+	a = target.present(a)
 	if !ev.resetWait && (sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter) {
 		if p := policyOf(policies); p != nil {
 			_, _, _, policyErr := p.routeAndCancel(senders, a, seen, sent, now, gatewayRemindEvery)
@@ -352,7 +359,7 @@ func gatewayStep(path string, check gatewayChecker, sample func() (gatewayUnitSa
 	// It pages. The hold is forgotten only now, immediately before the page,
 	// and only if one exists; the bookkeeping is bounded in time and its faults
 	// are reported with the firing's errors, but never delay or stop the page.
-	retErr = errors.Join(retErr, closeGatewayHold(unitState, host, false, now, note))
+	retErr = errors.Join(retErr, closeGatewayHold(unitState, scope, false, now, note))
 	h.Held = nil
 	if h.Resolving {
 		// The new outage is due its page while an earlier recovery's resolution
@@ -396,24 +403,31 @@ func gatewayHeld(path, host string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return len(heldOf(sent, gatewayHeldKey(host))) > 0, nil
+	return len(gatewayHolds(sent, host)) > 0, nil
 }
 
 // closeGatewayHold forgets the Gateway's held record, if the shared record has
 // one; when the Gateway recovered, the line saying it was held and recovered
 // is given to note. With no hold nothing is locked or written.
-func closeGatewayHold(path, host string, recovered bool, at time.Time, note func(string)) error {
+func closeGatewayHold(path, host string, recovered bool, at time.Time, note func(string), names ...string) error {
+	name := gatewayName
+	if len(names) > 0 {
+		name = names[0]
+	}
 	if held, err := gatewayHeld(path, host); err != nil || !held {
 		return err
 	}
 	return withUnitStateWait(path, at, gatewayBookkeepingWait, func(u *unitState) error {
-		taken := takeHeld(u.sent, gatewayHeldKey(host), time.Time{})
+		taken := gatewayHolds(u.sent, host)
+		for _, h := range taken {
+			delete(u.sent, heldKey(h.until, h.alertKey))
+		}
 		if len(taken) == 0 {
 			return nil
 		}
 		if recovered && note != nil {
 			for _, h := range taken {
-				note(recoveredLine(gatewayName, h.until))
+				note(recoveredLine(name, h.until))
 			}
 		}
 		return u.record()
@@ -486,4 +500,20 @@ func restartDetail(failing bool, rise int) string {
 		return fmt.Sprintf(" ti-gateway.service keeps failing to start: its restart count is %d above where it last stayed quiet.", rise)
 	}
 	return " ti-gateway.service keeps failing to start: it has not yet been quiet for two firings in a row."
+}
+
+// gatewayHolds matches the complete Gateway identity: the joint key is a
+// prefix of instance keys and must not consume their maintenance holds
+// (alerts-and-dashboard.md, "Maintenance windows").
+func gatewayHolds(sent map[string]time.Time, host string) []held {
+	key := gatewayHeldKey(host)
+	var found []held
+	for k, at := range sent {
+		ch, alert, ok := strings.Cut(k, "|")
+		if ok && strings.HasPrefix(ch, heldPrefix) && alert == key {
+			until, _ := time.Parse(time.RFC3339, strings.TrimPrefix(ch, heldPrefix))
+			found = append(found, held{alertKey: alert, at: at, until: until})
+		}
+	}
+	return found
 }

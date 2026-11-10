@@ -107,12 +107,13 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	ackWithin := flags.Duration("ack-within", defaultAckWithin, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
 	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run after the incident alerts at every firing, a failure two checks in a row pages once for the host, a passing check resolves it, and the daily summary shows the last check")
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
+	gatewayInstanceEnv := flags.String("gateway-instance-env", "", "this reporter instance Gateway environment file; non-owner instances read their own restart times here and skip the check quietly if absent; the joint owner ignores this file")
 	gatewayAdapters := flags.String("gateway-adapters", "", "comma-separated adapter units (ti-adapter-<instance>.service) whose journal shows a sustained loss of IBKR (codes 1100/2110) for the Gateway check")
 	gatewayState := flags.String("gateway-state", "", "the host's Gateway state (default: host-gateway.json beside -state)")
 	// Deprecated and ignored: an earlier build's unit file passes it, and a binary
 	// installed alone (ti-release installs no unit files) must still start.
 	_ = flags.String("gateway-marker", "", "deprecated, ignored")
-	gatewayOwner := flags.String("gateway-owner", "", "the account whose reporter owns the Gateway check, which reads the ti-gateway and -gateway-adapters journals with -journalctl after the incident alerts: logged out for more than 10 minutes outside the Gateway's restart windows pages once for the host, hourly reminders follow, and a completed login resolves it; every other instance skips it, so three accounts do not page three times")
+	gatewayOwner := flags.String("gateway-owner", "", "the account whose reporter owns the Gateway check, which reads the ti-gateway and -gateway-adapters journals with -journalctl after the incident alerts: logged out for more than 10 minutes outside the Gateway's restart windows pages once for the host, hourly reminders follow, and a completed login resolves it; other instances check only their own provisioned Gateway via -gateway-instance-env")
 	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, and beside which the reader's costs.jsonl gives the summary its costs line, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
 	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed unit is paged once per failure episode if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a unit no longer failed is resolved")
 	resolveUnits := flags.String("resolve-units", "", "comma-separated units (the data jobs, ti-data.service and ti-data@<account>.service, and the Flex readers, ti-flex@<account>.service) that systemctl show samples only to end their failure episode once a run has ended well: the reporter pages one once only when its OnFailure hook could not, never reminds or names it, and it never holds back the heartbeat; only a data job or a Flex reader is accepted, and not a unit also in -units")
@@ -465,19 +466,21 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			failures = append(failures, err)
 		}
 	}
-	// The Gateway is the host's, so one instance owns its check (ADR 0019,
-	// "Alerting"); like the clock check it follows the incident alerts.
-	if *gatewayOwner != "" && *accountName == *gatewayOwner {
-		path := *gatewayState
-		if path == "" {
-			path = filepath.Join(filepath.Dir(*statePath), "host-gateway.json")
+	// One reporter owns each Gateway's check (docs/manual/server.md,
+	// "The Traditional IRA's Gateway"; ADR 0019, "Alerting").
+	gateway, gatewayErr := selectGateway(*accountName, *gatewayOwner, *gatewayInstanceEnv, *gatewayState, *statePath, *gatewayAdapters, getenv)
+	if gatewayErr != nil {
+		failures = append(failures, gatewayErr)
+	} else if gateway.enabled {
+		step := gateway.target.step
+		if gateway.target.instance == "" {
+			step = gatewayStep
 		}
-		if sched, err := gatewayScheduleFrom(getenv); err != nil {
-			failures = append(failures, err)
-		} else if err := gatewayStep(path, gatewayJournalChecker(*journalctl, splitUnits(*gatewayAdapters)), gatewayUnitSampler(*systemctl), hostName(), sched, windowNow, unitStatePath, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, senders, setAside, now, policy); err != nil {
+		if err := step(gateway.path, gatewayJournalChecker(*journalctl, gateway.units, gateway.target), gatewayUnitSampler(*systemctl, gateway.target), hostName(), gateway.sched, windowNow, unitStatePath, func(line string) { _, _ = fmt.Fprintln(out, "reporter: "+line) }, senders, setAside, now, policy); err != nil {
 			failures = append(failures, err)
 		}
 	}
+
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
 	// The notice that the summary has no channel is the account's, keyed by

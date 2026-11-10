@@ -207,7 +207,7 @@ func TestReporterTemplateCoversAllGatewayAdaptersAndMemory(t *testing.T) {
 	}
 	words := strings.Fields(starts[0])
 	for flag, want := range map[string][]string{
-		"-gateway-adapters": {"ti-adapter-boost.service", "ti-adapter@trad-ira.service", "ti-adapter@roth-ira.service"},
+		"-gateway-adapters": {"ti-adapter-boost.service"},
 		"-resolve-units":    {"ti-memory.service"},
 	} {
 		i := indexOf(words, flag)

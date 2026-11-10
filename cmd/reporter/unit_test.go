@@ -204,8 +204,8 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		// The server's script is not on this machine: a stand-in that passes.
 		args[i+1] = newStandInCheck(t).path()
 	}
-	if i := indexOf(args, "-gateway-adapters"); i < 0 || i+1 >= len(args) || args[i+1] != "ti-adapter-boost.service,ti-adapter@trad-ira.service,ti-adapter@roth-ira.service" {
-		t.Errorf("ExecStart %v does not give the Gateway check all three adapters' journals", args)
+	if i := indexOf(args, "-gateway-adapters"); i < 0 || i+1 >= len(args) || args[i+1] != "ti-adapter-boost.service" {
+		t.Errorf("ExecStart %v does not give the joint Gateway check Boost's adapter journal", args)
 	}
 	if i := indexOf(args, "-gateway-owner"); i < 0 || i+1 >= len(args) || args[i+1] != "boost" {
 		t.Errorf("ExecStart %v does not name boost as the gateway check's owner", args)
@@ -216,7 +216,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	// The instance's engine and adapter are checked, and the reporter's own
 	// failure page is resolved by a clean firing.
 	for flag, value := range map[string]string{
-		"-units":         "ti-engine@boost.service,ti-engine@trad-ira.service,ti-engine@roth-ira.service,ti-adapter-boost.service,ti-adapter@trad-ira.service,ti-adapter@roth-ira.service,ti-gateway.service",
+		"-units":         "ti-engine@boost.service,ti-engine@trad-ira.service,ti-engine@roth-ira.service,ti-adapter-boost.service,ti-adapter@trad-ira.service,ti-adapter@roth-ira.service,ti-gateway.service,ti-gateway@trad-ira.service",
 		"-resolve-units": "ti-data.service,ti-data@trad-ira.service,ti-data@roth-ira.service,ti-flex@boost.service,ti-flex@trad-ira.service,ti-flex@roth-ira.service,ti-memory.service",
 		"-self-unit":     "ti-reporter@boost.service",
 	} {

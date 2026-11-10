@@ -12,8 +12,9 @@ import (
 // (alerts-and-dashboard.md, "Paging invariant").
 const KindGatewayLoggedOut Kind = "gateway-logged-out"
 
-// GatewayKey is the incident key of a logged-out Gateway on host. The Gateway
-// is the host's, shared by every account, so one key serves them all.
+// GatewayKey is the incident key of a logged-out Gateway (ADR 0019,
+// "Alerting"). The joint uses the host alone; callers scope a separate
+// instance as host/instance (server.md, "The Traditional IRA's Gateway").
 func GatewayKey(host string) string { return "gateway-logged-out:" + host }
 
 // GatewayLoggedOutAlert reports a Gateway that has been logged out since the

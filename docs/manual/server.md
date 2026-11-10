@@ -874,8 +874,25 @@ unit override removes the instance Gateway dependency and requires port **4002**
 against the external Mac Gateway; existing JSON files must be set accordingly.
 Run `sudo deploy/provision.sh firewall` to deny inbound 4003/4004 as well as
 4001/4002. The same IBC local-client restriction applies to both Gateways.
-The reporter's Gateway checks still observe only the joint Gateway; check the
-IRA's unit and journal directly. Flex credentials remain unchanged.
+Each reporter checks its own Gateway: Boost watches the joint Gateway, and
+`ti-reporter@trad-ira` watches the Traditional IRA's Gateway and only its adapter.
+The IRA's pages say “IB Gateway (trad-ira) is logged out” or “IB Gateway
+(trad-ira) is logged in but IBKR's servers are unreachable”. A failed IRA
+Gateway also pages through its failure hook, with the next reporter firing as
+backup. The shared failure record prevents duplicate pages from those paths.
+
+The IRA's restart windows come from `/etc/trend-investing/gateway-trad-ira.env`;
+its outage and delivery record is `host-gateway-trad-ira.json` in the reports
+folder. Boost keeps `host-gateway.json`, its existing titles and restart times.
+A reporter whose Gateway environment file is absent (Roth today) quietly skips
+this check. An existing but unreadable or invalid file fails that firing, so a
+configuration fault cannot silently disable monitoring. Flex credentials remain unchanged.
+
+For an IRA page, use `sudo systemctl restart ti-gateway@trad-ira` when the
+remedy calls for a restart, and read its healer with
+`journalctl -u ti-gateway-heal@ti-adapter@trad-ira.service.service`. The healer's template
+argument is the full adapter unit name. Use the gates below before restarting;
+the reporter only observes and pages, and never restarts anything.
 
 ## The Gateway is logged out
 
