@@ -147,6 +147,11 @@ if called "runuser"; then fail "the skip ran the installer"; fi
 scenario "" x86_64 base || fail "Lightsail base failed: $(cat "$work/out")"
 called " tzdata " || fail "Lightsail base does not install tzdata"
 if called "tzdata-legacy"; then fail "Lightsail base still installs tzdata-legacy"; fi
+# A library update never restarts a trading unit: needrestart would restart
+# the Gateway, which may need the owner's phone (docs/manual/server.md,
+# "Automatic security updates").
+called "/etc/needrestart/conf.d/50-trend-investing.conf" || fail "Lightsail base does not keep needrestart off the trading units"
+grep -qF '$nrconf{override_rc}->{qr(^ti-)} = 0;' "$here/../provision.sh" || fail "provision.sh does not exclude ti-* units from needrestart"
 called "fetch $TAILSCALE_URL" || fail "Lightsail base no longer fetches Tailscale"
 scenario mac-mini aarch64 base || fail "Mac mini base failed: $(cat "$work/out")"
 called " tzdata " || fail "Mac mini base does not install tzdata"
