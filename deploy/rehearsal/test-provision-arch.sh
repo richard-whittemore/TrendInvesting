@@ -54,7 +54,11 @@ scenario() {
     systemd_running() { false; }
     id() { if test "${1:-}" = -u; then echo 0; fi; }
     record() { echo "$*" >>"$TEST_CALLS"; }
-    install() { record install "$@"; }
+    install() {
+      record install "$@"
+      # What the provisioner writes from a here-document, kept by file name.
+      if test "${3:-}" = /dev/stdin || test "${5:-}" = /dev/stdin; then cat >"$TEST_CALLS.$(basename "${*: -1}")"; fi
+    }
     systemctl() { record systemctl "$@"; }
     secrets_migrate() {
       record secrets-migrate
@@ -151,7 +155,11 @@ if called "tzdata-legacy"; then fail "Lightsail base still installs tzdata-legac
 # the Gateway, which may need the owner's phone (docs/manual/server.md,
 # "Automatic security updates").
 called "/etc/needrestart/conf.d/50-trend-investing.conf" || fail "Lightsail base does not keep needrestart off the trading units"
-grep -qF '$nrconf{override_rc}->{qr(^ti-)} = 0;' "$here/../provision.sh" || fail "provision.sh does not exclude ti-* units from needrestart"
+# shellcheck disable=SC2016 # the Perl line is matched literally
+grep -qxF '$nrconf{override_rc}->{qr(^ti-)} = 0;' "$work/calls.50-trend-investing.conf" || fail "the needrestart file does not exclude ti-* units: $(cat "$work/calls.50-trend-investing.conf" 2>/dev/null)"
+nr=$(grep -n '50-trend-investing.conf' "$work/calls" | head -1 | cut -d: -f1)
+apt=$(grep -n '^apt-get install' "$work/calls" | head -1 | cut -d: -f1)
+test -n "$nr" && test -n "$apt" && test "$nr" -lt "$apt" || fail "needrestart's exclusion is not written before base installs packages (line $nr, apt-get $apt)"
 called "fetch $TAILSCALE_URL" || fail "Lightsail base no longer fetches Tailscale"
 scenario mac-mini aarch64 base || fail "Mac mini base failed: $(cat "$work/out")"
 called " tzdata " || fail "Mac mini base does not install tzdata"

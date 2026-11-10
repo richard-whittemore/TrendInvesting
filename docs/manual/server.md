@@ -614,8 +614,9 @@ repeats it, so IRA logs stay on the server and are never committed.
 
 Ubuntu installs security updates by itself each night and never reboots for
 them. After an update, Ubuntu's `needrestart` normally restarts any service
-still using the old library. It is told never to restart the trading units
-(everything named `ti-…`): on 2026-11-05 at 01:31 ET it restarted the
+still using the old library. It is set never to restart the trading units
+(everything named `ti-…`) on its own; if you run `apt upgrade` yourself, it
+lists them unticked, and you leave them so: on 2026-11-05 at 01:31 ET it restarted the
 Gateway, which logged back in two minutes later, but a Gateway restart can
 need your phone. The trading units take the updated library at their next
 nightly or owner-run restart. The rule is

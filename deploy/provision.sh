@@ -189,6 +189,20 @@ ensure_user() {
 }
 
 step_base() {
+  log "needrestart: never restart a trading unit"
+  # needrestart restarts services still using an updated library after an
+  # update; never a trading unit on its own (an interactive `apt upgrade`
+  # lists them unticked): a Gateway restart may need the owner's phone, and
+  # an engine or adapter restart belongs to its runbook. They take the library
+  # at their nightly or owner-run restart. Written before any package is
+  # installed, so this step's own installs restart none either
+  # (docs/manual/server.md, "Automatic security updates").
+  install -d -m 0755 /etc/needrestart/conf.d
+  install -m 0644 /dev/stdin /etc/needrestart/conf.d/50-trend-investing.conf <<'CONF'
+# Installed by provision.sh: never restart a trading unit after an update.
+$nrconf{override_rc}->{qr(^ti-)} = 0;
+CONF
+
   log "packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
@@ -236,16 +250,6 @@ Unattended-Upgrade::Allowed-Origins {
 };
 Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
-CONF
-  # needrestart restarts services still using an updated library after an
-  # update. Never a trading unit: a Gateway restart may need the owner's
-  # phone, and an engine or adapter restart belongs to its runbook. They pick
-  # up the library at their nightly or owner-run restart (docs/manual/server.md,
-  # "Automatic security updates").
-  install -d -m 0755 /etc/needrestart/conf.d
-  install -m 0644 /dev/stdin /etc/needrestart/conf.d/50-trend-investing.conf <<'CONF'
-# Installed by provision.sh: never restart a trading unit after an update.
-$nrconf{override_rc}->{qr(^ti-)} = 0;
 CONF
 
   if mac_mini; then
