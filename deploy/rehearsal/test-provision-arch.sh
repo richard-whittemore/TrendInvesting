@@ -40,6 +40,7 @@ cp -R "$here/.." "$work/deploy"
 scenario() {
   local target=$1 arch=$2 step=$3
   : >"$work/calls"
+  rm -f "$work"/calls.*
   local status=0
   (
     export TEST_CALLS="$work/calls"
@@ -56,8 +57,9 @@ scenario() {
     record() { echo "$*" >>"$TEST_CALLS"; }
     install() {
       record install "$@"
-      # What the provisioner writes from a here-document, kept by file name.
-      if test "${3:-}" = /dev/stdin || test "${5:-}" = /dev/stdin; then cat >"$TEST_CALLS.$(basename "${*: -1}")"; fi
+      # What the provisioner writes from a here-document, kept by its whole
+      # destination path (two steps write a 50-trend-investing.conf).
+      if test "${3:-}" = /dev/stdin || test "${5:-}" = /dev/stdin; then dest=${*: -1}; cat >"$TEST_CALLS.${dest//\//_}"; fi
     }
     systemctl() { record systemctl "$@"; }
     secrets_migrate() {
@@ -156,7 +158,7 @@ if called "tzdata-legacy"; then fail "Lightsail base still installs tzdata-legac
 # "Automatic security updates").
 called "/etc/needrestart/conf.d/50-trend-investing.conf" || fail "Lightsail base does not keep needrestart off the trading units"
 # shellcheck disable=SC2016 # the Perl line is matched literally
-grep -qxF '$nrconf{override_rc}->{qr(^ti-)} = 0;' "$work/calls.50-trend-investing.conf" || fail "the needrestart file does not exclude ti-* units: $(cat "$work/calls.50-trend-investing.conf" 2>/dev/null)"
+grep -qxF '$nrconf{override_rc}->{qr(^ti-)} = 0;' "$work/calls._etc_needrestart_conf.d_50-trend-investing.conf" || fail "the needrestart file does not exclude ti-* units: $(cat "$work/calls._etc_needrestart_conf.d_50-trend-investing.conf" 2>/dev/null)"
 nr=$(grep -n '50-trend-investing.conf' "$work/calls" | head -1 | cut -d: -f1)
 apt=$(grep -n '^apt-get install' "$work/calls" | head -1 | cut -d: -f1)
 test -n "$nr" && test -n "$apt" && test "$nr" -lt "$apt" || fail "needrestart's exclusion is not written before base installs packages (line $nr, apt-get $apt)"
