@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 // Each Gateway follows its own login evidence, restart windows and incident
@@ -324,5 +326,34 @@ func TestGatewayIncidentsRemindAndRecoverIndependentlyOnOneHost(t *testing.T) {
 	fire("boost", 90)
 	if n := strings.Count(strings.Join(r.to(ntfyHost), "\n"), "IB Gateway is logged out"); n != 3 {
 		t.Fatalf("new joint outage pages=%d want third", n)
+	}
+}
+
+// The instance's logout page names its own account, lockout file, restart and
+// journal, never the joint Gateway's: a joint remedy on the IRA's page would
+// clear the wrong lockout (docs/manual/server.md, "The Traditional IRA's Gateway").
+func TestInstanceLogoutPageRewritesEveryJointRemedy(t *testing.T) {
+	at := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	joint := report.GatewayLoggedOutAlert("host", at.Add(-time.Hour), at, "said")
+	page := gatewayTarget{instance: "trad-ira"}.present(joint)
+	for _, s := range []string{
+		"the trad-ira account's engine is blind and cannot trade",
+		"/var/lib/ti-gateway-trad-ira/login-failures",
+		"`sudo systemctl restart ti-gateway@trad-ira`",
+		"`journalctl -u ti-gateway@trad-ira`",
+	} {
+		if !strings.Contains(page.Body, s) {
+			t.Errorf("instance page lacks %q: %s", s, page.Body)
+		}
+	}
+	for _, s := range []string{
+		"every account this Gateway serves",
+		"/var/lib/ti-gateway/login-failures",
+		"`sudo systemctl restart ti-gateway`",
+		"`journalctl -u ti-gateway`",
+	} {
+		if strings.Contains(page.Body, s) {
+			t.Errorf("instance page keeps the joint %q: %s", s, page.Body)
+		}
 	}
 }
