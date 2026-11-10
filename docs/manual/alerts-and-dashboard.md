@@ -105,6 +105,27 @@ IBKR's system status, then restart the Gateway (`sudo systemctl restart ti-gatew
 approve a phone prompt if one comes, and start the affected adapters per
 [Gateway login](../runbooks/gateway-login.md). See the server manual's
 [The Gateway is logged out](server.md#the-gateway-is-logged-out), its "Gateway healer" part, for the healer's gates and restart limit.
+Each Gateway has one owning reporter. Boost watches `ti-gateway.service` and
+only `ti-adapter-boost.service`; its titles, incident key and
+`host-gateway.json` record stay the same. The Traditional IRA's reporter
+watches `ti-gateway@trad-ira.service` and only `ti-adapter@trad-ira.service`.
+Its titles name “IB Gateway (trad-ira)”, its incident key ends in `/trad-ira`,
+and its record is `host-gateway-trad-ira.json`. Logout, unreachable-IBKR and
+reset-wait notices share that Gateway's incident; recovery of one Gateway
+cannot resolve the other's page or maintenance hold.
+
+The instance reads its restart times directly from
+`/etc/trend-investing/gateway-<instance>.env` (`-gateway-instance-env`), without
+replacing Boost's environment settings. A missing file quietly skips that
+instance's check (Roth today); an unreadable or invalid file fails the firing.
+All the detection grace, paging policy and hourly reminder rules above apply
+separately. The IRA's remedy names `sudo systemctl restart ti-gateway@trad-ira`
+and `journalctl -u ti-gateway-heal@ti-adapter@trad-ira.service.service`, the healer
+started by that adapter's failure hook. A failed `ti-gateway@trad-ira.service`
+also uses the normal failed-unit page, shared by its hook and all reporter
+instances so they do not page it twice. Near a session it has the same
+capital-safety classification as a failed joint Gateway.
+
 An IBC logout or refused login keeps the logged-out wording and remedy,
 regardless of adapter evidence. An adapter journal read or parse failure cannot
 suppress that IBC-established outage: decide and deliver the outage when due,
@@ -396,7 +417,7 @@ hook reports at the moment it fails, and the failure the reporter finds at its
 firing, the data job's included, and the hourly reminder of a failure already
 paged) and the Gateway logged out. Each is written in the reporter's state
 files with the window's end noted (`held:<end of window>` in
-`unit-failures.json`, `held_in_maintenance_until` in `host-gateway.json`), so
+`unit-failures.json`, `held_in_maintenance_until` in `host-gateway.json` or `host-gateway-<instance>.json`), so
 you can see what a window held. The window is judged at each decision, not
 once per firing: one that closes while a firing is under way holds nothing
 from then on. A marker file that is there but is not a window in the one layout `ti-maintenance` writes is reported once in the reporter's output (once for each different content) and counts as no window; it is never a page and is never removed.
@@ -841,7 +862,7 @@ the editor and save:
 ```
 [Service]
 ExecStart=
-ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -gateway-owner boost -gateway-adapters ti-adapter-boost.service,ti-adapter@trad-ira.service -gateway-state ${TI_REPORTS_DIR}/host-gateway.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@boost.service,ti-engine@trad-ira.service,ti-engine@roth-ira.service,ti-adapter-boost.service,ti-adapter@trad-ira.service,ti-adapter@roth-ira.service,ti-gateway.service -resolve-units ti-data.service,ti-data@trad-ira.service,ti-data@roth-ira.service,ti-flex@boost.service,ti-flex@trad-ira.service,ti-flex@roth-ira.service -self-unit ti-reporter@%i.service
+ExecStart=/opt/trend-investing/bin/ti-reporter -run-env /var/lib/trend-investing/engines/%i/run.env -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pushover -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -gateway-owner boost -gateway-adapters ti-adapter-boost.service -gateway-instance-env /etc/trend-investing/gateway-%i.env -gateway-state ${TI_REPORTS_DIR}/host-gateway.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@boost.service,ti-engine@trad-ira.service,ti-engine@roth-ira.service,ti-adapter-boost.service,ti-adapter@trad-ira.service,ti-adapter@roth-ira.service,ti-gateway.service,ti-gateway@trad-ira.service -resolve-units ti-data.service,ti-data@trad-ira.service,ti-data@roth-ira.service,ti-flex@boost.service,ti-flex@trad-ira.service,ti-flex@roth-ira.service -self-unit ti-reporter@%i.service
 ```
 
 then run `sudo systemctl edit --drop-in=no-github-issues.conf ti-unit-failed@.service`

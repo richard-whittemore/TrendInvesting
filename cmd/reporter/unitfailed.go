@@ -40,7 +40,7 @@ const unitReminderInterval = time.Hour
 // nothing else, so no value can be
 // read as an option or name another unit (ADR 0019, "Alerting"; ADR 0027,
 // the restart model).
-var tradingUnit = regexp.MustCompile(`^(ti-(engine@|adapter-|adapter@|reporter@|data@|flex@)[a-z0-9][a-z0-9-]*|ti-data|ti-gateway|ti-memory)\.service$`)
+var tradingUnit = regexp.MustCompile(`^(ti-(engine@|adapter-|adapter@|gateway@|reporter@|data@|flex@)[a-z0-9][a-z0-9-]*|ti-data|ti-gateway|ti-memory)\.service$`)
 
 // invocationShape is systemd's invocation ID: 32 lowercase hex digits.
 var invocationShape = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -50,7 +50,7 @@ var invocationShape = regexp.MustCompile(`^[0-9a-f]{32}$`)
 func checkTradingUnits(flagName string, units []string) error {
 	for _, unit := range units {
 		if !tradingUnit.MatchString(unit) {
-			return fmt.Errorf("reporter: %s %q is not a trading unit's name (ti-engine@<account>.service, ti-adapter-<account>.service, ti-adapter@<account>.service, ti-reporter@<account>.service, ti-gateway.service, ti-data.service, ti-data@<account>.service, ti-flex@<account>.service or ti-memory.service)", flagName, unit)
+			return fmt.Errorf("reporter: %s %q is not a trading unit's name (ti-engine@<account>.service, ti-adapter-<account>.service, ti-adapter@<account>.service, ti-reporter@<account>.service, ti-gateway.service, ti-gateway@<account>.service, ti-data.service, ti-data@<account>.service, ti-flex@<account>.service or ti-memory.service)", flagName, unit)
 		}
 	}
 	return nil

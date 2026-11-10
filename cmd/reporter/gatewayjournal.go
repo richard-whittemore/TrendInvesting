@@ -139,13 +139,18 @@ func lineTime(l string) (time.Time, error) {
 }
 
 // gatewayJournalChecker reads IBC's journal and each adapter's.
-func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker {
+func gatewayJournalChecker(journalctl string, adapters []string, targets ...gatewayTarget) gatewayChecker {
+	target := gatewayTarget{}
+	if len(targets) > 0 {
+		target = targets[0]
+	}
+	unit := target.unit()
 	return func(now time.Time) (gatewayEvidence, error) {
-		ibc, err := journalQuery(journalctl, gatewayUnit, ibcEvent)
+		ibc, err := journalQuery(journalctl, unit, ibcEvent)
 		if err != nil {
 			return gatewayEvidence{}, err
 		}
-		resets, err := journalQuery(journalctl, gatewayUnit, resetWaitEvent)
+		resets, err := journalQuery(journalctl, unit, resetWaitEvent)
 		if err != nil {
 			return gatewayEvidence{}, err
 		}
@@ -263,7 +268,7 @@ func gatewayJournalChecker(journalctl string, adapters []string) gatewayChecker 
 			ev.said = "gateway: " + status + ": " + strings.Join(reasons, "; ")
 		case len(ibc) == 0:
 			ev.silent = true
-			ev.said = "gateway: no login evidence: the ti-gateway journal holds no login event in the last 14 days"
+			ev.said = "gateway: no login evidence: the " + strings.TrimSuffix(unit, ".service") + " journal holds no login event in the last 14 days"
 		default:
 			ev.said = "gateway: logged in (IBC's newest login event is a completed login)"
 		}
@@ -303,7 +308,7 @@ func lostSince(lines []string) (since time.Time, first string, restored time.Tim
 	return since, first, restored, nil
 }
 
-// gatewayUnitSample is what systemd says of ti-gateway.service: how many times
+// gatewayUnitSample is what systemd says of the selected Gateway: how many times
 // it has restarted, and whether it is active.
 type gatewayUnitSample struct {
 	restarts int
@@ -326,18 +331,23 @@ var knownActiveStates = map[string]bool{"active": true, "activating": true, "ina
 // gatewayUnitSampler asks systemctl for the Gateway unit's restart count and
 // state. This is what sees a start that keeps failing when the journal takes
 // nothing. A systemctl that fails is an error, never a good sample.
-func gatewayUnitSampler(systemctl string) func() (gatewayUnitSample, error) {
+func gatewayUnitSampler(systemctl string, targets ...gatewayTarget) func() (gatewayUnitSample, error) {
+	target := gatewayTarget{}
+	if len(targets) > 0 {
+		target = targets[0]
+	}
+	unit := target.unit()
 	return func() (gatewayUnitSample, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), gatewayCheckTimeout)
 		defer cancel()
 		//nolint:gosec // G204: the binary is the operator's -systemctl flag and the unit a fixed name.
-		cmd := exec.CommandContext(ctx, systemctl, "show", "-p", "NRestarts", "-p", "ActiveState", "-p", "SubState", gatewayUnit)
+		cmd := exec.CommandContext(ctx, systemctl, "show", "-p", "NRestarts", "-p", "ActiveState", "-p", "SubState", unit)
 		cmd.WaitDelay = gatewayCheckWaitDelay
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		raw, err := cmd.Output()
 		if err != nil {
-			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not ask systemd about %s: %w (it said: %s)", gatewayUnit, err, strings.TrimSpace(stderr.String()))
+			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not ask systemd about %s: %w (it said: %s)", unit, err, strings.TrimSpace(stderr.String()))
 		}
 		var s gatewayUnitSample
 		state, sub := "", ""
@@ -352,13 +362,13 @@ func gatewayUnitSampler(systemctl string) func() (gatewayUnitSample, error) {
 			case "NRestarts":
 				n, err := strconv.Atoi(v)
 				if err != nil || n < 0 {
-					return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check read NRestarts=%q for %s, which is not a count", v, gatewayUnit)
+					return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check read NRestarts=%q for %s, which is not a count", v, unit)
 				}
 				s.restarts, haveRestarts = n, true
 			}
 		}
 		if !haveRestarts || sub == "" || !knownActiveStates[state] {
-			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not trust what systemd said of %s (NRestarts present: %v, SubState %q, ActiveState %q)", gatewayUnit, haveRestarts, sub, state)
+			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not trust what systemd said of %s (NRestarts present: %v, SubState %q, ActiveState %q)", unit, haveRestarts, sub, state)
 		}
 		s.active = state == "active"
 		return s, nil

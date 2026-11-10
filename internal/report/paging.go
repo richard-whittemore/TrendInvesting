@@ -27,7 +27,7 @@ const (
 func (a Alert) Class(near bool) Class {
 	switch a.Kind {
 	case KindUnitFailed:
-		if near && (strings.HasPrefix(a.Key, "unit-failed:ti-engine@") || strings.HasPrefix(a.Key, "unit-failed:ti-adapter") || strings.HasPrefix(a.Key, "unit-failed:ti-gateway.")) {
+		if near && (strings.HasPrefix(a.Key, "unit-failed:ti-engine@") || strings.HasPrefix(a.Key, "unit-failed:ti-adapter") || strings.HasPrefix(a.Key, "unit-failed:ti-gateway.") || strings.HasPrefix(a.Key, "unit-failed:ti-gateway@")) {
 			return CapitalSafety
 		}
 		return Operational
