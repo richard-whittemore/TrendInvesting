@@ -310,7 +310,8 @@ func lostSince(lines []string) (since time.Time, first string, restored time.Tim
 
 // gatewayUnitSample is what systemd says of the selected Gateway: how many times
 // it has restarted, whether it is active, and whether owner intent skips the
-// instance check (docs/manual/server.md, "The Traditional IRA's Gateway").
+// instance check (ADR 0019, "Alerting"; docs/manual/server.md,
+// "The Traditional IRA's Gateway").
 type gatewayUnitSample struct {
 	restarts int
 	active   bool   // ActiveState=active
@@ -380,11 +381,14 @@ func gatewayUnitSampler(systemctl string, targets ...gatewayTarget) func() (gate
 			return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not trust what systemd said of %s (NRestarts present: %v, SubState %q, ActiveState %q)", unit, haveRestarts, sub, state)
 		}
 		if target.instance != "" {
-			if fileState == "" {
-				return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not trust UnitFileState for %s", unit)
-			}
-			if fileState != "enabled" && fileState != "enabled-runtime" && state != "active" && state != "activating" && state != "reloading" {
-				s.skipped = fmt.Sprintf("gateway (%s): skipped: %s is %s and not running", target.instance, unit, fileState)
+			switch fileState {
+			case "disabled", "masked", "masked-runtime":
+				if state == "inactive" {
+					s.skipped = fmt.Sprintf("gateway (%s): skipped: %s is inactive and %s", target.instance, unit, fileState)
+				}
+			case "enabled", "enabled-runtime", "static", "indirect", "generated", "transient", "alias", "linked", "linked-runtime":
+			default:
+				return gatewayUnitSample{}, fmt.Errorf("reporter: the gateway check could not trust UnitFileState=%q for %s", fileState, unit)
 			}
 		}
 		s.active = state == "active"

@@ -892,16 +892,23 @@ A reporter whose Gateway environment file is absent (Roth today) quietly skips
 this check. An existing but unreadable or invalid file fails that firing, so a
 configuration fault cannot silently disable monitoring. Flex credentials remain unchanged.
 
-A provisioned instance is checked only when its Gateway unit is enabled
-(including enabled-runtime), or is active, activating or reloading. When the
-owner disables or masks an instance and it is inactive or failed, the reporter
-prints one line saying the check was skipped and why. An old refused login
-then sends no new page or reminder. Any open Gateway incident for that instance
-is resolved through the usual delivery path, which closes its alert issue.
-A failed resolution is retried at the next firing. If systemd cannot be read,
-the firing fails and the incident stays open. The joint Gateway always keeps
-its check. Failed units still page through the failure hook and the reporter's
-`-units` check, even when this login check is skipped.
+An instance Gateway that is stopped (`ActiveState=inactive`) and not enabled
+(`UnitFileState=disabled`, `masked` or `masked-runtime`) is treated as switched
+off by the owner. Provisioning installs the unit disabled, and the owner runs
+it with `systemctl start`. A failed or stopping (`deactivating`) Gateway keeps
+its check, as does every state other than `inactive`. Other recognized unit
+file states, including `enabled` and `enabled-runtime`, also keep the check.
+For a switched-off instance the reporter prints one plain line saying the check
+was skipped and why. An old refused login then sends no new page or reminder.
+Any open Gateway incident for that instance is resolved through the usual
+delivery path, which closes its alert issue. This resolution does not mean
+IBKR was reached. A failed resolution is retried at the next firing.
+If systemd cannot be read, or its unit file state is empty or unrecognized,
+the firing fails and cannot treat the Gateway as switched off. Journal evidence
+still pages and reminds as usual, and the failed sample breaks the restart
+rule's quiet streak without changing its baseline. The joint Gateway always
+keeps its check. Failed units also page through the failure hook and the
+reporter's `-units` check.
 
 For an IRA page, use `sudo systemctl restart ti-gateway@trad-ira` when the
 remedy calls for a restart, and read its healer with

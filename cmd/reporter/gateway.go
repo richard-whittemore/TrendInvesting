@@ -190,10 +190,7 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 	// Owner intent gates instance evidence before reading old login failures
 	// (docs/manual/server.md, "The Traditional IRA's Gateway"). An uncertain
 	// systemd sample cannot authorize either a skip or an incident resolution.
-	if target.instance != "" && sampleErr != nil {
-		return sampleErr
-	}
-	skipped := target.instance != "" && unit.skipped != ""
+	skipped := sampleErr == nil && target.instance != "" && unit.skipped != ""
 	var ev gatewayEvidence
 	var checkErr error
 	if skipped {
@@ -212,7 +209,7 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 	// firing after its decision, including during grace or maintenance
 	// (docs/manual/server.md, "The Gateway is logged out"; ADR 0019, "Alerting").
 	defer func() { retErr = errors.Join(retErr, checkErr) }()
-	// For the joint Gateway, a systemctl failure still permits the journal
+	// A systemctl failure still permits the journal
 	// evidence to page below, and then fails the firing (ADR 0019, "Alerting").
 	defer func() { retErr = errors.Join(retErr, sampleErr) }()
 	out, said := ev.out, ev.said
