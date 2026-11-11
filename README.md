@@ -59,7 +59,7 @@ paper order, missed rebalance, Gateway login, halted account).
 
 ## Quick start
 
-Requirements: Go 1.27.3 or newer (see `.go-version`; `GOTOOLCHAIN=local`
+Requirements: Go 1.27.4 or newer (see `.go-version`; `GOTOOLCHAIN=local`
 means no other version is fetched automatically), Python 3 for the
 adapters, Docker for the rehearsal.
 
