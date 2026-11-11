@@ -364,6 +364,69 @@ class MomentumHoldingsTest(unittest.TestCase):
             tidata.parse(job.argv("--optional", "CCC"))
 
 
+class MomentumActionScopeTest(unittest.TestCase):
+    def conflict(self, data, kind, ticker, moved_to=None):
+        if kind == "dividends":
+            row = {"id": "REVISION", "ticker": ticker, "ex_dividend_date": "2026-11-27", "cash_amount": 1.0}
+            revised = dict(row, cash_amount=1.5)
+        else:
+            row = {"id": "REVISION", "ticker": ticker, "execution_date": "2026-11-27",
+                   "split_from": 1, "split_to": 2}
+            revised = dict(row, split_to=3)
+        if moved_to is not None:
+            revised["ticker"] = moved_to
+        for first, last, copy in (("2026-11-02", "2026-11-29", row), ("2026-11-03", "2026-11-30", revised)):
+            record.write(str(data), {"kind": kind, "source": "massive", "from": first, "session": last,
+                                     "fetched_at": "2026-11-30T23:30:00Z", "rows": [copy]})
+
+    def stream(self, data, compact, optional=()):
+        return encode.encode(str(data), D(2026, 11, 23), D(2026, 11, 30), IDENTITY,
+                             required=("SPY", "IEF"), optional=optional,
+                             ranker=FakeRanker() if compact else None)
+
+    def test_unrelated_split_and_dividend_revisions_allow_both_momentum_paths(self):
+        for compact in (False, True):
+            for kind in ("splits", "dividends"):
+                for ticker in ("FUND", "ETFX", "ZZZ"):
+                    with self.subTest(compact=compact, kind=kind, ticker=ticker), tempfile.TemporaryDirectory() as root:
+                        build(root)
+                        clean = self.stream(root, compact)
+                        self.conflict(root, kind, ticker)
+                        self.assertEqual(self.stream(root, compact), clean)
+
+    def test_member_required_and_optional_revisions_still_refuse_both_paths(self):
+        for compact in (False, True):
+            for kind in ("splits", "dividends"):
+                for ticker in ("AAA", "DDD", "SPY", "IEF", "ETFX"):
+                    with self.subTest(compact=compact, kind=kind, ticker=ticker), tempfile.TemporaryDirectory() as root:
+                        build(root)
+                        self.conflict(root, kind, ticker)
+                        with self.assertRaisesRegex(encode.Conflict, kind + " REVISION differs between recordings"):
+                            self.stream(root, compact, optional=("ETFX",))
+
+    def test_action_moving_onto_or_off_a_later_member_still_refuses_both_paths(self):
+        for compact in (False, True):
+            for kind in ("splits", "dividends"):
+                for ticker, moved_to in (("FUND", "AAA"), ("AAA", "FUND")):
+                    with self.subTest(compact=compact, kind=kind, ticker=ticker), tempfile.TemporaryDirectory() as root:
+                        build(root)
+                        self.conflict(root, kind, ticker, moved_to)
+                        with self.assertRaisesRegex(encode.Conflict, kind + " REVISION differs between recordings"):
+                            self.stream(root, compact)
+
+    def test_unrelated_revisions_allow_the_momentum_warm_up(self):
+        for kind in ("splits", "dividends"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                data = Path(root) / "data"
+                data.mkdir()
+                build(str(data))
+                self.conflict(data, kind, "ETFX")
+                job = MomentumJob(root, data=data, ranker=FakeRanker())
+                status, _, err = job.main(after_settle(D(2026, 11, 30)), "--backfill-from", "2026-11-23")
+                self.assertEqual(status, 0, err)
+                self.assertTrue(job.path(D(2026, 11, 30)).exists())
+
+
 class MomentumJobTest(unittest.TestCase):
     """The morning's recordings for an IRA: the session's grouped bars once (shared with Boost's job), its
     universe (the listing) from those bars, and its sector labels; then the stream."""
