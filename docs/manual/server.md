@@ -929,6 +929,24 @@ remedy calls for a restart, and read its healer with
 argument is the full adapter unit name. Use the gates below before restarting;
 the reporter only observes and pages, and never restarts anything.
 
+## Stopping a Gateway on purpose
+
+`sudo systemctl stop ti-gateway` (or `ti-gateway@trad-ira`), a `restart`,
+or a server shutdown does not page. The Gateway's start program answers
+systemd's stop signal by ending IBC and exiting with status 143 (128 plus
+the signal's number, 15), and both Gateway units count that status as a
+clean stop (`SuccessExitStatus=143`). The other failing exits, such as a
+refused login or the bound on login attempts, still fail the unit and page
+as described under "A failed unit".
+
+To keep the IRA's Gateway off for longer, switch it off as well, with
+`sudo systemctl disable --now ti-gateway@trad-ira`: the reporter then skips
+it (see "The Traditional IRA's Gateway"). Before you sign
+in to IBKR's Client Portal with a username a Gateway is using, switch that
+Gateway off this way: IBKR allows one session per username, so the Gateway
+would otherwise stop at "Existing session detected". After you sign out,
+`sudo systemctl enable --now ti-gateway@trad-ira` brings it back.
+
 ## The Gateway is logged out
 
 **Gateway healer.** When an adapter exits 3 and its own invocation journal
