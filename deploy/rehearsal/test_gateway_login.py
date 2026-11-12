@@ -591,6 +591,15 @@ cmd_diff ibkr-login.env
             self.assertIn(line, section)
         self.assertIn("RestartPreventExitStatus=64 65 77 78", unit)
 
+    def test_a_stop_by_systemd_is_not_a_failure(self):
+        # ti-gateway-start exits 128+15 when systemd's SIGTERM stops it; that
+        # exit must not fail the unit and page (docs/manual/server.md,
+        # "Stopping a Gateway on purpose").
+        for name in ("ti-gateway.service", "ti-gateway@.service"):
+            with self.subTest(unit=name):
+                service = (DEPLOY / "systemd" / name).read_text().split("[Service]", 1)[1]
+                self.assertIn("\nSuccessExitStatus=143\n", service)
+
     def test_provision_refusal_before_any_install(self):
         source = (DEPLOY / "provision.sh").read_text()
         start = source.index("step_services() {")

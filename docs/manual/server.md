@@ -929,6 +929,40 @@ remedy calls for a restart, and read its healer with
 argument is the full adapter unit name. Use the gates below before restarting;
 the reporter only observes and pages, and never restarts anything.
 
+## Stopping a Gateway on purpose
+
+`sudo systemctl stop ti-gateway` (or `ti-gateway@trad-ira`), a `restart`,
+or a server shutdown does not fail the Gateway unit or send its "failed"
+page. The reporter's own checks are unchanged: a Gateway that stays down,
+or an adapter that fails meanwhile, still pages as its own sections say. The
+Gateway's start program answers
+systemd's stop signal by ending IBC and exiting with status 143 (128 plus
+the signal's number, 15), and both Gateway units count that status as a
+clean stop (`SuccessExitStatus=143`). The other failing exits, such as a
+refused login or the bound on login attempts, still fail the unit and page
+as described under "A failed unit".
+
+IBKR allows one session per username, so a Gateway stops at "Existing
+session detected" while you are signed in to Client Portal with its
+username. The two Gateways are switched off differently:
+
+- **The IRA's Gateway.** Before you sign in with the IRA's username, note
+  its state with `systemctl is-enabled ti-gateway@trad-ira` and
+  `systemctl is-active ti-gateway@trad-ira`, then run
+  `sudo systemctl disable --now ti-gateway@trad-ira`: the reporter's Gateway
+  check then skips it (see "The Traditional IRA's Gateway"); an IRA adapter
+  that fails meanwhile still pages. After you sign out, put it back as you
+  noted it: if it was enabled (it is once the IRA's dry run runs, so that
+  it starts again after a reboot), `sudo systemctl enable --now
+  ti-gateway@trad-ira`; if it was only running,
+  `sudo systemctl start ti-gateway@trad-ira`; if it was off, leave it.
+- **The joint Gateway.** Only stop it, `sudo systemctl stop ti-gateway`, and
+  never disable it: the reporter always checks it, and after a reboot the
+  secrets unlock starts it only if it is enabled. While it is stopped
+  the reporter can page it as down, so open a maintenance window first
+  (`sudo ti-maintenance start`) for a short sign-in. After you
+  sign out, `sudo systemctl start ti-gateway` brings it back.
+
 ## The Gateway is logged out
 
 **Gateway healer.** When an adapter exits 3 and its own invocation journal
