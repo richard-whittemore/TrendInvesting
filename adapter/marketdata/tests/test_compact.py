@@ -110,6 +110,28 @@ class LaterMemberActionConflictTest(unittest.TestCase):
                 with self.assertRaisesRegex(encode.Conflict, message):
                     compact(d)
 
+    def test_a_revised_action_for_a_member_listed_only_in_an_earlier_snapshot_refuses(self):
+        # CCC is not ranked on the last session, so it can leave that snapshot.
+        kind, ticker, changed = "dividends", "CCC", {"cash_amount": 1.5}
+        with tempfile.TemporaryDirectory() as d:
+            build(d, sector_session="2026-11-27")
+            path = os.path.join(d, "universe_2026-11-30.json")
+            last = record.read(path)
+            first_day = D(2026, 11, 27)
+            record.write(d, dict(last, session=first_day.isoformat(), fetched_at=stamp(first_day),
+                                 bars=bars_for(first_day)))
+            os.remove(path)
+            record.write(d, dict(last, tickers=[t for t in last["tickers"] if t["ticker"] != ticker]))
+            compact(d)
+
+            actions = record.read(sorted(Path(d).glob(kind + "_*.json"))[-1])
+            row = next(r for r in actions["rows"] if r["ticker"] == ticker)
+            revised = dict(actions, **{"from": "2026-11-21"}, rows=[dict(row, **changed)])
+            record.write(d, revised)
+            message = kind + " " + row["id"] + " differs between recordings"
+            with self.assertRaisesRegex(encode.Conflict, message):
+                compact(d)
+
 
 class HistoryContentTest(unittest.TestCase):
     def setUp(self):
