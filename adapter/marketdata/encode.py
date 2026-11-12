@@ -654,10 +654,10 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
         wanted |= members
     start = base + dt.timedelta(days=1)
     by_ticker = collections.defaultdict(lambda: ([], []))
-    # A boost stream reads its one instrument's actions only, so only theirs
-    # are checked for conflicting copies; a momentum stream may encode any
-    # listed ticker, so every action is.
-    scope = set(required) if boost else None
+    # Check every ticker whose factors are computed, including members
+    # whose bars are not emitted (docs/manual/market-data.md, "Two recordings
+    # give different figures for one dividend").
+    scope = set(required) if boost else wanted | members
     for r in _actions(directory, "splits", start, last, scope):
         by_ticker[r.get("ticker")][0].append(r)
     for r in _actions(directory, "dividends", start, last, scope):
@@ -813,8 +813,8 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
     (docs/live-trading/lessons-2026-10.md L1; the budget is stated in
     docs/manual/market-data.md):
 
-    1. every session base..last: the named instruments' bars, the universe
-       members, and per listed ticker its malformed sessions (as runs, the
+    1. every session base..last: the named instruments' bars, and per
+       universe member its malformed sessions (as runs, the
        first REASONS_KEPT with their own reason), its first well-formed
        close and its close before each of its dividend ex-dates, which is
        all _member_factors_from reads to find the sessions a member is left
@@ -825,10 +825,15 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
        decision whose window covers the session, and, from ``first``, the
        envelopes, made one at a time (the returned generator).
 
-    The recordings are listed once, before pass 1 (list_recordings), and
-    every pass reads only those, so a recording written meanwhile is not
-    read and one removed or replaced meanwhile refuses the stream. Passes 1
-    and 2 run before this returns and raise what encode raises, in the
+    The recordings are listed once, before pass 1 (list_recordings). A
+    scan of the span's listed universe snapshots finds every member with
+    a bar before actions are read, so actions are checked for all named
+    instruments and members, including members first listed later in the
+    span (docs/manual/market-data.md, "Two recordings give different figures
+    for one dividend"). Every pass reads only those recordings, so a
+    recording written meanwhile is not read and one removed or replaced
+    meanwhile refuses the stream. Passes 1 and 2 run before this returns
+    and raise what encode raises, in the
     order it raises them, so the generator only writes. The envelopes are
     byte for byte encode's own before it read this way (the recorded
     fixture in the compact stream's tests pins that)."""
@@ -841,6 +846,7 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
     if retracted_through is not None:   # a retraction recorded later, of a later day, is the next file's
         retractions = {d: r for d, r in retractions.items() if d <= retracted_through}
     named = set(required) | set(optional)
+    members = set()
     start = base + dt.timedelta(days=1)
     by_ticker = collections.defaultdict(lambda: ([], []))
     # The actions are read first, to know whose closes pass 1 keeps, but
@@ -848,9 +854,18 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
     # them raised is raised once pass 1 has checked the recordings.
     actions_failed = None
     try:
-        for r in _actions(directory, "splits", start, last, None):
+        for day in nyse_calendar.sessions(first, last):
+            name = "universe_{}.json".format(day.isoformat())
+            if day in retractions or name not in listing:
+                continue
+            rec = _read_listed(directory, name, listing)
+            listed = {t.get("ticker") for t in rec.get("tickers") or ()}
+            members |= listed & {r.get("T") for r in rec["bars"]}
+            del rec
+        scope = named | members
+        for r in _actions(directory, "splits", start, last, scope):
             by_ticker[r.get("ticker")][0].append(r)
-        for r in _actions(directory, "dividends", start, last, None):
+        for r in _actions(directory, "dividends", start, last, scope):
             by_ticker[r.get("ticker")][1].append(r)
     except Exception as e:
         actions_failed = e
@@ -867,19 +882,16 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
                     priors[expected[i - 1]].add(ticker)
 
     # Pass 1.
-    days, index, kept, members = [], {}, [], set()
+    days, index, kept = [], {}, []
     malformed = {}                             # ticker -> _Runs of its malformed sessions
     closes = collections.defaultdict(dict)     # ticker -> {session: raw close}: first, and before ex-dates
     for s in iter_sessions(directory, base, last, retractions, listing=listing):
         i = index[s.day] = len(days)
         days.append(s.day)
         kept.append(Session(s.day, {t: s.bars[t] for t in sorted(named) if t in s.bars}, s.fetched_at, None))
-        if s.day >= first and s.universe is not None:
-            listed = {t.get("ticker") for t in s.universe.get("tickers") or ()}
-            members |= listed & set(s.bars)
         wanted_close = priors.get(s.day, ())
         for ticker, row in s.bars.items():
-            if ticker in named:
+            if ticker in named or ticker not in members:
                 continue
             try:
                 _check_bar(ticker, s.day, row)
@@ -930,12 +942,6 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
         missing = [s.day.isoformat() for s in span if ticker not in s.bars]
         if missing:
             raise MissingData("{} has no bar on {}".format(ticker, ", ".join(missing)))
-    for ticker in list(closes):   # only a member's figures are read again
-        if ticker not in members:
-            del closes[ticker]
-    for ticker in list(malformed):
-        if ticker not in members:
-            del malformed[ticker]
 
     stream = _Stream(identity, first_sequence)
     after = nyse_calendar.sessions_after(last, ahead)

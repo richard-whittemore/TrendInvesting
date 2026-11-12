@@ -573,8 +573,8 @@ class FailClosedTest(unittest.TestCase):
             with mock.patch.object(history, "load_actions", wraps=history.load_actions) as reader:
                 run(d)
         self.assertEqual(sorted(c.args for c in reader.call_args_list),
-                         [(d, "dividends", FIRST + dt.timedelta(days=1), LAST, None),
-                          (d, "splits", FIRST + dt.timedelta(days=1), LAST, None)])
+                         [(d, "dividends", FIRST + dt.timedelta(days=1), LAST, set(REQUIRED) | set(OPTIONAL)),
+                          (d, "splits", FIRST + dt.timedelta(days=1), LAST, set(REQUIRED) | set(OPTIONAL))])
 
     def test_conflicting_copies_of_one_action_are_refused(self):
         with tempfile.TemporaryDirectory() as d:
