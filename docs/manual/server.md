@@ -932,7 +932,10 @@ the reporter only observes and pages, and never restarts anything.
 ## Stopping a Gateway on purpose
 
 `sudo systemctl stop ti-gateway` (or `ti-gateway@trad-ira`), a `restart`,
-or a server shutdown does not page. The Gateway's start program answers
+or a server shutdown no longer sends a "failed" page for the Gateway unit
+itself. The reporter's own checks are unchanged: a Gateway that stays down,
+or an adapter that fails meanwhile, still pages as its own sections say. The
+Gateway's start program answers
 systemd's stop signal by ending IBC and exiting with status 143 (128 plus
 the signal's number, 15), and both Gateway units count that status as a
 clean stop (`SuccessExitStatus=143`). The other failing exits, such as a

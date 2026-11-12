@@ -46,8 +46,8 @@ RestartPreventExitStatus=64 65 77 78
 TimeoutStopSec=60
 # ti-gateway-start exits 128+15 when systemd stops it with SIGTERM: a stop
 # asked for (systemctl stop or restart, a shutdown) is not a failure and must
-# not page (docs/manual/server.md, "Stopping a Gateway on purpose"). Any other
-# exit still fails the unit.
+# not page (docs/manual/server.md, "Stopping a Gateway on purpose"). The other
+# failing exit statuses remain failures.
 SuccessExitStatus=143
 # ti-gateway-start stops only xvfb-run, its own child, after a refused login;
 # this default, stated so it cannot be dropped, is what ends IBC's java and
