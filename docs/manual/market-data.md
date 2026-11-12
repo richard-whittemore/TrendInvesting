@@ -786,12 +786,14 @@ carries on from them.
   both Boost and momentum print `ti-data refused: Conflict: dividends <id> differs between recordings`
   for a dividend, or `ti-data refused: Conflict: splits <id> differs between recordings`
   for a split. On a daily firing the job first checks the files it has
-  already written, so the same conflict usually arrives wrapped:
-  `ti-data refused: Refused: the run's files through <session> cannot be
-  encoded again from their recordings (Conflict: dividends <id> differs
-  between recordings); this stops the job for a person`. When the part in
-  brackets is a `Conflict: ... differs between recordings`, follow the steps
-  below, not "A file already written differs". Massive changed its figure between two fetches whose windows
+  already written, so the same conflict usually arrives wrapped. Boost's
+  job says `ti-data refused: Refused: the run's files through <file> cannot
+  be encoded again from their recordings (Conflict: dividends <id> differs
+  between recordings); this stops the job for a person`; the IRA's says
+  `ti-data refused: Refused: the run's file <file> cannot be encoded again
+  from its recordings (Conflict: ...)`, with the same ending. When the part
+  in brackets is a `Conflict: ... differs between recordings`, follow the
+  steps below, not "A file already written differs". Massive changed its figure between two fetches whose windows
   overlap, and the job will not choose. Boost checks SPY's actions. The
   IRA's momentum stream checks every required or optional instrument (such
   as SPY, IEF, SHY or a held stock) and every listed universe member with a
@@ -1477,7 +1479,7 @@ for the recording and encoding steps.
 | `ti-data refused:` the engine's durable log "cannot be read", "is not an engine durable log", "holds no committed configuration input: start the engine first", "holds no committed input, so it names no run", or the run's first input "is not its configuration" | No file is written | Start the engine once (so `run.env` and its log exist), check `TI_RUN`, and restore a log that cannot be read from the backup as the engine wrote it; never edit it |
 | `ti-data refused:` "it is not a Boost configuration", "warm_up_start ... is not an NYSE session", "--backfill-from ... is not the configuration's warm_up_start", "session ... precedes the warm-up start", or "the Boost configuration ... is not the one the engine's durable log ... holds" | No file is written | Correct the date or put the configuration back as the engine started with it; an edited configuration is a new run |
 | `ti-data refused:` "the history ... holds N sessions; the indicators need M", or Massive returns nothing for a trading day | No file is written; recordings already made are kept | For a history that is too short, choose an earlier `warm_up_start` (more sessions) inside Massive's two-year window; once the engine has started, a changed `warm_up_start` changes the recorded configuration, so it needs a new run. If Massive returned nothing for a day, let the next firing retry it instead |
-| `ti-data refused:` "... differs from the stream its recordings and the engine log ... give now", or "cannot be encoded again from their recordings" | Nothing more is written for the run: the engine has already read the old file | If the bracketed reason is `Conflict: dividends <id> differs between recordings` (or `splits`), quarantine the wrong recordings ("Two recordings give different figures for one dividend"). Otherwise "A file already written differs" under "The daily data job": usually a new run with its own warm-up |
+| `ti-data refused:` "... differs from the stream its recordings and the engine log ... give now", or "cannot be encoded again from their recordings" (Boost) or "from its recordings" (the IRA) | Nothing more is written for the run: the engine has already read the old file | If the bracketed reason is `Conflict: dividends <id> differs between recordings` (or `splits`), quarantine the wrong recordings ("Two recordings give different figures for one dividend"). Otherwise "A file already written differs" under "The daily data job": usually a new run with its own warm-up |
 | `ti-data refused: Conflict: dividends <id> differs between recordings` (or `ti-data refused: Conflict: splits <id> differs between recordings`) | No file is written. Both jobs use these messages. Boost checks SPY. Momentum checks required and optional instruments and every listed universe member with a bar during the stream's sessions, including later joiners. | Check the figure against the issuer's notice and quarantine the recordings that hold the wrong one ("Two recordings give different figures for one dividend") |
 | `ti-data refused:` "has more than one stream folder", "cannot be matched to any run", "names this run in its first records but cannot be read", "does not follow its record hash chain", or "a second start of a first run" | No file is written | Restore or move aside as "A crash resume" says; never run a warm-up for a resumed run's new name |
 | The adapter stops: "the stream file ... is refused", "the run's stream folder ... does not exist", the same folder and log messages as the row above, or "the delivery record ... cannot be read" | Nothing from any file is sent | "What happens to the file", "What can go wrong, and what the adapter does" |
