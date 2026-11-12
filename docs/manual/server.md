@@ -946,13 +946,16 @@ IBKR allows one session per username, so a Gateway stops at "Existing
 session detected" while you are signed in to Client Portal with its
 username. The two Gateways are switched off differently:
 
-- **The IRA's Gateway.** Before you sign in with the IRA's username, run
+- **The IRA's Gateway.** Before you sign in with the IRA's username, note
+  its state with `systemctl is-enabled ti-gateway@trad-ira` and
+  `systemctl is-active ti-gateway@trad-ira`, then run
   `sudo systemctl disable --now ti-gateway@trad-ira`: the reporter's Gateway
   check then skips it (see "The Traditional IRA's Gateway"); an IRA adapter
-  that fails meanwhile still pages. After you sign out, bring it back as it
-  was: `sudo systemctl enable --now ti-gateway@trad-ira` if it was enabled
-  (it is once the IRA's dry run runs, so that it starts again after a
-  reboot), otherwise `sudo systemctl start ti-gateway@trad-ira`.
+  that fails meanwhile still pages. After you sign out, put it back as you
+  noted it: if it was enabled (it is once the IRA's dry run runs, so that
+  it starts again after a reboot), `sudo systemctl enable --now
+  ti-gateway@trad-ira`; if it was only running,
+  `sudo systemctl start ti-gateway@trad-ira`; if it was off, leave it.
 - **The joint Gateway.** Only stop it, `sudo systemctl stop ti-gateway`, and
   never disable it: the reporter always checks it, and after a reboot the
   secrets unlock starts it only if it is enabled. While it is stopped
