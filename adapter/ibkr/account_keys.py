@@ -43,6 +43,7 @@ def command(args, api_factory, out, err):
     pairs = set()
     failure = None
     connection_failure = None
+    cleanup_failures = []
     try:
         conn = Connection(api_factory(cfg), cfg, status_sink=lambda status: None)
         conn.connect()
@@ -70,12 +71,12 @@ def command(args, api_factory, out, err):
                 if values is not None:
                     end_account_values(conn, account, values)
             except Exception as stopped:
-                connection_failure = "{}: {}".format(type(stopped).__name__, stopped)
+                cleanup_failures.append("{}: {}".format(type(stopped).__name__, stopped))
             finally:
                 try:
                     conn.api.disconnect()
                 except Exception as stopped:
-                    connection_failure = "{}: {}".format(type(stopped).__name__, stopped)
+                    cleanup_failures.append("{}: {}".format(type(stopped).__name__, stopped))
 
     for key, currency in sorted(pairs):
         emit("key={} currency={}".format(key, currency))
@@ -92,7 +93,10 @@ def command(args, api_factory, out, err):
         emit("Settled keys: none")
     if connection_failure is not None:
         emit("connection failed: " + connection_failure, err)
-        return 2
     if failure is not None:
         emit(failure, err)
+    for cleanup_failure in cleanup_failures:
+        emit("cleanup failed: " + cleanup_failure, err)
+    if connection_failure is not None or cleanup_failures:
+        return 2
     return 0 if ended and failure is None and all(key in present for key in needed) else 1

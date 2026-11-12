@@ -191,3 +191,31 @@ class AccountKeysTests(unittest.TestCase):
         self.assertIn("unsubscribe failed", output)
         self.assertNotIn(ACCOUNT, output)
         self.assertFalse(self.fake.connected)
+
+    def test_download_and_cleanup_failures_are_all_masked_with_primary_first(self):
+        subscribe = self.fake.req_account_updates
+
+        def fail_unsubscribe(enabled, account):
+            if not enabled:
+                raise OSError("unsubscribe failed for " + ACCOUNT)
+            subscribe(enabled, account)
+
+        download_failure = patch("account_keys.Connection.events",
+                                 side_effect=RuntimeError("download failed for " + ACCOUNT))
+        for primary, events in (("download failed", download_failure), ("2101", contextlib.nullcontext())):
+            with self.subTest(primary=primary):
+                self.fake.summary_error = 2101
+                self.out = io.StringIO()
+                self.err = io.StringIO()
+                with events, \
+                        patch.object(self.fake, "req_account_updates", side_effect=fail_unsubscribe), \
+                        patch.object(self.fake, "disconnect", side_effect=OSError("disconnect failed for " + OTHER_ACCOUNT)):
+                    status, output = self.run_command()
+                self.assertEqual(status, 2)
+                reasons = self.err.getvalue().splitlines()
+                self.assertEqual(len(reasons), 3, output)
+                self.assertIn(primary, reasons[0])
+                self.assertIn("unsubscribe failed", reasons[1])
+                self.assertIn("disconnect failed", reasons[2])
+                self.assertNotIn(ACCOUNT, output)
+                self.assertNotIn(OTHER_ACCOUNT, output)

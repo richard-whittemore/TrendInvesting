@@ -91,6 +91,41 @@ class CommandTests(unittest.TestCase):
                     should_stop=Steps(steps), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
                     protobuf_version=lambda: "5.29.5")
 
+    def test_account_keys_real_client_checks_installed_pins_before_command(self):
+        argv = ["account-keys", "--config", str(self.config), "--client-id", "19",
+                "--ibapi-record", str(self.record), "--versions", str(self.versions)]
+        for ibapi, protobuf, expected in (((10, 51, 1), "5.29.5", 0),
+                                         ((10, 50, 2), "5.29.5", 1),
+                                         ((10, 51, 1), "5.29.4", 1)):
+            with self.subTest(ibapi=ibapi, protobuf=protobuf), \
+                    mock.patch("account_keys.command", return_value=0) as command, \
+                    mock.patch("cli._real_api") as real_api:
+                self.err = io.StringIO()
+                status = main(argv, err=self.err, ibapi_version=lambda: ibapi,
+                              protobuf_version=lambda: protobuf)
+                self.assertEqual(status, expected)
+                real_api.assert_not_called()
+                if expected == 0:
+                    command.assert_called_once()
+                    self.assertIs(command.call_args.args[1], real_api)
+                else:
+                    command.assert_not_called()
+                    self.assertIn("refused:", self.err.getvalue())
+                    self.assertIn("pin", self.err.getvalue())
+
+    def test_account_keys_default_pin_paths_and_injected_client_bypass(self):
+        argv = ["account-keys", "--config", str(self.config), "--client-id", "19"]
+        with mock.patch("cli.check_installed", side_effect=ibapi_pin.IbapiNotPinned("missing pin")) as check, \
+                mock.patch("account_keys.command", return_value=0) as command:
+            self.assertEqual(main(argv, err=self.err), 1)
+            check.assert_called_once_with("/opt/trend-investing/twsapi/INSTALLED",
+                                          "/opt/trend-investing/adapter/versions.env")
+            command.assert_not_called()
+            check.reset_mock()
+            self.assertEqual(main(argv, api_factory=self.api, err=self.err), 0)
+            check.assert_not_called()
+            command.assert_called_once()
+
     def test_malformed_maintenance_refuses_before_connecting(self):
         schedule = self.dir / "maintenance.json"
         schedule.write_text('{"windows": [{"days": ["Sat"], "start": "wrong"}]}')

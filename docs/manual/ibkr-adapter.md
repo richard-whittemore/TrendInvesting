@@ -265,7 +265,9 @@ other diagnostic is reading account updates on this Gateway either.
 
 On the server, use the installed adapter code and its Python virtual environment,
 as the adapter service does. The normal server configuration keeps the account
-number in a root-only file. This command hands just that file to a temporary
+number encrypted on disk (ADR 0028). `sudo ti-unlock` must have run first to
+decrypt the root-only copy into `/run/trend-investing/secrets/accounts/`.
+This command hands just that file to a temporary
 service running as `ti-trader`, using the same credential mechanism as
 `ti-adapter@trad-ira`:
 
@@ -274,11 +276,14 @@ sudo systemctl stop ti-adapter@trad-ira
 sudo systemd-run --unit=ti-account-keys-trad-ira --wait --pipe --collect \
   --property=User=ti-trader \
   --property=WorkingDirectory=/opt/trend-investing/adapter \
-  --property=LoadCredential=account:/etc/trend-investing/accounts/trad-ira.env \
-  /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr account-keys \
+  --property=LoadCredential=account:/run/trend-investing/secrets/accounts/trad-ira.env \
+  /bin/sh -c 'exec /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr account-keys \
   --config /etc/trend-investing/adapters/trad-ira.json --client-id 19 \
-  --secrets '%d/account' --account-key IBKR_ACCOUNT_TRAD_IRA
+  --secrets "$CREDENTIALS_DIRECTORY/account" --account-key IBKR_ACCOUNT_TRAD_IRA'
 ```
+
+The shell expands `CREDENTIALS_DIRECTORY` inside the service because systemd-run
+on Ubuntu 24.04 (systemd 255) does not expand `%d` in command-line arguments.
 
 If the configuration itself already names `account_id`, use this simpler command
 instead, from the installed code's directory; omit both secrets arguments:
