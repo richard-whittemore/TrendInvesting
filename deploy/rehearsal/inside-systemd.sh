@@ -257,7 +257,7 @@ test -e /run/ti-gateway/login.env || fail "instance stop removed joint login"
 rm /etc/systemd/system/ti-gateway@trad-ira.service.d/probe.conf
 systemctl stop ti-gateway.service
 test "$(systemctl show -p Result --value ti-gateway.service)" = success || fail "a stop failed the joint Gateway"
-test -z "$(systemctl list-units --all --no-legend 'ti-unit-failed@ti-gateway*')" || fail "a Gateway stop started the failure page"
+test -z "$(journalctl -q --no-pager -o cat -u 'ti-unit-failed@ti-gateway*')" || fail "a Gateway stop started the failure page"
 test ! -e /run/ti-gateway/login.env || fail "Gateway stop left the staged login"
 rm /etc/systemd/system/ti-gateway.service.d/probe.conf
 printf 'joint\n' >/etc/trend-investing/gateway-login
