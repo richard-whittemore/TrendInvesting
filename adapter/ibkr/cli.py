@@ -180,6 +180,19 @@ def _parser():
     probe.add_argument("--expect-batch", action="store_true",
                        help="fail unless this start queued a batch of the run's stream; left out, a start that "
                             "finds every file delivered passes as \"no new batch since start\"")
+    keys = commands.add_parser(
+        "account-keys", help="list Gateway's account-value keys, read-only",
+        description="A read-only account-value download: prints keys and currencies, no amounts or account numbers. "
+                    "Never places, modifies or cancels orders; never requests open orders or positions; "
+                    "sends nothing to the engine. Uses an unused client ID chosen by the operator, "
+                    "never the adapter's own (docs/manual/ibkr-adapter.md, Listing the account's balance keys).")
+    keys.add_argument("--config", required=True, metavar="FILE", help="the adapter's JSON configuration")
+    keys.add_argument("--client-id", required=True, type=int, metavar="N",
+                      help="an unused positive client ID, different from the adapter's own")
+    keys.add_argument("--timeout", type=float, default=60, metavar="SECONDS",
+                      help="maximum wait for the account download to end (default 60 seconds)")
+    keys.add_argument("--secrets", metavar="FILE", help="the account's KEY=VALUE file, if absent from config")
+    keys.add_argument("--account-key", metavar="NAME", help="the account's line in --secrets")
     return parser
 
 
@@ -300,6 +313,9 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
     """
     err = err or sys.stderr
     args = _parser().parse_args(argv)
+    if args.command == "account-keys":
+        import account_keys
+        return account_keys.command(args, api_factory or _real_api, out or sys.stdout, err)
     if args.command == "probe":
         import probe
         lines, status = probe.run(args.journal, args.engine_log, args.client_id, args.snapshot_version, args.mode,

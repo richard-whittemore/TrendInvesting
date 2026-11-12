@@ -248,6 +248,79 @@ negotiated (`ibkr gateway server_version=N contract_data=protobuf|text`):
 doubles are built from both, as `ibapi`'s own decoder hands them over, so
 either works; the probe reports which one the live Gateway uses.
 
+### Listing the account's balance keys
+
+Use this when the adapter stops with `account values ended; SettledCash missing`
+or another missing balance. It shows the balance names and currencies that
+Gateway actually sends for the configured account. It is read-only: it never
+places, changes or cancels orders, never requests open orders or positions, and
+sends nothing to the engine. It prints no amounts or account numbers, including
+in failure messages.
+
+Choose an unused positive client ID, such as 19; never use the adapter's own
+ID (12 for trad-ira). The command refuses that ID rather than displacing the
+adapter. Stop the account's adapter before the reading, since another
+account-updates subscription can interrupt its balance download. Check that no
+other diagnostic is reading account updates on this Gateway either.
+
+On the server, use the installed adapter code and its Python virtual environment,
+as the adapter service does. The normal server configuration keeps the account
+number in a root-only file. This command hands just that file to a temporary
+service running as `ti-trader`, using the same credential mechanism as
+`ti-adapter@trad-ira`:
+
+```sh
+sudo systemctl stop ti-adapter@trad-ira
+sudo systemd-run --unit=ti-account-keys-trad-ira --wait --pipe --collect \
+  --property=User=ti-trader \
+  --property=WorkingDirectory=/opt/trend-investing/adapter \
+  --property=LoadCredential=account:/etc/trend-investing/accounts/trad-ira.env \
+  /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr account-keys \
+  --config /etc/trend-investing/adapters/trad-ira.json --client-id 19 \
+  --secrets '%d/account' --account-key IBKR_ACCOUNT_TRAD_IRA
+```
+
+If the configuration itself already names `account_id`, use this simpler command
+instead, from the installed code's directory; omit both secrets arguments:
+
+```sh
+cd /opt/trend-investing/adapter
+sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr account-keys \
+  --config /etc/trend-investing/adapters/trad-ira.json --client-id 19
+```
+
+The reading subscribes to that account's values, waits for Gateway's end marker,
+then unsubscribes and disconnects. The default wait is 60 seconds; add
+`--timeout 90` to allow 90 seconds. Connection setup has its own configured
+`connect_timeout`.
+
+Each distinct key and currency is printed once, sorted, followed by the download
+result and the keys this adapter configuration needs. For example, a Gateway
+that sends only the securities segment's settled cash might print these lines
+among its results:
+
+```text
+account-keys: key=SettledCash-S currency=USD
+account-keys: download ended
+account-keys: needed SettledCash MISSING
+account-keys: Settled key=SettledCash-S currency=USD
+```
+
+The separate `Settled` lines repeat every key containing that word, regardless of
+capitalization, so a segment suffix is easy to spot. `Settled keys: none` means
+no such key arrived. A segment key does not count as the required unsuffixed
+`SettledCash`. `present` means the key arrived in at least one currency; it does
+not certify that the amount is usable or that a trading snapshot would pass.
+`download did NOT end within 60s` means the reading is incomplete; even keys
+listed as present cannot make that reading pass. A connection failure can end
+the reading sooner; its reason is printed separately.
+
+Exit status is 0 only when the download ended and every needed key was present,
+1 for a missing key, an unfinished or refused download, or invalid configuration,
+and 2 for a connection failure. Record the output for diagnosis before choosing
+a balance-rule change. This command does not repair the missing balance or
+restart the adapter; start it again only after resolving the startup failure.
+
 ### The same-day probe
 
 After every adapter install, run the probe on the server the same day,
