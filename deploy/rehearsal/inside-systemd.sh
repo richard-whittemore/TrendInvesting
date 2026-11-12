@@ -178,8 +178,11 @@ cat >/usr/local/libexec/trend-investing/gateway-probe.py <<'PYCODE'
 import json
 import os
 from pathlib import Path
+import signal
 import time
 
+# Exits as ti-gateway-start does when systemd stops it: 128 + SIGTERM.
+signal.signal(signal.SIGTERM, lambda *_: os._exit(143))
 runtime = Path(os.environ["RUNTIME_DIRECTORY"])
 result = {}
 try:
@@ -246,10 +249,15 @@ systemctl is-active --quiet ti-gateway.service || fail "instance interrupted joi
 test "$(stat -c %U:%G:%a /run/ti-gateway-trad-ira/login.env)" = ti-gateway:ti-gateway:600 || fail "instance login owner/mode"
 cmp -s /run/ti-gateway-trad-ira/login.env "$unlocked/ibkr-login-trad-ira.env" || fail "instance staged wrong login"
 systemctl stop ti-gateway@trad-ira.service
+# A requested stop is clean: no failed unit, so no page (server.md,
+# "Stopping a Gateway on purpose").
+test "$(systemctl show -p Result --value ti-gateway@trad-ira.service)" = success || fail "a stop failed the instance Gateway"
 test ! -e /run/ti-gateway-trad-ira/login.env || fail "instance left staged login"
 test -e /run/ti-gateway/login.env || fail "instance stop removed joint login"
 rm /etc/systemd/system/ti-gateway@trad-ira.service.d/probe.conf
 systemctl stop ti-gateway.service
+test "$(systemctl show -p Result --value ti-gateway.service)" = success || fail "a stop failed the joint Gateway"
+test -z "$(systemctl list-units --all --no-legend 'ti-unit-failed@ti-gateway*')" || fail "a Gateway stop started the failure page"
 test ! -e /run/ti-gateway/login.env || fail "Gateway stop left the staged login"
 rm /etc/systemd/system/ti-gateway.service.d/probe.conf
 printf 'joint\n' >/etc/trend-investing/gateway-login

@@ -932,8 +932,8 @@ the reporter only observes and pages, and never restarts anything.
 ## Stopping a Gateway on purpose
 
 `sudo systemctl stop ti-gateway` (or `ti-gateway@trad-ira`), a `restart`,
-or a server shutdown no longer sends a "failed" page for the Gateway unit
-itself. The reporter's own checks are unchanged: a Gateway that stays down,
+or a server shutdown does not fail the Gateway unit or send its "failed"
+page. The reporter's own checks are unchanged: a Gateway that stays down,
 or an adapter that fails meanwhile, still pages as its own sections say. The
 Gateway's start program answers
 systemd's stop signal by ending IBC and exiting with status 143 (128 plus
@@ -942,13 +942,21 @@ clean stop (`SuccessExitStatus=143`). The other failing exits, such as a
 refused login or the bound on login attempts, still fail the unit and page
 as described under "A failed unit".
 
-To keep the IRA's Gateway off for longer, switch it off as well, with
-`sudo systemctl disable --now ti-gateway@trad-ira`: the reporter then skips
-it (see "The Traditional IRA's Gateway"). Before you sign
-in to IBKR's Client Portal with a username a Gateway is using, switch that
-Gateway off this way: IBKR allows one session per username, so the Gateway
-would otherwise stop at "Existing session detected". After you sign out,
-`sudo systemctl enable --now ti-gateway@trad-ira` brings it back.
+IBKR allows one session per username, so a Gateway stops at "Existing
+session detected" while you are signed in to Client Portal with its
+username. The two Gateways are switched off differently:
+
+- **The IRA's Gateway.** Before you sign in with the IRA's username, run
+  `sudo systemctl disable --now ti-gateway@trad-ira`: the reporter then
+  skips it and nothing pages (see "The Traditional IRA's Gateway"). After
+  you sign out, `sudo systemctl enable --now ti-gateway@trad-ira` brings it
+  back.
+- **The joint Gateway.** Only stop it, `sudo systemctl stop ti-gateway`, and
+  never disable it: the reporter always checks it, and after a reboot the
+  secrets unlock starts it only if it is enabled. While it is stopped
+  the reporter can page it as down, so open a maintenance window first
+  (`sudo ti-maintenance start`) for a short sign-in. After you
+  sign out, `sudo systemctl start ti-gateway` brings it back.
 
 ## The Gateway is logged out
 
