@@ -783,8 +783,9 @@ carries on from them.
   (`ti-data --session <the last written session>` reports the file and exits
   0 when it does). Never edit a file or a recording to make them agree.
 - **Two recordings give different figures for one dividend** (or split):
-  the refusal reads `ConflictingActions: dividends <id> differs between
-  recordings`. Massive changed its figure between two fetches whose windows
+  both Boost and momentum print `ti-data refused: Conflict: dividends <id> differs between recordings`
+  for a dividend, or `ti-data refused: Conflict: splits <id> differs between recordings`
+  for a split. Massive changed its figure between two fetches whose windows
   overlap, and the job will not choose. Boost checks SPY's actions. The
   IRA's momentum stream checks every required or optional instrument (such
   as SPY, IEF, SHY or a held stock) and every listed universe member with a
@@ -1080,7 +1081,9 @@ whole order, engine, warm-up, adapter, then the daily firings, is
 - "the ranker refused" or "did not answer within 60 s": `universe-rank` is
   missing, from another build, or given another configuration
   ([momentum universe](momentum-universe.md), "What can go wrong").
-- `ConflictingActions` for an IRA instrument or universe member: the
+- `ti-data refused: Conflict: dividends <id> differs between recordings`
+  or `ti-data refused: Conflict: splits <id> differs between recordings`
+  for an IRA instrument or universe member: the
   momentum stream checks actions for its required and optional instruments
   and every listed universe member with a bar during its sessions. A
   revised dividend or split for one of them stops the job, including a
@@ -1469,7 +1472,7 @@ for the recording and encoding steps.
 | `ti-data refused:` "it is not a Boost configuration", "warm_up_start ... is not an NYSE session", "--backfill-from ... is not the configuration's warm_up_start", "session ... precedes the warm-up start", or "the Boost configuration ... is not the one the engine's durable log ... holds" | No file is written | Correct the date or put the configuration back as the engine started with it; an edited configuration is a new run |
 | `ti-data refused:` "the history ... holds N sessions; the indicators need M", or Massive returns nothing for a trading day | No file is written; recordings already made are kept | For a history that is too short, choose an earlier `warm_up_start` (more sessions) inside Massive's two-year window; once the engine has started, a changed `warm_up_start` changes the recorded configuration, so it needs a new run. If Massive returned nothing for a day, let the next firing retry it instead |
 | `ti-data refused:` "... differs from the stream its recordings and the engine log ... give now", or "cannot be encoded again from their recordings" | Nothing more is written for the run: the engine has already read the old file | "A file already written differs" under "The daily data job": usually a new run with its own warm-up |
-| `ti-data refused:` "ConflictingActions: dividends <id> differs between recordings" (or `Conflict: splits <id> differs between recordings`) | No file is written. Boost checks SPY. Momentum checks required and optional instruments and every listed universe member with a bar during the stream's sessions, including later joiners. | Check the figure against the issuer's notice and quarantine the recordings that hold the wrong one ("Two recordings give different figures for one dividend") |
+| `ti-data refused: Conflict: dividends <id> differs between recordings` (or `ti-data refused: Conflict: splits <id> differs between recordings`) | No file is written. Both jobs use these messages. Boost checks SPY. Momentum checks required and optional instruments and every listed universe member with a bar during the stream's sessions, including later joiners. | Check the figure against the issuer's notice and quarantine the recordings that hold the wrong one ("Two recordings give different figures for one dividend") |
 | `ti-data refused:` "has more than one stream folder", "cannot be matched to any run", "names this run in its first records but cannot be read", "does not follow its record hash chain", or "a second start of a first run" | No file is written | Restore or move aside as "A crash resume" says; never run a warm-up for a resumed run's new name |
 | The adapter stops: "the stream file ... is refused", "the run's stream folder ... does not exist", the same folder and log messages as the row above, or "the delivery record ... cannot be read" | Nothing from any file is sent | "What happens to the file", "What can go wrong, and what the adapter does" |
 | The adapter stops: "could not be read in full for the broker snapshot", or "the reconciliation owed ... could not be read" | Nothing is written down or sent; the file stays | Check IB Gateway's link and the account's currency, then start the adapter again |
