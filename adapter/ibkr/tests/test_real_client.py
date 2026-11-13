@@ -117,6 +117,12 @@ class _EClient:
     def cancelPositions(self):
         self.requests.append(("cancelPositions",))
 
+    def reqAccountSummary(self, reqId, groupName, tags):
+        self.requests.append(("reqAccountSummary", reqId, groupName, tags))
+
+    def cancelAccountSummary(self, reqId):
+        self.requests.append(("cancelAccountSummary", reqId))
+
     def reqAccountUpdates(self, subscribe, acctCode):
         self.requests.append(("reqAccountUpdates", subscribe, acctCode))
 
@@ -555,6 +561,8 @@ class ForwardingTests(unittest.TestCase):
         client.cancel_positions()
         client.req_account_updates(True, "DU0000001")
         client.req_account_updates(False, "DU0000001")
+        client.req_account_summary(6, "All", "SettledCash")
+        client.cancel_account_summary(6)
         client.req_all_open_orders()
         client.req_executions(4, "DU0000001")
         client.req_mkt_data(5, types.SimpleNamespace(conId=756733, symbol="SPY", secType="STK", currency="USD",
@@ -565,7 +573,9 @@ class ForwardingTests(unittest.TestCase):
         self.assertEqual(client._client.requests, [
             ("connect", "127.0.0.1", 4002, 11), ("reqCurrentTime",), ("reqPositions",),
             ("cancelPositions",), ("reqAccountUpdates", True, "DU0000001"),
-            ("reqAccountUpdates", False, "DU0000001"), ("reqAllOpenOrders",),
+            ("reqAccountUpdates", False, "DU0000001"),
+            ("reqAccountSummary", 6, "All", "SettledCash"), ("cancelAccountSummary", 6),
+            ("reqAllOpenOrders",),
             # Every client's executions (client filter 0): IBKR then
             # returns other clients' to the Master API client ID.
             ("reqExecutions", 4, "DU0000001", 0),
@@ -616,6 +626,8 @@ class ForwardingTests(unittest.TestCase):
                 w.positionEnd()
                 w.updateAccountValue("NetLiquidation", "1", "USD", "A")
                 w.accountDownloadEnd("A")
+                w.accountSummary(6, "DU0000001", "SettledCash", "123.45", "USD")
+                w.accountSummaryEnd(6)
                 w.openOrder(7, "c", "o", "s")
                 w.openOrderEnd()
                 w.orderStatus(7, "Submitted", 0, 1, 0.0, 9, 0, 0.0, 11, "", 0.0)
@@ -626,10 +638,15 @@ class ForwardingTests(unittest.TestCase):
                 w.tickPrice(5, 4, 401.17, "attrib")
                 w.tickSnapshotEnd(5)
                 w.connectionClosed()
-                names = [e.name for e in inbox.events()]
+                events = list(inbox.events())
+                self.assertEqual([(e.name, e.args) for e in events if e.name.startswith("account_summary")],
+                                 [("account_summary", (6, "DU0000001", "SettledCash", "123.45", "USD")),
+                                  ("account_summary_end", (6,))])
+                names = [e.name for e in events]
                 self.assertEqual(names, [
                     "next_valid_id", "managed_accounts", "error", "current_time", "position", "position_end",
-                    "account_value", "account_download_end", "open_order", "open_order_end",
+                    "account_value", "account_download_end", "account_summary", "account_summary_end",
+                    "open_order", "open_order_end",
                     "order_status", "exec_details", "exec_details_end", "commission_report",
                     "commission_report", "tick_price", "tick_snapshot_end", "connection_closed"])
 

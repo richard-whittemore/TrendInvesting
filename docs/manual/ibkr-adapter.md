@@ -295,9 +295,12 @@ sudo -u ti-trader /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr 
 ```
 
 The reading subscribes to that account's values, waits for Gateway's end marker,
-then unsubscribes and disconnects. The default wait is 60 seconds; add
-`--timeout 90` to allow 90 seconds. Connection setup has its own configured
-`connect_timeout`.
+then unsubscribes. After a completed download and successful unsubscribe, it
+makes exactly one `reqAccountSummary` request with group `All` and tag
+`SettledCash` on this throwaway connection. It always cancels that request,
+including after an error or timeout, then disconnects. Each reading has its own
+`--timeout` wait, defaulting to 60 seconds. Add `--timeout 90` to allow 90 seconds
+per reading. Connection setup has its own configured `connect_timeout`.
 
 Each distinct key and currency is printed once, sorted, followed by the download
 result and the keys this adapter configuration needs. For example, a Gateway
@@ -308,23 +311,59 @@ among its results:
 account-keys: key=SettledCash-S currency=USD
 account-keys: download ended
 account-keys: needed SettledCash MISSING
-account-keys: Settled key=SettledCash-S currency=USD
+account-keys: Settled key=SettledCash-S currency=USD shape=9.9
 ```
 
-The separate `Settled` lines repeat every key containing that word, regardless of
-capitalization, so a segment suffix is easy to spot. `Settled keys: none` means
-no such key arrived. A segment key does not count as the required unsuffixed
-`SettledCash`. `present` means the key arrived in at least one currency; it does
-not certify that the amount is usable or that a trading snapshot would pass.
-`download did NOT end within 60s` means the reading is incomplete; even keys
-listed as present cannot make that reading pass. A connection failure can end
-the reading sooner; its reason is printed separately.
+The separate `Settled` lines show every key containing that word, regardless of
+capitalization, and the shape of its last value for each currency. Every run of
+digits becomes a single `9`, so digit counts and amounts stay private. Account
+numbers are masked before shaping. An empty value prints `shape=(empty)` and a
+shape longer than 80 characters is cut to 80 followed by `…`. For example,
+`SettledCashByDate` might produce either of these shapes, showing whether it
+holds a decimal or a date-and-value structure.
 
-Exit status is 0 only when the download ended and every needed key was present,
-1 for a missing key, an unfinished or refused download, or invalid configuration,
-and 2 for a connection failure. Record the output for diagnosis before choosing
-a balance-rule change. This command does not repair the missing balance or
-restart the adapter; start it again only after resolving the startup failure.
+```text
+account-keys: Settled key=SettledCashByDate currency=USD shape=9.9
+account-keys: Settled key=SettledCashByDate currency=USD shape=9:9.9,9:9.9
+```
+
+`Settled keys: none` means no such key arrived. A segment key does not count as
+the required unsuffixed `SettledCash`. `present` means the key arrived in at
+least one currency. A trading snapshot also requires a usable amount.
+`download did NOT end within 60s` means the reading is incomplete. A connection
+failure can end the reading sooner, with its reason printed separately.
+
+The one-shot summary prints the count of `SettledCash` rows for the configured
+account, then each row's currency, finite-number classification and masked shape.
+Rows belonging to other accounts are ignored. For example, a successful reading
+can print the following lines.
+
+```text
+account-keys: summary SettledCash rows=1
+account-keys: summary SettledCash currency=USD number=yes shape=9.9
+account-keys: summary ended
+```
+
+`number=yes` means the value parses as a finite float. Settled cash can come
+from this one-shot summary when `number=yes`, even if the account-updates
+download carries only `SettledCashByDate`. `number=no` includes empty values,
+structured text, NaN and infinity. `summary ended` confirms the summary's end
+marker arrived. `summary did NOT end within 60s` means it was incomplete.
+An IBKR refusal prints `summary refused by IBKR code <code>` with the message
+text omitted. A local summary exception prints only its type.
+
+The adapter continues to use account updates for repeated balance reads.
+IB Gateway 10.50 answered two summaries per connection and refused every later
+read with code 322, even after cancellation. This diagnostic makes its single
+summary request on a separate connection.
+
+Exit status is 0 only when the account-updates download ended and every needed
+key was present, 1 for a missing key, an unfinished or refused download, or
+invalid configuration, and 2 for a connection or cleanup failure. Summary
+results are informational and leave that status unchanged. A failure to cancel
+the summary counts as a cleanup failure and returns 2. Record the output for
+diagnosis before choosing a balance-rule change. Start the adapter again only
+after resolving the startup failure.
 
 ### The same-day probe
 
