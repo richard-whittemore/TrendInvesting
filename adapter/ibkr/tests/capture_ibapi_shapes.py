@@ -27,6 +27,8 @@ from decimal import Decimal
 from ibapi import server_versions
 from ibapi.decoder import Decoder
 from ibapi.protobuf.AccountValue_pb2 import AccountValue
+from ibapi.protobuf.AccountSummary_pb2 import AccountSummary
+from ibapi.protobuf.AccountSummaryEnd_pb2 import AccountSummaryEnd
 from ibapi.protobuf.ContractData_pb2 import ContractData
 from ibapi.protobuf.ContractDataEnd_pb2 import ContractDataEnd
 from ibapi.protobuf.ErrorMessage_pb2 import ErrorMessage
@@ -57,6 +59,12 @@ class Recorder(EWrapper):
 
     def updateAccountValue(self, key, val, currency, accountName):
         self.calls.append(("updateAccountValue", key, val, currency, accountName))
+
+    def accountSummary(self, reqId, account, tag, value, currency):
+        self.calls.append(("accountSummary", reqId, account, tag, value, currency))
+
+    def accountSummaryEnd(self, reqId):
+        self.calls.append(("accountSummaryEnd", reqId))
 
     def position(self, account, contract, position, avgCost):
         self.calls.append(("position", account, contract, position, avgCost))
@@ -97,6 +105,13 @@ def protobuf_calls():
     value = AccountValue()
     value.key, value.value, value.currency, value.accountName = "SettledCash", "10000.00", "USD", ACCOUNT
     decoder.processAccountValueMsgProtoBuf(value.SerializeToString())
+    summary = AccountSummary()
+    summary.reqId, summary.account, summary.tag = 10, ACCOUNT, "SettledCash"
+    summary.value, summary.currency = "10000.00", "USD"
+    decoder.processAccountSummaryMsgProtoBuf(summary.SerializeToString())
+    summary_end = AccountSummaryEnd()
+    summary_end.reqId = 10
+    decoder.processAccountSummaryEndMsgProtoBuf(summary_end.SerializeToString())
     refused = ErrorMessage()
     refused.id, refused.errorCode = 8, 200
     refused.errorMsg = "No security definition has been found for the request"
@@ -153,6 +168,8 @@ def text_calls():
     decoder.interpret(contract, IN.CONTRACT_DATA)
     decoder.interpret(b(1, 7), IN.CONTRACT_DATA_END)
     decoder.interpret(b(2, "SettledCash", "10000.00", "USD", ACCOUNT), IN.ACCT_VALUE)
+    decoder.interpret(b(1, 10, ACCOUNT, "SettledCash", "10000.00", "USD"), IN.ACCOUNT_SUMMARY)
+    decoder.interpret(b(1, 10), IN.ACCOUNT_SUMMARY_END)
     decoder.interpret(b(8, 200, "No security definition has been found for the request", "", 1800000000000),
                       IN.ERR_MSG)
     decoder.interpret(b(3, "synthetic", CON_ID, SYMBOL, "STK", "", 0, "", "", "SMART", "USD", SYMBOL,
@@ -173,6 +190,11 @@ def shapes(calls):
             out["contract_details_end"] = {"req_id": typed(call[1])}
         elif call[0] == "updateAccountValue":
             out["account_value"] = {k: typed(v) for k, v in zip(("key", "val", "currency", "accountName"), call[1:])}
+        elif call[0] == "accountSummary":
+            out["account_summary"] = {k: typed(v) for k, v in zip(
+                ("reqId", "account", "tag", "value", "currency"), call[1:])}
+        elif call[0] == "accountSummaryEnd":
+            out["account_summary_end"] = {"reqId": typed(call[1])}
         elif call[0] == "position":
             out["fractional_position"] = {
                 "account": typed(call[1]),

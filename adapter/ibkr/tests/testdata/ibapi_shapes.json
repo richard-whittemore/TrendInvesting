@@ -1,6 +1,34 @@
 {
   "ibapi": "1051.1",
   "protobuf": {
+    "account_summary": {
+      "account": {
+        "type": "str",
+        "value": "DU0000001"
+      },
+      "currency": {
+        "type": "str",
+        "value": "USD"
+      },
+      "reqId": {
+        "type": "int",
+        "value": 10
+      },
+      "tag": {
+        "type": "str",
+        "value": "SettledCash"
+      },
+      "value": {
+        "type": "str",
+        "value": "10000.00"
+      }
+    },
+    "account_summary_end": {
+      "reqId": {
+        "type": "int",
+        "value": 10
+      }
+    },
     "account_value": {
       "accountName": {
         "type": "str",
@@ -246,6 +274,34 @@
   },
   "server_version": 205,
   "text": {
+    "account_summary": {
+      "account": {
+        "type": "str",
+        "value": "DU0000001"
+      },
+      "currency": {
+        "type": "str",
+        "value": "USD"
+      },
+      "reqId": {
+        "type": "int",
+        "value": 10
+      },
+      "tag": {
+        "type": "str",
+        "value": "SettledCash"
+      },
+      "value": {
+        "type": "str",
+        "value": "10000.00"
+      }
+    },
+    "account_summary_end": {
+      "reqId": {
+        "type": "int",
+        "value": 10
+      }
+    },
     "account_value": {
       "accountName": {
         "type": "str",

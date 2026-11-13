@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, FakeTWS
 from test_connection import config
+from test_account_shape import captured_fractional
+from account_keys import value_shape
 from cli import main
 
 
@@ -40,7 +42,8 @@ class AccountKeysTests(unittest.TestCase):
                        "--timeout", "0.01", *extra], api_factory=factory, out=self.out, err=self.err,
                       engine_connect=lambda *args: self.fail("diagnostic connected to engine"))
         self.assertLessEqual({call[0] for call in self.fake.calls},
-                             {"connect", "req_account_updates", "disconnect"})
+                             {"connect", "req_account_updates", "req_account_summary",
+                              "cancel_account_summary", "disconnect"})
         return status, self.out.getvalue() + self.err.getvalue()
 
     def test_sorted_distinct_pairs_without_amounts_or_accounts_and_read_only_requests(self):
@@ -219,3 +222,184 @@ class AccountKeysTests(unittest.TestCase):
                 self.assertIn("disconnect failed", reasons[2])
                 self.assertNotIn(ACCOUNT, output)
                 self.assertNotIn(OTHER_ACCOUNT, output)
+
+
+    def summary_reply(self, rows=(), end=True, error=None):
+        def reply(req_id, group, tags):
+            self.fake.calls.append(("req_account_summary", req_id, group, tags))
+            for row in rows:
+                self.fake.callbacks.account_summary(req_id, *row)
+            if error is not None:
+                self.fake.callbacks.error(req_id, error, "PRIVATE ERROR " + ACCOUNT)
+            if end:
+                self.fake.callbacks.account_summary_end(req_id)
+        return patch.object(self.fake, "req_account_summary", side_effect=reply)
+
+    def assert_summary_cancelled_once(self):
+        requests = self.fake.called("req_account_summary")
+        self.assertEqual(len(requests), 1)
+        _, req_id, group, tags = requests[0]
+        self.assertEqual((group, tags), ("All", "SettledCash"))
+        self.assertEqual(self.fake.called("cancel_account_summary"), [("cancel_account_summary", req_id)])
+        unsubscribe = ("req_account_updates", False, ACCOUNT)
+        self.assertLess(self.fake.calls.index(unsubscribe), self.fake.calls.index(requests[0]))
+        self.assertLess(self.fake.calls.index(("cancel_account_summary", req_id)),
+                        self.fake.calls.index(("disconnect",)))
+
+    def test_settled_shapes_mask_digits_accounts_truncate_and_keep_last_value(self):
+        cases = [("SettledCashByDate", "20261113:12345.67,20261114:890.12", "9:9.9,9:9.9"),
+                 ("SettledEmpty", "", "(empty)"),
+                 ("SettledMultiline", "1\naccount-keys: summary ended", r"9\naccount-keys: summary ended"),
+                 ("SettledLong", "x" * 81, "x" * 80 + "…"),
+                 ("SettledExact", "x" * 80, "x" * 80),
+                 ("SettledAccount", ACCOUNT + " " + OTHER_ACCOUNT + " DUX0000000", "<account> <account> <account>"),
+                 ("unSETTLED", "1234567890", "9")]
+        self.fake.summary.append((ACCOUNT, "SettledCashByDate", "earlier", "USD"))
+        cases.append(("SettledDigits", "1234567890" * 20, "9"))
+        self.fake.summary += [(ACCOUNT, key, value, "USD") for key, value, _ in cases]
+        status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        for key, value, shape in cases:
+            self.assertIn(f"account-keys: Settled key={key} currency=USD shape={shape}", output.splitlines())
+        self.assertNotIn("earlier", output)
+        self.assertEqual(output.count("account-keys: Settled key=SettledCashByDate"), 1)
+        for secret in (ACCOUNT, OTHER_ACCOUNT, "DUX0000000", "12345.67"):
+            self.assertNotIn(secret, output)
+
+    def test_summary_filters_accounts_request_ids_tags_and_classifies_finite_numbers(self):
+        rows = [(OTHER_ACCOUNT, "SettledCash", "other secret", "OTHER")]
+        values = [("123456.78", "yes", "9.9"), ("-1.5e3", "yes", "-9.9e9"),
+                  ("1\naccount-keys: summary ended", "no", r"9\naccount-keys: summary ended"),
+                  ("nan", "no", "nan"), ("inf", "no", "inf"), ("1e9999", "no", "9e9"),
+                  ("", "no", "(empty)"), (ACCOUNT, "no", "<account>"),
+                  ("x" * 81, "no", "x" * 80 + "…")]
+        rows += [(ACCOUNT, "SettledCash", value, "USD") for value, _, _ in values]
+        rows += [(ACCOUNT, "NetLiquidation", "wrong tag", "USD")]
+        with self.summary_reply(rows):
+            status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        self.assertIn(f"account-keys: summary SettledCash rows={len(values)}", output)
+        for _, number, shape in values:
+            self.assertIn(f"account-keys: summary SettledCash currency=USD number={number} shape={shape}",
+                          output.splitlines())
+        for secret in (OTHER_ACCOUNT, ACCOUNT, "other secret", "OTHER", "123456.78", "wrong tag"):
+            self.assertNotIn(secret, output)
+        self.assertIn("account-keys: summary ended", output)
+        self.assert_summary_cancelled_once()
+
+    def test_summary_success_error_and_timeout_leave_download_exit_code_unchanged(self):
+        for missing in (False, True):
+            for result in ("success", "error", "timeout"):
+                with self.subTest(missing=missing, result=result):
+                    self.fake = FakeTWS()
+                    self.fake.ledger_rows = False
+                    self.fake.summary = [(ACCOUNT, key, "987654.321", "USD") for key in
+                                         ("TotalCashValue", "SettledCash", "NetLiquidation", "ExcessLiquidity")]
+                    self.out = io.StringIO()
+                    self.err = io.StringIO()
+                    if missing:
+                        self.fake.summary = [row for row in self.fake.summary if row[1] != "SettledCash"]
+                    with self.summary_reply(end=result == "success", error=322 if result == "error" else None):
+                        status, output = self.run_command()
+                    self.assertEqual(status, 1 if missing else 0, output)
+                    self.assert_summary_cancelled_once()
+                    self.assertIn("account-keys: summary SettledCash rows=0", output)
+                    if result == "success":
+                        self.assertIn("account-keys: summary ended", output)
+                    elif result == "timeout":
+                        self.assertIn("summary did NOT end within 0.01s", output)
+                    else:
+                        self.assertNotIn("summary did NOT end", output)
+                    if result == "error":
+                        self.assertIn("summary refused by IBKR code 322", output)
+                    self.assertNotIn("PRIVATE ERROR", output)
+                    self.assertNotIn(ACCOUNT, output)
+
+    def test_summary_request_exception_is_informational_and_cancelled(self):
+        with patch.object(self.fake, "req_account_summary", side_effect=RuntimeError("PRIVATE ERROR " + ACCOUNT)) as request:
+            status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        self.assertIn("summary failed: RuntimeError", output)
+        self.assertIn("summary SettledCash rows=0", output)
+        self.assertNotIn("summary did NOT end", output)
+        self.assertEqual(request.call_count, 1)
+        req_id = request.call_args.args[0]
+        self.assertEqual(self.fake.called("cancel_account_summary"), [("cancel_account_summary", req_id)])
+        self.assertNotIn("PRIVATE ERROR", output)
+        self.assertNotIn(ACCOUNT, output)
+        self.assertFalse(self.fake.connected)
+
+    def test_summary_cancel_failure_returns_two_and_still_disconnects(self):
+        with self.summary_reply(), patch.object(self.fake, "cancel_account_summary", side_effect=OSError("PRIVATE ERROR " + ACCOUNT)):
+            status, output = self.run_command()
+        self.assertEqual(status, 2, output)
+        self.assertIn("cleanup failed", output)
+        self.assertNotIn("PRIVATE ERROR", output)
+        self.assertFalse(self.fake.connected)
+
+    def test_summary_is_skipped_until_download_ends_and_unsubscribes(self):
+        self.fake.end_summary = False
+        status, output = self.run_command()
+        self.assertEqual(status, 1, output)
+        self.assertEqual(self.fake.called("req_account_summary"), [])
+
+
+    def test_summary_ignores_other_request_rows_errors_and_end_markers(self):
+        def reply(req_id, group, tags):
+            self.fake.calls.append(("req_account_summary", req_id, group, tags))
+            self.fake.callbacks.account_summary(req_id + 1, ACCOUNT, "SettledCash", "wrong request", "USD")
+            self.fake.callbacks.error(req_id + 1, 322, "PRIVATE ERROR")
+            self.fake.callbacks.account_summary_end(req_id + 1)
+            self.fake.callbacks.account_summary(req_id, ACCOUNT, "SettledCash", "123.45", "USD")
+            self.fake.callbacks.account_summary_end(req_id)
+        with patch.object(self.fake, "req_account_summary", side_effect=reply):
+            status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        self.assertIn("summary SettledCash rows=1", output)
+        self.assertIn("summary ended", output)
+        self.assertNotIn("wrong request", output)
+        self.assertNotIn("refused", output)
+        self.assertNotIn("PRIVATE ERROR", output)
+        self.assert_summary_cancelled_once()
+
+    def test_summary_disconnect_is_informational_and_still_cancelled(self):
+        def drop(req_id, group, tags):
+            self.fake.calls.append(("req_account_summary", req_id, group, tags))
+            self.fake.drop()
+        with patch.object(self.fake, "req_account_summary", side_effect=drop):
+            status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        self.assertIn("summary failed: NotConnected", output)
+        self.assertIn("summary SettledCash rows=0", output)
+        self.assertNotIn("summary did NOT end", output)
+        self.assert_summary_cancelled_once()
+
+    def test_value_shape_escapes_controls_after_masking_and_digits_before_cutting(self):
+        for code in (*range(0x20), 0x7f, *range(0x80, 0xa0)):
+            with self.subTest(code=code):
+                expected = {10: r"\n", 13: r"\r", 9: r"\t"}.get(code, f"\\x{code:02x}")
+                self.assertEqual(value_shape(ACCOUNT + " 123" + chr(code), ACCOUNT),
+                                 "<account> 9" + expected)
+        self.assertEqual(value_shape("x" * 79 + "\n", ACCOUNT), "x" * 79 + "\\" + "…")
+        self.assertEqual(value_shape("é\u00a0", ACCOUNT), "é\u00a0")
+
+    def test_summary_counts_captured_ibapi_callback_in_wrapper_argument_order(self):
+        for protocol in ("protobuf", "text"):
+            with self.subTest(protocol=protocol):
+                row = captured_fractional("account_summary", protocol)
+                end = captured_fractional("account_summary_end", protocol)
+                self.out = io.StringIO()
+                self.err = io.StringIO()
+
+                def reply(req_id, group, tags):
+                    self.fake.calls.append(("req_account_summary", req_id, group, tags))
+                    self.fake.callbacks.account_summary(row.reqId, row.account, row.tag, row.value, row.currency)
+                    self.fake.callbacks.account_summary_end(end.reqId)
+
+                with patch("account_keys.Connection.new_req_id", return_value=row.reqId), \
+                        patch.object(self.fake, "req_account_summary", side_effect=reply):
+                    status, output = self.run_command()
+                self.assertEqual(status, 0, output)
+                self.assertIn("account-keys: summary SettledCash rows=1", output)
+                self.assertIn("account-keys: summary SettledCash currency=USD number=yes shape=9.9", output)
+                self.assertIn("account-keys: summary ended", output)

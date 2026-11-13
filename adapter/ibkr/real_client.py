@@ -258,6 +258,12 @@ def _forwarder_class():
         def accountDownloadEnd(self, accountName):
             self._send("account_download_end", accountName)
 
+        def accountSummary(self, reqId, account, tag, value, currency):
+            self._send("account_summary", reqId, account, tag, value, currency)
+
+        def accountSummaryEnd(self, reqId):
+            self._send("account_summary_end", reqId)
+
         def openOrder(self, orderId, contract, order, orderState):
             self._send("open_order", orderId, contract, order, orderState)
 
@@ -488,6 +494,12 @@ class IbapiClient(TWSApi):
 
     def req_account_updates(self, subscribe, account_id):
         self._client.reqAccountUpdates(subscribe, account_id)
+
+    def req_account_summary(self, req_id, group, tags):
+        self._client.reqAccountSummary(req_id, group, tags)
+
+    def cancel_account_summary(self, req_id):
+        self._client.cancelAccountSummary(req_id)
 
     def req_all_open_orders(self):
         self._client.reqAllOpenOrders()

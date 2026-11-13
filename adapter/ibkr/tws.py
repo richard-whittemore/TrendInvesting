@@ -48,6 +48,12 @@ class TWSApi:
     neither carrying a request ID; req_account_updates(False, account_id)
     unsubscribes. One subscription per client, asked for again freely.
 
+    req_account_summary(req_id, group, tags) is used only by the throwaway
+    account-keys diagnostic (docs/manual/ibkr-adapter.md). It receives
+    account_summary rows and account_summary_end under req_id, and always
+    calls cancel_account_summary(req_id) afterwards. The adapter uses
+    req_account_updates for repeated reads (account.py's Gateway 10.50 lesson).
+
     req_mkt_data asks for one market-data snapshot of a contract (a plain
     object with conId, symbol, secType, currency and exchange, as
     place_order's contract): IBKR answers with tick_price callbacks under
@@ -88,6 +94,12 @@ class TWSApi:
         raise NotImplementedError
 
     def req_account_updates(self, subscribe, account_id):
+        raise NotImplementedError
+
+    def req_account_summary(self, req_id, group, tags):
+        raise NotImplementedError
+
+    def cancel_account_summary(self, req_id):
         raise NotImplementedError
 
     def req_all_open_orders(self):
@@ -147,6 +159,8 @@ class Inbox:
         "position_end",         # ()
         "account_value",        # (key, value, currency, account)
         "account_download_end",  # (account)
+        "account_summary",      # (req_id, account, tag, value, currency)
+        "account_summary_end",  # (req_id)
         "open_order",           # (order_id, contract, order, order_state)
         "open_order_end",       # ()
         "order_status",         # (order_id, status, filled, remaining, avg_fill_price, perm_id,
