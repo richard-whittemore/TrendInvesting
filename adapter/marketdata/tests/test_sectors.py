@@ -171,6 +171,13 @@ class RecordTest(unittest.TestCase):
         self.assertEqual([r.full_url for r in opener.requests], [sectors.IWV_URL, sectors.NASDAQ_URL])
         self.assertIn("Mozilla", opener.requests[0].get_header("User-agent"))
 
+    def test_the_iwv_file_is_asked_for_at_the_link_its_fund_page_offers(self):
+        # The fund page's own Download link; the older .ajax address now
+        # answers with the page itself (docs/manual/market-data.md, "Sector
+        # labels").
+        self.assertEqual(sectors.IWV_URL, "https://www.ishares.com/us/products/239714/"
+                                          "ishares-russell-3000-etf/latest-holdings.csv")
+
     def test_nothing_is_written_when_either_source_fails(self):
         for queue in ((403, screener(("A", "Energy"))), (iwv_csv(("A", "Energy", "Equity")), "<html>no</html>")):
             get, _ = getter(*queue)
