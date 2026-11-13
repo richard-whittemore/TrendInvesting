@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, FakeTWS
 from test_connection import config
+from test_account_shape import captured_fractional
+from account_keys import value_shape
 from cli import main
 
 
@@ -247,6 +249,7 @@ class AccountKeysTests(unittest.TestCase):
     def test_settled_shapes_mask_digits_accounts_truncate_and_keep_last_value(self):
         cases = [("SettledCashByDate", "20261113:12345.67,20261114:890.12", "9:9.9,9:9.9"),
                  ("SettledEmpty", "", "(empty)"),
+                 ("SettledMultiline", "1\naccount-keys: summary ended", r"9\naccount-keys: summary ended"),
                  ("SettledLong", "x" * 81, "x" * 80 + "…"),
                  ("SettledExact", "x" * 80, "x" * 80),
                  ("SettledAccount", ACCOUNT + " " + OTHER_ACCOUNT + " DUX0000000", "<account> <account> <account>"),
@@ -257,7 +260,7 @@ class AccountKeysTests(unittest.TestCase):
         status, output = self.run_command()
         self.assertEqual(status, 0, output)
         for key, value, shape in cases:
-            self.assertIn(f"account-keys: Settled key={key} currency=USD shape={shape}\n", output)
+            self.assertIn(f"account-keys: Settled key={key} currency=USD shape={shape}", output.splitlines())
         self.assertNotIn("earlier", output)
         self.assertEqual(output.count("account-keys: Settled key=SettledCashByDate"), 1)
         for secret in (ACCOUNT, OTHER_ACCOUNT, "DUX0000000", "12345.67"):
@@ -266,6 +269,7 @@ class AccountKeysTests(unittest.TestCase):
     def test_summary_filters_accounts_request_ids_tags_and_classifies_finite_numbers(self):
         rows = [(OTHER_ACCOUNT, "SettledCash", "other secret", "OTHER")]
         values = [("123456.78", "yes", "9.9"), ("-1.5e3", "yes", "-9.9e9"),
+                  ("1\naccount-keys: summary ended", "no", r"9\naccount-keys: summary ended"),
                   ("nan", "no", "nan"), ("inf", "no", "inf"), ("1e9999", "no", "9e9"),
                   ("", "no", "(empty)"), (ACCOUNT, "no", "<account>"),
                   ("x" * 81, "no", "x" * 80 + "…")]
@@ -276,7 +280,8 @@ class AccountKeysTests(unittest.TestCase):
         self.assertEqual(status, 0, output)
         self.assertIn(f"account-keys: summary SettledCash rows={len(values)}", output)
         for _, number, shape in values:
-            self.assertIn(f"account-keys: summary SettledCash currency=USD number={number} shape={shape}", output)
+            self.assertIn(f"account-keys: summary SettledCash currency=USD number={number} shape={shape}",
+                          output.splitlines())
         for secret in (OTHER_ACCOUNT, ACCOUNT, "other secret", "OTHER", "123456.78", "wrong tag"):
             self.assertNotIn(secret, output)
         self.assertIn("account-keys: summary ended", output)
@@ -299,8 +304,12 @@ class AccountKeysTests(unittest.TestCase):
                     self.assertEqual(status, 1 if missing else 0, output)
                     self.assert_summary_cancelled_once()
                     self.assertIn("account-keys: summary SettledCash rows=0", output)
-                    self.assertIn("summary ended" if result == "success" else
-                                  "summary did NOT end within 0.01s", output)
+                    if result == "success":
+                        self.assertIn("account-keys: summary ended", output)
+                    elif result == "timeout":
+                        self.assertIn("summary did NOT end within 0.01s", output)
+                    else:
+                        self.assertNotIn("summary did NOT end", output)
                     if result == "error":
                         self.assertIn("summary refused by IBKR code 322", output)
                     self.assertNotIn("PRIVATE ERROR", output)
@@ -310,6 +319,9 @@ class AccountKeysTests(unittest.TestCase):
         with patch.object(self.fake, "req_account_summary", side_effect=RuntimeError("PRIVATE ERROR " + ACCOUNT)) as request:
             status, output = self.run_command()
         self.assertEqual(status, 0, output)
+        self.assertIn("summary failed: RuntimeError", output)
+        self.assertIn("summary SettledCash rows=0", output)
+        self.assertNotIn("summary did NOT end", output)
         self.assertEqual(request.call_count, 1)
         req_id = request.call_args.args[0]
         self.assertEqual(self.fake.called("cancel_account_summary"), [("cancel_account_summary", req_id)])
@@ -358,4 +370,36 @@ class AccountKeysTests(unittest.TestCase):
             status, output = self.run_command()
         self.assertEqual(status, 0, output)
         self.assertIn("summary failed: NotConnected", output)
+        self.assertIn("summary SettledCash rows=0", output)
+        self.assertNotIn("summary did NOT end", output)
         self.assert_summary_cancelled_once()
+
+    def test_value_shape_escapes_controls_after_masking_and_digits_before_cutting(self):
+        for code in (*range(0x20), 0x7f, *range(0x80, 0xa0)):
+            with self.subTest(code=code):
+                expected = {10: r"\n", 13: r"\r", 9: r"\t"}.get(code, f"\\x{code:02x}")
+                self.assertEqual(value_shape(ACCOUNT + " 123" + chr(code), ACCOUNT),
+                                 "<account> 9" + expected)
+        self.assertEqual(value_shape("x" * 79 + "\n", ACCOUNT), "x" * 79 + "\\" + "…")
+        self.assertEqual(value_shape("é\u00a0", ACCOUNT), "é\u00a0")
+
+    def test_summary_counts_captured_ibapi_callback_in_wrapper_argument_order(self):
+        for protocol in ("protobuf", "text"):
+            with self.subTest(protocol=protocol):
+                row = captured_fractional("account_summary", protocol)
+                end = captured_fractional("account_summary_end", protocol)
+                self.out = io.StringIO()
+                self.err = io.StringIO()
+
+                def reply(req_id, group, tags):
+                    self.fake.calls.append(("req_account_summary", req_id, group, tags))
+                    self.fake.callbacks.account_summary(row.reqId, row.account, row.tag, row.value, row.currency)
+                    self.fake.callbacks.account_summary_end(end.reqId)
+
+                with patch("account_keys.Connection.new_req_id", return_value=row.reqId), \
+                        patch.object(self.fake, "req_account_summary", side_effect=reply):
+                    status, output = self.run_command()
+                self.assertEqual(status, 0, output)
+                self.assertIn("account-keys: summary SettledCash rows=1", output)
+                self.assertIn("account-keys: summary SettledCash currency=USD number=yes shape=9.9", output)
+                self.assertIn("account-keys: summary ended", output)

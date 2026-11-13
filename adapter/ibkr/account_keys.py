@@ -17,8 +17,11 @@ from masking import mask_accounts
 
 
 def value_shape(value, account):
-    """Mask accounts before collapsing digit runs and limiting shape length (manual's balance-key diagnostic, L12)."""
+    """Mask accounts, collapse digits and escape controls before cutting (manual's balance-key diagnostic, L12)."""
     shape = re.sub(r"\d+", "9", mask_accounts(value, account))
+    escapes = {"\n": r"\n", "\r": r"\r", "\t": r"\t"}
+    shape = re.sub(r"[\x00-\x1f\x7f-\x9f]",
+                   lambda match: escapes.get(match[0], r"\x{:02x}".format(ord(match[0]))), shape)
     return shape[:80] + "…" if len(shape) > 80 else shape or "(empty)"
 
 
@@ -31,6 +34,7 @@ def read_summary(conn, account, timeout, emit, cleanup_failures):
     req_id = conn.new_req_id()
     rows = []
     ended = False
+    timed_out = False
     try:
         conn.api.req_account_summary(req_id, "All", "SettledCash")
         for event in conn.events(timeout):
@@ -50,6 +54,8 @@ def read_summary(conn, account, timeout, emit, cleanup_failures):
             if event.name == "account_summary_end" and event.args == (req_id,):
                 ended = True
                 break
+        else:
+            timed_out = True
     except Exception as stopped:
         emit("summary failed: {}".format(type(stopped).__name__))
     finally:
@@ -61,7 +67,10 @@ def read_summary(conn, account, timeout, emit, cleanup_failures):
     for currency, number, shape in rows:
         emit("summary SettledCash currency={} number={} shape={}".format(
             currency, "yes" if number else "no", shape))
-    emit("summary ended" if ended else "summary did NOT end within {:g}s".format(timeout))
+    if ended:
+        emit("summary ended")
+    elif timed_out:
+        emit("summary did NOT end within {:g}s".format(timeout))
 
 
 def command(args, api_factory, out, err):

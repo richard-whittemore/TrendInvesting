@@ -317,7 +317,11 @@ account-keys: Settled key=SettledCash-S currency=USD shape=9.9
 The separate `Settled` lines show every key containing that word, regardless of
 capitalization, and the shape of its last value for each currency. Every run of
 digits becomes a single `9`, so digit counts and amounts stay private. Account
-numbers are masked before shaping. An empty value prints `shape=(empty)` and a
+numbers are masked before shaping. After masking accounts and collapsing digits,
+control characters are escaped. Newline becomes `\n`, carriage return `\r`, and
+tab `\t`. Other characters below 0x20, DEL, and C1 controls (0x80–0x9F) become
+`\xHH`. Escaping happens before the length limit, keeping each value shape on
+one output line. An empty value prints `shape=(empty)` and a
 shape longer than 80 characters is cut to 80 followed by `…`. For example,
 `SettledCashByDate` might produce either of these shapes, showing whether it
 holds a decimal or a date-and-value structure.
@@ -344,13 +348,17 @@ account-keys: summary SettledCash currency=USD number=yes shape=9.9
 account-keys: summary ended
 ```
 
-`number=yes` means the value parses as a finite float. Settled cash can come
-from this one-shot summary when `number=yes`, even if the account-updates
-download carries only `SettledCashByDate`. `number=no` includes empty values,
+`number=yes` only shows that IBKR's account summary reports a finite
+`SettledCash` value for the configured account. The diagnostic does not hand
+this value to the adapter or cure a missing account-updates key. The adapter
+still stops until a change to where it reads settled cash is made.
+`number=no` includes empty values,
 structured text, NaN and infinity. `summary ended` confirms the summary's end
-marker arrived. `summary did NOT end within 60s` means it was incomplete.
+marker arrived. `summary did NOT end within 60s` appears only when the wait
+runs out before that marker arrives.
 An IBKR refusal prints `summary refused by IBKR code <code>` with the message
-text omitted. A local summary exception prints only its type.
+text omitted. A local summary exception prints `summary failed: <type>`.
+After either, the diagnostic prints the rows count and any collected rows.
 
 The adapter continues to use account updates for repeated balance reads.
 IB Gateway 10.50 answered two summaries per connection and refused every later
