@@ -170,15 +170,28 @@ class ActionsTest(unittest.TestCase):
                 with self.assertRaises(history.ConflictingActions):
                     history.load_actions(d, "splits", D(2026, 1, 1), D(2026, 3, 23))
 
-    def test_different_rows_without_ids_keep_their_full_bodies(self):
-        first = {"ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0,
-                 "declaration_date": "2026-02-01"}
-        revised = dict(first, declaration_date="2026-02-02")
+    def test_a_missing_compared_field_conflicts(self):
+        for kind, first, field in (
+                ("dividends", {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05",
+                               "cash_amount": 1.0}, "cash_amount"),
+                ("splits", {"id": "S1", "ticker": "A", "execution_date": "2026-03-04",
+                            "split_from": 1, "split_to": 2}, "split_to")):
+            revised = dict(first)
+            del revised[field]
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as d:
+                write_window(d, kind, "2026-01-01", "2026-03-20", [first])
+                write_window(d, kind, "2026-01-02", "2026-03-23", [revised])
+                with self.assertRaises(history.ConflictingActions):
+                    history.load_actions(d, kind, D(2026, 1, 1), D(2026, 3, 23))
+
+    def test_split_unused_field_revisions_keep_the_first_copy(self):
+        first = {"id": "S1", "ticker": "A", "execution_date": "2026-03-04",
+                 "split_from": 1, "split_to": 2, "declaration_date": "2026-02-01"}
         with tempfile.TemporaryDirectory() as d:
-            write_window(d, "dividends", "2026-01-01", "2026-03-20", [first])
-            write_window(d, "dividends", "2026-01-02", "2026-03-23", [revised])
-            self.assertEqual(history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 23)),
-                             [first, revised])
+            write_window(d, "splits", "2026-01-01", "2026-03-20", [first])
+            write_window(d, "splits", "2026-01-02", "2026-03-23",
+                         [dict(first, declaration_date="2026-02-02")])
+            self.assertEqual(history.load_actions(d, "splits", D(2026, 1, 1), D(2026, 3, 23)), [first])
 
     def test_a_conflict_is_checked_only_for_the_tickers_asked_for(self):
         old = {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0}

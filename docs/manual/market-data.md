@@ -805,16 +805,18 @@ carries on from them.
   in brackets is a `Conflict: ... differs between recordings`, follow the
   steps below, not "A file already written differs". Massive changed its figure between two fetches whose windows
   overlap, and the job will not choose. For copies with the same Massive id,
-  only fields used in the stream count: a dividend's ticker, ex-dividend
-  date, cash amount, currency and dividend type; a split's ticker, execution
-  date, split-from and split-to amounts. A revision to any other field,
+  two copies conflict when they differ in a field that reaches the stream:
+  a dividend's ticker, ex-dividend date or cash amount; a split's ticker,
+  execution date, split-from or split-to amounts. A dividend's currency or
+  type also counts, because they say what that cash amount is, though the
+  encoder does not read them today. A revision to any other field,
   such as the declaration, record or pay date, is recorded and kept but
   does not stop the job; the first copy read still stands.
   Boost checks SPY's actions. The IRA's momentum stream checks every
   required or optional instrument (such as SPY, IEF, SHY or a held stock)
   and every listed universe member with a
   bar during the stream's sessions, including a stock that joins later.
-  A revision to one of those stream fields for any of these instruments
+  A revision to any of those compared fields for any of these instruments
   stops that job, even if the stock is never selected. A copy that moves an
   action onto or off one of these tickers also stops it. Revisions for other securities do not
   stop the job. Every action is still recorded and kept. Each daily

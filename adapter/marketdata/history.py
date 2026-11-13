@@ -6,8 +6,10 @@ whole market cost 260 requests (about 54 minutes at 5 a minute). Splits and
 dividends come from the bulk reference endpoints, filtered by date and
 paginated, and are recorded per window; windows overlap, so an action read
 from several is counted once (by Massive's id, or the whole row when it has
-none), copies of one id with different stream fields are refused, and the
-windows must cover the requested range. Recordings are never overwritten,
+none). Copies of one id conflict when they differ in a field that reaches
+the stream (ticker, the date, the cash amount or the split ratio), or in a
+dividend's currency or type, which say what that cash amount is. The windows
+must cover the requested range. Recordings are never overwritten,
 so a backfill and an interrupted action window are resumable. A session is
 fetched only after its close plus the settle delay. Closed
 days come from the NYSE calendar (nyse_calendar.py), never from an empty
@@ -25,8 +27,10 @@ from .steps import SETTLE, SOURCE, MissingData, _now, _stamp, require_settled
 
 KINDS = ("splits", "dividends")
 
-# Only fields that reach the stream can conflict: docs/manual/market-data.md,
-# "Two recordings give different figures for one dividend". Other revisions keep the first copy.
+# Copies conflict on fields that reach the stream (ticker, date, cash amount or
+# split ratio), or dividend currency or type, which say what the cash amount is:
+# docs/manual/market-data.md, "Two recordings give different figures for one dividend".
+# Other revisions keep the first copy.
 DIVIDEND_FIELDS = ("ticker", "ex_dividend_date", "cash_amount", "currency", "dividend_type")
 SPLIT_FIELDS = ("ticker", "execution_date", "split_from", "split_to")
 
@@ -154,9 +158,10 @@ def load_actions(directory, kind, first, last, tickers=None):
     """Every recorded row of ``kind`` (splits or dividends), oldest window
     first, each action once. Raises Gap unless the recorded windows cover
     every day of first..last, and ConflictingActions if two recordings hold
-    copies of one id that differ in a stream field: ticker, ex_dividend_date,
-    cash_amount, currency or dividend_type for dividends; ticker,
-    execution_date, split_from or split_to for splits. Other revisions keep
+    copies of one id that differ in a field that reaches the stream: ticker,
+    ex_dividend_date or cash_amount for dividends; ticker, execution_date,
+    split_from or split_to for splits. A dividend's currency or dividend_type
+    also conflicts, because they say what that cash_amount is. Other revisions keep
     the full first copy. Rows without an id are keyed by their full canonical
     body, so only identical rows without an id count once.
 
