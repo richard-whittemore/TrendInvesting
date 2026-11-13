@@ -365,6 +365,16 @@ screener response has no `sector` field, or in which either
 source's stocks map to no Morningstar sector at all: a renamed column or vocabulary is an
 outage to fix, not a month of unlabelled stocks.
 
+The iShares file is read from the address the fund page's own Download link
+gives (`.../ishares-russell-3000-etf/latest-holdings.csv`). The older
+`.ajax?fileType=csv` address began answering with the fund's web page instead
+of the file on 2026-11-11. The job refused that page ("no 'Ticker,' header:
+not an iShares holdings file"), so the session of 2026-11-11 has no
+universe. If the warning
+returns, open the fund page in a browser, check where its Download link now
+points, and change the address in `adapter/marketdata/sectors.py`; the job
+never signs in or accepts a site's terms to reach a file.
+
 Both sources serve only today's file, so `sectors` records the latest
 settled session only: from an hour after its close until the next session's
 close. `--asof` on a weekend or holiday means the trading day before it. A

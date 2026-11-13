@@ -50,8 +50,9 @@ from .steps import SETTLE, MissingData, _now, _stamp, require_settled
 
 IWV_SOURCE = "ishares-iwv-gics"
 NASDAQ_SOURCE = "nasdaq-screener"
-IWV_URL = ("https://www.ishares.com/us/products/239714/ishares-russell-3000-etf/1467271812596.ajax"
-           "?fileType=csv&fileName=IWV_holdings&dataType=fund")
+# The fund page's own Download link (docs/manual/market-data.md, "Sector
+# labels"): since 2026-11-11 the older .ajax download answers with the page.
+IWV_URL = "https://www.ishares.com/us/products/239714/ishares-russell-3000-etf/latest-holdings.csv"
 NASDAQ_URL = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true"
 HOSTS = ("www.ishares.com", "api.nasdaq.com")
 # Both sites refuse a request without a browser-like User-Agent.
