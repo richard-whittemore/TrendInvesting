@@ -6,10 +6,10 @@ whole market cost 260 requests (about 54 minutes at 5 a minute). Splits and
 dividends come from the bulk reference endpoints, filtered by date and
 paginated, and are recorded per window; windows overlap, so an action read
 from several is counted once (by Massive's id, or the whole row when it has
-none), two different copies of one id are refused, and the windows must
-cover the requested range. Recordings are never overwritten, so a backfill
-and an interrupted action window are resumable. A session is fetched only
-after its close plus the settle delay. Closed
+none), copies of one id with different stream fields are refused, and the
+windows must cover the requested range. Recordings are never overwritten,
+so a backfill and an interrupted action window are resumable. A session is
+fetched only after its close plus the settle delay. Closed
 days come from the NYSE calendar (nyse_calendar.py), never from an empty
 response: an empty response on a trading day is MissingData, records nothing
 and is retried on the next run. A trading day with no recording is a Gap and
@@ -24,6 +24,11 @@ from . import nyse_calendar, record
 from .steps import SETTLE, SOURCE, MissingData, _now, _stamp, require_settled
 
 KINDS = ("splits", "dividends")
+
+# Only fields that reach the stream can conflict: docs/manual/market-data.md,
+# "Two recordings give different figures for one dividend". Other revisions keep the first copy.
+DIVIDEND_FIELDS = ("ticker", "ex_dividend_date", "cash_amount", "currency", "dividend_type")
+SPLIT_FIELDS = ("ticker", "execution_date", "split_from", "split_to")
 
 
 class Gap(Exception):
@@ -149,25 +154,31 @@ def load_actions(directory, kind, first, last, tickers=None):
     """Every recorded row of ``kind`` (splits or dividends), oldest window
     first, each action once. Raises Gap unless the recorded windows cover
     every day of first..last, and ConflictingActions if two recordings hold
-    different rows for one action.
+    copies of one id that differ in a stream field: ticker, ex_dividend_date,
+    cash_amount, currency or dividend_type for dividends; ticker,
+    execution_date, split_from or split_to for splits. Other revisions keep
+    the full first copy. Rows without an id are keyed by their full canonical
+    body, so only identical rows without an id count once.
 
     With ``tickers`` (a set), only those tickers' rows are returned and a
     conflict is raised only when either copy is one of theirs, so a revised
     figure for an instrument the caller never reads does not refuse it; a
     copy that moves an action onto or off one of them still does."""
     windows, rows, seen = [], [], {}
+    fields = DIVIDEND_FIELDS if kind == "dividends" else SPLIT_FIELDS
     for path in sorted(glob.glob(os.path.join(directory, kind + "_*_*.json"))):
         rec = record.read(path)
         windows.append((dt.date.fromisoformat(rec["from"]), dt.date.fromisoformat(rec["session"])))
         for r in rec["rows"]:
             body = _canonical(r)
             key = ("id", r["id"]) if r.get("id") else ("row", body)
+            material = _canonical({field: r[field] for field in fields if field in r})
             if key in seen:
                 kept, ticker = seen[key]
-                if kept != body and (tickers is None or ticker in tickers or r.get("ticker") in tickers):
+                if kept != material and (tickers is None or ticker in tickers or r.get("ticker") in tickers):
                     raise ConflictingActions("{} {} differs between recordings".format(kind, key[1]))
                 continue
-            seen[key] = (body, r.get("ticker"))
+            seen[key] = (material, r.get("ticker"))
             if tickers is None or r.get("ticker") in tickers:
                 rows.append(r)
     reach = first - dt.timedelta(days=1)
