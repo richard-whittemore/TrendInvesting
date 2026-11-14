@@ -211,8 +211,8 @@ func TestAnInputTheToolCannotRecordIsRefused(t *testing.T) {
 	}
 }
 
-// previousLog writes a durable log at path: a configuration input, then one
-// input with decisions.
+// previousLog writes a durable log at path, with a snapshot before the
+// input with decisions, or only a configuration when there are no decisions.
 func previousLog(t *testing.T, path string, decisions ...event.Envelope) journal.Recovery {
 	t.Helper()
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -238,7 +238,11 @@ func previousLog(t *testing.T, path string, decisions ...event.Envelope) journal
 		t.Fatal(err)
 	}
 	if len(decisions) > 0 {
-		group := []journal.Entry{{Kind: journal.KindInput, Envelope: stamp("session:1", event.SessionClosedEventType, 1, 2, map[string]string{"x": "y"})}}
+		snapshot := snapshotInput(t, stamp("snapshot", event.AccountSnapshotEventType, 4, 2, nil), "joint")
+		if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: snapshot}}); err != nil {
+			t.Fatal(err)
+		}
+		group := []journal.Entry{{Kind: journal.KindInput, Envelope: stamp("session:1", event.SessionClosedEventType, 1, 3, map[string]string{"x": "y"})}}
 		for i, d := range decisions {
 			group = append(group, journal.Entry{Kind: journal.KindDecision, Envelope: stamp(d.ID, d.Type, uint64(d.SchemaVersion), uint64(i+1), d.Payload)})
 		}
@@ -266,6 +270,128 @@ func encoded(t *testing.T, p any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+// snapshotInput supplies a recorded book for approval tests that exercise
+// other restart rules (docs/manual/restart.md).
+func snapshotInput(t *testing.T, env event.Envelope, account string) event.Envelope {
+	t.Helper()
+	p := event.AccountCashSnapshotPayload{
+		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
+			AccountID: account, AsOf: env.EventTime, NetLiquidation: 1000, Currency: "USD", Positions: []event.AccountPosition{},
+		},
+		TotalCash: 1000, SettledCash: new(1000.0),
+	}
+	env.ID, env.Type, env.SchemaVersion = "snapshot", event.AccountSnapshotEventType, event.AccountSnapshotCashVersion
+	env.Payload = encoded(t, p)
+	env.PayloadHash = event.HashPayload(env.Payload)
+	return env
+}
+
+// approvalOnlyLog records a configuration and first-run approval without
+// an account snapshot, as in docs/manual/reconciliation.md's first-reading halt.
+func approvalOnlyLog(t *testing.T, path, strategy string) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	version := strategy + "/test"
+	log, err := journal.CreateLog(file, journal.NewLogHeader("sha256:cfg", version))
+	if err != nil {
+		t.Fatal(err)
+	}
+	when, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval := event.OperatorRunApprovedPayload{
+		AccountID: "joint", ApprovedBy: "owner", ApprovedAt: when,
+		Boost:        event.BoostStateInForce{Latched: new(false)},
+		StartingBook: &event.StartingBook{Positions: []event.AccountPosition{}, TotalCash: 1000, Currency: "USD"},
+	}
+	if strategy == event.TargetWeightStrategyMomentum {
+		approval.Boost, approval.Momentum = event.BoostStateInForce{}, &event.MomentumStateInForce{}
+	}
+	for i, input := range []struct {
+		id, kind string
+		version  uint32
+		payload  any
+	}{
+		{"configuration", event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, map[string]string{"account_id": "joint", "strategy_id": strategy}},
+		{"approval", event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, approval},
+	} {
+		raw := encoded(t, input.payload)
+		env := event.Envelope{ID: input.id, Type: input.kind, SchemaVersion: input.version, EnvelopeVersion: event.CurrentEnvelopeVersion,
+			EventTime: when, RecordedAt: when, Sequence: uint64(i + 1), Source: "test", StrategyVersion: version,
+			ConfigurationHash: "sha256:cfg", PayloadHash: event.HashPayload(raw), Payload: raw}
+		group := []journal.Entry{{Kind: journal.KindInput, Envelope: env}}
+		if input.id == "approval" && strategy == event.TargetWeightStrategyMomentum {
+			raw := encoded(t, event.RunApprovalAcceptedPayload{AccountID: "joint", ApprovalID: env.ID, ApprovalSequence: env.Sequence})
+			accepted := env
+			accepted.ID, accepted.Type, accepted.SchemaVersion, accepted.Sequence = "accepted", event.RunApprovalAcceptedEventType, event.RunApprovalAcceptedSchemaVersion, 1
+			accepted.Payload, accepted.PayloadHash = raw, event.HashPayload(raw)
+			group = append(group, journal.Entry{Kind: journal.KindDecision, Envelope: accepted})
+		}
+		if err := log.Append(group); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestApprovalWithoutSnapshotRequiresStartingBook(t *testing.T) {
+	for _, strategy := range []string{event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum} {
+		t.Run(strategy, func(t *testing.T) {
+			dir := t.TempDir()
+			logPath, approvalPath := filepath.Join(dir, "run-1.log"), filepath.Join(dir, "approval.json")
+			approvalOnlyLog(t, logPath, strategy)
+			_, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", approvalPath, "-at", at)
+			if err == nil {
+				t.Error("approval succeeded without an account snapshot or a stated book")
+			} else {
+				for _, want := range []string{"run-1.log", "records no account snapshot", "fresh run would hold no book", "halt on its first reading", "IBKR", "-positions SYM=shares,...", "empty when none", "-cash <TotalCashValue>", "-currency USD", "docs/manual/reconciliation.md"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("refusal %q does not contain %q", err, want)
+					}
+				}
+			}
+			if _, err := os.Stat(approvalPath); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("approval file exists or cannot be checked: %v", err)
+			}
+		})
+	}
+}
+
+func TestApprovalWithoutSnapshotAcceptsStatedBook(t *testing.T) {
+	for _, strategy := range []string{event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum} {
+		for _, positions := range []string{"SPY=7", ""} {
+			t.Run(strategy+"/"+positions, func(t *testing.T) {
+				dir := t.TempDir()
+				logPath, approvalPath := filepath.Join(dir, "run-1.log"), filepath.Join(dir, "approval.json")
+				approvalOnlyLog(t, logPath, strategy)
+				if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", approvalPath,
+					"-positions", positions, "-cash", "250.5", "-currency", "USD", "-at", at); err != nil {
+					t.Fatal(err)
+				}
+				raw, err := os.ReadFile(approvalPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				p, err := event.DecodeOperatorRunApproved(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				book := p.StartingBook
+				if p.FirstRun() || book == nil || book.TotalCash != 250.5 || book.Currency != "USD" {
+					t.Fatalf("approval does not state the fresh run's book: %+v", p)
+				}
+				if positions == "" && len(book.Positions) != 0 || positions != "" && (len(book.Positions) != 1 || book.Positions[0] != (event.AccountPosition{InstrumentID: "SPY", Quantity: 7})) {
+					t.Errorf("stated positions %q, got %+v", positions, book.Positions)
+				}
+			})
+		}
+	}
 }
 
 // TestTheApprovalStatesWhatThePreviousLogEndsIn: the tool writes the owner's
@@ -296,7 +422,7 @@ func TestTheApprovalStatesWhatThePreviousLogEndsIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the engine would refuse the approval: %v", err)
 	}
-	if p.PreviousLog != "run-1.log" || p.PreviousLogFinalHash != recovery.FinalRecordHash || !*p.Boost.Latched || p.IncidentInForce == nil ||
+	if p.StartingBook != nil || p.PreviousLog != "run-1.log" || p.PreviousLogFinalHash != recovery.FinalRecordHash || !*p.Boost.Latched || p.IncidentInForce == nil ||
 		p.IncidentInForce.IncidentID != "engine-state:joint:1" || p.IncidentInForce.State != event.EngineStateHalted || *p.IncidentInForce.SaleAttempted {
 		t.Errorf("approval %+v", p)
 	}
@@ -364,7 +490,7 @@ func TestTheApprovalWarnsOfAKillSwitchLeftEngaged(t *testing.T) {
 	}
 	cfg := r.Envelope(1, "boost/1.6.0/test", "sha256:cfg")
 	cfg.ID, cfg.Type, cfg.SchemaVersion, cfg.Source = "configuration", event.TargetWeightConfigurationEventType, 5, "engine"
-	for _, e := range []event.Envelope{cfg, r.Envelope(2, "boost/1.6.0/test", "sha256:cfg")} {
+	for _, e := range []event.Envelope{cfg, r.Envelope(2, "boost/1.6.0/test", "sha256:cfg"), snapshotInput(t, r.Envelope(3, "boost/1.6.0/test", "sha256:cfg"), "joint")} {
 		if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: e}}); err != nil {
 			t.Fatal(err)
 		}
@@ -442,6 +568,7 @@ func killSwitchLog(t *testing.T, dir, account string, more ...operator.Record) s
 	for i, m := range more {
 		inputs = append(inputs, m.Envelope(uint64(3+i), "boost/1.12.0/test", "sha256:cfg"))
 	}
+	inputs = append(inputs, snapshotInput(t, r.Envelope(uint64(len(inputs)+1), "boost/1.12.0/test", "sha256:cfg"), account))
 	for _, e := range inputs {
 		if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: e}}); err != nil {
 			t.Fatal(err)

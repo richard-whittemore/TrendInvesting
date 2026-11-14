@@ -74,14 +74,25 @@ runbook has the template). `operator` is installed on the server: run it as
 
 **A run that halted on its first reading** (the reading did not match the
 previous close or the starting book, so its reconciliation was
-unverifiable) holds no snapshot of that reading: the adapter sent the
-reconciliation alone. A fresh run approved without a starting book is
-compared with the same book again and halts again. Check the account in
-IBKR, and approve the fresh run that clears the incident with the book you
-find there, typed right after reading it (`operator approve -log <the
-halted run's log> -account <account> -by owner -clear-incident <id>
--positions SYM=<shares> -cash <total cash> -currency USD -out <approval
-file>`).
+unverifiable) holds no snapshot of that reading, because the adapter sent
+the reconciliation alone. If the previous log records no `account.snapshot`
+input at all, `operator approve -log` now refuses to write an approval
+unless you state the starting book. This applies to both Boost and momentum,
+including a run whose adapter never delivered a snapshot or whose engine
+refused it. A fresh run without that book would halt on its first reading.
+Check the account in IBKR, and approve the fresh run with the book you find
+there, typed right after reading it.
+
+```sh
+sudo -u ti-trader operator approve -log <previous log> -account <account> -by owner \
+  -positions 'SYM=shares,...' -cash <TotalCashValue> -currency USD -out <approval file>
+```
+
+Replace the positions with every holding and its shares, or use
+`-positions ''` when none are held. Cash is IBKR's `TotalCashValue`.
+For a halted run, add `-clear-incident <id>` after completing recovery.
+The refusal names [reconciliation](reconciliation.md). A previous log with
+an account snapshot follows the existing approval procedure.
 
 **An account's first run** has no previous log, so its approval names none
 and states the starting book instead, the boost not latched and no

@@ -17,6 +17,9 @@ import (
 // recompute from bars, read from the log's own records: what the owner's
 // approval states, and what the operator is told before approving.
 type EndState struct {
+	// HasAccountSnapshot reports an account.snapshot input in the log.
+	// Without one, approval must state the book (docs/manual/restart.md).
+	HasAccountSnapshot bool
 	// Latched is Boost's latch in force (CheckApprovedLatch; ADR 0026,
 	// point 5), false for a log that never decided and for a momentum log.
 	Latched bool
@@ -121,6 +124,9 @@ func ReadEndState(entries []journal.Entry, accountID, logName string, settlement
 	var lastKillAt time.Time
 	for _, entry := range entries {
 		env := entry.Envelope
+		if entry.Kind == journal.KindInput && env.Type == event.AccountSnapshotEventType {
+			end.HasAccountSnapshot = true
+		}
 		if entry.Kind != journal.KindInput || env.Type != event.KillSwitchEventType {
 			continue
 		}

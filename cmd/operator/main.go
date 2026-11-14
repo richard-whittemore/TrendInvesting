@@ -412,6 +412,9 @@ func approve(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if !end.HasAccountSnapshot && book == nil {
+		return fmt.Errorf("operator: %s records no account snapshot, so a fresh run would hold no book and halt on its first reading; read the account in IBKR and state it with -positions SYM=shares,... (empty when none) -cash <TotalCashValue> -currency USD (docs/manual/reconciliation.md)", name)
+	}
 	approval, err := restart.ProposeApproval(end, restart.ApprovalRequest{
 		AccountID: *account, PreviousLog: name, PreviousLogFinalHash: recovery.FinalRecordHash,
 		ApprovedBy: *by, ApprovedAt: at, ClearIncident: *clearIncident, SaleAttempted: *saleAttempted, StartingBook: book != nil,
