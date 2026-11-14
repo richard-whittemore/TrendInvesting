@@ -122,7 +122,7 @@ func ReadEndState(entries []journal.Entry, accountID, logName string, settlement
 	if end.PendingCash, err = pendingCashAtEnd(entries, logName); err != nil {
 		return EndState{}, err
 	}
-	if end.LatestSnapshotMissingCash, err = latestSnapshotMissingCash(entries, accountID, logName); err != nil {
+	if end.LatestSnapshotMissingCash, err = latestSnapshotMissingCash(entries, logName); err != nil {
 		return EndState{}, err
 	}
 	var lastKillAt time.Time
@@ -148,7 +148,9 @@ func ReadEndState(entries []journal.Entry, accountID, logName string, settlement
 // (docs/manual/reconciliation.md; ADR 0019 and ADR 0027). Pairing replaces
 // only the final :account.snapshot suffix with :account.reconciliation;
 // inputs count even without decisions, and only total-cash unread blocks it.
-func latestSnapshotMissingCash(entries []journal.Entry, accountID, logName string) (bool, error) {
+// The latest snapshot is taken whatever account it names, as the adapter's
+// book basis takes it: a log is one account's.
+func latestSnapshotMissingCash(entries []journal.Entry, logName string) (bool, error) {
 	byID := make(map[string]event.Envelope)
 	var latest *event.Envelope
 	for _, entry := range entries {
@@ -157,16 +159,7 @@ func latestSnapshotMissingCash(entries []journal.Entry, accountID, logName strin
 		}
 		env := entry.Envelope
 		byID[env.ID] = env
-		if env.Type != event.AccountSnapshotEventType {
-			continue
-		}
-		var p struct {
-			AccountID string `json:"account_id"`
-		}
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
-			return false, fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
-		}
-		if p.AccountID == accountID {
+		if env.Type == event.AccountSnapshotEventType {
 			latest = &env
 		}
 	}

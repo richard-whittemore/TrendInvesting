@@ -475,11 +475,11 @@ func TestLatestSnapshotMissingCash(t *testing.T) {
 		missing bool
 	}{
 		{"none", nil, false},
-		{"other account", []journal.Entry{snapshot("a:account.snapshot", "other")}, false},
+		{"other account", []journal.Entry{snapshot("a:account.snapshot", "other")}, true},
 		{"unpaired", []journal.Entry{snapshot("a:account.snapshot", "joint")}, true},
 		{"suffix required", []journal.Entry{snapshot("a", "joint"), reading}, true},
 		{"paired before snapshot", []journal.Entry{reading, snapshot("a:account.snapshot", "joint")}, false},
-		{"later other account", []journal.Entry{snapshot("a:account.snapshot", "joint"), reading, snapshot("b:account.snapshot", "other")}, false},
+		{"later other account", []journal.Entry{snapshot("a:account.snapshot", "joint"), reading, snapshot("b:account.snapshot", "other")}, true},
 		{"decision is not a reading", []journal.Entry{snapshot("a:account.snapshot", "joint"), func() journal.Entry { e := reading; e.Kind = journal.KindDecision; return e }()}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -499,11 +499,9 @@ func TestLatestSnapshotMissingCashRefusesUndecodableEvidence(t *testing.T) {
 		map[string]string{"account_id": "joint"})
 	reading := recorded(t, journal.KindInput, "a:account.reconciliation", event.ReconciliationEventType, event.ReconciliationSchemaVersion,
 		event.ReconciliationPayload{Unreadable: []string{}, TotalCash: 0})
-	brokenSnapshot, brokenReading := snapshot, reading
-	brokenSnapshot.Envelope.Payload = json.RawMessage(`not json`)
+	brokenReading := reading
 	brokenReading.Envelope.Payload = json.RawMessage(`not json`)
 	for name, entries := range map[string][]journal.Entry{
-		"snapshot":       {brokenSnapshot},
 		"reconciliation": {snapshot, brokenReading},
 	} {
 		t.Run(name, func(t *testing.T) {
