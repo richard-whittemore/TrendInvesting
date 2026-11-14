@@ -461,3 +461,35 @@ func TestFractionalLifecyclePreventsRetirement(t *testing.T) {
 		})
 	}
 }
+
+func TestLatestSnapshotMissingCash(t *testing.T) {
+	snapshot := func(id, account string) journal.Entry {
+		return recorded(t, journal.KindInput, id, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion,
+			map[string]string{"account_id": account})
+	}
+	reading := recorded(t, journal.KindInput, "a:account.reconciliation", event.ReconciliationEventType, event.ReconciliationSchemaVersion,
+		event.ReconciliationPayload{Unreadable: []string{}, TotalCash: 0})
+	for _, tc := range []struct {
+		name    string
+		entries []journal.Entry
+		missing bool
+	}{
+		{"none", nil, false},
+		{"other account", []journal.Entry{snapshot("a:account.snapshot", "other")}, false},
+		{"unpaired", []journal.Entry{snapshot("a:account.snapshot", "joint")}, true},
+		{"suffix required", []journal.Entry{snapshot("a", "joint"), reading}, true},
+		{"paired before snapshot", []journal.Entry{reading, snapshot("a:account.snapshot", "joint")}, false},
+		{"later other account", []journal.Entry{snapshot("a:account.snapshot", "joint"), reading, snapshot("b:account.snapshot", "other")}, false},
+		{"decision is not a reading", []journal.Entry{snapshot("a:account.snapshot", "joint"), func() journal.Entry { e := reading; e.Kind = journal.KindDecision; return e }()}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			end, err := restart.ReadEndState(tc.entries, "joint", "run.log")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if end.LatestSnapshotMissingCash != tc.missing {
+				t.Errorf("missing cash = %v, want %v", end.LatestSnapshotMissingCash, tc.missing)
+			}
+		})
+	}
+}

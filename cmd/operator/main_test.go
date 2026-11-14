@@ -211,8 +211,8 @@ func TestAnInputTheToolCannotRecordIsRefused(t *testing.T) {
 	}
 }
 
-// previousLog writes a durable log at path, with a snapshot before the
-// input with decisions, or only a configuration when there are no decisions.
+// previousLog writes a durable log at path with decisions, or only a
+// configuration when there are no decisions (docs/manual/restart.md).
 func previousLog(t *testing.T, path string, decisions ...event.Envelope) journal.Recovery {
 	t.Helper()
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -238,10 +238,6 @@ func previousLog(t *testing.T, path string, decisions ...event.Envelope) journal
 		t.Fatal(err)
 	}
 	if len(decisions) > 0 {
-		snapshot := snapshotInput(t, stamp("snapshot", event.AccountSnapshotEventType, 4, 2, nil), "joint")
-		if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: snapshot}}); err != nil {
-			t.Fatal(err)
-		}
 		group := []journal.Entry{{Kind: journal.KindInput, Envelope: stamp("session:1", event.SessionClosedEventType, 1, 3, map[string]string{"x": "y"})}}
 		for i, d := range decisions {
 			group = append(group, journal.Entry{Kind: journal.KindDecision, Envelope: stamp(d.ID, d.Type, uint64(d.SchemaVersion), uint64(i+1), d.Payload)})
@@ -272,8 +268,8 @@ func encoded(t *testing.T, p any) json.RawMessage {
 	return raw
 }
 
-// snapshotInput supplies a recorded book for approval tests that exercise
-// other restart rules (docs/manual/restart.md).
+// snapshotInput supplies a snapshot input for approval tests
+// (docs/manual/restart.md).
 func snapshotInput(t *testing.T, env event.Envelope, account string) event.Envelope {
 	t.Helper()
 	p := event.AccountCashSnapshotPayload{
@@ -288,9 +284,9 @@ func snapshotInput(t *testing.T, env event.Envelope, account string) event.Envel
 	return env
 }
 
-// approvalOnlyLog records a configuration and first-run approval without
-// an account snapshot, as in docs/manual/reconciliation.md's first-reading halt.
-func approvalOnlyLog(t *testing.T, path, strategy string) {
+// approvalOnlyLog records a configuration, first-run approval and any
+// readings as inputs without decisions (docs/manual/reconciliation.md).
+func approvalOnlyLog(t *testing.T, path, strategy string, readings ...event.Envelope) {
 	t.Helper()
 	file, err := os.Create(path)
 	if err != nil {
@@ -338,38 +334,92 @@ func approvalOnlyLog(t *testing.T, path, strategy string) {
 			t.Fatal(err)
 		}
 	}
-}
-
-func TestApprovalWithoutSnapshotRequiresStartingBook(t *testing.T) {
-	for _, strategy := range []string{event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum} {
-		t.Run(strategy, func(t *testing.T) {
-			dir := t.TempDir()
-			logPath, approvalPath := filepath.Join(dir, "run-1.log"), filepath.Join(dir, "approval.json")
-			approvalOnlyLog(t, logPath, strategy)
-			_, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", approvalPath, "-at", at)
-			if err == nil {
-				t.Error("approval succeeded without an account snapshot or a stated book")
-			} else {
-				for _, want := range []string{"run-1.log", "records no account snapshot", "fresh run would hold no book", "halt on its first reading", "IBKR", "-positions SYM=shares,...", "empty when none", "-cash <TotalCashValue>", "-currency USD", "docs/manual/reconciliation.md"} {
-					if !strings.Contains(err.Error(), want) {
-						t.Errorf("refusal %q does not contain %q", err, want)
-					}
-				}
-			}
-			if _, err := os.Stat(approvalPath); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("approval file exists or cannot be checked: %v", err)
-			}
-		})
+	for i, env := range readings {
+		env.Sequence = uint64(i + 3)
+		env.StrategyVersion = version
+		if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: env}}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-func TestApprovalWithoutSnapshotAcceptsStatedBook(t *testing.T) {
+func approvalReading(t *testing.T, reading string, reconciliation bool, unreadable ...string) event.Envelope {
+	t.Helper()
+	when, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := snapshotInput(t, event.Envelope{EnvelopeVersion: event.CurrentEnvelopeVersion,
+		EventTime: when, RecordedAt: when, Source: "test", ConfigurationHash: "sha256:cfg"}, "joint")
+	env.ID = "ibkr:account.broker.snapshot:" + reading + ":" + event.AccountSnapshotEventType
+	if reconciliation {
+		env.ID = "ibkr:account.broker.snapshot:" + reading + ":" + event.ReconciliationEventType
+		env.Type, env.SchemaVersion = event.ReconciliationEventType, event.ReconciliationSchemaVersion
+		if unreadable == nil {
+			unreadable = []string{}
+		}
+		env.Payload = encoded(t, event.ReconciliationPayload{AccountID: "joint", ReconciliationID: reading,
+			AsOf: when, Trigger: event.ReconciliationTriggerMorning, Unreadable: unreadable,
+			Positions: []event.AccountPosition{}, TotalCash: 0, Currency: "USD"})
+		env.PayloadHash = event.HashPayload(env.Payload)
+	}
+	return env
+}
+
+func TestApprovalPreviousCloseCash(t *testing.T) {
+	for _, strategy := range []string{event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum} {
+		for _, tc := range []struct {
+			name     string
+			readings []event.Envelope
+			refused  bool
+		}{
+			{"unpaired snapshot", []event.Envelope{approvalReading(t, "a", false)}, true},
+			{"paired cash unread", []event.Envelope{approvalReading(t, "a", false), approvalReading(t, "a", true, event.ReconciliationComponentCash)}, true},
+			{"paired zero cash", []event.Envelope{approvalReading(t, "a", false), approvalReading(t, "a", true)}, false},
+			{"positions unread cash read", []event.Envelope{approvalReading(t, "a", true, event.ReconciliationComponentPositions), approvalReading(t, "a", false)}, false},
+			{"different reading", []event.Envelope{approvalReading(t, "a", false), approvalReading(t, "b", true)}, true},
+			{"latest snapshot unpaired", []event.Envelope{approvalReading(t, "a", false), approvalReading(t, "a", true), approvalReading(t, "b", false)}, true},
+			{"latest snapshot paired", []event.Envelope{approvalReading(t, "a", false), approvalReading(t, "b", false), approvalReading(t, "b", true)}, false},
+			{"no snapshot", nil, false},
+		} {
+			t.Run(strategy+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				logPath, approvalPath := filepath.Join(dir, "run-1.log"), filepath.Join(dir, "approval.json")
+				approvalOnlyLog(t, logPath, strategy, tc.readings...)
+				_, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", approvalPath, "-at", at)
+				if !tc.refused {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := os.ReadFile(approvalPath); err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+				if err == nil {
+					t.Error("approval succeeded with no total cash for the latest snapshot's reading")
+				} else {
+					for _, want := range []string{"run-1.log", "adapter would refuse", "previous close", "fresh run would hold no book", "halt on its first reading", "IBKR", "-positions SYM=shares,...", "empty when none", "-cash <TotalCashValue>", "-currency USD", "docs/manual/reconciliation.md"} {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("refusal %q does not contain %q", err, want)
+						}
+					}
+				}
+				if _, err := os.Stat(approvalPath); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("approval file exists or cannot be checked: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestApprovalUnpairedSnapshotAcceptsStatedBook(t *testing.T) {
 	for _, strategy := range []string{event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum} {
 		for _, positions := range []string{"SPY=7", ""} {
 			t.Run(strategy+"/"+positions, func(t *testing.T) {
 				dir := t.TempDir()
 				logPath, approvalPath := filepath.Join(dir, "run-1.log"), filepath.Join(dir, "approval.json")
-				approvalOnlyLog(t, logPath, strategy)
+				approvalOnlyLog(t, logPath, strategy, approvalReading(t, "a", false))
 				if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", approvalPath,
 					"-positions", positions, "-cash", "250.5", "-currency", "USD", "-at", at); err != nil {
 					t.Fatal(err)
@@ -490,7 +540,7 @@ func TestTheApprovalWarnsOfAKillSwitchLeftEngaged(t *testing.T) {
 	}
 	cfg := r.Envelope(1, "boost/1.6.0/test", "sha256:cfg")
 	cfg.ID, cfg.Type, cfg.SchemaVersion, cfg.Source = "configuration", event.TargetWeightConfigurationEventType, 5, "engine"
-	for _, e := range []event.Envelope{cfg, r.Envelope(2, "boost/1.6.0/test", "sha256:cfg"), snapshotInput(t, r.Envelope(3, "boost/1.6.0/test", "sha256:cfg"), "joint")} {
+	for _, e := range []event.Envelope{cfg, r.Envelope(2, "boost/1.6.0/test", "sha256:cfg")} {
 		if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: e}}); err != nil {
 			t.Fatal(err)
 		}
@@ -568,7 +618,6 @@ func killSwitchLog(t *testing.T, dir, account string, more ...operator.Record) s
 	for i, m := range more {
 		inputs = append(inputs, m.Envelope(uint64(3+i), "boost/1.12.0/test", "sha256:cfg"))
 	}
-	inputs = append(inputs, snapshotInput(t, r.Envelope(uint64(len(inputs)+1), "boost/1.12.0/test", "sha256:cfg"), account))
 	for _, e := range inputs {
 		if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: e}}); err != nil {
 			t.Fatal(err)
@@ -1063,6 +1112,8 @@ func momentumLog(t *testing.T, path string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var lastSnapshot event.AccountCashSnapshotPayload
+	var lastSnapshotID string
 	for _, line := range bytes.Split(bytes.TrimSpace(month), []byte("\n")) {
 		var in struct {
 			Type          string          `json:"type"`
@@ -1074,7 +1125,25 @@ func momentumLog(t *testing.T, path string) []string {
 		if err := json.Unmarshal(line, &in); err != nil {
 			t.Fatal(err)
 		}
+		if in.Type == event.AccountSnapshotEventType {
+			in.ID += ":" + event.AccountSnapshotEventType
+			lastSnapshotID = in.ID
+			if err := json.Unmarshal(in.Payload, &lastSnapshot); err != nil {
+				t.Fatal(err)
+			}
+		}
 		apply(in.ID, in.Type, in.SchemaVersion, in.EventTime, bytes.ReplaceAll(in.Payload, []byte(`"account_id":"trad-ira"`), []byte(`"account_id":"DUIRA"`)))
+	}
+	reading := event.ReconciliationPayload{AccountID: "DUIRA", ReconciliationID: lastSnapshotID,
+		AsOf: lastSnapshot.AsOf, Trigger: event.ReconciliationTriggerMorning, Unreadable: []string{},
+		Positions: lastSnapshot.Positions, TotalCash: lastSnapshot.TotalCash, Currency: "USD"}
+	rawReading := encoded(t, reading)
+	env := event.Envelope{ID: strings.TrimSuffix(lastSnapshotID, event.AccountSnapshotEventType) + event.ReconciliationEventType,
+		Type: event.ReconciliationEventType, SchemaVersion: event.ReconciliationSchemaVersion, EnvelopeVersion: event.CurrentEnvelopeVersion,
+		EventTime: lastSnapshot.AsOf, RecordedAt: lastSnapshot.AsOf, Sequence: sequence + 1, Source: "test", StrategyVersion: version,
+		ConfigurationHash: h.ConfigurationHash(), PayloadHash: event.HashPayload(rawReading), Payload: rawReading}
+	if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: env}}); err != nil {
+		t.Fatal(err)
 	}
 	var orders []string
 	for _, e := range recorder.Entries() {

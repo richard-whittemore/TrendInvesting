@@ -17,9 +17,10 @@ import (
 // recompute from bars, read from the log's own records: what the owner's
 // approval states, and what the operator is told before approving.
 type EndState struct {
-	// HasAccountSnapshot reports an account.snapshot input in the log.
-	// Without one, approval must state the book (docs/manual/restart.md).
-	HasAccountSnapshot bool
+	// LatestSnapshotMissingCash reports that the account's latest snapshot
+	// input has no paired reconciliation with total cash read. No snapshot
+	// leaves the earlier approval chain in force (docs/manual/restart.md).
+	LatestSnapshotMissingCash bool
 	// Latched is Boost's latch in force (CheckApprovedLatch; ADR 0026,
 	// point 5), false for a log that never decided and for a momentum log.
 	Latched bool
@@ -121,12 +122,12 @@ func ReadEndState(entries []journal.Entry, accountID, logName string, settlement
 	if end.PendingCash, err = pendingCashAtEnd(entries, logName); err != nil {
 		return EndState{}, err
 	}
+	if end.LatestSnapshotMissingCash, err = latestSnapshotMissingCash(entries, accountID, logName); err != nil {
+		return EndState{}, err
+	}
 	var lastKillAt time.Time
 	for _, entry := range entries {
 		env := entry.Envelope
-		if entry.Kind == journal.KindInput && env.Type == event.AccountSnapshotEventType {
-			end.HasAccountSnapshot = true
-		}
 		if entry.Kind != journal.KindInput || env.Type != event.KillSwitchEventType {
 			continue
 		}
@@ -141,6 +142,50 @@ func ReadEndState(entries []journal.Entry, accountID, logName string, settlement
 		}
 	}
 	return end, nil
+}
+
+// latestSnapshotMissingCash reads the previous close's paired cash evidence
+// (docs/manual/reconciliation.md; ADR 0019 and ADR 0027). Pairing replaces
+// only the final :account.snapshot suffix with :account.reconciliation;
+// inputs count even without decisions, and only total-cash unread blocks it.
+func latestSnapshotMissingCash(entries []journal.Entry, accountID, logName string) (bool, error) {
+	byID := make(map[string]event.Envelope)
+	var latest *event.Envelope
+	for _, entry := range entries {
+		if entry.Kind != journal.KindInput {
+			continue
+		}
+		env := entry.Envelope
+		byID[env.ID] = env
+		if env.Type != event.AccountSnapshotEventType {
+			continue
+		}
+		var p struct {
+			AccountID string `json:"account_id"`
+		}
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			return false, fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+		}
+		if p.AccountID == accountID {
+			latest = &env
+		}
+	}
+	if latest == nil {
+		return false, nil
+	}
+	if !strings.HasSuffix(latest.ID, ":"+event.AccountSnapshotEventType) {
+		return true, nil
+	}
+	paired := strings.TrimSuffix(latest.ID, event.AccountSnapshotEventType) + event.ReconciliationEventType
+	reading, ok := byID[paired]
+	if !ok {
+		return true, nil
+	}
+	var p event.ReconciliationPayload
+	if err := json.Unmarshal(reading.Payload, &p); err != nil {
+		return false, fmt.Errorf("engine: decode %s in %s: %w", reading.ID, logName, err)
+	}
+	return !p.Readable(event.ReconciliationComponentCash), nil
 }
 
 // saleAttempt is what saleAttemptAtEnd reads of an incident's one sale back

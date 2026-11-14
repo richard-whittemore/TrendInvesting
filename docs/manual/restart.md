@@ -72,16 +72,18 @@ runbook has the template). `operator` is installed on the server: run it as
   adapter reads IBKR's cash in; `operator approve` refuses another, and the
   adapter never compares a book stated in one.
 
-**A run that halted on its first reading** (the reading did not match the
-previous close or the starting book, so its reconciliation was
-unverifiable) holds no snapshot of that reading, because the adapter sent
-the reconciliation alone. If the previous log records no `account.snapshot`
-input at all, `operator approve -log` now refuses to write an approval
-unless you state the starting book. This applies to both Boost and momentum,
-including a run whose adapter never delivered a snapshot or whose engine
-refused it. A fresh run without that book would halt on its first reading.
-Check the account in IBKR, and approve the fresh run with the book you find
-there, typed right after reading it.
+**A previous close whose total cash was not recorded** cannot be used by
+the adapter. When the previous log's latest `account.snapshot` input for
+the account has no reconciliation of the same reading with total cash read,
+`operator approve -log` refuses to write an approval unless you state the
+starting book. The pairing replaces the input ID's final `:account.snapshot`
+with `:account.reconciliation`; the paired input must not list `total-cash`
+in `unreadable`. A refused snapshot is still a recorded input and counts
+for this rule, even when it has no decisions. This applies to both Boost
+and momentum. The adapter would refuse that snapshot as the previous close,
+so a fresh run without a stated book would hold no book and halt on its
+first reading. Check the account in IBKR, and approve the fresh run with
+the book you find there, typed right after reading it.
 
 ```sh
 sudo -u ti-trader operator approve -log <previous log> -account <account> -by owner \
@@ -92,7 +94,10 @@ Replace the positions with every holding and its shares, or use
 `-positions ''` when none are held. Cash is IBKR's `TotalCashValue`.
 For a halted run, add `-clear-incident <id>` after completing recovery.
 The refusal names [reconciliation](reconciliation.md). A previous log with
-an account snapshot follows the existing approval procedure.
+no account snapshot is allowed: the adapter follows the Run approval chain
+to an earlier snapshot or the latest stated starting book. A snapshot with
+its paired cash read, or a stated starting book, follows the existing approval
+procedure.
 
 **An account's first run** has no previous log, so its approval names none
 and states the starting book instead, the boost not latched and no
