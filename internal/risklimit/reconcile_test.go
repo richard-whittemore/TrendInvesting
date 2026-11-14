@@ -307,3 +307,54 @@ func TestACorporateActionDeliveredTwiceCountsOnce(t *testing.T) {
 		t.Errorf("a refused corporate action leaves what was recorded: %s: %s, %s", r.Result.Classification, r.Result.Detail, c.State())
 	}
 }
+
+// ADR 0019 and ADR 0026 point 2, Budget: required-balance faults halt
+// through the book fault while preserving the recorded book and its faults.
+func TestRequiredBalanceFaultUsesTemporaryBook(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		haveBook bool
+		fault    string
+	}{
+		{"no-book", false, ""},
+		{"cash-book", true, ""},
+		{"faulted-book", true, "the book's total cash cannot be counted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := gate(t, limits(), event.TradingModeDryRun)
+			if tc.haveBook {
+				book := reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
+					AccountPositionsSnapshotPayload: account(10, 0), SettledCash: new(float64(1000)), TotalCash: 1000,
+				})
+				book.Fault = tc.fault
+				if err := g.SetBook(book); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const fault = "IBKR sent no settled cash, which the settled-cash rule budgets buys from"
+			r, err := g.Reconcile("snapshot:2", morningOf(1000, 10), fault)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Result.Classification != event.ReconciliationUnverifiable || r.Result.Action != event.ReconciliationActionHalt || g.State() != risklimit.StateHalted {
+				t.Fatalf("required balance did not halt: %+v", r)
+			}
+			if !strings.Contains(r.Result.Detail, fault) || !strings.Contains(r.Result.Detail, tc.fault) {
+				t.Errorf("faults missing: %s", r.Result.Detail)
+			}
+			if !tc.haveBook && !strings.Contains(r.Result.Detail, "no account snapshot has been recorded") {
+				t.Errorf("missing no-book reason: %s", r.Result.Detail)
+			}
+			ordinary := reconcileWith(t, g, "reconciliation:3", morningOf(1000, 10)).Result
+			if strings.Contains(ordinary.Detail, fault) {
+				t.Errorf("temporary fault was stored: %s", ordinary.Detail)
+			}
+			if tc.haveBook && (ordinary.AnchorID != "snapshot:1" || !strings.Contains(ordinary.Detail, tc.fault)) {
+				t.Errorf("recorded book changed: %+v", ordinary)
+			}
+			if !tc.haveBook && !strings.Contains(ordinary.Detail, "no account snapshot has been recorded") {
+				t.Errorf("temporary book was stored: %+v", ordinary)
+			}
+		})
+	}
+}

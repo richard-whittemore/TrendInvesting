@@ -291,28 +291,41 @@ func TestDashboardFractionalAdapterRecords(t *testing.T) {
 
 }
 
-func TestDashboardSettledCashUnavailable(t *testing.T) {
-	entries := iraEntries(t, "trad-ira")
-	var cfg event.TargetWeightConfigurationPayload
-	if err := json.Unmarshal(entries[0].Envelope.Payload, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	cfg.Execution.ShareQuantity = event.ShareQuantityFractional
-	entries[0].Envelope.SchemaVersion = cfg.SchemaVersion()
-	entries[0].Envelope.Payload, _ = json.Marshal(cfg)
-	entries[0].Envelope.PayloadHash = event.HashPayload(entries[0].Envelope.Payload)
-	snap := json.RawMessage(`{"account_id":"trad-ira","as_of":"2024-01-03T21:00:00Z","net_liquidation":1000,"currency":"USD","quantity_scale":10000,"positions":[],"total_cash":500}`)
-	entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: iraEnvelope(t, uint64(len(entries)+1), event.AccountSnapshotEventType, 7, "snapshot", sessions.Add(24*time.Hour), snap)})
-	var buf bytes.Buffer
-	if err := journal.Write(&buf, journal.NewHeader("h", "v", sessions.Add(-time.Hour), sessions.Add(24*time.Hour)), entries); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "ira.journal")
-	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rec := get(newHandlerFor([]string{path}, nil), http.MethodGet, "/")
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Settled cash unavailable") {
-		t.Fatalf("cash display absent: %s", rec.Body.String())
+func TestDashboardSettledCash(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version uint32
+		settled string
+		want    string
+	}{
+		{"unavailable", 7, "", "Settled cash unavailable"},
+		{"positive", 6, `,"settled_cash":123.45`, "Settled cash 123.45"},
+		{"zero", 6, `,"settled_cash":0`, "Settled cash 0.00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := iraEntries(t, "trad-ira")
+			var cfg event.TargetWeightConfigurationPayload
+			if err := json.Unmarshal(entries[0].Envelope.Payload, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg.Execution.ShareQuantity = event.ShareQuantityFractional
+			entries[0].Envelope.SchemaVersion = cfg.SchemaVersion()
+			entries[0].Envelope.Payload, _ = json.Marshal(cfg)
+			entries[0].Envelope.PayloadHash = event.HashPayload(entries[0].Envelope.Payload)
+			snap := json.RawMessage(`{"account_id":"trad-ira","as_of":"2024-01-03T21:00:00Z","net_liquidation":1000,"currency":"USD","quantity_scale":10000,"positions":[],"total_cash":500` + tc.settled + `}`)
+			entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: iraEnvelope(t, uint64(len(entries)+1), event.AccountSnapshotEventType, tc.version, "snapshot", sessions.Add(24*time.Hour), snap)})
+			var buf bytes.Buffer
+			if err := journal.Write(&buf, journal.NewHeader("h", "v", sessions.Add(-time.Hour), sessions.Add(24*time.Hour)), entries); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "ira.journal")
+			if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rec := get(newHandlerFor([]string{path}, nil), http.MethodGet, "/")
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.want) {
+				t.Fatalf("cash display absent: %s", rec.Body.String())
+			}
+		})
 	}
 }

@@ -238,10 +238,13 @@ func sameCorporateAction(a, b event.CorporateActionPayload) bool {
 //     freezes no instrument and blocks buys;
 //   - unverifiable halts the whole account.
 //
+// bookFaults adds required-balance faults to a temporary copy of the book
+// for this reading (ADR 0019; ADR 0026 point 2, Budget).
+//
 // A state record is returned only when the state or its scope changes, and
 // it states the whole scope; Halted is never loosened. The first record out
 // of Normal is the incident.
-func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliation, error) {
+func (g *Gate) Reconcile(id string, p event.ReconciliationPayload, bookFaults ...string) (Reconciliation, error) {
 	if err := g.checkQuantityScale(p.QuantityScale); err != nil {
 		return Reconciliation{}, err
 	}
@@ -255,7 +258,23 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 		return Reconciliation{}, fmt.Errorf("risklimit: reconciliation for account %q; this gate is %q", p.AccountID, g.accountID)
 	}
 	settled := g.settlePending(id, p)
-	o := reconcile.Reconcile(g.book, g.changes, id, p)
+	book := g.book
+	if len(bookFaults) > 0 {
+		// ADR 0019 and ADR 0026 point 2, Budget: an unreadable required
+		// balance uses the existing book fault without replacing the book.
+		faultedBook := reconcile.Book{QuantityScale: p.QuantityScale}
+		if book != nil {
+			faultedBook = *book
+		} else {
+			faultedBook.Fault = "no account snapshot has been recorded, so the journal has no book to compare"
+		}
+		if faultedBook.Fault != "" {
+			bookFaults = append([]string{faultedBook.Fault}, bookFaults...)
+		}
+		faultedBook.Fault = strings.Join(bookFaults, "; ")
+		book = &faultedBook
+	}
+	o := reconcile.Reconcile(book, g.changes, id, p)
 	r := g.pend(id, o, p)
 	// A reading taken before the latest classified one is older knowledge: it
 	// does not replace that verdict, even after a recorded change cleared it

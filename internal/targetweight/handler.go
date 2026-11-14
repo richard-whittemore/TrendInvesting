@@ -1292,8 +1292,8 @@ func (h *Handler) applyReconciliation(in event.Envelope) ([]event.Envelope, erro
 
 // reconcileReading journals a reading's classification and state transition
 // through the existing unverifiable-balance gate (ADR 0019).
-func (h *Handler) reconcileReading(in event.Envelope, p event.ReconciliationPayload) ([]event.Envelope, error) {
-	r, err := h.gate.Reconcile(in.ID, p)
+func (h *Handler) reconcileReading(in event.Envelope, p event.ReconciliationPayload, bookFaults ...string) ([]event.Envelope, error) {
+	r, err := h.gate.Reconcile(in.ID, p, bookFaults...)
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
