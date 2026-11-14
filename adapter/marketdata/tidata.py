@@ -373,7 +373,7 @@ def read_engine_log(path, engine=ENGINE):
 
 
 def _positions(path, n, positions):
-    """Read instruments from account.snapshot versions 3, 4 and 6 or a starting book (ADR 0026 D7-F; ADR 0027).
+    """Read instruments from account.snapshot versions 3, 4, 6 and 7 or a starting book (ADR 0026 D7-F; ADR 0027).
 
     The caller checks the snapshot version and quantity scale; malformed positions
     are refused, never read as holding nothing.
@@ -420,7 +420,8 @@ class _Holdings:
                                                "versions {})".format(e.get("schema_version"), ", ".join(
                                                    str(v) for _, v in kinds.POSITIONS_SNAPSHOTS)))
             scale = payload.get("quantity_scale", 0) if isinstance(payload, dict) else None
-            expected_scale = 10000 if kind_version == kinds.ACCOUNT_SNAPSHOT_FRACTIONAL_CASH else 0
+            expected_scale = 10000 if kind_version in (kinds.ACCOUNT_SNAPSHOT_FRACTIONAL_CASH,
+                                                       kinds.ACCOUNT_SNAPSHOT_UNAVAILABLE_SETTLED_CASH) else 0
             if type(scale) is not int or scale != expected_scale:
                 raise _log_error(self.path, n, "cannot read holdings: account.snapshot quantity_scale must be "
                                                "integer {} (ADR 0026 D7-F)".format(expected_scale))

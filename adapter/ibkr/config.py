@@ -72,7 +72,7 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     account_snapshot_version is the account.snapshot version the engine
     reads (ACCOUNT_SNAPSHOT_VERSIONS): 3 for Boost, 4 for a whole-share IRA,
     6 for a D7-F IRA (exact ten-thousandths; ADR 0026). The IRA momentum
-    engine needs IBKR's SettledCash as well as its TotalCashValue
+    engine reads IBKR's TotalCashValue and records SettledCash when available
     in every reading (snapshot.read_account). resolve_contracts, for an IRA,
     resolves each instrument the batch marks to its IBKR contract by name
     (snapshot.resolve_contracts) and states it with the mark, so a stock

@@ -140,7 +140,7 @@ func (a *ira) snapshot(at time.Time, prices map[string]float64) event.AccountCas
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
 			AccountID: a.account, AsOf: at, NetLiquidation: net, Currency: "USD", Positions: positions,
 		},
-		SettledCash: a.settled, TotalCash: float64(a.settled + a.unsettled),
+		SettledCash: new(float64(a.settled)), TotalCash: float64(a.settled + a.unsettled),
 	}
 }
 

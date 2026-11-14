@@ -476,7 +476,7 @@ class IraFlexTests(unittest.TestCase):
 
     def test_a_snapshot_version_the_reader_does_not_know_is_still_refused(self):
         import flex
-        self.assertEqual(sorted(flex.ACCOUNT_SNAPSHOT_VERSIONS), [3, 4, 6])
+        self.assertEqual(sorted(flex.ACCOUNT_SNAPSHOT_VERSIONS), [3, 4, 6, 7])
 
 
 class DeliveredKindsTests(unittest.TestCase):
@@ -485,6 +485,7 @@ class DeliveredKindsTests(unittest.TestCase):
     def test_the_iras_snapshot_and_contract_mark_are_delivered_kinds(self):
         from delivery import DELIVERED_KINDS
         self.assertIn(("account.snapshot", 4), DELIVERED_KINDS)
+        self.assertIn(("account.snapshot", 7), DELIVERED_KINDS)
         self.assertIn(("market.mark.recorded", 3), DELIVERED_KINDS)
         self.assertIn(("market.mark.unavailable", 1), DELIVERED_KINDS)
 
@@ -1420,6 +1421,38 @@ def fractional_reading(quantity="12.3456", version=6):
 
 
 class FractionalAccountTests(unittest.TestCase):
+    def test_missing_settled_cash_writes_version_7_but_invalid_still_stops(self):
+        for settled in (None, "NaN", "foreign", "disagreeing-base", "no-total"):
+            with self.subTest(settled=settled):
+                h = fractional_reading()
+                h.fake.summary = full_summary()
+                if settled == "foreign":
+                    h.fake.summary.append((ACCOUNT, "SettledCash", "5", "EUR"))
+                elif settled == "disagreeing-base":
+                    h.fake.summary += [(ACCOUNT, "SettledCash", "5", "USD"),
+                                       (ACCOUNT, "SettledCash", "6", "BASE")]
+                elif settled == "no-total":
+                    h.fake.summary = [r for r in h.fake.summary if r[1] != "TotalCashValue"]
+                elif settled is not None:
+                    h.fake.summary.append((ACCOUNT, "SettledCash", settled, "USD"))
+                reading = read_account(h.conn)
+                if settled is None:
+                    self.assertFalse(reading.unread)
+                    record = account_snapshot_record(reading, CLOSE, version=6)
+                    self.assertEqual(record.schema_version, 7)
+                    self.assertNotIn("settled_cash", record.payload)
+                    self.assertEqual(record.payload["total_cash"], float(reading.balances["TotalCashValue"].amount))
+                    self.assertEqual(snapshot_fault(record.payload, 7), "")
+                    from probe import Report, _check_batch
+                    report = Report()
+                    _check_batch([{"id": "snapshot", "type": "account.snapshot", "schema_version": 7,
+                                   "payload": record.payload}], 6, report)
+                    self.assertTrue(any("ok account snapshot version 7" in line for line in report.lines), report.lines)
+                    self.assertIn("probe: ok settled cash unavailable", report.lines)
+                else:
+                    with self.assertRaises(ValueError):
+                        account_snapshot_record(reading, CLOSE, version=6)
+
     def test_config_selects_fractional_policy_and_shipped_ira_uses_it(self):
         self.assertEqual(config(account_snapshot_version=6).account_snapshot_version, 6)
         repo = Path(__file__).resolve().parents[3]
@@ -1491,7 +1524,7 @@ class FractionalReconciliationTests(unittest.TestCase):
             payload["total_cash"] = 1000
             commit(engine, "reading:account.reconciliation", kind="account.reconciliation", version=2,
                    payload=dict(payload, unreadable=[]))
-            commit(engine, "reading:account.snapshot", kind="account.snapshot", version=6, payload=payload)
+            commit(engine, "reading:account.snapshot", kind="account.snapshot", version=7, payload={k: v for k, v in payload.items() if k != "settled_cash"})
             daily, _ = previous_close(str(log))
         positions, cash = daily.positions, daily.cash
         self.assertEqual(positions, {"AAA": Decimal("12.3456")})

@@ -144,7 +144,7 @@ func TestRebalanceOnlyWithheldKeepsStandingAccountPoint(t *testing.T) {
 			s, _ := iraDay(t)
 			s.bar(0, "SPY", 100)
 			s.bar(1, "SPY", 100)
-			s.add(event.AccountSnapshotEventType, 4, "next", day(1), event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "trad-ira", AsOf: day(1), Currency: "USD", NetLiquidation: 100000}})
+			s.add(event.AccountSnapshotEventType, 4, "next", day(1), event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "trad-ira", AsOf: day(1), Currency: "USD", NetLiquidation: 100000}, SettledCash: new(float64(0))})
 			s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "withheld", day(1), event.TargetsDecidedPayload{AccountID: "trad-ira", StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: day(1), SessionPeriodEnd: day(1), Outcome: event.TargetsOutcomeWithheld, WithheldReason: reason, Detail: "synthetic withheld rebalance", Momentum: event.MomentumFigures{CloseSession: "2024-01-03", TrendInstrument: "SPY"}, Glide: event.GlideFigures{AgeMonths: 600, RebalanceSession: "2024-01-04", BondShare: 0.48}})
 			for _, historical := range []bool{false, true} {
 				var h report.History

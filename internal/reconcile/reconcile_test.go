@@ -26,7 +26,7 @@ func iraBook() *reconcile.Book {
 			AccountID: "ira", AsOf: closeAt, NetLiquidation: 16000, Currency: "USD",
 			Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 147}, {InstrumentID: "TLT", Quantity: 20}},
 		},
-		SettledCash: 512.3, TotalCash: 512.3,
+		SettledCash: new(float64(512.3)), TotalCash: 512.3,
 	})
 	return &b
 }
@@ -377,7 +377,7 @@ func TestAFigureBeyondTheCentRangeIsUnverifiable(t *testing.T) {
 	bookWith := func(cash float64) *reconcile.Book {
 		b := reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
 			AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "ira", AsOf: closeAt, Currency: "USD", Positions: []event.AccountPosition{}},
-			SettledCash:                     cash, TotalCash: cash,
+			SettledCash:                     new(float64(cash)), TotalCash: cash,
 		})
 		return &b
 	}
@@ -428,7 +428,7 @@ func TestSumsOfInRangeFiguresThatWrapAreUnverifiable(t *testing.T) {
 	bookWith := func(cash float64) *reconcile.Book {
 		b := reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
 			AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "ira", AsOf: closeAt, Currency: "USD", Positions: []event.AccountPosition{}},
-			SettledCash:                     cash, TotalCash: cash,
+			SettledCash:                     new(float64(cash)), TotalCash: cash,
 		})
 		return &b
 	}
@@ -538,7 +538,7 @@ func TestOnlyTheCashPartsWrapping(t *testing.T) {
 	const big = 5e16
 	b := reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "ira", AsOf: closeAt, Currency: "USD", Positions: []event.AccountPosition{}},
-		SettledCash:                     -big, TotalCash: -big,
+		SettledCash:                     new(float64(-big)), TotalCash: -big,
 	})
 	at := closeAt.Add(time.Hour)
 	div := func(id string) reconcile.Change {

@@ -1,6 +1,7 @@
 package event
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -121,23 +122,47 @@ func (p SessionCalendarPayload) Validate() error {
 //     consumer refuses the others' versions (ADR 0015).
 const AccountSnapshotCashVersion uint32 = 4
 
-// AccountCashSnapshotPayload is account.snapshot version 4. TotalCash
+// AccountCashSnapshotPayload holds account.snapshot versions 4, 6 and 7 (ADR 0015).
+// Version 7 alone omits SettledCash; versions 4 and 6 require it. TotalCash
 // includes unsettled sale proceeds; SettledCash does not. Either may be
 // negative when the broker reports a debit, which in an IRA is a margin
 // loan the risk gate refuses to add to.
 type AccountCashSnapshotPayload struct {
 	AccountPositionsSnapshotPayload
-	SettledCash float64 `json:"settled_cash"`
-	TotalCash   float64 `json:"total_cash"`
+	SettledCash      *float64 `json:"settled_cash,omitempty"`
+	TotalCash        float64  `json:"total_cash"`
+	totalCashMissing bool
 }
 
-// Validate checks version 3's fields and that both cash figures are finite.
+// UnmarshalJSON preserves a missing total-cash field as unreadable rather
+// than zero (ADR 0019). Go-built payloads still explicitly marshal zero.
+func (p *AccountCashSnapshotPayload) UnmarshalJSON(raw []byte) error {
+	type alias AccountCashSnapshotPayload
+	var decoded struct {
+		alias
+		TotalCash *float64 `json:"total_cash"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	*p = AccountCashSnapshotPayload(decoded.alias)
+	p.totalCashMissing = decoded.TotalCash == nil
+	if decoded.TotalCash != nil {
+		p.TotalCash = *decoded.TotalCash
+	}
+	return nil
+}
+
+// Validate checks positions and that each available cash figure is finite.
 func (p AccountCashSnapshotPayload) Validate() error {
 	var errs []error
+	if p.totalCashMissing {
+		errs = append(errs, errors.New("total cash is required"))
+	}
 	if err := p.AccountPositionsSnapshotPayload.Validate(); err != nil {
 		errs = append(errs, err)
 	}
-	if !isFinite(p.SettledCash) || !isFinite(p.TotalCash) {
+	if (p.SettledCash != nil && !isFinite(*p.SettledCash)) || !isFinite(p.TotalCash) {
 		errs = append(errs, errors.New("settled and total cash must be finite"))
 	}
 	if err := errors.Join(errs...); err != nil {
@@ -362,9 +387,16 @@ const (
 	OrderLifecycleFractionalSyntheticVersion uint32 = 5
 )
 
-// SchemaVersion declares the cash snapshot's quantity encoding (ADR 0015).
+// AccountSnapshotFractionalUnavailableSettledCashVersion records fixed-point quantities
+// with no settled-cash figure (ADR 0015; ADR 0026, Budget). Absence is never zero.
+const AccountSnapshotFractionalUnavailableSettledCashVersion uint32 = 7
+
+// SchemaVersion declares the cash snapshot's quantity encoding and cash availability (ADR 0015).
 func (p AccountCashSnapshotPayload) SchemaVersion() uint32 {
 	if p.QuantityScale != 0 {
+		if p.SettledCash == nil {
+			return AccountSnapshotFractionalUnavailableSettledCashVersion
+		}
 		return AccountSnapshotFractionalCashVersion
 	}
 	return AccountSnapshotCashVersion
@@ -372,18 +404,25 @@ func (p AccountCashSnapshotPayload) SchemaVersion() uint32 {
 
 // ValidateSchema checks cash snapshot quantity units (ADR 0015).
 func (p AccountCashSnapshotPayload) ValidateSchema(v uint32) error {
-	if v != AccountSnapshotCashVersion && v != AccountSnapshotFractionalCashVersion {
+	if v != AccountSnapshotCashVersion && v != AccountSnapshotFractionalCashVersion && v != AccountSnapshotFractionalUnavailableSettledCashVersion {
 		return fmt.Errorf("unsupported cash snapshot version %d", v)
 	}
-	if err := quantitySchema(p.QuantityScale, v, AccountSnapshotFractionalCashVersion); err != nil {
+	if (v == AccountSnapshotFractionalUnavailableSettledCashVersion) != (p.SettledCash == nil) {
+		return errors.New("settled cash must be absent only in version 7")
+	}
+	quantityVersion := v
+	if v == AccountSnapshotFractionalUnavailableSettledCashVersion {
+		quantityVersion = AccountSnapshotFractionalCashVersion
+	}
+	if err := quantitySchema(p.QuantityScale, quantityVersion, AccountSnapshotFractionalCashVersion); err != nil {
 		return err
 	}
 	return p.Validate()
 }
 
-// AccountCashSnapshotVersions lists old and fixed-point cash snapshots (ADR 0015).
+// AccountCashSnapshotVersions lists legacy, fixed-point and unavailable-settled-cash snapshots (ADR 0015).
 func AccountCashSnapshotVersions() []uint32 {
-	return []uint32{AccountSnapshotCashVersion, AccountSnapshotFractionalCashVersion}
+	return []uint32{AccountSnapshotCashVersion, AccountSnapshotFractionalCashVersion, AccountSnapshotFractionalUnavailableSettledCashVersion}
 }
 
 // SchemaVersion declares a fill's quantity encoding (ADR 0015).

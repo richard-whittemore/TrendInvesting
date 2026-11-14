@@ -193,9 +193,9 @@ type Summary struct {
 	HaveSnapshot   bool
 	HoldingsAsOf   time.Time
 	NetLiquidation float64
-	// HaveCash identifies a version-4 or version-6 IRA cash snapshot (ADR 0026 point 2).
+	// HaveCash identifies a version-4, version-6 or version-7 IRA cash snapshot (ADR 0026 point 2).
 	HaveCash      bool
-	SettledCash   float64
+	SettledCash   *float64
 	TotalCash     float64
 	Holdings      []event.AccountPosition
 	Decisions     []DecisionLine

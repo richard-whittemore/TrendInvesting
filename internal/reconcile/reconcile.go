@@ -53,7 +53,8 @@ func PositionsBook(id string, p event.AccountPositionsSnapshotPayload) Book {
 // CashBook is the book of account.snapshot version 4, envelope id: its
 // holdings and its total cash, which includes unsettled proceeds and so is
 // the balance IBKR's TotalCashValue reports. Version 6 carries the same
-// fields with fixed-point quantities (ADRs 0015 and 0026 D7-F).
+// fields with fixed-point quantities; version 7 omits settled cash, which
+// this total-cash book does not use (ADRs 0015 and 0026 D7-F).
 func CashBook(id string, p event.AccountCashSnapshotPayload) Book {
 	b := PositionsBook(id, p.AccountPositionsSnapshotPayload)
 	b.CashSet = true

@@ -720,7 +720,7 @@ func TestTheSafetyVersionsOfOrderRecordsAreRead(t *testing.T) {
 func cashSnap(when time.Time, p ...event.AccountPosition) rec {
 	return rec{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, when, event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "I", AsOf: when, NetLiquidation: 100, Currency: "USD", Positions: p},
-		SettledCash:                     40, TotalCash: 50,
+		SettledCash:                     new(float64(40)), TotalCash: 50,
 	}}
 }
 
@@ -860,7 +860,7 @@ func TestTheNextVersionOfEveryReadRecordIsRefused(t *testing.T) {
 		{journal.KindDecision, event.OrderPlannedEventType, event.OrderPlannedFractionalVersion + 1, d, map[string]any{}},
 		{journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedFractionalVersion + 1, d, map[string]any{}},
 		{journal.KindDecision, event.OrderRefusedEventType, event.OrderRefusedFractionalVersion + 1, d, map[string]any{}},
-		{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotFractionalCashVersion + 1, d, map[string]any{}},
+		{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotFractionalUnavailableSettledCashVersion + 1, d, map[string]any{}},
 	} {
 		js := []journalquery.Journal{load(t, "j", build(t, rec{journal.KindInput, "other.thing", 1, d, 1}, r))}
 		if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "does not read") {
@@ -874,7 +874,7 @@ func TestInvalidTargetWeightRecordsAreRefused(t *testing.T) {
 	for name, r := range map[string]rec{
 		"fill":      {journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, d, event.TargetWeightFillPayload{AccountID: "I"}},
 		"lifecycle": {journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, d, event.LimitOrderLifecyclePayload{AccountID: "I"}},
-		"snapshot":  {journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, d, event.AccountCashSnapshotPayload{SettledCash: 1}},
+		"snapshot":  {journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, d, event.AccountCashSnapshotPayload{SettledCash: new(float64(1))}},
 	} {
 		js := []journalquery.Journal{load(t, "j", build(t, r))}
 		if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 1:") || strings.Contains(err.Error(), "does not read") {

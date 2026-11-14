@@ -36,7 +36,7 @@ func TestRoundingSlackHeldUntilLastExecution(t *testing.T) {
 	slack = 1
 	h.gate.RecordDecision("decision")
 	r := h.momentum
-	r.snapshot = &event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: cfg.AccountID, QuantityScale: 10000, AsOf: at, NetLiquidation: 10000, Currency: "USD"}, TotalCash: 73.60, SettledCash: 73.60}
+	r.snapshot = &event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: cfg.AccountID, QuantityScale: 10000, AsOf: at, NetLiquidation: 10000, Currency: "USD"}, TotalCash: 73.60, SettledCash: new(float64(73.60))}
 	r.marks["AAA"] = event.MarkRecordedPayload{InstrumentID: "AAA", Price: 10.10, AsOf: at}
 	o := event.OrderPlannedPayload{AccountID: cfg.AccountID, Tag: "decision", ClientOrderID: "buy", InstrumentID: "AAA", Side: event.OrderSideBuy, Phase: event.OrderSideBuy, OrderType: event.OrderTypeLimit,
 		Quantity: 72500, QuantityScale: 10000, FractionalIncrement: "0.0001", LimitPrice: 10.10, ReferencePrice: 10.10, PriceBand: 0.05, NetLiquidation: 10000, TargetWeight: 0.01}

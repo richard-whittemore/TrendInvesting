@@ -278,7 +278,7 @@ func TestTheIBKRAdapterPayloadsDecodeAndValidate(t *testing.T) {
 	// 0026 points 2 and 3).
 	var cash event.AccountCashSnapshotPayload
 	read("account_cash_snapshot.json", event.AccountSnapshotCashVersion, &cash)
-	if cash.SettledCash != 9000 || cash.TotalCash != 10000 || cash.NetLiquidation != 10000 || cash.Quantity("IEF") != 10 {
+	if *cash.SettledCash != 9000 || cash.TotalCash != 10000 || cash.NetLiquidation != 10000 || cash.Quantity("IEF") != 10 {
 		t.Errorf("account cash snapshot %+v", cash)
 	}
 	var contractMark event.MarkRecordedPayload

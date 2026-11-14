@@ -74,7 +74,7 @@ func validSessionCalendar() event.SessionCalendarPayload {
 func validAccountCashSnapshot() event.AccountCashSnapshotPayload {
 	p := validAccountPositionsSnapshot()
 	p.AccountID = "ira-traditional"
-	return event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: p, SettledCash: 900, TotalCash: 1000}
+	return event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: p, SettledCash: new(float64(900)), TotalCash: 1000}
 }
 
 func validLimitOrderLifecycle() event.LimitOrderLifecyclePayload {
@@ -313,7 +313,7 @@ func TestAccountCashSnapshotValidate(t *testing.T) {
 	v := validAccountCashSnapshot()
 	type P = event.AccountCashSnapshotPayload
 	expectInvalid(t, "positions part", v, func(p *P) { p.NetLiquidation = 0 }, "net liquidation")
-	expectInvalid(t, "settled", v, func(p *P) { p.SettledCash = math.NaN() }, "cash")
+	expectInvalid(t, "settled", v, func(p *P) { p.SettledCash = new(math.NaN()) }, "cash")
 	expectInvalid(t, "total", v, func(p *P) { p.TotalCash = math.Inf(1) }, "cash")
 	raw, err := json.Marshal(v)
 	if err != nil {

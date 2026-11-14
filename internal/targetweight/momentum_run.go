@@ -381,7 +381,7 @@ func (r *momentumRun) applyUniverse(in event.Envelope) error {
 }
 
 func (r *momentumRun) applySnapshot(in event.Envelope) ([]event.Envelope, error) {
-	p, err := decodeVersions[event.AccountCashSnapshotPayload](in, []uint32{event.AccountSnapshotCashVersion, event.AccountSnapshotFractionalCashVersion})
+	p, err := decodeVersions[event.AccountCashSnapshotPayload](in, event.AccountCashSnapshotVersions())
 	if err != nil {
 		return nil, err
 	}
@@ -393,6 +393,17 @@ func (r *momentumRun) applySnapshot(in event.Envelope) ([]event.Envelope, error)
 	}
 	if r.snapshot != nil && !p.AsOf.After(r.snapshot.AsOf) {
 		return nil, fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, r.snapshot.AsOf)
+	}
+	// ADR 0019 and ADR 0026 point 2, Budget: a required cash balance that
+	// cannot be read takes the reconciliation's unverifiable halt path;
+	// total-cash needs no settled figure.
+	if r.exec.CashRule == event.CashRuleSettled && p.SettledCash == nil {
+		return r.h.reconcileReading(in, event.ReconciliationPayload{
+			QuantityScale: p.QuantityScale, AccountID: p.AccountID,
+			ReconciliationID: "snapshot-cash:" + in.ID, Trigger: event.ReconciliationTriggerMorning,
+			AsOf: p.AsOf, Unreadable: []string{}, Positions: p.Positions,
+			TotalCash: p.TotalCash, Currency: p.Currency,
+		}, "IBKR sent no settled cash, which the settled-cash rule budgets buys from")
 	}
 	r.snapshot = &p
 	return r.h.checkBook(in, reconcile.CashBook(in.ID, p), p.AsOf)
@@ -946,11 +957,12 @@ func (r *momentumRun) applyApproval(in event.Envelope) ([]event.Envelope, error)
 }
 
 // cash is the cash the D5 rule funds buys from (ADR 0026, point 2, "Budget").
+// applySnapshot admits no absent settled cash under the settled-cash rule.
 func (r *momentumRun) cash(s event.AccountCashSnapshotPayload) float64 {
 	if r.exec.CashRule == event.CashRuleTotal {
 		return s.TotalCash
 	}
-	return s.SettledCash
+	return *s.SettledCash
 }
 
 // planBuys plans the rebalance's buy phase: the buys scaled to the budget,

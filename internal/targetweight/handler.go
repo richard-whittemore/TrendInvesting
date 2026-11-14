@@ -305,7 +305,10 @@ import (
 //   - 1.30.0 adds D7-F exact four-place quantities, increment rounding,
 //     decimal capital checks, the per-execution rounding reserve and
 //     versioned quantity evidence (ADR 0026 D7-F).
-const RulesVersion = "1.30.0"
+//   - 1.31.0 accepts cash snapshot version 7 under total-cash and uses the
+//     unverifiable halt path when settled-cash requires its absent figure
+//     (ADR 0019; ADR 0026, Budget).
+const RulesVersion = "1.31.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -1284,7 +1287,13 @@ func (h *Handler) applyReconciliation(in event.Envelope) ([]event.Envelope, erro
 	if err := h.normalizeReconciliation(&p); err != nil {
 		return nil, err
 	}
-	r, err := h.gate.Reconcile(in.ID, p)
+	return h.reconcileReading(in, p)
+}
+
+// reconcileReading journals a reading's classification and state transition
+// through the existing unverifiable-balance gate (ADR 0019).
+func (h *Handler) reconcileReading(in event.Envelope, p event.ReconciliationPayload, bookFaults ...string) ([]event.Envelope, error) {
+	r, err := h.gate.Reconcile(in.ID, p, bookFaults...)
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}

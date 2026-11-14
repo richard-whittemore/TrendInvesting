@@ -28,7 +28,7 @@ func nextBook(cash float64, positions ...event.AccountPosition) reconcile.Book {
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
 			AccountID: "ira", AsOf: nextClose, NetLiquidation: 16000, Currency: "USD", Positions: positions,
 		},
-		SettledCash: cash, TotalCash: cash,
+		SettledCash: new(float64(cash)), TotalCash: cash,
 	})
 }
 

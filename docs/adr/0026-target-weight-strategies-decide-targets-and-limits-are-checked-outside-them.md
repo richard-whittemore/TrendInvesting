@@ -109,6 +109,19 @@ only cash, say), the buy phase is planned at once, in the same decision.
 - **Budget.** Buys are funded from cash on hand plus cash realised by the
   sells; which cash counts is D5's answer, in configuration. From that, the
   cash already committed to working buys is subtracted.
+  **Amended 2026-11-14 (owner decision):** settled cash is optional while
+  the account uses `total-cash`: neither the buy budget nor the unexplained
+  cash drop check reads it. IBKR sends no `SettledCash` for the paper
+  Traditional IRA, in account updates or a one-shot summary. An ended
+  download without that row records account snapshot version 7: version 6
+  with settled cash absent, never zero or another balance. The adapter
+  stays configured for version 6 and chooses 7 from the reading; versions
+  4 and 6 still require both cash figures (ADR 0015). A present but invalid
+  row still stops the read, as does any other missing required balance.
+  Under `settled-cash`, version 7 is an unverifiable cash reading and takes
+  the existing reconciliation halt path (ADR 0019), with no buy budgeted
+  from it. Switching to that rule requires a settled-cash source first.
+  `SettledCashByDate` is not read. Boost and Turtle refuse version 7.
 - **Worst-case cost.** Each buy is costed at its limit price, the band's edge
   (point 3), not the previous close, plus the configured maximum commission
   and fees. Buys worth $980 at the previous close cost $1,029 at a 5% band

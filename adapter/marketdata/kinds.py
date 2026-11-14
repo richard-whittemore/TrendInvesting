@@ -35,14 +35,18 @@ MARK_CONTRACT = ("market.mark.recorded", 3)           # MarkRecordedContractVers
 MARK_UNAVAILABLE = ("market.mark.unavailable", 1)     # MarkUnavailableSchemaVersion
 # Fractional capital-path inputs remain delivered history (ADR 0015; ADR 0026 D7-F).
 ACCOUNT_SNAPSHOT_FRACTIONAL_CASH = ("account.snapshot", 6)
+# Version 7 omits settled cash, preserving holdings and total cash (ADR 0015).
+ACCOUNT_SNAPSHOT_UNAVAILABLE_SETTLED_CASH = ("account.snapshot", 7)
 BROKER_SNAPSHOT_FRACTIONAL = ("account.broker.snapshot", 3)
 ADAPTER_KINDS = (ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT, BROKER_SNAPSHOT_V1, MARK, ACCOUNT_SNAPSHOT_CASH, MARK_CONTRACT,
-                 MARK_UNAVAILABLE, ACCOUNT_SNAPSHOT_FRACTIONAL_CASH, BROKER_SNAPSHOT_FRACTIONAL)
+                 MARK_UNAVAILABLE, ACCOUNT_SNAPSHOT_FRACTIONAL_CASH, BROKER_SNAPSHOT_FRACTIONAL,
+                 ACCOUNT_SNAPSHOT_UNAVAILABLE_SETTLED_CASH)
 
 # Position-bearing snapshots used for holdings coverage: Boost v3, IRA cash
 # v4 and fractional IRA cash v6 (ADR 0026, D7-F; ADR 0015). The reader
 # collects instrument names only; unknown versions still fail closed.
-POSITIONS_SNAPSHOTS = (ACCOUNT_SNAPSHOT, ACCOUNT_SNAPSHOT_CASH, ACCOUNT_SNAPSHOT_FRACTIONAL_CASH)
+POSITIONS_SNAPSHOTS = (ACCOUNT_SNAPSHOT, ACCOUNT_SNAPSHOT_CASH, ACCOUNT_SNAPSHOT_FRACTIONAL_CASH,
+                       ACCOUNT_SNAPSHOT_UNAVAILABLE_SETTLED_CASH)
 # Target-weight fills add their instrument to holdings coverage; v4 belongs
 # to the Turtle reducer (ADR 0026, D7-F; ADR 0015).
 TARGET_WEIGHT_FILL = ("execution.fill", 5)

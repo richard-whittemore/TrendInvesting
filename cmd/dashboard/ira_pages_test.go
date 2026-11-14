@@ -219,7 +219,7 @@ func TestDashboardFractionalAdapterRecords(t *testing.T) {
 	}
 	snap := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
 		AccountID: fill.AccountID, AsOf: sessionClose, Currency: "USD", NetLiquidation: 4000, QuantityScale: event.FractionalQuantityScale,
-		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 123456}}}, SettledCash: 100, TotalCash: 100}
+		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 123456}}}, SettledCash: new(float64(100)), TotalCash: 100}
 	entries = []journal.Entry{
 		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 1, event.TargetWeightConfigurationEventType, cfg.SchemaVersion(), "cfg", releasedAt.Add(-time.Hour), cfg)},
 		{Kind: journal.KindInput, Envelope: iraEnvelope(t, 2, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s0", releasedAt, event.SessionClosedPayload{PeriodEnd: releasedAt, InstrumentIDs: []string{"SPY"}})},
@@ -289,4 +289,43 @@ func TestDashboardFractionalAdapterRecords(t *testing.T) {
 		t.Fatalf("dry-run order = %+v", order)
 	}
 
+}
+
+func TestDashboardSettledCash(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version uint32
+		settled string
+		want    string
+	}{
+		{"unavailable", 7, "", "Settled cash unavailable"},
+		{"positive", 6, `,"settled_cash":123.45`, "Settled cash 123.45"},
+		{"zero", 6, `,"settled_cash":0`, "Settled cash 0.00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := iraEntries(t, "trad-ira")
+			var cfg event.TargetWeightConfigurationPayload
+			if err := json.Unmarshal(entries[0].Envelope.Payload, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg.Execution.ShareQuantity = event.ShareQuantityFractional
+			entries[0].Envelope.SchemaVersion = cfg.SchemaVersion()
+			entries[0].Envelope.Payload, _ = json.Marshal(cfg)
+			entries[0].Envelope.PayloadHash = event.HashPayload(entries[0].Envelope.Payload)
+			snap := json.RawMessage(`{"account_id":"trad-ira","as_of":"2024-01-03T21:00:00Z","net_liquidation":1000,"currency":"USD","quantity_scale":10000,"positions":[],"total_cash":500` + tc.settled + `}`)
+			entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: iraEnvelope(t, uint64(len(entries)+1), event.AccountSnapshotEventType, tc.version, "snapshot", sessions.Add(24*time.Hour), snap)})
+			var buf bytes.Buffer
+			if err := journal.Write(&buf, journal.NewHeader("h", "v", sessions.Add(-time.Hour), sessions.Add(24*time.Hour)), entries); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "ira.journal")
+			if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rec := get(newHandlerFor([]string{path}, nil), http.MethodGet, "/")
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.want) {
+				t.Fatalf("cash display absent: %s", rec.Body.String())
+			}
+		})
+	}
 }

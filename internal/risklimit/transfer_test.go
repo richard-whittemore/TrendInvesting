@@ -59,7 +59,7 @@ func rebook(g *risklimit.Gate, n int, cash float64) {
 	p := account(10, 0)
 	p.AsOf = p.AsOf.AddDate(0, 0, n).Add(6 * time.Hour) // 4 p.m. New York: the close
 	if err := g.SetBook(reconcile.CashBook("snapshot:"+p.AsOf.Format(time.DateOnly), event.AccountCashSnapshotPayload{
-		AccountPositionsSnapshotPayload: p, SettledCash: cash, TotalCash: cash,
+		AccountPositionsSnapshotPayload: p, SettledCash: new(float64(cash)), TotalCash: cash,
 	})); err != nil {
 		panic(err) // a fixture book the gate refuses is a test-writing error
 	}
@@ -294,7 +294,7 @@ func TestAPendingDifferenceTheCalendarCannotCountFromIsDegraded(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	book := account(10, 0)
 	book.AsOf = time.Date(2030, time.December, 30, 15, 0, 0, 0, time.UTC)
-	if err := g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: book, SettledCash: 1000, TotalCash: 1000})); err != nil {
+	if err := g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: book, SettledCash: new(float64(1000)), TotalCash: 1000})); err != nil {
 		t.Fatal(err)
 	}
 	flexAside(t, g, book.AsOf.Add(-time.Hour))
@@ -308,7 +308,7 @@ func TestAPendingDifferenceTheCalendarCannotCountFromIsDegraded(t *testing.T) {
 		b := book
 		b.AsOf = obs.AsOf.Add(-time.Hour)
 		return b
-	}(), SettledCash: 1500, TotalCash: 1500})); err != nil {
+	}(), SettledCash: new(float64(1500)), TotalCash: 1500})); err != nil {
 		t.Fatal(err)
 	}
 	next := reconcileWith(t, g, "reconciliation:2", obs)
@@ -321,7 +321,7 @@ func TestABookTheCalendarCannotPlaceIsNeverPending(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	book := account(10, 0)
 	book.AsOf = time.Date(2031, time.March, 4, 15, 0, 0, 0, time.UTC)
-	if err := g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: book, SettledCash: 1000, TotalCash: 1000})); err != nil {
+	if err := g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: book, SettledCash: new(float64(1000)), TotalCash: 1000})); err != nil {
 		t.Fatal(err)
 	}
 	flexAside(t, g, book.AsOf.Add(-time.Hour))
@@ -499,7 +499,7 @@ func TestAPendingDifferenceReadAgainAfterAFillIsTheSameDifference(t *testing.T) 
 func snapshotAt(asOf time.Time) reconcile.Book {
 	p := account(10, 0)
 	p.AsOf = asOf
-	return reconcile.CashBook("snapshot:"+asOf.Format(time.RFC3339), event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: p, SettledCash: 1000, TotalCash: 1000})
+	return reconcile.CashBook("snapshot:"+asOf.Format(time.RFC3339), event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: p, SettledCash: new(float64(1000)), TotalCash: 1000})
 }
 
 func TestAPendingCashIncreaseLeavesOnlyABudgetWhoseSnapshotSawIt(t *testing.T) {
