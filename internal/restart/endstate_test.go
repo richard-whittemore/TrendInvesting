@@ -493,3 +493,23 @@ func TestLatestSnapshotMissingCash(t *testing.T) {
 		})
 	}
 }
+
+func TestLatestSnapshotMissingCashRefusesUndecodableEvidence(t *testing.T) {
+	snapshot := recorded(t, journal.KindInput, "a:account.snapshot", event.AccountSnapshotEventType, event.AccountSnapshotCashVersion,
+		map[string]string{"account_id": "joint"})
+	reading := recorded(t, journal.KindInput, "a:account.reconciliation", event.ReconciliationEventType, event.ReconciliationSchemaVersion,
+		event.ReconciliationPayload{Unreadable: []string{}, TotalCash: 0})
+	brokenSnapshot, brokenReading := snapshot, reading
+	brokenSnapshot.Envelope.Payload = json.RawMessage(`not json`)
+	brokenReading.Envelope.Payload = json.RawMessage(`not json`)
+	for name, entries := range map[string][]journal.Entry{
+		"snapshot":       {brokenSnapshot},
+		"reconciliation": {snapshot, brokenReading},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := restart.ReadEndState(entries, "joint", "run.log"); err == nil || !strings.Contains(err.Error(), "decode") {
+				t.Errorf("ReadEndState = %v, want the undecodable %s refused", err, name)
+			}
+		})
+	}
+}
