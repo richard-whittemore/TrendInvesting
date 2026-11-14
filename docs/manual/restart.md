@@ -73,8 +73,8 @@ runbook has the template). `operator` is installed on the server: run it as
   adapter never compares a book stated in one.
 
 **A previous close whose total cash was not recorded** cannot be used by
-the adapter. When the previous log's latest `account.snapshot` input for
-the account has no reconciliation of the same reading with total cash read,
+the adapter. When the previous log's latest `account.snapshot` input, whatever
+account it names (as the adapter reads it), has no reconciliation of the same reading with total cash read,
 `operator approve -log` refuses to write an approval unless you state the
 starting book. The pairing replaces the input ID's final `:account.snapshot`
 with `:account.reconciliation`; the paired input must not list `total-cash`
