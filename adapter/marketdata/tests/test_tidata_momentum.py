@@ -320,6 +320,14 @@ class MomentumHoldingsTest(unittest.TestCase):
                                             "payload": payload})])
                 self.assertEqual(held.held(), ("AAA",))
 
+    def test_unavailable_settled_cash_snapshot_preserves_fractional_holdings(self):
+        held = tidata._Holdings("synthetic.log")
+        held.groups = 1
+        held.keep([(2, "input", {"type": "account.snapshot", "schema_version": 7,
+                                "payload": {"quantity_scale": 10000, "positions": [
+                                    {"instrument_id": "AAA", "quantity": 123456}]}})])
+        self.assertEqual(held.held(), ("AAA",))
+
     def test_positions_contract_documents_fractional_snapshots(self):
         self.assertIn("6", tidata._positions.__doc__)
         self.assertIn("ADR 0026", tidata._positions.__doc__)

@@ -1388,3 +1388,16 @@ func TestReducerCurrencyPinSurvivesRebasing(t *testing.T) {
 		t.Fatalf("emitted = %v, want exactly the re-basing's %q event (prior emissions are journalled even when a later call fails closed)", emitted, event.NotionalAccountRebasedEventType)
 	}
 }
+
+func TestTurtleRefusesUnavailableSettledCashSnapshot(t *testing.T) {
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := accountSnapshotPayload(snapshotBefore(1), 900_000)
+	in := accountSnapshotEnvelope(t, 2, snap, snap.AsOf)
+	in.SchemaVersion = 7
+	if _, err := reducer.Apply(context.Background(), in); err == nil {
+		t.Fatal("Turtle accepted snapshot version 7")
+	}
+}

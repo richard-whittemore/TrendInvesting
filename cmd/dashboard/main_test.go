@@ -288,7 +288,7 @@ func TestThePackageHasNoWritePath(t *testing.T) {
 func TestJournalSliceReadsFractionalFillsAndOrders(t *testing.T) {
 	s := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
 		AccountID: "synthetic", AsOf: t0, NetLiquidation: 100, Currency: "USD", QuantityScale: 10000,
-		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: 10, TotalCash: 10}
+		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: new(float64(10)), TotalCash: 10}
 	f := event.TargetWeightFillPayload{AccountID: s.AccountID, ClientOrderID: "synthetic-order", FillID: "synthetic-fill",
 		InstrumentID: "AAA", Side: "sell", Quantity: 12500, QuantityScale: 10000, Price: 2, FilledAt: t0}
 	l := event.LimitOrderLifecyclePayload{AccountID: s.AccountID, ClientOrderID: f.ClientOrderID, OrderID: "synthetic-venue",
@@ -315,7 +315,7 @@ func TestJournalSliceReadsFractionalFillsAndOrders(t *testing.T) {
 func TestJournalSliceReconcilesFractionalShares(t *testing.T) {
 	s := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
 		AccountID: "synthetic", AsOf: t0, NetLiquidation: 100, Currency: "USD", QuantityScale: 10000,
-		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: 10, TotalCash: 10}
+		Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: new(float64(10)), TotalCash: 10}
 	f := event.TargetWeightFillPayload{AccountID: s.AccountID, ClientOrderID: "synthetic-order", FillID: "synthetic-fill",
 		InstrumentID: "AAA", Side: "sell", Quantity: 12501, QuantityScale: 10000, Price: 2, FilledAt: t0}
 	entries := []journal.Entry{

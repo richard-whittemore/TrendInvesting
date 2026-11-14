@@ -91,21 +91,22 @@ var wireCovered = map[string]string{
 // types. Discovery reads their numeric versions from source and classifies each
 // type@version separately, so a new version cannot inherit a legacy excuse.
 var fractionalEventTypes = map[string]string{
-	"AccountSnapshotFractionalPositionsVersion":  "account.snapshot",
-	"AccountSnapshotFractionalCashVersion":       "account.snapshot",
-	"FillTargetWeightFractionalVersion":          "execution.fill",
-	"OrderLifecycleFractionalVersion":            "execution.order.lifecycle",
-	"OrderLifecycleFractionalSyntheticVersion":   "execution.order.lifecycle",
-	"BrokerSnapshotFractionalVersion":            "account.broker.snapshot",
-	"OrderPlannedFractionalVersion":              "strategy.order.planned",
-	"OrderReleasedFractionalVersion":             "risk.order.released",
-	"OrderRefusedFractionalVersion":              "risk.order.refused",
-	"TargetsDecidedFractionalVersion":            "strategy.targets.decided",
-	"TargetWeightConfigurationFractionalVersion": "strategy.target-weight.configuration",
-	"OrderSkippedFractionalSchemaVersion":        "strategy.order.skipped",
-	"OrderRetiredFractionalVersion":              "execution.order.retired",
-	"ReconciliationFractionalVersion":            "account.reconciliation",
-	"ReconciliationResultFractionalVersion":      "risk.reconciliation.result",
+	"AccountSnapshotFractionalPositionsVersion":              "account.snapshot",
+	"AccountSnapshotFractionalUnavailableSettledCashVersion": "account.snapshot",
+	"AccountSnapshotFractionalCashVersion":                   "account.snapshot",
+	"FillTargetWeightFractionalVersion":                      "execution.fill",
+	"OrderLifecycleFractionalVersion":                        "execution.order.lifecycle",
+	"OrderLifecycleFractionalSyntheticVersion":               "execution.order.lifecycle",
+	"BrokerSnapshotFractionalVersion":                        "account.broker.snapshot",
+	"OrderPlannedFractionalVersion":                          "strategy.order.planned",
+	"OrderReleasedFractionalVersion":                         "risk.order.released",
+	"OrderRefusedFractionalVersion":                          "risk.order.refused",
+	"TargetsDecidedFractionalVersion":                        "strategy.targets.decided",
+	"TargetWeightConfigurationFractionalVersion":             "strategy.target-weight.configuration",
+	"OrderSkippedFractionalSchemaVersion":                    "strategy.order.skipped",
+	"OrderRetiredFractionalVersion":                          "execution.order.retired",
+	"ReconciliationFractionalVersion":                        "account.reconciliation",
+	"ReconciliationResultFractionalVersion":                  "risk.reconciliation.result",
 }
 
 // notYetCrossed is every event type internal/event defines that deliberately
@@ -119,6 +120,7 @@ var notYetCrossed = map[string]string{
 	// likewise lists only whole-share adapter inputs; no fractional schema
 	// is evidence of traffic across the LEAN boundary.
 	"account.snapshot@5":                     "IRA fractional holdings snapshot; LEAN publishes whole-share snapshot v2",
+	"account.snapshot@7":                     "IRA cash snapshot without settled cash; LEAN publishes whole-share snapshot v2",
 	"account.snapshot@6":                     "IRA fractional holdings/cash snapshot; LEAN publishes whole-share snapshot v2",
 	"execution.fill@6":                       "IRA target-weight fractional fill; LEAN publishes whole-share fill v4",
 	"execution.order.lifecycle@4":            "IRA fractional lifecycle; LEAN publishes whole-share lifecycle v1",

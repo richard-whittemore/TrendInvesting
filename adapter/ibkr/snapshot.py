@@ -21,7 +21,7 @@ The owner's decision of 2026-10-18 (ADR 0019, ADR 0025 point 5 and ADR
 0026 point 1, amended): one reading taken after a session's close and
 before the next open, with no order working or pending at IBKR for the
 account and no execution since the close, is the account as of that close.
-From that one reading come the engine's account.snapshot (version 3, or cash versions 4/6,
+From that one reading come the engine's account.snapshot (version 3, or cash versions 4/6/7,
 account_snapshot_record) and the broker snapshot (version 2, or fractional version 3,
 broker_snapshot_record), both stamped as of the close, the broker snapshot
 stating the true read time beside it as evidence; when the reading cannot
@@ -251,6 +251,12 @@ def read_account(conn):
         unread.update(MARKERS[tag] for tag in invalid)
     for tag, component in needed:
         if tag not in balances:
+            # ADR 0019: only an ended download with no row means unavailable.
+            # Invalid rows retain their unread marker; version 4 still requires it.
+            if (tag == SETTLED_CASH and conn.config.account_snapshot_version == 6
+                    and summary is not None and summary.ended and summary.error is None
+                    and tag not in invalid):
+                continue
             unread.add(component)
         elif balances[tag].currency != BASE_CURRENCY:
             unread.add(component)
@@ -298,7 +304,8 @@ def _summary_outcome(conn, summary, balances, invalid):
             elif tag in invalid:
                 problems.append("{} unreadable".format(MARKERS[tag]))
             elif tag not in balances:
-                problems.append("{} missing".format(tag))
+                problems.append("{} unavailable".format(tag) if tag == SETTLED_CASH and conn.config.account_snapshot_version == 6
+                                else "{} missing".format(tag))
             elif balances[tag].currency != BASE_CURRENCY:
                 problems.append("{} in {}".format(tag, balances[tag].currency))
         text = "ended" + ("; " + ", ".join(problems) if problems else "")
@@ -721,8 +728,10 @@ def account_snapshot_record(reading, as_of, net_liquidation=None, version=ACCOUN
     engine, ADR 0026 point 2) adds IBKR's settled cash and total cash from
     the same reading, and needs both: a reading missing either gives no
     snapshot at all, never one with a zero or with only one of them. Version 6
-    uses the same cash fields with integer ten-thousandths and quantity_scale
-    10000 (ADR 0015; ADR 0026 D7-F).
+    uses integer ten-thousandths and quantity_scale 10000 (ADR 0015; ADR 0026
+    D7-F). When the ended download has no SettledCash row, configuration 6
+    writes version 7 with settled cash absent. An invalid row still refuses
+    the reading (ADR 0019); total cash remains required.
     """
     if version not in (ACCOUNT_SNAPSHOT_VERSION, ACCOUNT_SNAPSHOT_CASH_VERSION, 6):
         raise ValueError("account.snapshot version {} is not one the adapter writes".format(version))
@@ -732,9 +741,12 @@ def account_snapshot_record(reading, as_of, net_liquidation=None, version=ACCOUN
     if reading.unread & needed:
         raise ValueError("an account snapshot at version {} needs {}, and {} could not be read".format(
             version, ", ".join(sorted(needed)), ", ".join(sorted(reading.unread & needed))))
-    if version in (ACCOUNT_SNAPSHOT_CASH_VERSION, 6) and not {TOTAL_CASH, SETTLED_CASH} <= set(reading.balances):
-        raise ValueError("an account snapshot at version {} needs IBKR's settled and total cash, and the reading "
-                         "holds {}".format(version, ", ".join(sorted(reading.balances)) or "no balance"))
+    if version == 6 and SETTLED_CASH not in reading.balances:
+        version = 7
+    cash_balances = {TOTAL_CASH} | ({SETTLED_CASH} if version != 7 else set())
+    if version in (ACCOUNT_SNAPSHOT_CASH_VERSION, 6, 7) and not cash_balances <= set(reading.balances):
+        raise ValueError("an account snapshot at version {} needs IBKR's {}, and the reading holds {}".format(
+            version, ", ".join(sorted(cash_balances)), ", ".join(sorted(reading.balances)) or "no balance"))
     balance = reading.balances[NET_LIQUIDATION]
     payload = {
         "account_id": reading.account_id,
@@ -746,6 +758,7 @@ def account_snapshot_record(reading, as_of, net_liquidation=None, version=ACCOUN
     }
     if version in (ACCOUNT_SNAPSHOT_CASH_VERSION, 6):
         payload["settled_cash"] = float(reading.balances[SETTLED_CASH].amount)
+    if version in (ACCOUNT_SNAPSHOT_CASH_VERSION, 6, 7):
         payload["total_cash"] = float(reading.balances[TOTAL_CASH].amount)
     if reading.quantity_scale:
         payload["quantity_scale"] = reading.quantity_scale

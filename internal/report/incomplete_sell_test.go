@@ -319,7 +319,7 @@ func TestFractionalSummaryAcceptsFractionalConfiguration(t *testing.T) {
 
 func TestWholeShareSummaryRejectsFractionalRecord(t *testing.T) {
 	s := newIRAStream(t)
-	p := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: iraInstance, QuantityScale: 10000, AsOf: day(0), NetLiquidation: 1000, Currency: "USD", Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: 100, TotalCash: 100}
+	p := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: iraInstance, QuantityScale: 10000, AsOf: day(0), NetLiquidation: 1000, Currency: "USD", Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: 72500}}}, SettledCash: new(float64(100)), TotalCash: 100}
 	s.add(event.AccountSnapshotEventType, p.SchemaVersion(), "fractional-snapshot", day(0), p)
 	if _, err := report.Summarize(s.out, "2025-01-28", "SPY"); err == nil || !strings.Contains(err.Error(), "fractional") {
 		t.Fatalf("fractional record in whole-share run must be refused: %v", err)

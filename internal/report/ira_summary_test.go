@@ -59,7 +59,7 @@ func iraDay(t *testing.T) (*stream, []event.AccountPosition) {
 	sort.Slice(targets, func(i, j int) bool { return targets[i].InstrumentID < targets[j].InstrumentID })
 	add(event.AccountSnapshotEventType, 4, "snapshot", day(0), event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "trad-ira", AsOf: day(0), Currency: "USD", NetLiquidation: 100000, Positions: holdings},
-		SettledCash:                     1234, TotalCash: 2345,
+		SettledCash:                     new(float64(1234)), TotalCash: 2345,
 	})
 	for _, h := range holdings {
 		add(event.MarkRecordedEventType, 3, "mark:"+h.InstrumentID, day(0), event.MarkRecordedPayload{
@@ -182,7 +182,7 @@ func TestIRASummaryPairsCashSnapshotsAcrossRuns(t *testing.T) {
 	current := &stream{t: t, out: append([]event.Envelope{}, first.out[:1]...)}
 	current.bar(1, "SPY", 110)
 	p := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
-		AccountID: "trad-ira", AsOf: day(1), Currency: "USD", NetLiquidation: 105000}, SettledCash: -10, TotalCash: 20}
+		AccountID: "trad-ira", AsOf: day(1), Currency: "USD", NetLiquidation: 105000}, SettledCash: new(float64(-10)), TotalCash: 20}
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -260,5 +260,25 @@ func TestIRASummaryMergesWithheldPicksEvidenceForSameSession(t *testing.T) {
 				t.Errorf("decision line = %+v, want latest evidence with original targets", line)
 			}
 		})
+	}
+}
+
+func TestIRASummarySettledCashUnavailable(t *testing.T) {
+	s, _ := iraDay(t)
+	var cfg event.TargetWeightConfigurationPayload
+	if err := json.Unmarshal(s.out[0].Payload, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Execution.ShareQuantity = event.ShareQuantityFractional
+	s.out[0].SchemaVersion = cfg.SchemaVersion()
+	s.out[0].Payload, _ = json.Marshal(cfg)
+	p := json.RawMessage(`{"account_id":"trad-ira","as_of":"2024-01-02T22:00:00Z","currency":"USD","net_liquidation":100000,"positions":[],"total_cash":2345,"quantity_scale":10000}`)
+	s.add(event.AccountSnapshotEventType, 7, "unavailable", day(0).Add(time.Hour), p)
+	got, err := report.Summarize(s.out, "2024-01-02", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RejectedInputs != 0 || !strings.Contains(strings.ToLower(report.RenderText(got)), "settled cash unavailable; total cash 2345.00") {
+		t.Fatalf("unavailable reading: %s", report.RenderText(got))
 	}
 }

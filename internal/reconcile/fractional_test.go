@@ -12,7 +12,7 @@ import (
 func TestFractionalPositionsAndFillReconcileExactly(t *testing.T) {
 	b := reconcile.CashBook("snapshot", event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "ira", AsOf: closeAt, NetLiquidation: 100, Currency: "USD", QuantityScale: 10000, Positions: []event.AccountPosition{held("AAA", 123456)}},
-		TotalCash:                       50, SettledCash: 50,
+		TotalCash:                       50, SettledCash: new(float64(50)),
 	})
 	obs := observed(50, held("AAA", 123456))
 	obs.QuantityScale = 10000

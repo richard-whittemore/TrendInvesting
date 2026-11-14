@@ -79,7 +79,7 @@ func TestAMomentumCashDifferenceDegradesCashAlone(t *testing.T) {
 	mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:0", at, event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: iraAccount, AsOf: at, NetLiquidation: 30000, Currency: "USD",
 			Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 10}}},
-		SettledCash: 1000, TotalCash: 1000,
+		SettledCash: new(float64(1000)), TotalCash: 1000,
 	}))
 	dividend := event.CorporateActionPayload{InstrumentID: "SPY", Kind: event.CorporateActionKindDividend, EffectiveAt: at.Add(time.Hour), CashAmount: 17.25, Currency: "USD"}
 	mustApply(t, h, s.envelope(t, event.MarketCorporateActionEventType, event.MarketCorporateActionSchemaVersion, "dividend:1", at.Add(time.Hour), dividend))

@@ -380,7 +380,7 @@ func TestFractionalReaderVersionListsAreIndependent(t *testing.T) {
 	}{
 		"configuration":         {event.TargetWeightConfigurationVersions, []uint32{7, 8}},
 		"positions":             {event.AccountPositionsSnapshotVersions, []uint32{3, 5}},
-		"cash":                  {event.AccountCashSnapshotVersions, []uint32{4, 6}},
+		"cash":                  {event.AccountCashSnapshotVersions, []uint32{4, 6, 7}},
 		"fill":                  {event.TargetWeightFillVersions, []uint32{5, 6}},
 		"lifecycle inputs":      {event.LimitOrderLifecycleInputVersions, []uint32{2, 4}},
 		"retirement":            {event.OrderRetiredVersions, []uint32{1, 2}},

@@ -26,7 +26,7 @@ func bookedIRA(t *testing.T) (*targetweight.Handler, *stream, time.Time) {
 	mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:0", at, event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: iraAccount, AsOf: at, NetLiquidation: 30000, Currency: "USD",
 			Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 10}}},
-		SettledCash: 1000, TotalCash: 1000,
+		SettledCash: new(float64(1000)), TotalCash: 1000,
 	}))
 	return h, s, at
 }
@@ -90,7 +90,7 @@ func TestADepositTheReaderHasNotReadIsPendingThenExplained(t *testing.T) {
 	mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:1", next, event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: iraAccount, AsOf: next, NetLiquidation: 30500, Currency: "USD",
 			Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 10}}},
-		SettledCash: 1500, TotalCash: 1500,
+		SettledCash: new(float64(1500)), TotalCash: 1500,
 	}))
 	mustApply(t, h, movementInput(t, s, "T1", 500, newYorkDay("2025-01-03")))
 	mustApply(t, h, flexStatusInput(t, s, event.FlexStateRead, "20250102", next.Add(5*time.Hour)))
@@ -250,7 +250,7 @@ func TestAPendingDifferenceReadTwicePagesOnce(t *testing.T) {
 	mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:1", next, event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: iraAccount, AsOf: next, NetLiquidation: 30500, Currency: "USD",
 			Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 10}}},
-		SettledCash: 1500, TotalCash: 1500,
+		SettledCash: new(float64(1500)), TotalCash: 1500,
 	}))
 	mustApply(t, h, flexStatusInput(t, s, event.FlexStateRead, "20250103", newYorkDay("2025-01-03").Add(21*time.Hour+30*time.Minute)))
 	obs.AsOf, obs.ReconciliationID = newYorkDay("2025-01-06").Add(9*time.Hour), "morning:2"

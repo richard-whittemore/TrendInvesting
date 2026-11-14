@@ -131,7 +131,7 @@ def snapshot_fault(payload, version):
     """The first field of an account snapshot the engine would not read as valid, or ""."""
     if not isinstance(payload, dict):
         return "payload"
-    if _scale_fault(payload, version == 6):
+    if _scale_fault(payload, version in (6, 7)):
         return "quantity_scale (account policy or schema mismatch)"
     for name, ok in (("account_id", _text(payload.get("account_id"))), ("as_of", _text(payload.get("as_of"))),
                      ("net_liquidation", _number(payload.get("net_liquidation")) and payload["net_liquidation"] > 0),
@@ -140,8 +140,10 @@ def snapshot_fault(payload, version):
             return name
     if _positions(payload):
         return _positions(payload)
-    if version in (4, 6):
-        for name in ("settled_cash", "total_cash"):
+    if version == 7 and payload.get("settled_cash") is not None:
+        return "settled_cash (version 7 requires absence)"
+    if version in (4, 6, 7):
+        for name in (("total_cash",) if version == 7 else ("settled_cash", "total_cash")):
             if not _number(payload.get(name)):
                 return name
     return ""
@@ -396,8 +398,8 @@ def _check_batch(inputs, snapshot_version, report):
         report.fail("the batch this start queued has no account snapshot among the inputs it delivered: the engine "
                     "did not receive it (an earlier start's records are never taken for this one)")
     else:
-        wrong = [e["id"] for e in snapshots if e["schema_version"] != snapshot_version]
-        faults = [(e["id"], snapshot_fault(e["payload"], snapshot_version)) for e in snapshots]
+        wrong = [e["id"] for e in snapshots if e["schema_version"] not in ((6, 7) if snapshot_version == 6 else (snapshot_version,))]
+        faults = [(e["id"], snapshot_fault(e["payload"], e["schema_version"])) for e in snapshots]
         faults = [(i, f) for i, f in faults if f]
         last = snapshots[-1]["payload"]
         if wrong:
@@ -406,10 +408,13 @@ def _check_batch(inputs, snapshot_version, report):
         elif faults:
             report.fail("account snapshot {} has no valid {}".format(*faults[0]))
         else:
-            cash = ("settled_cash", "total_cash") if snapshot_version in (4, 6) else ()
+            actual_version = snapshots[-1]["schema_version"]
+            cash = ("total_cash",) if actual_version == 7 else ("settled_cash", "total_cash") if actual_version in (4, 6) else ()
             report.ok("account snapshot version {} as of {}: {}".format(
-                snapshot_version, last.get("as_of"),
+                actual_version, last.get("as_of"),
                 ", ".join("{} {}".format(k, last[k]) for k in ("net_liquidation",) + cash)))
+            if actual_version == 7:
+                report.ok("settled cash unavailable")
             if snapshot_version == 6:
                 from quantities import shares
                 holdings = ", ".join("{} {}".format(row["instrument_id"],

@@ -69,7 +69,7 @@ func TestAMomentumCloseSnapshotIsCheckedOnItsHoldingsAlone(t *testing.T) {
 		return s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, id, at, event.AccountCashSnapshotPayload{
 			AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: iraAccount, AsOf: at, NetLiquidation: 30000, Currency: "USD",
 				Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: spy}}},
-			SettledCash: cash, TotalCash: cash,
+			SettledCash: new(float64(cash)), TotalCash: cash,
 		})
 	}
 	mustApply(t, h, snapshot("snapshot:0", "2025-01-02", 10, 1000))

@@ -21,7 +21,7 @@ func booked(t *testing.T) *risklimit.Gate {
 	t.Helper()
 	g := gate(t, limits(), event.TradingModeDryRun)
 	if err := g.SetBook(reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
-		AccountPositionsSnapshotPayload: account(10, 0), SettledCash: 1000, TotalCash: 1000,
+		AccountPositionsSnapshotPayload: account(10, 0), SettledCash: new(float64(1000)), TotalCash: 1000,
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestJournalledEventsSinceTheBookExplainIt(t *testing.T) {
 	}
 	// A book taken later replaces the anchor; the fill is then in it.
 	if err := g.SetBook(reconcile.CashBook("snapshot:2", event.AccountCashSnapshotPayload{
-		AccountPositionsSnapshotPayload: account(6, 30), SettledCash: 1004.7, TotalCash: 1004.7,
+		AccountPositionsSnapshotPayload: account(6, 30), SettledCash: new(float64(1004.7)), TotalCash: 1004.7,
 	})); err != nil {
 		t.Fatal(err)
 	}

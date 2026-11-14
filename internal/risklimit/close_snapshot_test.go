@@ -20,7 +20,7 @@ import (
 // the fixture time, holding spy SPY and $1,000.00.
 func closeSnapshot(spy int64, minutes int) reconcile.Book {
 	return reconcile.CashBook("snapshot:2", event.AccountCashSnapshotPayload{
-		AccountPositionsSnapshotPayload: account(spy, minutes), SettledCash: 1000, TotalCash: 1000,
+		AccountPositionsSnapshotPayload: account(spy, minutes), SettledCash: new(float64(1000)), TotalCash: 1000,
 	})
 }
 
@@ -122,7 +122,7 @@ func TestTheCheckedSnapshotBecomesTheBook(t *testing.T) {
 	}
 	// The earlier reconciliation's view is the old book's: a snapshot after
 	// the new book is checked afresh.
-	next := reconcile.CashBook("snapshot:3", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: account(14, 120), SettledCash: 1000, TotalCash: 1000})
+	next := reconcile.CashBook("snapshot:3", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: account(14, 120), SettledCash: new(float64(1000)), TotalCash: 1000})
 	if r, journal := checkBookWith(t, g, next); !journal || !slices.Equal(r.Result.ScopeInstrumentIDs, []string{"SPY"}) {
 		t.Fatalf("snapshot:3: %v %+v", journal, r.Result)
 	}
@@ -581,7 +581,7 @@ func withIEF(minutes int, held bool) event.ReconciliationPayload {
 func snapshotWithIEF(minutes int) reconcile.Book {
 	s := account(10, minutes)
 	s.Positions = append([]event.AccountPosition{{InstrumentID: "IEF", Quantity: 2}}, s.Positions...)
-	return reconcile.CashBook("snapshot:2", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: s, SettledCash: 1000, TotalCash: 1000})
+	return reconcile.CashBook("snapshot:2", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: s, SettledCash: new(float64(1000)), TotalCash: 1000})
 }
 
 // TestAReadingOmittingAReportedHoldingForgetsItsResidual: IEF was never in

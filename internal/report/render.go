@@ -18,7 +18,11 @@ func RenderText(s Summary) string {
 		b.WriteString("No account snapshot recorded.\n")
 	}
 	if s.HaveCash {
-		fmt.Fprintf(&b, "Settled cash %.2f; total cash %.2f\n", s.SettledCash, s.TotalCash)
+		if s.SettledCash == nil {
+			fmt.Fprintf(&b, "Settled cash unavailable; total cash %.2f\n", s.TotalCash)
+		} else {
+			fmt.Fprintf(&b, "Settled cash %.2f; total cash %.2f\n", *s.SettledCash, s.TotalCash)
+		}
 	}
 	// The verdict comes first, so whether the account is beating the
 	// benchmark is read at a glance; the figures it rests on follow below.

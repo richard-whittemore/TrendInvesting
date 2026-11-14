@@ -136,7 +136,7 @@ func momentumMonth(t *testing.T) []fixtureInput {
 		}
 		add(event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, event.AccountCashSnapshotPayload{
 			AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: fixtureAccount, AsOf: end, NetLiquidation: 10000, Currency: "USD"},
-			SettledCash:                     10000, TotalCash: 10000,
+			SettledCash:                     new(float64(10000)), TotalCash: 10000,
 		})
 		for _, id := range ids {
 			add(event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%s:%s", id, session), end,

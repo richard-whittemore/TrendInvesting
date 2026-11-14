@@ -1918,14 +1918,14 @@ class StreamFolderRuleTests(unittest.TestCase):
         import snapshot
         from delivery import DELIVERED_KINDS, kinds
         # The adapter's own inputs in a batch: the account snapshot (Boost's
-        # version 3 or an IRA's 4), the broker snapshot (at either version a
+        # version 3 or an IRA's 4, 6 or 7), the broker snapshot (at either version a
         # log may hold), the mark (Boost's 2 or an IRA's 3, with its contract),
         # and an unresolved name's missing-mark evidence (ADR 0026, amended 2026-10-29).
         self.assertEqual(set(DELIVERED_KINDS), set(kinds.KINDS) | {
             (snapshot.BROKER_SNAPSHOT_TYPE, 1), (snapshot.BROKER_SNAPSHOT_TYPE, snapshot.BROKER_SNAPSHOT_VERSION),
             (snapshot.ACCOUNT_SNAPSHOT_TYPE, snapshot.ACCOUNT_SNAPSHOT_VERSION),
             (snapshot.ACCOUNT_SNAPSHOT_TYPE, snapshot.ACCOUNT_SNAPSHOT_CASH_VERSION),
-            (snapshot.ACCOUNT_SNAPSHOT_TYPE, 6), (snapshot.BROKER_SNAPSHOT_TYPE, 3),
+            (snapshot.ACCOUNT_SNAPSHOT_TYPE, 6), (snapshot.ACCOUNT_SNAPSHOT_TYPE, 7), (snapshot.BROKER_SNAPSHOT_TYPE, 3),
             (snapshot.MARK_TYPE, snapshot.MARK_VERSION), (snapshot.MARK_TYPE, snapshot.MARK_CONTRACT_VERSION),
             ("market.mark.unavailable", 1)})
         self.assertIs(kinds.DELIVERED_KINDS, DELIVERED_KINDS)

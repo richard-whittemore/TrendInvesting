@@ -71,7 +71,7 @@ func TestFractionalInputUnits(t *testing.T) {
 	if out, err := h.checkBook(event.Envelope{ID: "mixed-book"}, reconcile.Book{AnchorID: "mixed-book"}, at); err == nil || !strings.Contains(err.Error(), "quantity scale") || len(out) != 0 {
 		t.Fatalf("mixed book must refuse without emissions: %v, %v", out, err)
 	}
-	snapshot := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: cfg.AccountID, AsOf: at, NetLiquidation: 1000, Currency: "USD", Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: -1}}}, SettledCash: 1000, TotalCash: 1000}
+	snapshot := event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: cfg.AccountID, AsOf: at, NetLiquidation: 1000, Currency: "USD", Positions: []event.AccountPosition{{InstrumentID: "AAA", Quantity: -1}}}, SettledCash: new(float64(1000)), TotalCash: 1000}
 	if _, err := h.momentum.applySnapshot(envelope(event.AccountSnapshotEventType, 4, snapshot)); err == nil || !strings.Contains(err.Error(), "four-place") {
 		t.Fatalf("legacy negative snapshot: %v", err)
 	}

@@ -65,7 +65,7 @@ var (
 	// A bar is read at version 1, which the Turtle engine writes, and at
 	// version 2, which the target-weight engines write (ADR 0026).
 	barVersions         = []uint32{event.CompletedBarSchemaVersion, event.CompletedBarAdjustedVersion}
-	snapshotVersions    = []uint32{event.AccountSnapshotPositionsVersion, event.AccountSnapshotCashVersion, event.AccountSnapshotFractionalPositionsVersion, event.AccountSnapshotFractionalCashVersion}
+	snapshotVersions    = []uint32{event.AccountSnapshotPositionsVersion, event.AccountSnapshotCashVersion, event.AccountSnapshotFractionalPositionsVersion, event.AccountSnapshotFractionalCashVersion, event.AccountSnapshotFractionalUnavailableSettledCashVersion}
 	fillVersions        = []uint32{event.FillSchemaVersion}
 	engineStateVersions = []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}
 	// A decision is read at version 7, which earlier builds wrote, and at
@@ -117,8 +117,8 @@ var (
 func readSnapshot(e event.Envelope, strategy string) (event.AccountCashSnapshotPayload, bool, error) {
 	if isMomentum(strategy) {
 		var p event.AccountCashSnapshotPayload
-		if e.SchemaVersion != event.AccountSnapshotCashVersion && e.SchemaVersion != event.AccountSnapshotFractionalCashVersion {
-			return p, false, fmt.Errorf("report: momentum snapshot must be version %d or %d", event.AccountSnapshotCashVersion, event.AccountSnapshotFractionalCashVersion)
+		if e.SchemaVersion != event.AccountSnapshotCashVersion && e.SchemaVersion != event.AccountSnapshotFractionalCashVersion && e.SchemaVersion != event.AccountSnapshotFractionalUnavailableSettledCashVersion {
+			return p, false, fmt.Errorf("report: momentum snapshot must be version %d, %d or %d", event.AccountSnapshotCashVersion, event.AccountSnapshotFractionalCashVersion, event.AccountSnapshotFractionalUnavailableSettledCashVersion)
 		}
 		err := read(e, snapshotVersions, &p)
 		return p, true, err
