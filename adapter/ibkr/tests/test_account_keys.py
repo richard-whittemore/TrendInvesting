@@ -401,6 +401,53 @@ class AccountKeysTests(unittest.TestCase):
     FAKE_LINE = "x\naccount-keys: summary ended"
     FAKE_ESCAPED = r"x\naccount-keys: summary ended"
 
+    def masked_control_fields(self):
+        for control, escaped in (("\t", r"\t"), ("\x1b", r"\x1b"), ("\u2028", r"\u2028")):
+            for account in ("U7654321", "DU999999", "DUX999999", "DF999999"):
+                yield control + account, escaped + "<account>", account
+
+    def assert_masked_control_fields(self, output, prefix, suffix):
+        for field, masked, account in self.masked_control_fields():
+            with self.subTest(field=field):
+                self.assertNotIn(account, output)
+                self.assertIn(prefix + masked + suffix, output.splitlines())
+
+    def test_download_key_masks_raw_accounts_before_escaping(self):
+        self.fake.summary += [(ACCOUNT, field, "1", "USD")
+                              for field, _, _ in self.masked_control_fields()]
+        status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        self.assert_masked_control_fields(output, "account-keys: key=", " currency=USD")
+
+    def test_download_currency_masks_raw_accounts_before_escaping(self):
+        self.fake.summary += [(ACCOUNT, "CashBalance", "1", field)
+                              for field, _, _ in self.masked_control_fields()]
+        status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        self.assert_masked_control_fields(output, "account-keys: key=CashBalance currency=", "")
+
+    def test_settled_key_masks_raw_accounts_before_escaping(self):
+        self.fake.summary += [(ACCOUNT, "Settled" + field, "1", "USD")
+                              for field, _, _ in self.masked_control_fields()]
+        status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        self.assert_masked_control_fields(output, "account-keys: Settled key=Settled", " currency=USD shape=9")
+
+    def test_settled_currency_masks_raw_accounts_before_escaping(self):
+        self.fake.summary += [(ACCOUNT, "SettledCash", "1", field)
+                              for field, _, _ in self.masked_control_fields()]
+        status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        self.assert_masked_control_fields(output, "account-keys: Settled key=SettledCash currency=", " shape=9")
+
+    def test_summary_currency_masks_raw_accounts_before_escaping(self):
+        rows = [(ACCOUNT, "SettledCash", "1", field)
+                for field, _, _ in self.masked_control_fields()]
+        with self.summary_reply(rows):
+            status, output = self.run_command()
+        self.assertEqual(status, 0, output)
+        self.assert_masked_control_fields(output, "account-keys: summary SettledCash currency=", " number=yes shape=9")
+
     def test_download_key_and_currency_are_escaped(self):
         self.fake.summary += [(ACCOUNT, "Key" + self.FAKE_LINE, "1", "USD"),
                               (ACCOUNT, "CashBalance", "1", "U S\\n")]

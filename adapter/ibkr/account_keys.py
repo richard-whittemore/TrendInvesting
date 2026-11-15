@@ -36,6 +36,11 @@ def escape_text(text):
     return _UNSAFE.sub(one, text)
 
 
+def _safe(text, account):
+    """Mask raw accounts before escaping (manual's balance-key diagnostic, L12)."""
+    return escape_text(mask_accounts(text, account))
+
+
 def value_shape(value, account):
     """Mask accounts, collapse digits and escape before cutting (manual's balance-key diagnostic, L12)."""
     shape = escape_text(re.sub(r"\d+", "9", mask_accounts(value, account)))
@@ -58,7 +63,7 @@ def read_summary(conn, account, timeout, emit, cleanup_failures):
             if not conn.connected or conn.last_drop_reason is not None:
                 raise NotConnected("summary link lost")
             if event.name == "error" and len(event.args) >= 2 and event.args[0] == req_id:
-                emit("summary refused by IBKR code {}".format(escape_text(str(event.args[1]))))
+                emit("summary refused by IBKR code {}".format(_safe(str(event.args[1]), account)))
                 break
             if event.name == "account_summary" and len(event.args) == 5:
                 row_id, row_account, tag, value, currency = event.args
@@ -83,7 +88,7 @@ def read_summary(conn, account, timeout, emit, cleanup_failures):
     emit("summary SettledCash rows={}".format(len(rows)))
     for currency, number, shape in rows:
         emit("summary SettledCash currency={} number={} shape={}".format(
-            escape_text(currency), "yes" if number else "no", shape))
+            _safe(currency, account), "yes" if number else "no", shape))
     if ended:
         emit("summary ended")
     elif timed_out:
@@ -133,7 +138,7 @@ def command(args, api_factory, out, err):
             values.take(event)
             if values.error is not None:
                 code, _ = values.error
-                failure = "account download refused by IBKR code {}".format(escape_text(str(code)))
+                failure = "account download refused by IBKR code {}".format(_safe(str(code), account))
                 break
             if event.name == "account_value" and values.open and len(event.args) == 4:
                 key, value, currency, row_account = event.args
@@ -161,7 +166,7 @@ def command(args, api_factory, out, err):
                     cleanup_failures.append("{}: {}".format(type(stopped).__name__, stopped))
 
     for key, currency in sorted(pairs):
-        emit("key={} currency={}".format(escape_text(key), escape_text(currency)))
+        emit("key={} currency={}".format(_safe(key, account), _safe(currency, account)))
     ended = values is not None and values.ended
     emit("download ended" if ended else "download did NOT end within {:g}s".format(args.timeout))
     present = {key for key, _ in pairs}
@@ -171,7 +176,7 @@ def command(args, api_factory, out, err):
     settled = sorted((key, currency) for key, currency in pairs if "settled" in key.lower())
     for key, currency in settled:
         emit("Settled key={} currency={} shape={}".format(
-            escape_text(key), escape_text(currency), shapes[key, currency]))
+            _safe(key, account), _safe(currency, account), shapes[key, currency]))
     if not settled:
         emit("Settled keys: none")
     for line in summary_lines:

@@ -321,8 +321,9 @@ digits becomes a single `9`, so digit counts and amounts stay private. Account
 numbers are masked before shaping. After masking accounts and collapsing digits,
 the shape is escaped, and every other string IBKR sends that this command prints
 (each balance key name and each currency, in the key lines, the `Settled` lines
-and the summary rows) is escaped the same way, so nothing IBKR sends can start a
-new line or pass for one of this command's own status lines. Newline becomes
+and the summary rows) has its account numbers masked before it is escaped the
+same way, so nothing IBKR sends can start a new line or pass for one of this
+command's own status lines. Newline becomes
 `\n`, carriage return `\r`, and tab `\t`. Other characters below 0x20, DEL, and
 C1 controls (0x80–0x9F) become `\xHH`. The Unicode line and paragraph separators
 (U+2028, U+2029) and the direction overrides (U+202A–U+202E, U+2066–U+2069)
