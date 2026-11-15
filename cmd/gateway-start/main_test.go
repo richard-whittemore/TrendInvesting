@@ -1017,7 +1017,7 @@ func TestAUnitStopDuringResetOutputDoesNotBecomeAnotherResetWait(t *testing.T) {
 	// lines are in the pipe; a stop before that would end it with the refusal
 	// unwritten, which is a different case from the one checked here.
 	written := filepath.Join(r.dir, "refusal-written")
-	c := r.cfg(`printf 'noise\n` + refusal + `\n'; : >` + written + `; while :; do :; done`)
+	c := r.cfg(`printf 'noise\n` + refusal + `\n'; : >'` + written + `'; while :; do :; done`)
 	resetClock(r, &c, "2026-10-31T04:08:00Z", nil)
 	c.Accepted = regexp.MustCompile(defaultAccepted)
 	c.SinkTimeout = 10 * time.Second
