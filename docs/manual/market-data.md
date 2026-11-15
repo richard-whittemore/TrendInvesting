@@ -31,6 +31,7 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | `python3 -m marketdata bars --out DIR --instruments SPY,IEF,SHY` | the named instruments' bars | yes |
 | `python3 -m marketdata backfill --out DIR --sessions 260` | one whole-market bar file per past session (about 54 minutes at Massive's 5 requests a minute; resumable) | yes |
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
+| `python3 -m marketdata fx --out DIR` | ECB reference-rate history for dividend conversion | no |
 | `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
 | `python3 -m marketdata encode --out DIR --first YYYY-MM-DD --asof YYYY-MM-DD --configuration-hash H --strategy-version V --run-id R --stream FILE ...` (all of these but `--asof` are required: the engine's configuration hash, strategy version and run identity come from its durable log; `--run-id` takes the run's name, the value the data job stamps on every envelope as its correlation id: the `TI_RUN` of the run that began the chain, which is its durable log's file name without `.log`, for a paper run and a dry-run first run alike. It is not the run's identity, the Run approval's ID or, for a dry-run first run, the configuration's hash and as-of time, which the job uses only to find the run's folder) | the engines' input stream (below) | no, and it never uses the network |
 | `python3 -m marketdata retract --out DIR --session YYYY-MM-DD --reason TEXT` | that the exchange cancelled a session (below) | no |
@@ -1494,6 +1495,29 @@ which writes the sessions again from its recordings, and start the adapter
   the ones its records give stops it too ("does not follow its record hash
   chain"): restore that log from the backup as the engine wrote it.
 
+## Dividend currencies
+
+The momentum data job fetches the ECB's [full history of euro reference
+rates](https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip) once per
+recorded session. It extracts the CSV with Python's standard library and
+keeps the whole CSV in `fx-ecb_<session>.json`, with its source, URL, session
+and fetch time. Encoding reads that recording only. These information rates
+adjust historical prices for ranking; they never price an order.
+
+A dividend paid in currency X becomes dollars as cash × (USD per EUR) /
+(X per EUR), using its ex-dividend date's fixing. EUR needs only USD per
+EUR; USD passes through unchanged and needs no rate recording. If the
+date has no fixing, the latest fixing within the preceding five calendar
+days is used. A missing currency, an uncovered currency or an unavailable
+rate skips that dividend's adjustment. The existing exclusion diagnostics
+name the ticker, ex-date, currency and reason. For a universe member, the
+first trading session on or after that ex-date is omitted from its history,
+so a ranking cannot span the unadjusted jump. Required and held instruments
+retain the existing fail-closed refusal when an adjustment is unavailable.
+A converted amount at or below zero, at or above the prior close (restated
+onto the ex-date share basis), or not finite is refused. Valid dividends on
+the same ex-date are still applied. Boost's SPY USD path needs no ECB data.
+
 ## What can go wrong, and what the step does
 
 **The daily job and the delivery, at a glance.** The detail and the steps
@@ -1502,6 +1526,8 @@ for the recording and encoding steps.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
+| A dividend's currency is uncovered, missing, or has no usable ECB fixing within five calendar days | That dividend adjustment is skipped; the existing `excluded` diagnostic records ticker, ex-date, currency and reason. A universe member loses the ex-date session so ranking cannot cross the unknown adjustment; a required or held instrument refuses the stream | Check the dividend's currency and the recorded ECB CSV ("Dividend currencies"). Never substitute dollars or zero |
+| The ECB recording is missing or malformed, or converted dividend cash is outside 0 < cash < prior close | Encoding refuses cleanly; the data job publishes no stream. The cash refusal names ticker and ex-date | Check the recorded input and the issuer's dividend notice; preserve the existing recordings |
 | `ti-data refused:` "no secrets file", "cannot read MASSIVE_API_KEY from the secrets file" or "MASSIVE_API_KEY is not set in the secrets file" | No file is written; the unit shows as failed. The key is never printed | Put the key on the `MASSIVE_API_KEY=` line of `secrets.env` (`sudo ti-secrets edit secrets.env`; the file is stored encrypted), then `sudo systemctl start ti-data` ("What can go wrong" under "The daily data job") |
 | `ti-data refused:` "run ... has no stream yet: run the warm-up once first" | No file is written | Run the one-time warm-up with the date it names ("The one-time warm-up") |
 | `ti-data refused:` the engine's durable log "cannot be read", "is not an engine durable log", "holds no committed configuration input: start the engine first", "holds no committed input, so it names no run", or the run's first input "is not its configuration" | No file is written | Start the engine once (so `run.env` and its log exist), check `TI_RUN`, and restore a log that cannot be read from the backup as the engine wrote it; never edit it |

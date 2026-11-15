@@ -356,7 +356,7 @@ class BarsTest(unittest.TestCase):
         client, opener, _ = make_client(
             {"status": "OK", "results": [agg(DAY, 100.0)]},                 # SPY raw
             {"status": "OK", "results": [agg(DAY, 50.0)]},                  # SPY split-adjusted
-            {"status": "OK", "results": [{"ex_dividend_date": "2026-03-20", "cash_amount": 1.5}]},
+            {"status": "OK", "results": [{"ex_dividend_date": "2026-03-20", "currency": "USD", "cash_amount": 1.5}]},
             {"status": "OK", "results": [agg(DAY, 90.0)]},                  # IEF raw
             {"status": "OK", "results": [agg(DAY, 90.0)]},
             {"status": "OK", "results": []})                                # no dividends is fine

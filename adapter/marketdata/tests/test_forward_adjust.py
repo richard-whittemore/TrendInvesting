@@ -16,7 +16,7 @@ def split(day, frm, to):
 
 
 def div(day, cash):
-    return {"ticker": "A", "ex_dividend_date": day, "cash_amount": cash}
+    return {"ticker": "A", "ex_dividend_date": day, "currency": "USD", "cash_amount": cash}
 
 
 def factors(closes, splits=(), dividends=(), base=DAYS[0], sessions=DAYS):

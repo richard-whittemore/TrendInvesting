@@ -11,6 +11,7 @@ ranked names (about 1500 requests, over 5 hours) does not, and needs IBKR
 history or a paid plan.
 """
 import datetime as dt
+import os
 import zoneinfo
 
 from . import nyse_calendar, record as recording
@@ -126,3 +127,21 @@ def run_universe(client, session, directory, now=_now, grouped_body=None, settle
 def run_bars(client, instruments, session, directory, lookback_days=400, now=_now, settle=SETTLE):
     require_settled(session, now, settle)
     return recording.write(directory, fetch_bars(client, instruments, session, lookback_days, now=now))
+
+
+def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
+    """Fetch ECB history once for this session, or validate its immutable recording."""
+    from . import fx
+    require_settled(session, now, settle)
+    path = os.path.join(directory, recording.filename({'kind': fx.KIND, 'session': session.isoformat()}))
+    if os.path.exists(path):
+        try:
+            fx.checked(recording.read(path), session)
+        except (recording.Corrupt, OSError, ValueError, KeyError, TypeError) as e:
+            raise MissingData('unreadable ECB recording: {}'.format(e)) from None
+        return path
+    body, url = (get or fx.http_get)(fx.URL)
+    rec = dict(kind=fx.KIND, source=fx.SOURCE, session=session.isoformat(), fetched_at=_stamp(now),
+               url=url, body=fx.csv_body(body))
+    fx.checked(rec)
+    return recording.write(directory, rec)

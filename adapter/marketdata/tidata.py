@@ -164,7 +164,7 @@ import sys
 import tempfile
 from collections import namedtuple
 
-from . import encode, engine_log, history, kinds, massive, nyse_calendar, record, sectors, steps
+from . import encode, engine_log, fx, history, kinds, massive, nyse_calendar, record, sectors, steps
 
 ENGINE = "boost"
 MOMENTUM = "momentum"
@@ -1041,7 +1041,7 @@ def _record_universe(client, data, day, now, settle, warn):
 
 def run_momentum(data, streams, config, engine_log, key, now, settle, instance, ranker_bin=None, ranker=None,
                  session=None, backfill_from=None, client_factory=massive.Client, sectors_get=sectors.http_get,
-                 warn=None, reencode_all=False, rebuild_manifest=False):
+                 warn=None, reencode_all=False, rebuild_manifest=False, fx_get=fx.http_get):
     """Runs the momentum engine's job once (see above) and returns the stream's path. The ranker is
     ``ranker`` if given, else cmd/universe-rank at ``ranker_bin``, run on a private copy of the configuration's
     bytes checked against the engine's log, never on the file's path, which may change while the job runs."""
@@ -1073,7 +1073,7 @@ def run_momentum(data, streams, config, engine_log, key, now, settle, instance, 
                 ranker = encode.go_ranker([ranker_bin, "-config", checked])
             return _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session,
                                  backfill_from, client_factory, sectors_get, warn, cfg, log, reencode_all,
-                                 rebuild_manifest)
+                                 rebuild_manifest, fx_get)
     except Busy as e:
         # At the last morning firing nothing asks again before the 09:00 cutoff, and the run holding the lock
         # (a warm-up or a run by hand) has no OnFailure of its own: the firing fails, so it pages
@@ -1110,17 +1110,19 @@ def _instance_lock(streams, instance):
 
 
 def _action_set(data):
-    """{name: sha256} of every split and dividend recording: the action recordings an encoding reads."""
+    """{name: sha256} of split, dividend and ECB inputs, so revised rates recheck published streams."""
     out = {}
     for kind in history.KINDS:
         for path in glob.glob(os.path.join(data, kind + "_*_*.json")):
             out[os.path.basename(path)] = _file_digest(path)
+    for path in glob.glob(os.path.join(data, fx.KIND + "_*.json")):
+        out[os.path.basename(path)] = _file_digest(path)
     return out
 
 
 def _action_from(name):
-    """The first day of an action recording's window, from its name (record.filename: kind_from_session)."""
-    return dt.date.fromisoformat(name.split("_")[1])
+    """Earliest stream end that can read this input: an action window start or ECB snapshot session."""
+    return dt.date.fromisoformat(name.removesuffix(".json").split("_")[1])
 
 
 def _manifest_entry(path, first, last, without):
@@ -1367,7 +1369,7 @@ def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ra
     reach = min(_action_from(k) for k in changed)
     affected = [s for s in spans if s[1] >= reach]
     if len(affected) > MAX_REENCODED and not reencode_all:
-        raise Refused("split and dividend recordings appeared or changed since the run's files were checked ({}), "
+        raise Refused("split, dividend or ECB recordings appeared or changed since the run's files were checked ({}), "
                       "reaching back to {}: the {} files published from {} on would have to be encoded again, more "
                       "than one firing checks ({}); nothing is written. Run the job once by hand with --reencode-all "
                       "(docs/manual/market-data.md, \"A job for the IRAs\")".format(
@@ -1377,7 +1379,7 @@ def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ra
 
 
 def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session, backfill_from,
-                  client_factory, sectors_get, warn, cfg, log, reencode_all, rebuild_manifest=False):
+                  client_factory, sectors_get, warn, cfg, log, reencode_all, rebuild_manifest=False, fx_get=fx.http_get):
     run_id = stream_run(os.path.join(streams, instance), engine_log, log, engine=MOMENTUM)
     identity = encode.Identity(log.configuration_hash, log.strategy_version, run_id)
     directory = os.path.join(streams, instance, run_id)
@@ -1407,6 +1409,7 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
         session = _session_before(session)
     if session < base:
         raise Refused("session {} precedes the run's base {}".format(session, base))
+    steps.run_fx(session, data, get=fx_get, now=now, settle=settle)
     manifest, spans = _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker,
                                  retracted, rebuild=rebuild_manifest)
     latest = settled_session(now(), settle)
@@ -1625,7 +1628,7 @@ def awaiting_first_run(path, engine_streams=None):
     return True
 
 
-def main(argv, now=steps._now, client_factory=massive.Client, ranker=None, sectors_get=sectors.http_get):
+def main(argv, now=steps._now, client_factory=massive.Client, ranker=None, sectors_get=sectors.http_get, fx_get=fx.http_get):
     args = parse(argv)
     print("ti-data " + STAMP, file=sys.stderr)
     key = None   # held here, so every message printed below can have it replaced
@@ -1643,7 +1646,7 @@ def main(argv, now=steps._now, client_factory=massive.Client, ranker=None, secto
                                 ranker_bin=args.ranker, ranker=ranker, reencode_all=args.reencode_all,
                                 rebuild_manifest=args.rebuild_manifest,
                                 session=args.session, backfill_from=args.backfill_from,
-                                client_factory=client_factory, sectors_get=sectors_get)
+                                client_factory=client_factory, sectors_get=sectors_get, fx_get=fx_get)
         else:
             path = run(args.data, args.streams, args.config, args.engine_log, key, now,
                        dt.timedelta(minutes=args.settle_minutes), session=args.session,

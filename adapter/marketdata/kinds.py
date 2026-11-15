@@ -63,3 +63,6 @@ RUN_APPROVED_BOOK_FROM = 3
 # job's) count this one table, so they cannot diverge. Operator, approval,
 # configuration and reconciliation inputs are not in it.
 DELIVERED_KINDS = KINDS + ADAPTER_KINDS
+
+# Recorded reference input, not an engine event (docs/manual/market-data.md).
+FX = "fx-ecb"

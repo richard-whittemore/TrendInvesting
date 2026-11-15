@@ -170,7 +170,7 @@ def record_momentum_history(directory, days, instruments=MOMENTUM_INSTRUMENTS):
                                      "rows": json.loads(screener(*((t, "Finance") for t in labelled)))["data"]["rows"]})
     # Every third name pays a quarterly dividend; every hundredth splits once.
     dividends = [{"id": "V{}-{}".format(n, q), "ticker": t, "ex_dividend_date": days[30 + 63 * q + n % 20].isoformat(),
-                  "cash_amount": 0.1} for n, t in enumerate(names) if n % 3 == 0 for q in range((len(days) - 50) // 63)]
+                  "currency": "USD", "cash_amount": 0.1} for n, t in enumerate(names) if n % 3 == 0 for q in range((len(days) - 50) // 63)]
     splits = [{"id": "S{}".format(n), "ticker": t, "execution_date": days[100 + n % (len(days) - 150)].isoformat(),
                "split_from": 1, "split_to": 2} for n, t in enumerate(names) if n % 100 == 1]
     for kind, rows in (("dividends", dividends), ("splits", splits)):
