@@ -154,7 +154,8 @@ class ActionsTest(unittest.TestCase):
 
     def test_an_id_less_row_with_a_requested_or_unknown_ticker_refuses_a_filtered_read(self):
         for ticker in ({"ticker": "SPY"}, {}, {"ticker": None}, {"ticker": 42},
-                       {"ticker": True}, {"ticker": []}, {"ticker": {}}):
+                       {"ticker": True}, {"ticker": []}, {"ticker": {}},
+                       {"ticker": ""}, {"ticker": " "}, {"ticker": "\t"}):
             with self.subTest(ticker=ticker), tempfile.TemporaryDirectory() as d:
                 row = dict(ticker, ex_dividend_date="2026-03-05", cash_amount=1.0)
                 write_window(d, "dividends", "2026-01-01", "2026-03-20", [row])

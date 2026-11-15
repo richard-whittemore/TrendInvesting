@@ -171,7 +171,7 @@ def load_actions(directory, kind, first, last, tickers=None):
     conflict is raised only when either copy is one of theirs, so a revised
     figure for an instrument the caller never reads does not refuse it; a
     copy that moves an action onto or off one of them still does. A row without
-    a usable id is ignored only if its ticker is a known string outside the set."""
+    a usable id is ignored only if its ticker is a non-blank string outside the set."""
     windows, rows, seen = [], [], {}
     fields = DIVIDEND_FIELDS if kind == "dividends" else SPLIT_FIELDS
     for path in sorted(glob.glob(os.path.join(directory, kind + "_*_*.json"))):
@@ -181,7 +181,7 @@ def load_actions(directory, kind, first, last, tickers=None):
             row_id = r.get("id")
             if not isinstance(row_id, str) or not row_id.strip():
                 ticker = r.get("ticker")
-                if tickers is not None and isinstance(ticker, str) and ticker not in tickers:
+                if tickers is not None and isinstance(ticker, str) and ticker.strip() and ticker not in tickers:
                     continue
                 raise ConflictingActions("{} row without an id in the window {} to {} (ticker {})".format(
                     kind, rec["from"], rec["session"], r.get("ticker")))
