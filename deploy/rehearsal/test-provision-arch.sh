@@ -119,6 +119,7 @@ elf() {
 # dist DIR MACHINE: the five Go programs, all for MACHINE.
 dist() {
   mkdir -p "$1"
+  printf 'test-build\n' >"$1/BUILD"
   local b
   for b in ti-engine ti-reporter ti-dashboard operator journal-query; do elf "$1/$b" "$2"; done
 }

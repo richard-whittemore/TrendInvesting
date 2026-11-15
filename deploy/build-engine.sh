@@ -74,4 +74,7 @@ for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journa
     -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$stamp" \
     -o "$out/${tool#*:}" "./cmd/${tool%%:*}"
 done
+# The build identity the services step requires beside ti-engine
+# (docs/manual/server.md, "Installing a build").
+git -C "$repo" rev-parse HEAD > "$out/BUILD"
 printf 'build-engine: %s/ti-engine, ti-reporter, ti-dashboard, operator, journal-query, ti-gateway-start, ti-gateway-heal and universe-rank for linux/%s stamped %s\n' "$out" "$goarch" "$stamp"

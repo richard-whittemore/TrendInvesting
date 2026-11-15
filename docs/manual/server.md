@@ -17,15 +17,31 @@ including `ti-engine`. It also installs `ti-data` from that same directory.
 `TI_DATA_BUILD` can select a different data-job file. With `TI_DIST` unset,
 the build directory defaults to `dist/` beside `deploy/`.
 
-The engine is installed to a temporary name in `/opt/trend-investing/bin/`
-and renamed into place. A running engine keeps its open binary and picks up
-the installed binary at its next fresh run. The services step never starts,
-stops or restarts an engine unit.
+When the build directory contains `ti-engine`, it must also contain `BUILD`.
+`deploy/build-engine.sh` writes the commit identity there, including when the
+working tree has local changes. The identity must be non-empty, contain only
+letters, digits, dots, underscores or hyphens, and be at most 64 characters.
+The services step checks this and any installed `bin/BUILD` before replacing
+files. A missing staged program leaves an installed copy in place. Its unit
+fails only if no copy is installed.
 
-Before replacing an existing engine, the services step keeps a copy as
-`ti-engine.<old BUILD>.bak` in that folder when `bin/BUILD` is present,
-or `ti-engine.bak` otherwise. If the build directory includes `BUILD`,
-the services step copies it into `bin/BUILD` after installing the engine.
+If the staged engine has exactly the same bytes as the installed engine,
+the services step leaves the engine in place, updates `bin/BUILD` through a
+temporary file and logs `ti-engine already at <build>`.
+
+For a changed engine, both the engine and `BUILD` are copied to temporary
+names in `/opt/trend-investing/bin/` before making a backup. The engine is
+then renamed into place, followed by `BUILD`. A running engine keeps its open
+binary and picks up the installed binary at its next fresh run. The services
+step never starts, stops or restarts an engine unit.
+
+The backup is named `ti-engine.<old BUILD>.bak`, or `ti-engine.bak` when
+there is no installed `BUILD`. An existing backup with the same bytes can
+be reused. If its bytes differ, the new backup gets a UTC timestamp, such as
+`ti-engine.<old BUILD>.20261115T120000Z.bak`. Backups are never overwritten.
+If that timestamped name also holds different bytes, installation stops
+before replacing the engine. The services step logs the old and new build
+identities and the backup name after installation.
 
 ## What it is and why
 

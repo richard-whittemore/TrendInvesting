@@ -727,6 +727,22 @@ install_mac_adapter_unit() {
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
+  # Validate identities before installation (docs/manual/server.md, Installing a build).
+  local bin=/opt/trend-investing/bin old_build=none new_build=
+  if test -f "$dist/ti-engine"; then
+    if test -f "$dist/BUILD"; then new_build=$(cat "$dist/BUILD"); fi
+    case $new_build in
+      ''|*[!a-zA-Z0-9._-]*) die "ti-engine in $dist has no valid BUILD; deploy/build-engine.sh writes it" ;;
+    esac
+    test "${#new_build}" -le 64 || die "ti-engine in $dist has no valid BUILD; deploy/build-engine.sh writes it"
+    if test -f "$bin/BUILD"; then
+      old_build=$(cat "$bin/BUILD")
+      case $old_build in
+        ''|*[!a-zA-Z0-9._-]*) die "invalid build identity in $bin/BUILD" ;;
+      esac
+      test "${#old_build}" -le 64 || die "invalid build identity in $bin/BUILD"
+    fi
+  fi
   # Preserve the owner's joint login choice; stale selectors must be resolved
   # before installation (docs/manual/server.md, The Traditional IRA's Gateway).
   if test -e "$etc/gateway-login"; then
@@ -798,8 +814,9 @@ GATEWAY_MAJOR=${GATEWAY_MAJOR}
 TI_GATEWAY_RESTART_TIME=11:45 PM
 TI_GATEWAY_COLD_RESTART=09:00
 CONF
-  # The data step (deploy/build-data.sh), from the selected build directory;
-  # without it the unit fails when the timer fires, so the gap is seen.
+  # The data step comes from TI_DIST (default dist/ beside deploy/), unless
+  # TI_DATA_BUILD selects it. A missing staged program leaves any installed
+  # copy in place; its unit fails only if none is installed (server.md).
   local data_job=${TI_DATA_BUILD:-$dist/ti-data}
   if test -f "$data_job"; then
     install -m 0755 "$data_job" /opt/trend-investing/bin/ti-data
@@ -810,8 +827,9 @@ CONF
   # The engine, the reporter, the dashboard, the owner's two tools and universe-rank (the
   # Go ranker the IRAs' data job runs: ti-data@.service), built for the
   # server by deploy/build-engine.sh (the server has no Go)
-  # and copied to dist/ beside deploy/. A missing one is named here, and its
-  # unit fails when it runs, so the gap is seen. The owner records instructions
+  # and staged in TI_DIST (default dist/ beside deploy/). A missing staged
+  # program leaves any installed copy in place; its unit fails only if none
+  # is installed (docs/manual/server.md). The owner records instructions
   # as `sudo -u ti-operator operator ...` and runs `sudo -u ti-trader
   # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
   # PATH includes /usr/local/bin, where each is linked.
@@ -820,24 +838,32 @@ CONF
       if test "$b" = ti-engine; then
         # Preserve the running inode and a backup before the atomic rename
         # (docs/manual/server.md, "Installing a build"). No engine is restarted.
-        local bin=/opt/trend-investing/bin backup=ti-engine.bak
-        if test -f "$bin/BUILD"; then
-          local old_build
-          old_build=$(cat "$bin/BUILD")
-          case $old_build in
-            ''|*[!a-zA-Z0-9._-]*) die "invalid build identity in $bin/BUILD" ;;
-          esac
-          backup="ti-engine.$old_build.bak"
+        if test -f "$bin/ti-engine" && cmp -s "$bin/ti-engine" "$dist/ti-engine"; then
+          install -m 0644 "$dist/BUILD" "$bin/.BUILD.new" || die "could not stage BUILD"
+          mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
+          log "ti-engine already at $new_build"
+          continue
+        fi
+        local backup=none
+        if test -f "$bin/ti-engine"; then
+          backup=ti-engine.bak
+          if test -f "$bin/BUILD"; then backup="ti-engine.$old_build.bak"; fi
+          if test -e "$bin/$backup" && ! cmp -s "$bin/$backup" "$bin/ti-engine"; then
+            backup="${backup%.bak}.$(date -u +%Y%m%dT%H%M%SZ).bak"
+            if test -e "$bin/$backup" && ! cmp -s "$bin/$backup" "$bin/ti-engine"; then
+              die "backup already exists with different contents: $bin/$backup"
+            fi
+          fi
         fi
         install -m 0755 "$dist/$b" "$bin/.ti-engine.new" || die "could not stage ti-engine"
-        if test -f "$bin/ti-engine"; then
+        install -m 0644 "$dist/BUILD" "$bin/.BUILD.new" || die "could not stage BUILD"
+        if test "$backup" != none && ! test -e "$bin/$backup"; then
           cp -p "$bin/ti-engine" "$bin/$backup" || die "could not back up ti-engine"
         fi
         mv -f "$bin/.ti-engine.new" "$bin/ti-engine" || die "could not replace ti-engine"
-        if test -f "$dist/BUILD"; then
-          install -m 0644 "$dist/BUILD" "$bin/.BUILD.new" || die "could not stage BUILD"
-          mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
-        fi
+        mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
+        log "installed ti-engine $new_build over $old_build (backup $backup)"
+        continue
       else
         install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
       fi
