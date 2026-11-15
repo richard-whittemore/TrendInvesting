@@ -16,12 +16,34 @@ from connection import Connection, NotConnected
 from masking import mask_accounts
 
 
+_UNSAFE = re.compile("[\\\\\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+_NAMED = {"\n": r"\n", "\r": r"\r", "\t": r"\t", "\\": "\\\\"}
+
+
+def escape_text(text):
+    """Escape every string IBKR sends before it is printed (manual's balance-key diagnostic, L12).
+
+    Controls, line and direction characters and the backslash itself become
+    visible escapes, so one printed line stays one line and a literal
+    backslash-n differs from an escaped newline.
+    """
+    def one(match):
+        char = match[0]
+        if char in _NAMED:
+            return _NAMED[char]
+        return "\\x{:02x}".format(ord(char)) if ord(char) < 0x100 else "\\u{:04x}".format(ord(char))
+
+    return _UNSAFE.sub(one, text)
+
+
+def _safe(text, account):
+    """Mask raw accounts before escaping (manual's balance-key diagnostic, L12)."""
+    return escape_text(mask_accounts(text, account))
+
+
 def value_shape(value, account):
-    """Mask accounts, collapse digits and escape controls before cutting (manual's balance-key diagnostic, L12)."""
-    shape = re.sub(r"\d+", "9", mask_accounts(value, account))
-    escapes = {"\n": r"\n", "\r": r"\r", "\t": r"\t"}
-    shape = re.sub(r"[\x00-\x1f\x7f-\x9f]",
-                   lambda match: escapes.get(match[0], r"\x{:02x}".format(ord(match[0]))), shape)
+    """Mask accounts, collapse digits and escape before cutting (manual's balance-key diagnostic, L12)."""
+    shape = escape_text(re.sub(r"\d+", "9", mask_accounts(value, account)))
     return shape[:80] + "…" if len(shape) > 80 else shape or "(empty)"
 
 
@@ -41,7 +63,7 @@ def read_summary(conn, account, timeout, emit, cleanup_failures):
             if not conn.connected or conn.last_drop_reason is not None:
                 raise NotConnected("summary link lost")
             if event.name == "error" and len(event.args) >= 2 and event.args[0] == req_id:
-                emit("summary refused by IBKR code {}".format(event.args[1]))
+                emit("summary refused by IBKR code {}".format(_safe(str(event.args[1]), account)))
                 break
             if event.name == "account_summary" and len(event.args) == 5:
                 row_id, row_account, tag, value, currency = event.args
@@ -66,7 +88,7 @@ def read_summary(conn, account, timeout, emit, cleanup_failures):
     emit("summary SettledCash rows={}".format(len(rows)))
     for currency, number, shape in rows:
         emit("summary SettledCash currency={} number={} shape={}".format(
-            currency, "yes" if number else "no", shape))
+            _safe(currency, account), "yes" if number else "no", shape))
     if ended:
         emit("summary ended")
     elif timed_out:
@@ -116,7 +138,7 @@ def command(args, api_factory, out, err):
             values.take(event)
             if values.error is not None:
                 code, _ = values.error
-                failure = "account download refused by IBKR code {}".format(code)
+                failure = "account download refused by IBKR code {}".format(_safe(str(code), account))
                 break
             if event.name == "account_value" and values.open and len(event.args) == 4:
                 key, value, currency, row_account = event.args
@@ -144,7 +166,7 @@ def command(args, api_factory, out, err):
                     cleanup_failures.append("{}: {}".format(type(stopped).__name__, stopped))
 
     for key, currency in sorted(pairs):
-        emit("key={} currency={}".format(key, currency))
+        emit("key={} currency={}".format(_safe(key, account), _safe(currency, account)))
     ended = values is not None and values.ended
     emit("download ended" if ended else "download did NOT end within {:g}s".format(args.timeout))
     present = {key for key, _ in pairs}
@@ -153,7 +175,8 @@ def command(args, api_factory, out, err):
         emit("needed {} {}".format(key, "present" if key in present else "MISSING"))
     settled = sorted((key, currency) for key, currency in pairs if "settled" in key.lower())
     for key, currency in settled:
-        emit("Settled key={} currency={} shape={}".format(key, currency, shapes[key, currency]))
+        emit("Settled key={} currency={} shape={}".format(
+            _safe(key, account), _safe(currency, account), shapes[key, currency]))
     if not settled:
         emit("Settled keys: none")
     for line in summary_lines:

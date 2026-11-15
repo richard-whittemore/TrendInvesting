@@ -319,9 +319,17 @@ The separate `Settled` lines show every key containing that word, regardless of
 capitalization, and the shape of its last value for each currency. Every run of
 digits becomes a single `9`, so digit counts and amounts stay private. Account
 numbers are masked before shaping. After masking accounts and collapsing digits,
-control characters are escaped. Newline becomes `\n`, carriage return `\r`, and
-tab `\t`. Other characters below 0x20, DEL, and C1 controls (0x80–0x9F) become
-`\xHH`. Escaping happens before the length limit, keeping each value shape on
+the shape is escaped, and every other string IBKR sends that this command prints
+(each balance key name and each currency, in the key lines, the `Settled` lines
+and the summary rows) has its account numbers masked before it is escaped the
+same way, so nothing IBKR sends can start a new line or pass for one of this
+command's own status lines. Newline becomes
+`\n`, carriage return `\r`, and tab `\t`. Other characters below 0x20, DEL, and
+C1 controls (0x80–0x9F) become `\xHH`. The Unicode line and paragraph separators
+(U+2028, U+2029) and the direction overrides (U+202A–U+202E, U+2066–U+2069)
+become `\uHHHH`. A backslash prints as two backslashes, so a name that really
+contains a backslash followed by `n` (printed `\\n`) is never confused with an
+escaped newline (printed `\n`). Escaping happens before the length limit, keeping each value shape on
 one output line. An empty value prints `shape=(empty)` and a
 shape longer than 80 characters is cut to 80 followed by `…`. For example,
 `SettledCashByDate` might produce either of these shapes, showing whether it
