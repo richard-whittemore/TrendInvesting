@@ -40,7 +40,8 @@ class Gap(Exception):
 
 
 class ConflictingActions(Exception):
-    """Two recordings hold different copies of one corporate action."""
+    """Two recordings hold different copies of one corporate action, or a
+    recorded corporate action has no usable id."""
 
 
 def _path(directory, day):
