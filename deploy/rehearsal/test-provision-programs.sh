@@ -137,6 +137,28 @@ check_units() {
 }
 
 export TI_DIST=$work/dist
+# A release-managed installation refuses services before any bin write
+# (docs/manual/server.md, Installing a build), even without a staged engine.
+while IFS= read -r program; do
+  printf 'installed %s\n' "$program" >"$bin/$program"
+done <"$work/programs"
+printf 'installed data\n' >"$bin/ti-data"
+printf 'installed-build\n' >"$bin/BUILD"
+cp -R "$bin" "$work/managed-bin"
+mkdir -p "$work/root/opt/trend-investing/releases"
+printf 'v1.2.3\n' >"$work/root/opt/trend-investing/releases/current"
+for staged_engine in present absent; do
+  rm -rf "$bin"
+  cp -R "$work/managed-bin" "$bin"
+  if test "$staged_engine" = absent; then mv "$work/dist/ti-engine" "$work/staged-engine"; fi
+  run_scenario
+  test "$status" != 0 || fail "managed installation accepted services with engine $staged_engine"
+  grep -Fq 'this installation is managed by ti-release (releases/current names v1.2.3); put builds in place with ti-release, not services (docs/manual/server.md, Installing a build)' "$work/out" || fail 'missing release-managed diagnostic'
+  diff -r "$work/managed-bin" "$bin" >/dev/null || fail "managed installation changed bin with engine $staged_engine"
+  if grep -q '^install ' "$work/calls"; then fail 'managed installation installed files'; fi
+  if test "$staged_engine" = absent; then mv "$work/staged-engine" "$work/dist/ti-engine"; fi
+done
+rm "$work/root/opt/trend-investing/releases/current"
 printf 'old engine\n' >"$bin/ti-engine"
 printf 'old-build\n' >"$bin/BUILD"
 # A hard link models the old inode held open by a running engine.

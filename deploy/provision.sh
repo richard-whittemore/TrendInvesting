@@ -737,6 +737,12 @@ valid_build_identity() {
 }
 
 step_services() {
+  # Release-managed builds are installed through ti-release
+  # (docs/manual/server.md, Installing a build).
+  local current=/opt/trend-investing/releases/current
+  if test -e "$current"; then
+    die "this installation is managed by ti-release (releases/current names $(cat "$current")); put builds in place with ti-release, not services (docs/manual/server.md, Installing a build)"
+  fi
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
   # Validate identities before installation (docs/manual/server.md, Installing a build).

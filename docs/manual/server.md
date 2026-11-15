@@ -10,7 +10,13 @@ provisioner and units: [mac-mini](mac-mini.md) says what differs there.*
 
 ## Installing a build
 
-Copy the built programs to the server, then run
+On a ti-release-managed server, where
+`/opt/trend-investing/releases/current` exists, use `ti-release` to install
+builds. It records the release tag in `bin/BUILD`. The services step refuses
+before replacing any program on these servers.
+
+For a server installed through services, copy the built programs to the
+server, then run
 `sudo env TI_DIST=/path/to/build deploy/provision.sh services` from the checkout.
 The services step installs all eight programs from `deploy/build-engine.sh`,
 including `ti-engine`. It also installs `ti-data` from that same directory.
@@ -18,9 +24,11 @@ including `ti-engine`. It also installs `ti-data` from that same directory.
 the build directory defaults to `dist/` beside `deploy/`.
 
 When the build directory contains `ti-engine`, it must also contain `BUILD`.
-`deploy/build-engine.sh` writes the commit identity there, including when the
-working tree has local changes. The identity must be non-empty, contain only
-letters, digits, dots, underscores or hyphens, and be at most 64 characters.
+`deploy/build-engine.sh` writes the build stamp of a clean, committed tree
+there. A dirty tree is refused. `TI_ALLOW_DIRTY=1` is for local experiments
+only and must never be used for a server build. The identity must be one
+non-empty ASCII line, contain only letters, digits, dots, underscores or
+hyphens, and be at most 64 characters, with an optional final newline.
 The services step checks this and any installed `bin/BUILD` before replacing
 files. A missing staged program leaves an installed copy in place. Its unit
 fails only if no copy is installed.
