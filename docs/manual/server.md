@@ -8,6 +8,25 @@ need to know to look after it. Paper trading runs here. The Mac mini's
 container is only a local rehearsal of this server, set up by the same
 provisioner and units: [mac-mini](mac-mini.md) says what differs there.*
 
+## Installing a build
+
+Copy the built programs to the server, then run
+`sudo env TI_DIST=/path/to/build deploy/provision.sh services` from the checkout.
+The services step installs all eight programs from `deploy/build-engine.sh`,
+including `ti-engine`. It also installs `ti-data` from that same directory.
+`TI_DATA_BUILD` can select a different data-job file. With `TI_DIST` unset,
+the build directory defaults to `dist/` beside `deploy/`.
+
+The engine is installed to a temporary name in `/opt/trend-investing/bin/`
+and renamed into place. A running engine keeps its open binary and picks up
+the installed binary at its next fresh run. The services step never starts,
+stops or restarts an engine unit.
+
+Before replacing an existing engine, the services step keeps a copy as
+`ti-engine.<old BUILD>.bak` in that folder when `bin/BUILD` is present,
+or `ti-engine.bak` otherwise. If the build directory includes `BUILD`,
+the services step copies it into `bin/BUILD` after installing the engine.
+
 ## What it is and why
 
 One virtual machine at AWS Lightsail: Ubuntu 24.04 LTS, x86_64 (IBKR ships
@@ -22,7 +41,7 @@ client: the rendered IBC settings reject incoming connections from any address
 but the server's own and trust none. The firewall also denies ports 4001–4004,
 but that is a second layer, not the guard: Tailscale's own rules let tailnet
 traffic through before the firewall looks. On a server set up earlier, apply
-all of this with: `git pull`, `sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh` into `/usr/local/libexec/trend-investing`. `services` reinstalls the five programs (`ti-data`, `ti-reporter`, `ti-dashboard`, `operator`, `journal-query`) found in the checkout's `dist/`, and never `ti-engine`. `dist/` on this server holds the builds copied from the Mac at the first install and has not been changed since. That holds until the first `ti-release`; after that, run `services` only with `dist/` moved aside (or do upgrades only through `ti-release`). If you are unsure, move `dist/` aside before running `services` (the programs already installed then stay)), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
+all of this with: `git pull`, `sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh` into `/usr/local/libexec/trend-investing`. `services` installs every available built program, including `ti-engine`, from `TI_DIST` (the checkout's `dist/` by default). Running engines pick up the new binary at their next fresh run. `dist/` on this server holds the builds copied from the Mac at the first install and has not been changed since. That holds until the first `ti-release`; after that, run `services` only with `dist/` moved aside (or do upgrades only through `ti-release`). If you are unsure, move `dist/` aside before running `services` (the programs already installed then stay)), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
 start expect an IBKR Mobile prompt). `services` copies the repository's engine
 `.env` files over `/etc/trend-investing/engines/` and keeps every `.config`
 already there (see the caution under the file table). Then check, as the owner: the Gateway log shows `Login has completed`, and `sudo grep -E '^(AcceptIncomingConnectionAction|TrustedTwsApiClientIPs)=' /run/ti-gateway/config.ini` prints `AcceptIncomingConnectionAction=reject` and `TrustedTwsApiClientIPs=` (an empty list). The guards are: the IBC files' modes; those two settings (the real guard); the Gateway's read-only API, which holds in dry-run only (once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices before turning read-only off); and the firewall's deny of ports 4001 and 4002, a second layer that Tailscale's own input rules may bypass. Closing the port at the network level for tailnet devices is done with Tailscale access rules, a separate owner step. Each `provision.sh` step is safe to repeat.

@@ -579,7 +579,8 @@ elf_machine() {
 # Go program in DIST is not an ELF file for this machine's architecture
 # (dist/ built for the other machine: deploy/build-engine.sh builds
 # linux/amd64 for Lightsail, linux/arm64 with --arch arm64 for the Mac mini).
-# ti-engine is checked too, though the owner installs it by hand.
+# Includes ti-engine, installed atomically by services (docs/manual/server.md,
+# "Installing a build").
 require_native_programs() {
   local dist=$1 machine want b got
   machine=$(uname -m)
@@ -797,27 +798,49 @@ GATEWAY_MAJOR=${GATEWAY_MAJOR}
 TI_GATEWAY_RESTART_TIME=11:45 PM
 TI_GATEWAY_COLD_RESTART=09:00
 CONF
-  # The data step (deploy/build-data.sh), when its file is beside deploy/;
+  # The data step (deploy/build-data.sh), from the selected build directory;
   # without it the unit fails when the timer fires, so the gap is seen.
-  local data_job=${TI_DATA_BUILD:-$here/../dist/ti-data}
+  local data_job=${TI_DATA_BUILD:-$dist/ti-data}
   if test -f "$data_job"; then
     install -m 0755 "$data_job" /opt/trend-investing/bin/ti-data
     log "installed the data step from $data_job"
   else
     log "no $data_job: the data step is not installed (deploy/build-data.sh builds it)"
   fi
-  # The reporter, the dashboard, the owner's two tools and universe-rank (the
+  # The engine, the reporter, the dashboard, the owner's two tools and universe-rank (the
   # Go ranker the IRAs' data job runs: ti-data@.service), built for the
-  # server beside ti-engine by deploy/build-engine.sh (the server has no Go)
+  # server by deploy/build-engine.sh (the server has no Go)
   # and copied to dist/ beside deploy/. A missing one is named here, and its
   # unit fails when it runs, so the gap is seen. The owner records instructions
   # as `sudo -u ti-operator operator ...` and runs `sudo -u ti-trader
   # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
   # PATH includes /usr/local/bin, where each is linked.
-  local dist=${TI_DIST:-$here/../dist} b
-  for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start ti-gateway-heal universe-rank; do
+  for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start ti-gateway-heal universe-rank; do
     if test -f "$dist/$b"; then
-      install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
+      if test "$b" = ti-engine; then
+        # Preserve the running inode and a backup before the atomic rename
+        # (docs/manual/server.md, "Installing a build"). No engine is restarted.
+        local bin=/opt/trend-investing/bin backup=ti-engine.bak
+        if test -f "$bin/BUILD"; then
+          local old_build
+          old_build=$(cat "$bin/BUILD")
+          case $old_build in
+            ''|*[!a-zA-Z0-9._-]*) die "invalid build identity in $bin/BUILD" ;;
+          esac
+          backup="ti-engine.$old_build.bak"
+        fi
+        install -m 0755 "$dist/$b" "$bin/.ti-engine.new" || die "could not stage ti-engine"
+        if test -f "$bin/ti-engine"; then
+          cp -p "$bin/ti-engine" "$bin/$backup" || die "could not back up ti-engine"
+        fi
+        mv -f "$bin/.ti-engine.new" "$bin/ti-engine" || die "could not replace ti-engine"
+        if test -f "$dist/BUILD"; then
+          install -m 0644 "$dist/BUILD" "$bin/.BUILD.new" || die "could not stage BUILD"
+          mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
+        fi
+      else
+        install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
+      fi
       log "installed $b from $dist"
     else
       log "no $dist/$b: $b is not installed (deploy/build-engine.sh builds it)"

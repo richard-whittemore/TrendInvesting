@@ -661,8 +661,9 @@ class TemplateUnitTest(unittest.TestCase):
         build = (REPO / "deploy/build-engine.sh").read_text()
         self.assertIn("universe-rank:universe-rank", build)
         provision = (REPO / "deploy/provision.sh").read_text()
-        self.assertRegex(provision, r"for b in ti-reporter ti-dashboard operator journal-query [a-z -]*universe-rank; do")
-        self.assertRegex(provision, r"for b in ti-engine ti-reporter ti-dashboard operator journal-query [a-z -]*universe-rank; do")
+        # Both the architecture check and the services install list it.
+        loops = re.findall(r"for b in ti-engine ti-reporter ti-dashboard operator journal-query [a-z -]*universe-rank; do", provision)
+        self.assertEqual(len(loops), 2, loops)
 
     def test_provisioning_enables_the_iras_timer(self):
         provision = (REPO / "deploy/provision.sh").read_text()

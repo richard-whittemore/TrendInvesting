@@ -35,8 +35,8 @@
 # Install on the server (owner step, see docs/runbooks/lightsail-deployment.md):
 # with dist/ copied beside deploy/, `sudo deploy/provision.sh services`
 # refuses, installing nothing, if any of the eight is not built for the
-# server's architecture, and installs the other seven; then
-#   sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine
+# server's architecture, and installs all eight. A running engine uses the
+# new binary at its next fresh run (docs/manual/server.md, Installing a build).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
