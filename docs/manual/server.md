@@ -57,7 +57,12 @@ client: the rendered IBC settings reject incoming connections from any address
 but the server's own and trust none. The firewall also denies ports 4001–4004,
 but that is a second layer, not the guard: Tailscale's own rules let tailnet
 traffic through before the firewall looks. On a server set up earlier, apply
-all of this with: `git pull`, `sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh` into `/usr/local/libexec/trend-investing`. `services` installs every available built program, including `ti-engine`, from `TI_DIST` (the checkout's `dist/` by default). Running engines pick up the new binary at their next fresh run. `dist/` on this server holds the builds copied from the Mac at the first install and has not been changed since. That holds until the first `ti-release`; after that, run `services` only with `dist/` moved aside (or do upgrades only through `ti-release`). If you are unsure, move `dist/` aside before running `services` (the programs already installed then stay)), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
+all of this with `git pull`, copy a fresh build including `BUILD` into `dist/`
+(or set `TI_DIST` to that build's directory), then run
+`sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh`
+into `/usr/local/libexec/trend-investing` and all available built programs,
+including `ti-engine`, as described in "Installing a build" below. Running
+engines pick up the new binary at their next fresh run), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
 start expect an IBKR Mobile prompt). `services` copies the repository's engine
 `.env` files over `/etc/trend-investing/engines/` and keeps every `.config`
 already there (see the caution under the file table). Then check, as the owner: the Gateway log shows `Login has completed`, and `sudo grep -E '^(AcceptIncomingConnectionAction|TrustedTwsApiClientIPs)=' /run/ti-gateway/config.ini` prints `AcceptIncomingConnectionAction=reject` and `TrustedTwsApiClientIPs=` (an empty list). The guards are: the IBC files' modes; those two settings (the real guard); the Gateway's read-only API, which holds in dry-run only (once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices before turning read-only off); and the firewall's deny of ports 4001 and 4002, a second layer that Tailscale's own input rules may bypass. Closing the port at the network level for tailnet devices is done with Tailscale access rules, a separate owner step. Each `provision.sh` step is safe to repeat.
@@ -1478,13 +1483,10 @@ Paste `policy.hujson` again once you have found the cause.
 - **After every boot:** `sudo ti-unlock`, then approve the Gateway's phone
   prompt ("Unlocking the secrets after a boot").
 - **Every Sunday:** approve the Gateway's phone prompt.
-- **Installing a build:** build on the Mac with `deploy/build-engine.sh`
-  (and `deploy/build-data.sh`), copy `dist/` beside `deploy/`, `sudo install`
-  the engine, and run `sudo deploy/provision.sh services`, which installs the
-  reporter, the dashboard, `operator`, `journal-query` and `ti-data` and
-  restarts the dashboard (`docs/runbooks/lightsail-deployment.md`). A new data job build only with
-  a fresh engine run, or after checking it reproduces the current run's
-  files.
+- **Installing a build:** follow [Installing a build](#installing-a-build)
+  to build and copy a fresh `dist/` including `BUILD`, then install it with
+  `sudo deploy/provision.sh services`. Install a new data job build only with
+  a fresh engine run, or after checking it reproduces the current run's files.
 - **The dashboard on the tailnet:** `sudo tailscale serve --bg 8088`, the
   port its unit listens on.
 

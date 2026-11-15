@@ -47,6 +47,8 @@ build_setting() { go version -m "$1" | awk -F'\t' -v k="$2" '$2 == "build" && in
 # binary (by its ELF header and its recorded GOOS and GOARCH) stamped $stamp.
 check_build() {
   local dir=$1 goarch=$2 machine=$3 p
+  expect "BUILD matches the binary stamp" "$stamp" "$(cat "$dir/BUILD")"
+  LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$dir/BUILD" || expect "BUILD fits services identity validation" valid invalid
   for p in $programs; do
     expect "$p is an ELF file for $goarch" "$machine" "$(elf_machine "$dir/$p")"
     expect "$p records GOOS linux" linux "$(build_setting "$dir/$p" GOOS)"

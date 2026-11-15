@@ -84,11 +84,35 @@ cat >"$work/scenario.sh" <<'SCENARIO'
   }
   date() { echo 20261115T120000Z; }
   mv() { record mv "$@"; guard "$@"; command mv "$@"; }
-  cp() { record cp "$@"; guard "$@"; command cp "$@"; }
+  cp() {
+    record cp "$@"; guard "$@"
+    if test "${FAIL_BACKUP_COPY:-0}" = 1 && test "${*: -2:1}" = "$bin/ti-engine"; then
+      printf partial >"${*: -1}"
+      return 1
+    fi
+    command cp "$@"
+  }
   rm() { guard "$@"; command rm "$@"; }
   ln() { record ln "$@"; }
   runuser() { record runuser "$@"; }
-  systemctl() { record systemctl "$@"; }
+  systemctl() {
+    record systemctl "$@"
+    local arg verb= engine=0 now=0
+    for arg in "$@"; do
+      case $arg in
+        ti-engine*) engine=1 ;;
+        --now) now=1 ;;
+        start|stop|restart|try-restart|reload|reload-or-restart|try-reload-or-restart|kill|isolate|enable|disable) verb=$arg ;;
+      esac
+    done
+    if test "$engine" = 1; then
+      case $verb in
+        enable|disable) test "$now" != 1 || { record forbidden-engine-state-change; return 97; } ;;
+        '') ;;
+        *) record forbidden-engine-state-change; return 97 ;;
+      esac
+    fi
+  }
   : >"$work/calls"
   step_services
 SCENARIO
@@ -97,6 +121,9 @@ run_scenario() {
   bash -e "$work/scenario.sh" >"$work/out" 2>&1
   status=$?
   set -e
+  if grep -q '^forbidden-engine-state-change$' "$work/calls"; then
+    fail 'services changed an engine unit running state'
+  fi
 }
 run_services() {
   run_scenario
@@ -106,9 +133,6 @@ run_services() {
   fi
 }
 check_units() {
-  if grep -E '^systemctl (start|stop|restart|try-restart|reload-or-restart|reload-or-try-restart|enable.*--now|disable.*--now).*ti-engine@' "$work/calls"; then
-    fail 'services changed an engine unit running state'
-  fi
   grep -q '^systemctl restart ti-dashboard.service$' "$work/calls" || fail 'live systemctl branch was not exercised'
 }
 
@@ -131,9 +155,14 @@ grep -E "^mv .*${bin}/.* ${bin}/ti-engine$" "$work/calls" >/dev/null || fail 'en
 check_units
 
 rm -f "$bin/BUILD"
+chmod 0600 "$bin/ti-engine"
+ln "$bin/ti-engine" "$work/identical-engine"
 export TI_DATA_BUILD=$work/override/ti-data
 run_services
 test ! -e "$bin/ti-engine.bak" || fail 'identical engine was backed up'
+test "$bin/ti-engine" -ef "$work/identical-engine" || fail 'identical engine inode replaced'
+test -x "$bin/ti-engine" || fail 'identical engine executable mode not restored'
+grep -Fxq "chown root:root $bin/ti-engine" "$work/calls" || fail 'identical engine ownership not restored'
 grep -q "ti-engine already at new-build" "$work/out" || fail 'identical engine was not logged'
 if grep -E "(install|cp|mv).*($bin/\.ti-engine.new|$bin/ti-engine$)" "$work/calls"; then fail 'identical engine was staged or renamed'; fi
 cmp -s "$TI_DATA_BUILD" "$bin/ti-data" || fail 'explicit TI_DATA_BUILD was ignored'
@@ -180,6 +209,35 @@ test "$status" != 0 || fail 'accepted overlong installed BUILD'
 grep -qx 'keep engine' "$bin/ti-engine" || fail 'invalid installed identity replaced engine'
 printf 'keep-build\n' >"$bin/BUILD"
 
+for target in "$work/dist/BUILD" "$bin/BUILD"; do
+  for malformed in nul trailing-nul extra-newline embedded-newline non-ascii; do
+    printf 'keep engine\n' >"$bin/ti-engine"
+    printf 'new-build\n' >"$work/dist/BUILD"
+    printf 'keep-build\n' >"$bin/BUILD"
+    case $malformed in
+      nul) printf 'valid\000suffix\n' >"$target" ;;
+      trailing-nul) printf 'valid\000' >"$target" ;;
+      extra-newline) printf 'valid\n\n' >"$target" ;;
+      embedded-newline) printf 'valid\nother' >"$target" ;;
+      non-ascii) printf 'valid\377\n' >"$target" ;;
+    esac
+    run_scenario
+    test "$status" != 0 || fail "accepted $malformed in $target"
+    grep -qx 'keep engine' "$bin/ti-engine" || fail 'malformed BUILD replaced engine'
+    if grep -q '^install ' "$work/calls"; then fail 'malformed BUILD installed files'; fi
+  done
+done
+printf 'keep engine\n' >"$bin/ti-engine"
+printf 'new-build' >"$work/dist/BUILD"
+printf 'keep-build\n' >"$bin/BUILD"
+export FAIL_BACKUP_COPY=1
+run_scenario
+test "$status" != 0 || fail 'failed backup copy succeeded'
+test ! -e "$bin/ti-engine.keep-build.bak" || fail 'failed copy published partial backup'
+grep -qx 'keep engine' "$bin/ti-engine" || fail 'failed backup replaced engine'
+unset FAIL_BACKUP_COPY
+rm -f "$bin/ti-engine.keep-build.bak"
+
 printf 'earlier backup\n' >"$bin/ti-engine.keep-build.bak"
 run_services
 grep -qx 'earlier backup' "$bin/ti-engine.keep-build.bak" || fail 'differing backup overwritten'
@@ -195,7 +253,10 @@ build_stage = next(i for i, c in enumerate(calls) if c.startswith('install ') an
 backup = next(i for i, c in enumerate(calls) if c.startswith('cp '))
 engine_move = calls.index(f'mv -f {b}/.ti-engine.new {b}/ti-engine')
 build_move = calls.index(f'mv -f {b}/.BUILD.new {b}/BUILD')
-assert engine_stage < build_stage < backup < engine_move < build_move
+backup_move = calls.index(f'mv -f {b}/.ti-engine.bak.new {b}/ti-engine.keep-build.20261115T120000Z.bak')
+assert calls[backup].endswith(b + '/.ti-engine.bak.new')
+assert engine_stage < build_stage < backup < backup_move < engine_move < build_move
+assert Path(b + '/BUILD').read_bytes() == b'new-build\n'
 PYCODE
 
 # A retry in the same second preserves an existing timestamped backup too.
@@ -218,19 +279,43 @@ printf '#!/bin/bash\nmkdir -p bin\necho engine >bin/ti-engine\n' >"$work/build-t
 cat >"$work/build-tools/go" <<'GO'
 #!/bin/bash
 while test "$1" != -o; do shift; done
+test ! -e "$BUILD_OUTPUT/BUILD" || { echo 'BUILD visible during compilation' >>"$BUILD_OUTPUT/observed"; }
+if test "${FAIL_GO_BUILD:-0}" = 1; then exit 1; fi
 echo tool >"$2"
 GO
 chmod +x "$work/build-repo/scripts/build-stamp.sh" "$work/build-tools/"*
 git -C "$work/build-repo" init -q
 git -C "$work/build-repo" add .
 git -C "$work/build-repo" -c user.name=Test -c user.email=test@example.com commit -qm fixture
+export BUILD_OUTPUT=$work/build-output
 set +e
 PATH="$work/build-tools:$PATH" bash -e "$work/build-repo/deploy/build-engine.sh" --out "$work/build-output" >"$work/build-out" 2>&1
 status=$?
 set -e
 test "$status" = 0 || fail 'build of a clean tree failed'
-git -C "$work/build-repo" rev-parse HEAD >"$work/expected-build"
-cmp -s "$work/expected-build" "$work/build-output/BUILD" || fail 'build did not write HEAD to selected output BUILD'
+printf 'test-clean-tree\n' >"$work/expected-build"
+cmp -s "$work/expected-build" "$work/build-output/BUILD" || fail 'build did not write binary stamp to selected output BUILD'
+
+for failing_tool in make go; do
+  printf 'stale-build\n' >"$BUILD_OUTPUT/BUILD"
+  if test "$failing_tool" = make; then
+    cat >"$work/build-tools/make" <<'MAKE'
+#!/bin/bash
+test ! -e "$BUILD_OUTPUT/BUILD" || echo visible >"$BUILD_OUTPUT/observed"
+exit 1
+MAKE
+  else
+    printf '#!/bin/bash\nmkdir -p bin\necho engine >bin/ti-engine\n' >"$work/build-tools/make"
+  fi
+  set +e
+  FAIL_GO_BUILD=1 PATH="$work/build-tools:$PATH" bash -e "$work/build-repo/deploy/build-engine.sh" --out "$BUILD_OUTPUT" >"$work/build-out" 2>&1
+  status=$?
+  set -e
+  test "$status" != 0 || fail "failed $failing_tool build succeeded"
+  test ! -e "$BUILD_OUTPUT/BUILD" || fail "failed $failing_tool build retained stale BUILD"
+  test ! -e "$BUILD_OUTPUT/observed" || fail 'BUILD existed during compilation'
+  rm -f "$BUILD_OUTPUT/observed"
+done
 
 if test "$failures" -gt 0; then echo "$failures provisioning program test(s) failed" >&2; exit 1; fi
 echo 'provision programs tests passed'

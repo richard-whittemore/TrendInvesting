@@ -496,11 +496,17 @@ commit_on_main() {
 # (this runs where set -e is off) and the installed files are compared with
 # the checksums, so a failed copy or rename returns non-zero.
 install_from() {
-  local dir=$1 p
+  local dir=$1 p identity=${2:-${1##*/}}
+  if test "$identity" = initial && test -f "$dir/BUILD"; then identity=$(cat "$dir/BUILD"); fi
+  # Keep the installed identity with the engine for the services backup
+  # label (docs/manual/server.md, "Installing a build").
+  install -m 0644 /dev/null "$bin/.BUILD.new" || return 1
+  printf '%s\n' "$identity" >"$bin/.BUILD.new" || return 1
   for p in $(listed "$dir"); do
     install -m 0755 "$dir/$p" "$bin/.$p.new" || return 1
     mv -f "$bin/.$p.new" "$bin/$p" || { rm -f "$bin/.$p.new"; return 1; }
   done
+  mv -f "$bin/.BUILD.new" "$bin/BUILD" || return 1
   install -d -m 0755 "$link_dir" || return 1
   for p in operator journal-query; do
     if test -x "$bin/$p"; then ln -sfn "$bin/$p" "$link_dir/$p" || return 1; fi
@@ -561,6 +567,7 @@ snapshot_installed() {
   local d=$releases/initial p
   rm -rf "$d"
   mkdir -p "$d"
+  if test -f "$bin/BUILD"; then cp "$bin/BUILD" "$d/BUILD"; fi
   : >"$d/checksums.txt"
   for p in $programs; do
     test -f "$bin/$p" || continue
@@ -660,7 +667,7 @@ if test "$mode" = release; then
     fi
   fi
   ensure_window
-  if ! install_from "$stage" || ! restart_dashboard_verified; then
+  if ! install_from "$stage" "$tag" || ! restart_dashboard_verified; then
     log "$tag did not install, or the dashboard did not stay up on it; putting $cur back"
     put_back "$cur" || true
     die "release $tag not installed; the previous build ($cur) was put back"

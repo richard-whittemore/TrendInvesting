@@ -724,23 +724,29 @@ install_mac_adapter_unit() {
       "$here/systemd/ti-adapter@.service" >"$unit_dir/ti-adapter@.service"
 }
 
+# Validate the raw identity before shell substitution can discard bytes
+# (docs/manual/server.md, "Installing a build"). Accept one ASCII line,
+# with an optional final newline, bounded for backup filenames.
+valid_build_identity() {
+  test -f "$1" &&
+    test "$(wc -c <"$1")" -le 65 &&
+    test "$(wc -l <"$1")" -le 1 &&
+    test "$(LC_ALL=C awk 'END {print NR}' "$1")" -eq 1 &&
+    test "$(LC_ALL=C tr -d 'A-Za-z0-9._\n-' <"$1" | wc -c)" -eq 0 &&
+    LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$1"
+}
+
 step_services() {
   local dist=${TI_DIST:-$here/../dist} b
   require_native_programs "$dist"
   # Validate identities before installation (docs/manual/server.md, Installing a build).
   local bin=/opt/trend-investing/bin old_build=none new_build=
   if test -f "$dist/ti-engine"; then
-    if test -f "$dist/BUILD"; then new_build=$(cat "$dist/BUILD"); fi
-    case $new_build in
-      ''|*[!a-zA-Z0-9._-]*) die "ti-engine in $dist has no valid BUILD; deploy/build-engine.sh writes it" ;;
-    esac
-    test "${#new_build}" -le 64 || die "ti-engine in $dist has no valid BUILD; deploy/build-engine.sh writes it"
+    valid_build_identity "$dist/BUILD" || die "ti-engine in $dist has no valid BUILD; deploy/build-engine.sh writes it"
+    new_build=$(cat "$dist/BUILD")
     if test -f "$bin/BUILD"; then
+      valid_build_identity "$bin/BUILD" || die "invalid build identity in $bin/BUILD"
       old_build=$(cat "$bin/BUILD")
-      case $old_build in
-        ''|*[!a-zA-Z0-9._-]*) die "invalid build identity in $bin/BUILD" ;;
-      esac
-      test "${#old_build}" -le 64 || die "invalid build identity in $bin/BUILD"
     fi
   fi
   # Preserve the owner's joint login choice; stale selectors must be resolved
@@ -839,8 +845,10 @@ CONF
         # Preserve the running inode and a backup before the atomic rename
         # (docs/manual/server.md, "Installing a build"). No engine is restarted.
         if test -f "$bin/ti-engine" && cmp -s "$bin/ti-engine" "$dist/ti-engine"; then
-          install -m 0644 "$dist/BUILD" "$bin/.BUILD.new" || die "could not stage BUILD"
+          printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
           mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
+          chown root:root "$bin/ti-engine"
+          chmod 0755 "$bin/ti-engine"
           log "ti-engine already at $new_build"
           continue
         fi
@@ -856,9 +864,10 @@ CONF
           fi
         fi
         install -m 0755 "$dist/$b" "$bin/.ti-engine.new" || die "could not stage ti-engine"
-        install -m 0644 "$dist/BUILD" "$bin/.BUILD.new" || die "could not stage BUILD"
+        printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
         if test "$backup" != none && ! test -e "$bin/$backup"; then
-          cp -p "$bin/ti-engine" "$bin/$backup" || die "could not back up ti-engine"
+          cp -p "$bin/ti-engine" "$bin/.ti-engine.bak.new" || die "could not back up ti-engine"
+          mv -f "$bin/.ti-engine.bak.new" "$bin/$backup" || die "could not publish ti-engine backup"
         fi
         mv -f "$bin/.ti-engine.new" "$bin/ti-engine" || die "could not replace ti-engine"
         mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"

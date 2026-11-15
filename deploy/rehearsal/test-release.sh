@@ -181,6 +181,7 @@ fresh_server() {
   mkdir -p "$TI_PREFIX/bin" "$TI_LINK_DIR"
   local p
   for p in $programs; do fake_program "$TI_PREFIX/bin/$p" "echo $p hand"; chmod 0755 "$TI_PREFIX/bin/$p"; done
+  printf 'hand-build\n' >"$TI_PREFIX/bin/BUILD"
   : >"$work/ctl.log"
   rm -f "$work/ctl.log.lists" "$work/ctl.log.active" "$work/ctl.log.maint" "$work/ctl.log.opencalls" "$work/ctl.log.other" "$work/ctl.log.start3" "$work/ctl.log.busy"
   : >"$work/gh.log"
@@ -243,7 +244,9 @@ state() { cat "$TI_PREFIX/releases/$1" 2>/dev/null || echo none; }
 nonzero() { test "$1" -ne 0 && echo nonzero || echo "$1"; }
 not_current() { if test "$(state current)" = "$2"; then fail "$1: current is $2"; fi; }
 all_are() { # description build: every program in bin is that build's
-  local p
+  local p identity=$2
+  if test "$identity" = hand; then identity=hand-build; fi
+  expect "$1: BUILD" "$identity" "$(cat "$TI_PREFIX/bin/BUILD")"
   for p in $programs; do expect "$1: $p" "echo $p $2" "$(installed "$p")"; done
 }
 
