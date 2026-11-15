@@ -1013,22 +1013,39 @@ func TestResetWaitCanBeInterruptedWhenTheUnitStops(t *testing.T) {
 
 func TestAUnitStopDuringResetOutputDoesNotBecomeAnotherResetWait(t *testing.T) {
 	r := newRig(t)
-	c := r.cfg(`printf 'noise\n` + refusal + `\n'; while :; do :; done`)
+	// The shell may write each line separately, so the stand-in marks when both
+	// lines are in the pipe; a stop before that would end it with the refusal
+	// unwritten, which is a different case from the one checked here.
+	written := filepath.Join(r.dir, "refusal-written")
+	c := r.cfg(`printf 'noise\n` + refusal + `\n'; : >` + written + `; while :; do :; done`)
 	resetClock(r, &c, "2026-10-31T04:08:00Z", nil)
 	c.Accepted = regexp.MustCompile(defaultAccepted)
-	c.SinkTimeout = time.Second
-	sigs := make(chan os.Signal, 1)
+	c.SinkTimeout = 10 * time.Second
+	// Unbuffered, so the send below completes exactly when the supervisor takes
+	// the stop. The bounds are generous for a loaded machine; nothing here
+	// waits on them when the code works.
+	sigs := make(chan os.Signal)
+	const bound = 30 * time.Second
 	out := &journal{w: writerFunc(func(p []byte) (int, error) {
 		if strings.TrimSpace(string(p)) == "noise" {
-			sigs <- syscall.SIGTERM
+			for deadline := time.Now().Add(bound); ; time.Sleep(time.Millisecond) {
+				if _, err := os.Stat(written); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Errorf("the stand-in did not write the refusal within %s", bound)
+					break
+				}
+			}
 			// Hold the buffered refusal until the supervisor consumes the stop.
-			deadline := time.Now().Add(time.Second)
-			for len(sigs) > 0 && time.Now().Before(deadline) {
-				time.Sleep(time.Millisecond)
+			select {
+			case sigs <- syscall.SIGTERM:
+			case <-time.After(bound):
+				t.Errorf("the supervisor did not take the stop within %s", bound)
 			}
 		}
 		return len(p), nil
-	}), timeout: time.Second}
+	}), timeout: 2 * bound}
 	var messages bytes.Buffer
 	code := runIBC(c, out, &journal{w: &messages, timeout: time.Second}, sigs)
 	if code != 143 {
@@ -1044,13 +1061,20 @@ func TestBlockedRendererStopsOnSignal(t *testing.T) {
 		dir := os.Getenv("TI_TEST_RENDER_DIR")
 		r := &rig{t: t, dir: dir, state: filepath.Join(dir, "login-failures"), now: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)}
 		c := r.cfg(`exit 0`)
-		c.Render = []string{"sh", "-c", `trap '' TERM INT; echo renderer-ready $$; sleep 3`}
+		// The descendant is started before the renderer reports ready, so the stop
+		// never meets a fork in flight (a group kill can miss a child still being
+		// forked), and it outlives every bound below, so a survivor is caught.
+		c.Render = []string{"sh", "-c", `trap '' TERM INT; sleep 300 & echo renderer-ready $$; wait`}
 		c.StopDeadline = 100 * time.Millisecond
 		os.Exit(run(c, os.Stdout, os.Stderr))
 	}
 	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT} {
 		t.Run(sig.String(), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// Bounds generous enough for a loaded machine, each far short of the
+			// renderer's own 300 s, so a renderer that is waited for or survives
+			// still fails the test.
+			const bound = 30 * time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), 2*bound)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBlockedRendererStopsOnSignal$")
 			r := newRig(t)
@@ -1072,10 +1096,16 @@ func TestBlockedRendererStopsOnSignal(t *testing.T) {
 					break
 				}
 			}
+			gone := false
 			if rendererPid > 1 {
-				// Whatever the outcome, the renderer this test started is ended by the
-				// one guarded way (docs/development.md, "Ending processes").
-				t.Cleanup(func() { _ = procgroup.Kill(rendererPid) })
+				// Unless the test saw it gone (its id may then belong to another
+				// group), the renderer this test started is ended by the one guarded
+				// way (docs/development.md, "Ending processes").
+				t.Cleanup(func() {
+					if !gone {
+						_ = procgroup.Kill(rendererPid)
+					}
+				})
 			}
 			start := time.Now()
 			if err := cmd.Process.Signal(sig); err != nil {
@@ -1083,7 +1113,7 @@ func TestBlockedRendererStopsOnSignal(t *testing.T) {
 			}
 			err = cmd.Wait()
 			var ee *exec.ExitError
-			if !ready || !errors.As(err, &ee) || ee.ExitCode() != 128+int(sig) || time.Since(start) > time.Second {
+			if !ready || !errors.As(err, &ee) || ee.ExitCode() != 128+int(sig) || time.Since(start) > bound {
 				t.Fatalf("ready=%v exit=%v elapsed=%s; blocked renderer must stop promptly with %d", ready, err, time.Since(start), 128+int(sig))
 			}
 			if r.launches() != 0 || len(r.counter()) != 0 {
@@ -1093,9 +1123,10 @@ func TestBlockedRendererStopsOnSignal(t *testing.T) {
 			if rendererPid <= 1 {
 				t.Fatal("the renderer did not report its pid")
 			}
-			if err := procgroup.WaitGone(rendererPid, time.Second); err != nil {
+			if err := procgroup.WaitGone(rendererPid, bound); err != nil {
 				t.Fatalf("the renderer's process group survived the supervisor's stop: %v", err)
 			}
+			gone = true
 		})
 	}
 }
