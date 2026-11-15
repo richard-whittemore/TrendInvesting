@@ -162,21 +162,27 @@ def load_actions(directory, kind, first, last, tickers=None):
     ex_dividend_date or cash_amount for dividends; ticker, execution_date,
     split_from or split_to for splits. A dividend's currency or dividend_type
     also conflicts, because they say what that cash_amount is. Other revisions keep
-    the full first copy. A row without an id raises ConflictingActions naming
-    the kind and the recorded window it came from, because it cannot be told
+    the full first copy. An id must be a string with a non-whitespace character.
+    A row without a usable id raises ConflictingActions naming
+    the kind, ticker and recorded window it came from, because it cannot be told
     from a second copy of one action, which would be counted twice.
 
     With ``tickers`` (a set), only those tickers' rows are returned and a
     conflict is raised only when either copy is one of theirs, so a revised
     figure for an instrument the caller never reads does not refuse it; a
-    copy that moves an action onto or off one of them still does."""
+    copy that moves an action onto or off one of them still does. A row without
+    a usable id is ignored only if its ticker is a known string outside the set."""
     windows, rows, seen = [], [], {}
     fields = DIVIDEND_FIELDS if kind == "dividends" else SPLIT_FIELDS
     for path in sorted(glob.glob(os.path.join(directory, kind + "_*_*.json"))):
         rec = record.read(path)
         windows.append((dt.date.fromisoformat(rec["from"]), dt.date.fromisoformat(rec["session"])))
         for r in rec["rows"]:
-            if not r.get("id"):
+            row_id = r.get("id")
+            if not isinstance(row_id, str) or not row_id.strip():
+                ticker = r.get("ticker")
+                if tickers is not None and isinstance(ticker, str) and ticker not in tickers:
+                    continue
                 raise ConflictingActions("{} row without an id in the window {} to {} (ticker {})".format(
                     kind, rec["from"], rec["session"], r.get("ticker")))
             key = ("id", r["id"])
