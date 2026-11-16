@@ -72,6 +72,9 @@ def _cash_usd(row, ticker, day, rates):
     cash = row.get("cash_amount")
     if not _finite(cash) or cash <= 0:
         raise CannotAdjust("{} dividend on {} has cash {!r}".format(ticker, day, cash), day)
+    currency = row.get("currency")
+    if currency != "USD" and fx.valid_currency(currency) and callable(rates):
+        rates = rates()
     try:
         cash = fx.usd(cash, row.get("currency"), day, rates)
     except fx.Unavailable as e:

@@ -183,3 +183,20 @@ class StableConversionTest(unittest.TestCase):
                 published = self.encoded(d, compact)
                 self.add_rates(d, '2026-12-02', usd=8, gbp=4)
                 self.assertEqual(self.encoded(d, compact), published)
+
+
+class LazyRatesTest(unittest.TestCase):
+    def test_member_first_observed_after_foreign_dividend_needs_no_fx(self):
+        for compact in (False, True):
+            with self.subTest(compact=compact), tempfile.TemporaryDirectory() as d:
+                build(d)
+                set_currency(d, 'GBP')
+                for path in Path(d).glob('grouped_*.json'):
+                    rec = record.read(path)
+                    if rec['session'] <= '2026-11-27':
+                        path.unlink()
+                        rec['bars'] = [r for r in rec['bars'] if r['T'] != 'CCC']
+                        record.write(d, rec)
+                with mock.patch.object(fx, 'load', side_effect=AssertionError('unapplied dividend loads FX')):
+                    got = stream(d, compact)
+                self.assertTrue(got)

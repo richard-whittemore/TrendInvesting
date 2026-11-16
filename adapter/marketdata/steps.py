@@ -141,33 +141,35 @@ def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
     raw, url = (get or fx.http_get)(fx.URL)
     fetched = fx.checked(dict(kind=fx.KIND, source=fx.SOURCE, session=str(session),
                               fetched_at=_stamp(now), url=url, body=fx.csv_body(raw)))
-    fx.merge(dict(existing), fetched)
-    new = {day: row for day, row in fetched.items() if day not in existing}
-    # Completed conversion windows cannot gain dates (manual, Dividend currencies).
-    if existing and any(day <= max(existing) for day in new):
-        raise MissingData('ECB backdated fixing within recorded coverage')
-    batches = [new] if not existing else [{day: row} for day, row in sorted(new.items())]
-    path = os.path.join(directory, recording.filename({'kind': fx.KIND, 'session': str(max(fetched))}))
-    if not new:
-        # A bootstrap can hold the fixing under a later date's filename.
-        for candidate in sorted(glob.glob(os.path.join(directory, fx.KIND + '_*.json'))):
-            if max(fetched) in fx.checked(recording.read(candidate)):
-                return candidate
-    for rates in batches:
-        day = max(rates)
-        rec = dict(kind=fx.KIND, source=fx.SOURCE, session=day.isoformat(), fetched_at=_stamp(now),
-                   url=url, body=fx.body(rates))
-        fx.checked(rec, day)
-        path = os.path.join(directory, recording.filename(rec))
+    fx.check_history(existing, fetched)
+    if not existing:
+        rec = dict(kind=fx.KIND, source=fx.SOURCE, session='bootstrap', fetched_at=_stamp(now),
+                   url=url, body=fx.body(fetched))
         try:
             recording.write(directory, rec)
         except recording.AlreadyRecorded:
-            try:
-                winner = fx.checked(recording.read(path), day)
-            except (recording.Corrupt, OSError, ValueError, KeyError, TypeError) as e:
-                raise MissingData('unreadable ECB recording: {}'.format(e)) from None
-            fx.merge(dict(winner), rates)
-            if any(date not in winner for date in rates):
-                raise MissingData('ECB recording does not hold the fetched fixings')
-    fx.load(directory)
-    return path
+            pass
+        existing = fx.load(directory)
+        fx.check_history(existing, fetched)
+    new = {day: row for day, row in fetched.items() if day not in existing}
+    for day, row in sorted(new.items()):
+        rec = dict(kind=fx.KIND, source=fx.SOURCE, session=day.isoformat(), fetched_at=_stamp(now),
+                   url=url, body=fx.body({day: row}))
+        fx.checked(rec, day)
+        written = False
+        try:
+            recording.write(directory, rec)
+            written = True
+        except recording.AlreadyRecorded:
+            pass
+        union = fx.load(directory)
+        fx.check_history(union, fetched)
+        if written:
+            # A concurrently recorded later fixing must not hide a backdated addition
+            # made by this write (manual, Dividend currencies).
+            del union[day]
+            fx.check_history(union, fetched)
+    # Return the recording holding the newest fetched fixing, including a bootstrap.
+    for candidate in sorted(glob.glob(os.path.join(directory, fx.KIND + '_*.json'))):
+        if max(fetched) in fx.checked(recording.read(candidate)):
+            return candidate

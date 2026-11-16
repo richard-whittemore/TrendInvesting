@@ -1500,26 +1500,32 @@ which writes the sessions again from its recordings, and start the adapter
 The momentum data job fetches the ECB's [full history of euro reference
 rates](https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip) and extracts
 the CSV with Python's standard library. The first fetch records one bootstrap
-history file through its latest fixing date. Later fetches record only new
-fixing dates, each in a small immutable `fx-ecb_<fixing-date>.json` containing
+history file named `fx-ecb_bootstrap.json`. Concurrent bootstraps share that
+name and compare the winning recording before adding new dates. Later fetches
+record only new fixing dates, each in a small immutable `fx-ecb_<fixing-date>.json` containing
 that date's rates, source, URL, session and fetch time. Storage grows by about
 1 KB per fixing day after the bootstrap. A fixing already recorded must match
 exactly, including which currencies are available. A difference refuses with
-"ECB revised the <date> fixing" and preserves the recordings. New fixings must
+"ECB revised the <date> fixing" and preserves the recordings. A downloaded
+full history that omits a recorded date up to its own newest fixing refuses
+with "ECB history no longer contains the <date> fixing" before writing.
+The union is reloaded and checked after each write. New fixings must
 be dated after the latest recorded fixing; backdated additions refuse so a
 completed conversion window cannot change. Every fixing must be dated no later
 than the UTC date of its recording's `fetched_at`, checked on write and read.
 
 Encoding reads the union of all FX recordings, rejects conflicting duplicate
-dates. Coverage uses the newest fixing date in that union, including dates
-after the stream's last session; conversion uses only the dividend's prior
-window. FX recordings do not enter the split/dividend manifest that triggers published-file rechecks.
+dates. Coverage includes the newest fixing date in that union and each
+recording's UTC fetch date minus one day, including dates after the stream's
+last session. Conversion uses only the dividend's prior window. FX recordings do not enter the split/dividend manifest that triggers published-file rechecks.
 Rechecking an older session cannot add a backdated action-manifest change.
 The body read has a 120-second monotonic deadline and a 20 MB byte cap.
 The connection uses a 60-second per-operation socket timeout; the data unit
 is bounded by `TimeoutStartSec=1h`. The CSV's declared and actual uncompressed size are capped at 50 MB. Sector labels
 are recorded before the ECB request so an ECB outage preserves that day's
-labels. Missing required conversion input refuses publication. These information
+labels. A network, HTTP, size or deadline failure warns and continues with
+existing recordings. Malformed, revised, withdrawn or backdated histories
+refuse. Missing required conversion input refuses publication. These information
 rates adjust historical prices for ranking and never price an order.
 
 A dividend paid in currency X becomes dollars as cash × (USD per EUR) /
@@ -1528,15 +1534,17 @@ date, from ex-date − 1 through ex-date − 5 calendar days. The ex-date's own
 fixing is never used: the factor's P is the prior session's close. EUR needs
 only USD per EUR; USD passes through unchanged and needs no rate recording.
 
-Let C be the newest fixing date in the union of recorded FX inputs. If
-C < ex-date − 1, the window is incomplete: publication refuses with MissingData
-and a later firing retries, even if an older usable fixing exists or the
-currency is uncovered. Once C ≥ ex-date − 1, an uncovered currency or a window
-with no usable fixing skips that dividend's adjustment. Recorded fixings are
-immutable and new dates must be after C, so later recordings cannot change
-this conversion or skip. A missing or malformed currency is unavailable without
-loading FX and follows the same skip handling. The existing exclusion diagnostics
-name the ticker, ex-date, currency and reason. For a universe member, the
+Let K be the later of the newest recorded fixing date and every recording's
+UTC fetch date minus one day. An archive fetched on day F holds all fixings
+through F − 1. If K < ex-date − 1, the window is incomplete and publication
+refuses with MissingData. A later firing retries, even if an older usable
+fixing exists or the currency is uncovered. Once K ≥ ex-date − 1, an uncovered
+currency or a window with no usable fixing skips that dividend's adjustment.
+Recorded fixings are immutable and new dates must be after the newest
+recorded fixing. A missing or malformed currency is unavailable without
+loading FX and follows the same skip handling. Encoding loads FX only for a
+valid non-USD dividend within the ticker's adjustment window and after its
+first close. The existing exclusion diagnostics name the ticker, ex-date, currency and reason. For a universe member, the
 first trading session on or after that ex-date is omitted from its history,
 so a ranking cannot span the unadjusted jump. Required and held instruments
 retain the existing fail-closed refusal when an adjustment is unavailable.

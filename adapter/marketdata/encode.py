@@ -399,13 +399,19 @@ def _universe_rows(directory, day, rec, max_age_days, named, listing=None):
     return [rows[s] for s in sorted(rows)], skipped
 
 
-def _rates(directory, by_ticker, listing=None):
-    """Union immutable fixings once per encode. USD needs no rate recording."""
-    if not any(fx.valid_currency(r.get("currency")) and r["currency"] != "USD"
-               for _, dividends in by_ticker.values() for r in dividends):
-        return None
-    return fx.load(directory, listing=listing,
-                   read=(lambda path: _read_listed(directory, os.path.basename(path), listing)) if listing is not None else None)
+def _rates(directory, listing=None):
+    """Load the union once, when adjustment needs it (manual, Dividend currencies)."""
+    rates = None
+
+    def load():
+        nonlocal rates
+        if rates is None:
+            rates = fx.load(directory, listing=listing,
+                            read=(lambda path: _read_listed(directory, os.path.basename(path), listing))
+                            if listing is not None else None)
+        return rates
+
+    return load
 
 
 def _factors(ticker, loaded, days, actions, base, rates=None):
@@ -675,7 +681,7 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     for r in _actions(directory, "dividends", start, last, scope):
         by_ticker[r.get("ticker")][1].append(r)
 
-    rates = _rates(directory, by_ticker)
+    rates = _rates(directory)
     factors, out = {}, {}   # out: ticker -> {session left out: reason}
     for ticker in sorted(wanted | members):
         if ticker in named:
@@ -923,7 +929,7 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
     if actions_failed is not None:
         raise actions_failed
 
-    rates = _rates(directory, by_ticker, listing)
+    rates = _rates(directory, listing)
     factors, out = {}, {}   # out: ticker -> the sessions it is left out of, with why
     for ticker in sorted(named | members):
         if ticker in named:

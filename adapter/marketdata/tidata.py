@@ -1416,7 +1416,12 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
         latest = _session_before(latest)
     if session == latest:
         _record_sectors(data, session, sectors_get, now, settle, warn)
-    steps.run_fx(session, data, get=fx_get, now=now, settle=settle)
+    try:
+        steps.run_fx(session, data, get=fx_get, now=now, settle=settle)
+    except steps.MissingData:
+        raise
+    except massive.MarketDataError as e:
+        warn("ECB history fetch failed ({}); continuing with recorded fixings".format(e))
     manifest, spans = _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker,
                                  retracted, rebuild=rebuild_manifest)
     for first, last, path in spans:
