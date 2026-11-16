@@ -136,6 +136,16 @@ class FXRecordingTest(unittest.TestCase):
             with self.subTest(currency=currency), self.assertRaises(fx.Unavailable):
                 fx.usd(1, currency, DAY, fx.parse(CSV))
 
+    def test_only_ascii_uppercase_codes_are_currencies(self):
+        from marketdata import fx
+        for currency in ['US\uff24', '\u0391\u0392\u0393', 'G\u0130P']:
+            with self.subTest(currency=currency):
+                self.assertFalse(fx.valid_currency(currency))
+                with self.assertRaises(fx.Unavailable):
+                    fx.usd(1, currency, DAY, fx.parse(CSV))
+        with self.assertRaises(Exception):
+            fx.parse(CSV.replace('GBP', 'G\u0130P', 1))
+
 
 class ImmutableFixingTest(unittest.TestCase):
     def test_bootstrap_then_only_new_fixings_and_old_session_is_harmless(self):

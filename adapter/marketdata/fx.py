@@ -11,6 +11,7 @@ import http.client
 import io
 import lzma
 import math
+import re
 import os
 import time
 import urllib.error
@@ -59,7 +60,7 @@ def parse(text, allow_empty=False):
             header.pop()
         if (len(header) < 2 or header[0] != 'Date' or 'USD' not in header
                 or len(set(header)) != len(header)
-                or any(len(c) != 3 or not c.isupper() or not c.isalpha() for c in header[1:])):
+                or any(not valid_currency(c) for c in header[1:])):
             raise ValueError('invalid columns')
         out = {}
         for row in rows:
@@ -131,9 +132,13 @@ def require_continuous(rates, covered):
         day += dt.timedelta(days=1)
 
 
+# Three ASCII capitals; str.isupper and str.isalpha also accept other scripts.
+_CURRENCY = re.compile(r'[A-Z]{3}')
+
+
 def valid_currency(currency):
     """Currency syntax accepted by conversion (manual, Dividend currencies)."""
-    return isinstance(currency, str) and len(currency) == 3 and currency.isalpha() and currency.isupper()
+    return isinstance(currency, str) and _CURRENCY.fullmatch(currency) is not None
 
 
 def usd(cash, currency, day, rates):
