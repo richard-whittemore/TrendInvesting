@@ -33,9 +33,9 @@ type rig struct {
 	now   time.Time
 }
 
-// shq single-quotes a path for the stand-in shell; t.TempDir paths hold no
-// single quote, but they may hold a space.
-func shq(p string) string { return "'" + p + "'" }
+// shq single-quotes a path for the stand-in shell; TMPDIR may hold a space
+// or a single quote, which is closed, escaped and reopened.
+func shq(p string) string { return "'" + strings.ReplaceAll(p, "'", `'\''`) + "'" }
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
@@ -1021,7 +1021,7 @@ func TestAUnitStopDuringResetOutputDoesNotBecomeAnotherResetWait(t *testing.T) {
 	// lines are in the pipe; a stop before that would end it with the refusal
 	// unwritten, which is a different case from the one checked here.
 	written := filepath.Join(r.dir, "refusal-written")
-	c := r.cfg(`printf 'noise\n` + refusal + `\n'; : >'` + written + `'; while :; do :; done`)
+	c := r.cfg(`printf 'noise\n` + refusal + `\n'; : >` + shq(written) + `; while :; do :; done`)
 	resetClock(r, &c, "2026-10-31T04:08:00Z", nil)
 	c.Accepted = regexp.MustCompile(defaultAccepted)
 	c.SinkTimeout = 10 * time.Second
