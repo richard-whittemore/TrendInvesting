@@ -166,18 +166,18 @@ class ImmutableFixingTest(unittest.TestCase):
     def test_union_includes_history_recorded_after_stream_and_rejects_conflicts(self):
         with tempfile.TemporaryDirectory() as d:
             rec = dict(kind=fx.KIND, source=fx.SOURCE, session='2026-03-06',
-                       fetched_at='2026-03-06T23:00:00Z', url=fx.URL, body=CSV, covered_before=None)
+                       fetched_at='2026-03-06T23:00:00Z', url=fx.URL, body=CSV + '2026-03-05,2,4,8,\n2026-03-06,2,4,8,\n', covered_before=None)
             record.write(d, rec)
             self.assertEqual(fx.load(d, DAY), fx.parse(CSV))
             rec['session'] = '2026-03-07'
             rec['fetched_at'] = '2026-03-07T23:00:00Z'
-            rec['covered_before'] = '2026-03-05'
+            rec['covered_before'] = '2026-03-06'
             record.write(d, rec)
             self.assertEqual(fx.load(d, DAY), fx.parse(CSV))
             rec['session'] = '2026-03-08'
             rec['fetched_at'] = '2026-03-08T23:00:00Z'
             rec['covered_before'] = '2026-03-06'
-            rec['body'] = CSV.replace(',2,4,', ',3,4,')
+            rec['body'] = rec['body'].replace(',2,4,', ',3,4,')
             record.write(d, rec)
             with self.assertRaisesRegex(steps.MissingData, 'ECB revised the 2026-03-04 fixing'):
                 fx.load(d, DAY)
@@ -237,7 +237,7 @@ class ImmutableFixingTest(unittest.TestCase):
             missing = synthetic_history('Date,USD,GBP\n2023-12-29,N/A,N/A\n2026-03-04,2,4\n')
             path = steps.run_fx(DAY, d, get=lambda url: (archive(missing), url), now=NOW)
             self.assertEqual(fx.parse(record.read(path)['body'])[dt.date(2023, 12, 29)], {})
-            with self.assertRaisesRegex(steps.MissingData, 'ECB'):
+            with self.assertRaisesRegex(fx.MarketDataError, 'ECB'):
                 steps.run_fx(DAY, d, get=lambda url: (archive(missing), 'https://example.com'),
                              now=lambda: NOW() + dt.timedelta(seconds=1))
 
@@ -272,8 +272,9 @@ class PriorFixingTest(unittest.TestCase):
     def test_future_fixing_refused_on_write(self):
         future = CSV + '2026-03-05,5,10,20,\n'
         with tempfile.TemporaryDirectory() as d:
-            with self.assertRaisesRegex(steps.MissingData, 'fetch'):
+            with self.assertRaisesRegex(fx.MarketDataError, 'fetch') as caught:
                 steps.run_fx(DAY, d, get=lambda url: (archive(future), url), now=NOW)
+            self.assertNotIsInstance(caught.exception, steps.MissingData)
             self.assertEqual(list(Path(d).glob('*.json')), [])
 
     def test_future_fixing_refused_on_read(self):
@@ -364,7 +365,7 @@ class CoverageAndMergeTest(unittest.TestCase):
                 return path
             incoming = CSV + '2026-03-05,5,10,20,\n'
             with mock.patch.object(record, 'write', side_effect=concurrent_write):
-                with self.assertRaisesRegex(steps.MissingData, 'chain is broken'):
+                with self.assertRaisesRegex(steps.MissingData, 'treated as complete'):
                     steps.run_fx(DAY, d, get=lambda url: (archive(incoming), url),
                                  now=lambda: dt.datetime(2026, 3, 6, 8, tzinfo=dt.timezone.utc))
 
@@ -446,6 +447,32 @@ class FetchIntegrityTest(unittest.TestCase):
                            dt.date(year, 12, 25), dt.date(year, 12, 26)]:
                 self.assertTrue(fx.target_closed(closed))
             self.assertFalse(fx.target_closed(day + dt.timedelta(days=2)))
+
+    def test_load_refuses_backdated_fixing_after_predecessor_coverage(self):
+        initial = synthetic_history('Date,USD\n2026-04-02,2\n')
+        with tempfile.TemporaryDirectory() as d:
+            record.write(d, dict(kind=fx.KIND, source=fx.SOURCE, session='2026-04-06',
+                                 fetched_at='2026-04-06T08:00:00Z', url=fx.URL,
+                                 body=initial, covered_before=None))
+            path = record.write(d, dict(kind=fx.KIND, source=fx.SOURCE, session='2026-04-07',
+                                        fetched_at='2026-04-07T08:00:00Z', url=fx.URL,
+                                        body='Date,USD\n2026-04-03,2\n', covered_before='2026-04-05'))
+            with self.assertRaises(steps.MissingData) as caught:
+                fx.load(d)
+            self.assertIn(Path(path).name, str(caught.exception))
+            self.assertIn('treated as complete', str(caught.exception))
+
+    def test_load_refuses_sparse_or_stale_bootstrap(self):
+        sparse = 'Date,USD\n2026-11-20,2\n'
+        for text, reason in [(sparse, 'incomplete'), (synthetic_history(sparse), 'stale')]:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as d:
+                path = record.write(d, dict(kind=fx.KIND, source=fx.SOURCE, session='bootstrap',
+                                            fetched_at='2026-11-24T08:00:00Z', url=fx.URL,
+                                            body=text, covered_before=None))
+                with self.assertRaises(steps.MissingData) as caught:
+                    fx.load(d)
+                self.assertIn(Path(path).name, str(caught.exception))
+                self.assertIn(reason, str(caught.exception))
 
     def test_stale_archive_writes_nothing_and_cannot_extend_coverage(self):
         with tempfile.TemporaryDirectory() as d:

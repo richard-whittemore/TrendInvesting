@@ -169,7 +169,10 @@ def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
         fetch_day = dt.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').date()
         rec = dict(kind=fx.KIND, source=fx.SOURCE, session=str(fetch_day),
                    fetched_at=stamp, url=url, body=fx.csv_body(raw))
-        fetched = fx.checked(rec, fetch_day)
+        try:
+            fetched = fx.checked(rec, fetch_day)
+        except MissingData as e:
+            raise fx.MarketDataError('invalid ECB archive: {}'.format(e)) from None
         fx.require_fresh(fetched, fetch_day)
         fx.check_history(existing, fetched)
         boundary = getattr(existing, 'covered_through', dt.date.min)

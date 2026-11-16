@@ -7,6 +7,7 @@ from unittest import mock
 
 from marketdata import encode, fx, record, steps
 from marketdata.tests.test_encode import build, FIRST, LAST, IDENTITY, bar_of
+from marketdata.tests.test_fx import synthetic_history
 
 
 def set_currency(directory, currency):
@@ -17,7 +18,9 @@ def set_currency(directory, currency):
     record.write(directory, rec)
 
 
-def rates_record(directory, text='Date,USD,GBP\n2026-11-26,2,4\n'):
+def rates_record(directory, text='Date,USD,GBP\n2026-11-26,2,4\n2026-11-27,2,4\n'):
+    if text.startswith('Date,'):
+        text = synthetic_history(text)
     return record.write(directory, dict(kind=fx.KIND, source=fx.SOURCE, session=str(LAST),
                                         fetched_at='2026-11-30T23:30:00Z', url=fx.URL, body=text, covered_before=None))
 
@@ -53,7 +56,7 @@ class FXEncodingTest(unittest.TestCase):
     def test_uncovered_and_stale_rates_skip_and_record_via_existing_exclusions(self):
         for compact in (False, True):
             for currency, text, reason in [('ZZZ', 'Date,USD,GBP\n2026-11-27,2,4\n', 'not covered'),
-                                            ('GBP', 'Date,USD,GBP\n2026-11-27,N/A,N/A\n2026-11-21,2,4\n', '5 calendar days'),
+                                            ('GBP', 'Date,USD,GBP\n2026-11-27,2,N/A\n2026-11-26,2,N/A\n2026-11-25,2,N/A\n2026-11-24,2,N/A\n2026-11-23,2,N/A\n2026-11-22,2,N/A\n2026-11-21,2,4\n', '5 calendar days'),
                                             (None, 'Date,USD,GBP\n2026-11-27,2,4\n', 'currency')]:
                 with self.subTest(compact=compact, currency=currency), tempfile.TemporaryDirectory() as d:
                     build(d)
@@ -135,9 +138,10 @@ class StableConversionTest(unittest.TestCase):
             covered = fx.load(directory).covered_through.isoformat()
         except fx.NoRecording:
             covered = None
+        rates = fx.parse(synthetic_history('Date,USD,GBP\n{},{},{}\n'.format(day, usd, gbp)))
         return record.write(directory, dict(kind=fx.KIND, source=fx.SOURCE, session=day, covered_before=covered,
                             fetched_at=day + 'T23:30:00Z', url=fx.URL,
-                            body='Date,USD,GBP\n{},{},{}\n'.format(day, usd, gbp)))
+                            body=fx.body({date: row for date, row in rates.items() if covered is None or date.isoformat() > covered})))
 
     def test_ex_date_fixing_arriving_after_publication_preserves_bytes(self):
         for compact in (False, True):

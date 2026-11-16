@@ -306,15 +306,23 @@ def load(directory, session=None, listing=None, read=None):
             if '_' in suffix and name != record.filename(rec):
                 raise ValueError('fetch timestamp differs from filename')
             recordings.append((rec['fetched_at'], name, rec, incoming))
-        except (record.Corrupt, OSError, ValueError, KeyError, TypeError) as e:
-            raise MissingData('unreadable ECB recording: {}'.format(e)) from None
+        except (record.Corrupt, OSError, ValueError, KeyError, TypeError, MissingData) as e:
+            raise MissingData('unreadable ECB recording {}: {}'.format(name, e)) from None
     rates = {}
     covered = dt.date.min
     for _, name, rec, incoming in sorted(recordings):
         expected = covered.isoformat() if covered != dt.date.min else None
         if 'covered_before' not in rec or rec['covered_before'] != expected:
             raise MissingData('ECB recording chain is broken at {}'.format(name))
-        merge(rates, incoming)
+        try:
+            union = dict(rates)
+            union.update(incoming)
+            check_history(Rates(rates, covered), union)
+            require_continuous(incoming, covered)
+            require_fresh(union, dt.datetime.strptime(rec['fetched_at'], '%Y-%m-%dT%H:%M:%SZ').date())
+            merge(rates, incoming)
+        except MarketDataError as e:
+            raise MissingData('invalid ECB recording {}: {}'.format(name, e)) from None
         covered = max(covered, incoming.covered_through)
     return Rates({day: row for day, row in rates.items() if session is None or day <= session},
                  covered, max(recording[0] for recording in recordings))

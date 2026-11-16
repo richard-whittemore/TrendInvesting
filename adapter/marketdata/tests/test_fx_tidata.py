@@ -83,6 +83,19 @@ class FXJobTest(unittest.TestCase):
             self.assertTrue(job.path(LAST).exists())
             self.assertEqual(list(job.data.glob(fx.KIND + '_*.json')), [])
 
+    def test_future_fixing_download_warns_and_usd_job_publishes(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = MomentumJob(d, ranker=ranker)
+            build(job.data)
+            set_currency(job.data, 'USD')
+            text = synthetic_history('Date,USD\n2026-11-27,2\n') + '2026-12-01,2\n'
+            code, err = self.invoke(job, lambda url: (archive(text), url))
+            self.assertEqual(code, 0, err)
+            self.assertIn('fixing dated after UTC fetch date', err)
+            self.assertIn('continuing with recorded fixings', err)
+            self.assertTrue(job.path(LAST).exists())
+            self.assertEqual(list(job.data.glob(fx.KIND + '_*.json')), [])
+
     def test_fx_does_not_trigger_reencoding_even_in_legacy_manifest(self):
         from marketdata.tests.test_fx_encode import rates_record
         with tempfile.TemporaryDirectory() as d:
@@ -137,7 +150,7 @@ class FXJobTest(unittest.TestCase):
                 elif currency == 'GBP':
                     record.write(job.data, dict(kind=fx.KIND, source=fx.SOURCE, session='2026-11-25',
                                                fetched_at='2026-11-25T23:00:00Z', url=fx.URL,
-                                               body='Date,USD,GBP\n2026-11-25,2,4\n', covered_before=None))
+                                               body=synthetic_history('Date,USD,GBP\n2026-11-25,2,4\n'), covered_before=None))
                 def fail(url):
                     raise fx.MarketDataError('ECB network outage')
                 code, err = self.invoke(job, fail)
