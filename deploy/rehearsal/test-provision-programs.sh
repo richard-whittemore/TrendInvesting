@@ -7,7 +7,7 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 work=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$work"' EXIT
-unset TI_DIST TI_DATA_BUILD TI_TARGET TI_REHEARSAL
+unset TI_DIST TI_DATA_BUILD TI_TARGET TI_REHEARSAL ENGINE_STATE
 mkdir -p "$work/source"
 cp -R "$here/.." "$work/source/deploy"
 # Redirect literal host paths too, including the final binary and its backup.
@@ -97,6 +97,14 @@ cat >"$work/scenario.sh" <<'SCENARIO'
   runuser() { record runuser "$@"; }
   systemctl() {
     record systemctl "$@"
+    if test "${1:-}" = list-units; then
+      test "$*" = "list-units --plain --no-legend --state=activating,deactivating,reloading ti-engine@*" || return 97
+      case ${ENGINE_STATE:-active} in
+        query-failed) return 1 ;;
+        activating|deactivating|reloading) echo "ti-engine@boost.service loaded $ENGINE_STATE" ;;
+      esac
+      return 0
+    fi
     local arg verb= engine=0 now=0
     for arg in "$@"; do
       case $arg in
@@ -137,8 +145,8 @@ check_units() {
 }
 
 export TI_DIST=$work/dist
-# A release-managed installation refuses services before any bin write
-# (docs/manual/server.md, Installing a build), even without a staged engine.
+# A release-managed installation keeps programs while provisioning services
+# and the data step (docs/manual/server.md, Installing a build).
 while IFS= read -r program; do
   printf 'installed %s\n' "$program" >"$bin/$program"
 done <"$work/programs"
@@ -151,14 +159,35 @@ for staged_engine in present absent; do
   rm -rf "$bin"
   cp -R "$work/managed-bin" "$bin"
   if test "$staged_engine" = absent; then mv "$work/dist/ti-engine" "$work/staged-engine"; fi
-  run_scenario
-  test "$status" != 0 || fail "managed installation accepted services with engine $staged_engine"
-  grep -Fq 'this installation is managed by ti-release (releases/current names v1.2.3); put builds in place with ti-release, not services (docs/manual/server.md, Installing a build)' "$work/out" || fail 'missing release-managed diagnostic'
-  diff -r "$work/managed-bin" "$bin" >/dev/null || fail "managed installation changed bin with engine $staged_engine"
-  if grep -q '^install ' "$work/calls"; then fail 'managed installation installed files'; fi
+  rm -f "$work/root/etc/systemd/system/ti-engine@.service"
+  run_services
+  grep -Fq 'programs are managed by ti-release (releases/current names v1.2.3); not installing programs (docs/manual/server.md, Installing a build)' "$work/out" || fail 'missing release-managed diagnostic'
+  while IFS= read -r program; do
+    cmp -s "$work/managed-bin/$program" "$bin/$program" || fail "managed installation changed $program"
+  done <"$work/programs"
+  cmp -s "$work/managed-bin/BUILD" "$bin/BUILD" || fail 'managed installation changed BUILD'
+  cmp -s "$work/dist/ti-data" "$bin/ti-data" || fail 'managed installation skipped data'
+  test -f "$work/root/etc/systemd/system/ti-engine@.service" || fail 'managed installation skipped units'
+  check_units
   if test "$staged_engine" = absent; then mv "$work/staged-engine" "$work/dist/ti-engine"; fi
 done
 rm "$work/root/opt/trend-investing/releases/current"
+# Engine transitions and a failed query preserve the installed engine and BUILD
+# (docs/manual/server.md, Installing a build).
+for state in activating deactivating reloading query-failed; do
+  export ENGINE_STATE=$state
+  run_scenario
+  test "$status" != 0 || fail "accepted engine state $state"
+  cmp -s "$work/managed-bin/ti-engine" "$bin/ti-engine" || fail "$state replaced engine"
+  cmp -s "$work/managed-bin/BUILD" "$bin/BUILD" || fail "$state changed BUILD"
+  if test "$state" = query-failed; then
+    grep -Fq 'could not ask systemd whether an engine unit is mid-restart' "$work/out" || fail 'missing failed-query diagnostic'
+  else
+    grep -Fq 'an engine unit is mid-restart' "$work/out" || fail "missing $state diagnostic"
+  fi
+  if grep -q '\.ti-engine.new' "$work/calls"; then fail "$state staged engine"; fi
+done
+unset ENGINE_STATE
 printf 'old engine\n' >"$bin/ti-engine"
 printf 'old-build\n' >"$bin/BUILD"
 # A hard link models the old inode held open by a running engine.
@@ -338,6 +367,40 @@ MAKE
   test ! -e "$BUILD_OUTPUT/observed" || fail 'BUILD existed during compilation'
   rm -f "$BUILD_OUTPUT/observed"
 done
+
+# Run the rehearsal's compilation block without Docker or Go. Its BUILD must
+# match the engine's embedded stamp (docs/manual/server.md, Installing a build).
+python3 - "$here/../rehearse.sh" "$work" <<'PYCODE' || fail 'rehearsal did not publish its engine stamp'
+from pathlib import Path
+import subprocess
+import sys
+source = Path(sys.argv[1]).read_text()
+work = Path(sys.argv[2])
+block = source[source.index('(cd "$repo" && GOOS='):source.index('# Compile-time clock injection')]
+script = r'''
+set -euo pipefail
+repo=$1
+dist=$2
+mkdir -p "$dist"
+goarch=amd64
+go() {
+  local stamp= arg
+  while test "$#" -gt 0; do
+    arg=$1
+    shift
+    case $arg in
+      -ldflags) stamp=${1##*=}; shift ;;
+      -o) printf '%s\n' "$stamp" >"$1"; shift ;;
+    esac
+  done
+}
+''' + block + r'''
+test -s "$dist/BUILD"
+printf 'rehearsal\n' | cmp - "$dist/BUILD"
+cmp "$dist/ti-engine" "$dist/BUILD"
+'''
+subprocess.run(['bash', '-c', script, 'rehearsal-build', str(work), str(work / 'rehearsal-dist')], check=True)
+PYCODE
 
 if test "$failures" -gt 0; then echo "$failures provisioning program test(s) failed" >&2; exit 1; fi
 echo 'provision programs tests passed'

@@ -12,8 +12,9 @@ provisioner and units: [mac-mini](mac-mini.md) says what differs there.*
 
 On a ti-release-managed server, where
 `/opt/trend-investing/releases/current` exists, use `ti-release` to install
-builds. It records the release tag in `bin/BUILD`. The services step refuses
-before replacing any program on these servers.
+builds. It records the release tag in `bin/BUILD`. The services step skips
+the eight programs on these servers and still provisions units, libexec scripts,
+settings and configuration stubs. The data step is installed as usual.
 
 For a server installed through services, copy the built programs to the
 server, then run
@@ -40,8 +41,10 @@ temporary file and logs `ti-engine already at <build>`.
 For a changed engine, both the engine and `BUILD` are copied to temporary
 names in `/opt/trend-investing/bin/` before making a backup. The engine is
 then renamed into place, followed by `BUILD`. A running engine keeps its open
-binary and picks up the installed binary at its next fresh run. The services
-step never starts, stops or restarts an engine unit.
+binary and picks up the installed binary at its next fresh run. Before
+replacing a changed engine, the services step refuses while any engine unit
+is activating, deactivating or reloading, or if systemd cannot answer the
+query. An active engine can keep running.
 
 The backup is named `ti-engine.<old BUILD>.bak`, or `ti-engine.bak` when
 there is no installed `BUILD`. An existing backup with the same bytes can
@@ -65,12 +68,12 @@ client: the rendered IBC settings reject incoming connections from any address
 but the server's own and trust none. The firewall also denies ports 4001–4004,
 but that is a second layer, not the guard: Tailscale's own rules let tailnet
 traffic through before the firewall looks. On a server set up earlier, apply
-all of this with `git pull`, copy a fresh build including `BUILD` into `dist/`
-(or set `TI_DIST` to that build's directory), then run
-`sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh`
+all of this with `git pull`, copy a fresh build including `BUILD` into `dist/`,
+then run `sudo deploy/provision.sh services`. For another build directory, use
+`sudo env TI_DIST=/path/to/build deploy/provision.sh services`. This installs the changed `render-ibc-config.sh`
 into `/usr/local/libexec/trend-investing` and all available built programs,
-including `ti-engine`, as described in "Installing a build" below. Running
-engines pick up the new binary at their next fresh run), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
+including `ti-engine`, as described in "Installing a build" above. Running
+engines pick up the new binary at their next fresh run. Then run `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
 start expect an IBKR Mobile prompt). `services` copies the repository's engine
 `.env` files over `/etc/trend-investing/engines/` and keeps every `.config`
 already there (see the caution under the file table). Then check, as the owner: the Gateway log shows `Login has completed`, and `sudo grep -E '^(AcceptIncomingConnectionAction|TrustedTwsApiClientIPs)=' /run/ti-gateway/config.ini` prints `AcceptIncomingConnectionAction=reject` and `TrustedTwsApiClientIPs=` (an empty list). The guards are: the IBC files' modes; those two settings (the real guard); the Gateway's read-only API, which holds in dry-run only (once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices before turning read-only off); and the firewall's deny of ports 4001 and 4002, a second layer that Tailscale's own input rules may bypass. Closing the port at the network level for tailnet devices is done with Tailscale access rules, a separate owner step. Each `provision.sh` step is safe to repeat.

@@ -33,7 +33,7 @@
 # not built from. TI_ALLOW_DIRTY=1 overrides that for a local experiment;
 # never install such a binary on the server.
 #
-# Install on the server (owner step, see docs/runbooks/lightsail-deployment.md):
+# Install on the server (owner step, see docs/manual/server.md, Installing a build):
 # with dist/ copied beside deploy/, `sudo deploy/provision.sh services`
 # requires BUILD beside the binaries and refuses, installing nothing,
 # if any of the eight is not built for the server's architecture, and

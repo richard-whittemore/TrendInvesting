@@ -740,14 +740,11 @@ step_services() {
   # Release-managed builds are installed through ti-release
   # (docs/manual/server.md, Installing a build).
   local current=/opt/trend-investing/releases/current
-  if test -e "$current"; then
-    die "this installation is managed by ti-release (releases/current names $(cat "$current")); put builds in place with ti-release, not services (docs/manual/server.md, Installing a build)"
-  fi
   local dist=${TI_DIST:-$here/../dist} b
-  require_native_programs "$dist"
+  if ! test -e "$current"; then require_native_programs "$dist"; fi
   # Validate identities before installation (docs/manual/server.md, Installing a build).
   local bin=/opt/trend-investing/bin old_build=none new_build=
-  if test -f "$dist/ti-engine"; then
+  if ! test -e "$current" && test -f "$dist/ti-engine"; then
     valid_build_identity "$dist/BUILD" || die "ti-engine in $dist has no valid BUILD; deploy/build-engine.sh writes it"
     new_build=$(cat "$dist/BUILD")
     if test -f "$bin/BUILD"; then
@@ -845,48 +842,64 @@ CONF
   # as `sudo -u ti-operator operator ...` and runs `sudo -u ti-trader
   # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
   # PATH includes /usr/local/bin, where each is linked.
-  for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start ti-gateway-heal universe-rank; do
-    if test -f "$dist/$b"; then
-      if test "$b" = ti-engine; then
-        # Preserve the running inode and a backup before the atomic rename
-        # (docs/manual/server.md, "Installing a build"). No engine is restarted.
-        if test -f "$bin/ti-engine" && cmp -s "$bin/ti-engine" "$dist/ti-engine"; then
-          printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
-          mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
-          chown root:root "$bin/ti-engine"
-          chmod 0755 "$bin/ti-engine"
-          log "ti-engine already at $new_build"
-          continue
-        fi
-        local backup=none
-        if test -f "$bin/ti-engine"; then
-          backup=ti-engine.bak
-          if test -f "$bin/BUILD"; then backup="ti-engine.$old_build.bak"; fi
-          if test -e "$bin/$backup" && ! cmp -s "$bin/$backup" "$bin/ti-engine"; then
-            backup="${backup%.bak}.$(date -u +%Y%m%dT%H%M%SZ).bak"
-            if test -e "$bin/$backup" && ! cmp -s "$bin/$backup" "$bin/ti-engine"; then
-              die "backup already exists with different contents: $bin/$backup"
+  if test -e "$current"; then
+    log "programs are managed by ti-release (releases/current names $(cat "$current")); not installing programs (docs/manual/server.md, Installing a build)"
+  else
+    for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start ti-gateway-heal universe-rank; do
+      if test -f "$dist/$b"; then
+        if test "$b" = ti-engine; then
+          # Preserve the running inode and a backup before the atomic rename
+          # (docs/manual/server.md, "Installing a build"). No engine is restarted.
+          if test -f "$bin/ti-engine" && cmp -s "$bin/ti-engine" "$dist/ti-engine"; then
+            printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
+            mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
+            chown root:root "$bin/ti-engine"
+            chmod 0755 "$bin/ti-engine"
+            log "ti-engine already at $new_build"
+            continue
+          fi
+          # Refuse transitions and failed queries before replacement
+          # (docs/manual/server.md, Installing a build). Rehearsals have no systemd.
+          if test "$rehearsal" != 1; then
+            local busy
+            if ! busy=$(systemctl list-units --plain --no-legend --state=activating,deactivating,reloading 'ti-engine@*' 2>/dev/null); then
+              die "could not ask systemd whether an engine unit is mid-restart; nothing installed"
+            fi
+            if test -n "$busy"; then
+              die "an engine unit is mid-restart; nothing installed. Wait until it is active or stopped:
+$busy"
             fi
           fi
+          local backup=none
+          if test -f "$bin/ti-engine"; then
+            backup=ti-engine.bak
+            if test -f "$bin/BUILD"; then backup="ti-engine.$old_build.bak"; fi
+            if test -e "$bin/$backup" && ! cmp -s "$bin/$backup" "$bin/ti-engine"; then
+              backup="${backup%.bak}.$(date -u +%Y%m%dT%H%M%SZ).bak"
+              if test -e "$bin/$backup" && ! cmp -s "$bin/$backup" "$bin/ti-engine"; then
+                die "backup already exists with different contents: $bin/$backup"
+              fi
+            fi
+          fi
+          install -m 0755 "$dist/$b" "$bin/.ti-engine.new" || die "could not stage ti-engine"
+          printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
+          if test "$backup" != none && ! test -e "$bin/$backup"; then
+            cp -p "$bin/ti-engine" "$bin/.ti-engine.bak.new" || die "could not back up ti-engine"
+            mv -f "$bin/.ti-engine.bak.new" "$bin/$backup" || die "could not publish ti-engine backup"
+          fi
+          mv -f "$bin/.ti-engine.new" "$bin/ti-engine" || die "could not replace ti-engine"
+          mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
+          log "installed ti-engine $new_build over $old_build (backup $backup)"
+          continue
+        else
+          install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
         fi
-        install -m 0755 "$dist/$b" "$bin/.ti-engine.new" || die "could not stage ti-engine"
-        printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
-        if test "$backup" != none && ! test -e "$bin/$backup"; then
-          cp -p "$bin/ti-engine" "$bin/.ti-engine.bak.new" || die "could not back up ti-engine"
-          mv -f "$bin/.ti-engine.bak.new" "$bin/$backup" || die "could not publish ti-engine backup"
-        fi
-        mv -f "$bin/.ti-engine.new" "$bin/ti-engine" || die "could not replace ti-engine"
-        mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
-        log "installed ti-engine $new_build over $old_build (backup $backup)"
-        continue
+        log "installed $b from $dist"
       else
-        install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
+        log "no $dist/$b: $b is not installed (deploy/build-engine.sh builds it)"
       fi
-      log "installed $b from $dist"
-    else
-      log "no $dist/$b: $b is not installed (deploy/build-engine.sh builds it)"
-    fi
-  done
+    done
+  fi
   for b in operator journal-query; do
     if test -x "/opt/trend-investing/bin/$b"; then
       ln -sfn "/opt/trend-investing/bin/$b" "/usr/local/bin/$b"
