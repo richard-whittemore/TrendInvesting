@@ -12,7 +12,24 @@ from unittest import mock
 from marketdata import fx, record, steps
 
 
-CSV = 'Date,USD,GBP,JPY,\n2026-03-04,2,4,N/A,\n2026-03-02,3,6,12,\n'
+def synthetic_history(text):
+    """Fill a synthetic archive's earlier TARGET days with constant rates."""
+    rates = fx.parse(text)
+    columns = text.splitlines()[0].split(',')
+    currencies = [c for c in columns[1:] if c]
+    day = dt.date(2024, 1, 1)
+    newest = max(rates)
+    while day <= newest:
+        if not fx.target_closed(day) and day not in rates:
+            cells = [day.isoformat()] + [dict(USD='2', GBP='4').get(c, 'N/A') for c in currencies]
+            if columns[-1] == '':
+                cells.append('')
+            text += ','.join(cells) + '\n'
+        day += dt.timedelta(days=1)
+    return text
+
+
+CSV = synthetic_history('Date,USD,GBP,JPY,\n2026-03-04,2,4,N/A,\n2026-03-03,3,6,N/A,\n2026-03-02,3,6,12,\n')
 DAY = dt.date(2026, 3, 4)
 NOW = lambda: dt.datetime(2026, 3, 4, 23, tzinfo=dt.timezone.utc)
 
@@ -62,7 +79,7 @@ class FXRecordingTest(unittest.TestCase):
                 with self.assertRaisesRegex(fx.MarketDataError, 'ECB') as caught:
                     steps.run_fx(DAY, d, get=lambda url: (body, url), now=NOW)
                 self.assertNotIsInstance(caught.exception, steps.MissingData)
-                self.assertEqual(list(Path(d).iterdir()), [])
+                self.assertEqual(list(Path(d).glob('*.json')), [])
 
     def test_currency_rates_and_five_day_window(self):
         from marketdata import fx
@@ -130,7 +147,7 @@ class ImmutableFixingTest(unittest.TestCase):
             self.assertEqual(Path(path).name, fx.KIND + '_2026-03-05_20260305T230000Z.json')
             self.assertEqual(fx.parse(record.read(path)['body']), {dt.date(2026, 3, 5): {'USD': 5, 'GBP': 10, 'JPY': 20}})
             self.assertEqual(Path(bootstrap).read_bytes(), original)
-            self.assertEqual(len(list(Path(d).iterdir())), 2)
+            self.assertEqual(len(list(Path(d).glob('*.json'))), 2)
             self.assertEqual(fx.load(d, DAY), fx.parse(CSV))
             self.assertEqual(fx.load(d, dt.date(2026, 3, 5)), fx.parse(later))
 
@@ -143,7 +160,7 @@ class ImmutableFixingTest(unittest.TestCase):
                 steps.run_fx(DAY, d, get=lambda url: (archive(revised), url),
                              now=lambda: dt.datetime(2026, 3, 5, 23, tzinfo=dt.timezone.utc))
             self.assertEqual(Path(path).read_bytes(), original)
-            self.assertEqual(len(list(Path(d).iterdir())), 1)
+            self.assertEqual(len(list(Path(d).glob('*.json'))), 1)
 
     def test_union_includes_history_recorded_after_stream_and_rejects_conflicts(self):
         with tempfile.TemporaryDirectory() as d:
@@ -216,9 +233,9 @@ class ImmutableFixingTest(unittest.TestCase):
 
     def test_unavailable_usd_is_preserved_and_noop_fetch_checks_provenance(self):
         with tempfile.TemporaryDirectory() as d:
-            missing = 'Date,USD,GBP\n2026-03-04,N/A,N/A\n'
+            missing = synthetic_history('Date,USD,GBP\n2023-12-29,N/A,N/A\n2026-03-04,2,4\n')
             path = steps.run_fx(DAY, d, get=lambda url: (archive(missing), url), now=NOW)
-            self.assertEqual(fx.parse(record.read(path)['body']), {DAY: {}})
+            self.assertEqual(fx.parse(record.read(path)['body'])[dt.date(2023, 12, 29)], {})
             with self.assertRaisesRegex(steps.MissingData, 'ECB'):
                 steps.run_fx(DAY, d, get=lambda url: (archive(missing), 'https://example.com'), now=NOW)
 
@@ -247,7 +264,7 @@ class PriorFixingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaisesRegex(steps.MissingData, 'fetch'):
                 steps.run_fx(DAY, d, get=lambda url: (archive(future), url), now=NOW)
-            self.assertEqual(list(Path(d).iterdir()), [])
+            self.assertEqual(list(Path(d).glob('*.json')), [])
 
     def test_future_fixing_refused_on_read(self):
         future = CSV + '2026-03-05,5,10,20,\n'
@@ -264,11 +281,11 @@ class PriorFixingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
             before = Path(path).read_bytes()
-            backfilled = CSV + '2026-03-03,9,10,20,\n'
+            backfilled = CSV + '2026-03-01,9,10,20,\n'
             with self.assertRaisesRegex(steps.MissingData, 'treated as complete'):
                 steps.run_fx(DAY, d, get=lambda url: (archive(backfilled), url), now=NOW)
             self.assertEqual(Path(path).read_bytes(), before)
-            self.assertEqual(len(list(Path(d).iterdir())), 1)
+            self.assertEqual(len(list(Path(d).glob('*.json'))), 1)
 
 
 class CoverageAndMergeTest(unittest.TestCase):
@@ -280,7 +297,7 @@ class CoverageAndMergeTest(unittest.TestCase):
                 ('2025-12-26', '2025-12-24', '2025-12-29', True)]:
             with self.subTest(fetched=fetched), tempfile.TemporaryDirectory() as d:
                 steps.run_fx(dt.date.fromisoformat(fixing), d,
-                             get=lambda url: (archive('Date,USD,GBP\n{},2,4\n'.format(fixing)), url),
+                             get=lambda url: (archive(synthetic_history('Date,USD,GBP\n{},2,4\n'.format(fixing))), url),
                              now=lambda: dt.datetime.fromisoformat(fetched + 'T08:00:00+00:00'))
                 rates = fx.load(d)
                 if complete:
@@ -292,21 +309,16 @@ class CoverageAndMergeTest(unittest.TestCase):
     def test_withdrawn_fixing_refuses_without_writing(self):
         with tempfile.TemporaryDirectory() as d:
             steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
-            before = {p.name: p.read_bytes() for p in Path(d).iterdir()}
+            before = {p.name: p.read_bytes() for p in Path(d).glob('*.json')}
             withdrawn = CSV.replace('2026-03-04,2,4,N/A,\n', '') + '2026-03-05,5,10,20,\n'
             with self.assertRaisesRegex(steps.MissingData, 'ECB history no longer contains the 2026-03-04 fixing'):
                 steps.run_fx(DAY, d, get=lambda url: (archive(withdrawn), url),
                              now=lambda: dt.datetime(2026, 3, 6, 8, tzinfo=dt.timezone.utc))
-            self.assertEqual({p.name: p.read_bytes() for p in Path(d).iterdir()}, before)
+            self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
 
     def test_same_second_fetch_collision_checks_winner(self):
-        from concurrent.futures import ThreadPoolExecutor
-        import threading
         for mode in ('same', 'extension', 'revision', 'withdrawal', 'backdating'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
-                barrier, installed = threading.Barrier(2), threading.Event()
-                load, write = fx.load, record.write
-                local = threading.local()
                 winner = CSV + '2026-03-05,5,10,20,\n'
                 loser = winner
                 if mode == 'extension':
@@ -316,44 +328,25 @@ class CoverageAndMergeTest(unittest.TestCase):
                 if mode == 'withdrawal':
                     loser = loser.replace('2026-03-04,2,4,N/A,\n', '')
                 if mode == 'backdating':
-                    loser += '2026-03-03,9,18,36,\n'
+                    loser += '2026-03-01,9,18,36,\n'
 
-                def initial_load(*args, **kwargs):
-                    try:
-                        return load(*args, **kwargs)
-                    except fx.NoRecording:
-                        barrier.wait(timeout=5)
-                        raise
-
-                def ordered_write(directory, rec):
-                    if local.loser:
-                        self.assertTrue(installed.wait(timeout=5))
-                    result = write(directory, rec)
-                    if not local.loser:
-                        installed.set()
-                    return result
-
-                def run(is_loser):
-                    local.loser = is_loser
-                    return steps.run_fx(DAY, d, get=lambda url: (archive(loser if is_loser else winner), url),
+                def run(text):
+                    return steps.run_fx(DAY, d, get=lambda url: (archive(text), url),
                                         now=lambda: dt.datetime(2026, 3, 6, 8, tzinfo=dt.timezone.utc))
 
-                with mock.patch.object(fx, 'load', side_effect=initial_load), \
-                        mock.patch.object(record, 'write', side_effect=ordered_write), ThreadPoolExecutor(2) as pool:
-                    first, second = pool.submit(run, False), pool.submit(run, True)
-                    first.result(timeout=10)
-                    if mode == 'same':
-                        second.result(timeout=10)
-                    elif mode == 'extension':
-                        with self.assertRaisesRegex(steps.MissingData, 'timestamp collision'):
-                            second.result(timeout=10)
-                    else:
-                        with self.assertRaisesRegex(steps.MissingData, 'revised|no longer contains|treated as complete'):
-                            second.result(timeout=10)
+                run(winner)
+                if mode == 'same':
+                    run(loser)
+                elif mode == 'extension':
+                    with self.assertRaisesRegex(steps.MissingData, 'timestamp collision'):
+                        run(loser)
+                else:
+                    with self.assertRaisesRegex(steps.MissingData, 'revised|no longer contains|treated as complete'):
+                        run(loser)
                 self.assertTrue((Path(d) / (fx.KIND + '_2026-03-06_20260306T080000Z.json')).exists())
                 expected = fx.parse(winner)
                 self.assertEqual(fx.load(d), expected)
-                self.assertEqual(len(list(Path(d).iterdir())), 1)
+                self.assertEqual(len(list(Path(d).glob('*.json'))), 1)
 
     def test_post_write_union_rechecks_withdrawal(self):
         with tempfile.TemporaryDirectory() as d:
@@ -361,7 +354,7 @@ class CoverageAndMergeTest(unittest.TestCase):
             write = record.write
             def concurrent_write(directory, rec):
                 path = write(directory, rec)
-                extra = dict(rec, session='2026-03-03', body='Date,USD,GBP\n2026-03-03,9,18\n')
+                extra = dict(rec, session='2026-03-01', body='Date,USD,GBP\n2026-03-01,9,18\n')
                 write(directory, extra)
                 return path
             incoming = CSV + '2026-03-05,5,10,20,\n'
@@ -392,22 +385,22 @@ class FetchRecordingTest(unittest.TestCase):
                             now=lambda: dt.datetime.fromisoformat(stamp).replace(tzinfo=dt.timezone.utc))
 
     def test_empty_fetch_persists_coverage_and_backdating_refuses(self):
-        text = 'Date,USD,GBP\n2026-04-02,2,4\n'
+        text = synthetic_history('Date,USD,GBP\n2026-04-02,2,4\n')
         with tempfile.TemporaryDirectory() as d:
             self.fetch(d, text, '2026-04-02T23:00:00')
             path = self.fetch(d, text, '2026-04-07T08:00:00')
-            self.assertEqual(len(list(Path(d).iterdir())), 2)
+            self.assertEqual(len(list(Path(d).glob('*.json'))), 2)
             self.assertEqual(record.read(path)['session'], '2026-04-07')
             self.assertEqual(fx.checked(record.read(path)), {})
             self.assertEqual(fx.load(d).covered_through, dt.date(2026, 4, 6))
-            before = {p.name: p.read_bytes() for p in Path(d).iterdir()}
+            before = {p.name: p.read_bytes() for p in Path(d).glob('*.json')}
             with self.assertRaisesRegex(steps.MissingData,
                     'ECB published a 2026-04-03 fixing after 2026-04-06 was treated as complete'):
                 self.fetch(d, text + '2026-04-03,9,4\n2026-04-07,2,4\n', '2026-04-08T08:00:00')
-            self.assertEqual({p.name: p.read_bytes() for p in Path(d).iterdir()}, before)
+            self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
 
     def test_crash_at_atomic_install_exposes_whole_fetch_or_none(self):
-        initial = 'Date,USD,GBP\n2026-04-02,2,4\n'
+        initial = synthetic_history('Date,USD,GBP\n2026-04-02,2,4\n')
         full = initial + '2026-04-06,6,4\n2026-04-07,8,4\n'
         for installed in (False, True):
             with self.subTest(installed=installed), tempfile.TemporaryDirectory() as d:
@@ -432,7 +425,7 @@ class FetchRecordingTest(unittest.TestCase):
                 steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
                 with self.assertRaises(steps.MissingData) as caught:
                     steps.run_fx(DAY, d, get=lambda url: (archive(text), url), now=NOW)
-                self.assertEqual(len(list(Path(d).iterdir())), 1)
+                self.assertEqual(len(list(Path(d).glob('*.json'))), 1)
                 for phrase in ('ECB site', 'quarantine', 'bootstrap', 'fresh run'):
                     self.assertIn(phrase, str(caught.exception))
 
@@ -451,18 +444,18 @@ class FetchIntegrityTest(unittest.TestCase):
     def test_stale_archive_writes_nothing_and_cannot_extend_coverage(self):
         with tempfile.TemporaryDirectory() as d:
             steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
-            before = {p.name: p.read_bytes() for p in Path(d).iterdir()}
+            before = {p.name: p.read_bytes() for p in Path(d).glob('*.json')}
             with self.assertRaisesRegex(fx.MarketDataError, 'stale'):
                 steps.run_fx(DAY, d, get=lambda url: (archive(), url),
                              now=lambda: dt.datetime(2026, 3, 6, 8, tzinfo=dt.timezone.utc))
-            self.assertEqual({p.name: p.read_bytes() for p in Path(d).iterdir()}, before)
+            self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
             self.assertEqual(fx.load(d).covered_through, DAY)
 
     def test_target_holiday_fetch_is_complete(self):
         for fetched, fixing in [('2026-04-06', '2026-04-02'), ('2026-12-26', '2026-12-24')]:
             with self.subTest(fetched=fetched), tempfile.TemporaryDirectory() as d:
                 steps.run_fx(dt.date.fromisoformat(fixing), d,
-                             get=lambda url: (archive('Date,USD\n{},2\n'.format(fixing)), url),
+                             get=lambda url: (archive(synthetic_history('Date,USD\n{},2\n'.format(fixing))), url),
                              now=lambda: dt.datetime.fromisoformat(fetched + 'T08:00:00+00:00'))
                 self.assertEqual(fx.load(d).covered_through, dt.date.fromisoformat(fetched) - dt.timedelta(days=1))
 
@@ -502,5 +495,94 @@ class FetchIntegrityTest(unittest.TestCase):
     def test_backdating_includes_remedy(self):
         recorded = fx.Rates(fx.parse(CSV), DAY)
         with self.assertRaises(steps.MissingData) as caught:
-            fx.check_history(recorded, fx.parse(CSV + '2026-03-03,2,4,8\n'))
+            fx.check_history(recorded, fx.parse(CSV + '2026-03-01,2,4,8\n'))
         self.assertIn(fx.REMEDY, str(caught.exception))
+
+
+class FetchSafetyTest(unittest.TestCase):
+    def fetch(self, directory, text, day=5):
+        return steps.run_fx(dt.date(2024, 1, 2), directory,
+                            get=lambda url: (archive(text), url),
+                            now=lambda: dt.datetime(2024, 1, day, 23, tzinfo=dt.timezone.utc))
+
+    def test_bootstrap_gap_or_missing_usd_writes_nothing(self):
+        for row in ('', '2024-01-03,N/A,4\n'):
+            with self.subTest(row=row), tempfile.TemporaryDirectory() as d:
+                text = 'Date,USD,GBP\n2024-01-02,2,4\n' + row + '2024-01-04,2,4\n2024-01-05,2,4\n'
+                with self.assertRaisesRegex(fx.MarketDataError, 'incomplete ECB archive') as caught:
+                    self.fetch(d, text)
+                self.assertNotIsInstance(caught.exception, steps.MissingData)
+                self.assertEqual(list(Path(d).glob('*.json')), [])
+
+    def test_only_pre_2024_gaps_are_accepted(self):
+        text = 'Date,USD,GBP\n2023-12-27,2,4\n2024-01-02,2,4\n'
+        with tempfile.TemporaryDirectory() as d:
+            self.fetch(d, text, day=2)
+            self.assertEqual(fx.load(d), fx.parse(text))
+
+    def test_later_gap_or_missing_usd_preserves_recordings(self):
+        initial = 'Date,USD,GBP\n2024-01-02,2,4\n'
+        for row in ('', '2024-01-03,N/A,4\n'):
+            with self.subTest(row=row), tempfile.TemporaryDirectory() as d:
+                self.fetch(d, initial, day=2)
+                before = {p.name: p.read_bytes() for p in Path(d).glob('*.json')}
+                with self.assertRaisesRegex(fx.MarketDataError, 'incomplete ECB archive'):
+                    self.fetch(d, initial + row + '2024-01-04,2,4\n2024-01-05,2,4\n')
+                self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
+                self.assertEqual(fx.load(d).covered_through, dt.date(2024, 1, 2))
+
+    def test_shared_lock_waits_and_reloads_predecessor(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        entered, release, waiting = threading.Event(), threading.Event(), threading.Event()
+        import fcntl
+        flock = fcntl.flock
+        def observe_wait(file, flags):
+            try:
+                return flock(file, flags)
+            except BlockingIOError:
+                waiting.set()
+                raise
+        initial = 'Date,USD,GBP\n2024-01-02,2,4\n'
+        def first_get(url):
+            entered.set()
+            if not release.wait(timeout=5):
+                raise AssertionError('first fetch was never released')
+            return archive(initial), url
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(fcntl, 'flock', side_effect=observe_wait), ThreadPoolExecutor(2) as pool:
+            first = pool.submit(steps.run_fx, dt.date(2024, 1, 2), d, get=first_get,
+                                now=lambda: dt.datetime(2024, 1, 2, 23, tzinfo=dt.timezone.utc))
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                second = pool.submit(self.fetch, d, initial + '2024-01-03,2,4\n', 3)
+                self.assertTrue(waiting.wait(timeout=1), 'second fetch did not wait for the shared lock')
+                self.assertFalse(second.done())
+            finally:
+                release.set()
+            first_path = first.result(timeout=5)
+            second_path = second.result(timeout=5)
+            self.assertIsNone(record.read(first_path)['covered_before'])
+            self.assertEqual(record.read(second_path)['covered_before'], '2024-01-02')
+            self.assertEqual(fx.load(d).covered_through, dt.date(2024, 1, 3))
+            self.assertEqual(len(list(Path(d).glob('*.json'))), 2)
+
+    def test_shared_lock_wait_is_bounded(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / '.fx.lock', 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                with mock.patch('time.monotonic', side_effect=[0, 301]):
+                    with self.assertRaisesRegex(steps.MissingData, 'another job is recording ECB rates'):
+                        self.fetch(d, 'Date,USD\n2024-01-02,2\n', day=2)
+            self.fetch(d, 'Date,USD\n2024-01-02,2\n', day=2)
+
+    def test_truncated_chunked_response_is_download_error(self):
+        import http.client
+        class Socket:
+            def makefile(self, *args, **kwargs):
+                return io.BytesIO(b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabc')
+        response = http.client.HTTPResponse(Socket())
+        response.begin()
+        response.geturl = lambda: fx.URL
+        with self.assertRaisesRegex(fx.MarketDataError, 'ECB request failed: IncompleteRead'):
+            fx.http_get(fx.URL, opener=lambda *args, **kwargs: response)

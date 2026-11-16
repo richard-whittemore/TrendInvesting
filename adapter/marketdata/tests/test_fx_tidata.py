@@ -8,7 +8,7 @@ from unittest import mock
 
 from marketdata import fx, record, steps, tidata
 from marketdata.tests.test_encode import build, LAST, IDENTITY
-from marketdata.tests.test_fx import archive
+from marketdata.tests.test_fx import archive, synthetic_history
 from marketdata.tests.test_fx_encode import set_currency, ranker
 from marketdata.tests.test_tidata import after_settle
 from marketdata.tests.test_tidata_momentum import MomentumJob, sector_pages
@@ -32,7 +32,7 @@ class FXJobTest(unittest.TestCase):
             calls = []
             def get(url):
                 calls.append(url)
-                return archive('Date,USD,GBP\n2026-11-27,2,4\n'), url
+                return archive(synthetic_history('Date,USD,GBP\n2026-11-27,2,4\n')), url
             code, err = self.invoke(job, get)
             self.assertEqual(code, 0, err)
             for detail in ['excluded CCC', '2026-11-27', 'ZZZ', 'not covered', 'skipped']:
@@ -98,7 +98,7 @@ class FXJobTest(unittest.TestCase):
             build(job.data)
             set_currency(job.data, 'EUR')
             with mock.patch.object(fx, 'usd', side_effect=lambda cash, currency, day, rates: cash):
-                code, err = self.invoke(job, lambda url: (archive('Date,USD\n2026-11-27,2\n'), url))
+                code, err = self.invoke(job, lambda url: (archive(synthetic_history('Date,USD\n2026-11-27,2\n')), url))
             self.assertEqual(code, 0, err)
             for path in job.data.glob(fx.KIND + '_*.json'):
                 path.unlink()
@@ -180,7 +180,7 @@ class FXJobTest(unittest.TestCase):
                 build(job.data)
                 set_currency(job.data, 'GBP')
                 steps.run_fx(LAST, job.data,
-                             get=lambda url: (archive('Date,USD,GBP\n2026-11-26,2,4\n2026-11-27,2,4\n'), url),
+                             get=lambda url: (archive(synthetic_history('Date,USD,GBP\n2026-11-26,2,4\n2026-11-27,2,4\n')), url),
                              now=lambda: after_settle(LAST))
                 before = {p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}
                 code, err = self.invoke(job, lambda url: (response, url))
@@ -188,3 +188,36 @@ class FXJobTest(unittest.TestCase):
                 self.assertIn('continuing with recorded fixings', err)
                 self.assertTrue(job.path(LAST).exists())
                 self.assertEqual({p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}, before)
+
+    def test_incomplete_archive_warns_and_writes_no_fx(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = MomentumJob(d, ranker=ranker)
+            build(job.data)
+            code, err = self.invoke(job, lambda url: (archive('Date,USD\n2026-11-27,2\n'), url))
+            self.assertEqual(code, 0, err)
+            self.assertIn('incomplete ECB archive', err)
+            self.assertIn('continuing with recorded fixings', err)
+            self.assertTrue(job.path(LAST).exists())
+            self.assertEqual(list(job.data.glob(fx.KIND + '_*.json')), [])
+
+    def test_truncated_chunked_download_warns_and_uses_existing_coverage(self):
+        import http.client
+        from marketdata.tests.test_fx_encode import rates_record
+        class Socket:
+            def makefile(self, *args, **kwargs):
+                return io.BytesIO(b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabc')
+        with tempfile.TemporaryDirectory() as d:
+            job = MomentumJob(d, ranker=ranker)
+            build(job.data)
+            set_currency(job.data, 'GBP')
+            rates_record(job.data)
+            before = {p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}
+            response = http.client.HTTPResponse(Socket())
+            response.begin()
+            response.geturl = lambda: fx.URL
+            code, err = self.invoke(job, lambda url: fx.http_get(url, opener=lambda *a, **k: response))
+            self.assertEqual(code, 0, err)
+            self.assertIn('IncompleteRead', err)
+            self.assertIn('continuing with recorded fixings', err)
+            self.assertTrue(job.path(LAST).exists())
+            self.assertEqual({p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}, before)

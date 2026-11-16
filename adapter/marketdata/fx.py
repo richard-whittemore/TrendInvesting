@@ -7,6 +7,7 @@ not dollar amounts or zero (ADR 0019).
 import csv
 import datetime as dt
 import glob
+import http.client
 import io
 import lzma
 import math
@@ -118,6 +119,16 @@ def require_fresh(rates, fetch_day):
         raise MarketDataError('stale ECB archive: newest fixing precedes {}'.format(expected))
 
 
+def require_continuous(rates, covered):
+    """Require new TARGET-day USD fixings since 2024 (manual, Dividend currencies)."""
+    day = max(covered, dt.date(2023, 12, 31)) + dt.timedelta(days=1)
+    newest = max(rates, default=dt.date.min)
+    while day <= newest:
+        if not target_closed(day) and 'USD' not in rates.get(day, {}):
+            raise MarketDataError('incomplete ECB archive: missing USD fixing for {}'.format(day))
+        day += dt.timedelta(days=1)
+
+
 def valid_currency(currency):
     """Currency syntax accepted by conversion (manual, Dividend currencies)."""
     return isinstance(currency, str) and len(currency) == 3 and currency.isalpha() and currency.isupper()
@@ -189,7 +200,7 @@ def http_get(url, opener=OPENER.open):
                     break
                 chunks.append(chunk)
             return b''.join(chunks), actual
-    except (urllib.error.URLError, OSError) as e:
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
         raise MarketDataError('ECB request failed: {}'.format(type(e).__name__)) from None
 
 

@@ -10,9 +10,11 @@ SHY and a few dozen held stocks fit one overnight run; fetching all 500
 ranked names (about 1500 requests, over 5 hours) does not, and needs IBKR
 history or a paid plan.
 """
+import contextlib
 import datetime as dt
-import glob
+import fcntl
 import os
+import time
 import zoneinfo
 
 from . import nyse_calendar, record as recording
@@ -130,40 +132,56 @@ def run_bars(client, instruments, session, directory, lookback_days=400, now=_no
     return recording.write(directory, fetch_bars(client, instruments, session, lookback_days, now=now))
 
 
+@contextlib.contextmanager
+def _fx_lock(directory):
+    """Serialize the shared FX chain through validation (manual, Dividend currencies)."""
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, '.fx.lock'), 'a') as lock:
+        deadline = time.monotonic() + 300
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise MissingData('another job is recording ECB rates') from None
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
     """Record new immutable ECB fixings (manual, Dividend currencies)."""
     from . import fx
     require_settled(session, now, settle)
-    try:
-        existing = fx.load(directory)
-    except fx.NoRecording:
-        existing = {}
-    raw, url = (get or fx.http_get)(fx.URL)
-    stamp = _stamp(now)
-    fetch_day = dt.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').date()
-    rec = dict(kind=fx.KIND, source=fx.SOURCE, session=str(fetch_day),
-               fetched_at=stamp, url=url, body=fx.csv_body(raw))
-    fetched = fx.checked(rec, fetch_day)
-    fx.require_fresh(fetched, fetch_day)
-    fx.check_history(existing, fetched)
-    boundary = getattr(existing, 'covered_through', dt.date.min)
-    rec['covered_before'] = boundary.isoformat() if boundary != dt.date.min else None
-    rec['body'] = fx.body({day: row for day, row in fetched.items() if day > boundary})
-    path = os.path.join(directory, recording.filename(rec))
-    try:
-        recording.write(directory, rec)
-    except recording.AlreadyRecorded:
+    with _fx_lock(directory):
+        try:
+            existing = fx.load(directory)
+        except fx.NoRecording:
+            existing = {}
+        raw, url = (get or fx.http_get)(fx.URL)
+        stamp = _stamp(now)
+        fetch_day = dt.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').date()
+        rec = dict(kind=fx.KIND, source=fx.SOURCE, session=str(fetch_day),
+                   fetched_at=stamp, url=url, body=fx.csv_body(raw))
+        fetched = fx.checked(rec, fetch_day)
+        fx.require_fresh(fetched, fetch_day)
+        fx.check_history(existing, fetched)
+        boundary = getattr(existing, 'covered_through', dt.date.min)
+        fx.require_continuous(fetched, boundary)
+        rec['covered_before'] = boundary.isoformat() if boundary != dt.date.min else None
+        rec['body'] = fx.body({day: row for day, row in fetched.items() if day > boundary})
+        path = os.path.join(directory, recording.filename(rec))
+        try:
+            recording.write(directory, rec)
+        except recording.AlreadyRecorded:
+            union = fx.load(directory)
+            fx.check_history(union, fetched)
+            if any(day not in union for day in fetched):
+                raise MissingData('ECB fetch timestamp collision; retry at a later UTC second') from None
+            return path
         union = fx.load(directory)
         fx.check_history(union, fetched)
-        if any(day not in union for day in fetched):
-            raise MissingData('ECB fetch timestamp collision; retry at a later UTC second') from None
         return path
-    union = fx.load(directory)
-    fx.check_history(union, fetched)
-    # A concurrent fetch can complete a window before this fetch is installed
-    # (manual, Dividend currencies). Recheck its coverage without our own file.
-    others = [os.path.basename(p) for p in glob.glob(os.path.join(directory, fx.KIND + '_*.json'))
-              if os.path.basename(p) != os.path.basename(path)]
-    if others:
-        fx.check_history(fx.load(directory, listing=others), fetched)
-    return path

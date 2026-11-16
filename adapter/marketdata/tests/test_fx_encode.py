@@ -225,9 +225,9 @@ class FetchToIRAEncodingTest(unittest.TestCase):
 
     def test_holiday_and_crash_fetches_reach_ira_encode(self):
         import datetime as dt
-        from marketdata.tests.test_fx import FetchRecordingTest
+        from marketdata.tests.test_fx import FetchRecordingTest, synthetic_history
         fetch = FetchRecordingTest().fetch
-        text = 'Date,USD,GBP\n2026-04-02,2,4\n'
+        text = synthetic_history('Date,USD,GBP\n2026-04-02,2,4\n')
         for crash in (None, 'before', 'after'):
             with self.subTest(crash=crash), tempfile.TemporaryDirectory() as d:
                 days = self.build_april(d)
