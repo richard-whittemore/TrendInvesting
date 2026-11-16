@@ -606,6 +606,7 @@ cmd_diff ibkr-login.env
         function = source[start:source.index("\n}", start) + 2]
         harness = r'''set -e
 here=$1
+rehearsal=1
 log() { echo "$*"; }
 die() { echo "$*" >&2; exit 1; }
 require_native_programs() { :; }

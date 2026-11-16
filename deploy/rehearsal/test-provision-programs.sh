@@ -25,6 +25,10 @@ programs = re.findall(r'mv bin/([^ ]+) "\$out/[^\"]+"', build)
 tools = re.search(r'for tool in (.*); do', build).group(1).split()
 programs += [tool.split(':')[1] for tool in tools]
 assert len(programs) == 8, programs
+release = re.search(r'^programs="([^"]+)"', (work / 'source/deploy/release.sh').read_text(), re.M).group(1)
+managed = re.search(r'^  local release_programs="([^"]+)"', s, re.M)
+assert managed and managed.group(1).split() == release.split(), 'release program lists differ'
+(work / 'release-programs').write_text('\n'.join(release.split()) + '\n')
 (work / 'programs').write_text('\n'.join(programs) + '\n')
 PY
 mkdir -p "$work/dist" "$work/override" "$work/root/opt/trend-investing/bin" "$work/root/etc/systemd/system"
@@ -34,6 +38,7 @@ while IFS= read -r program; do
   head -c 11 /dev/zero >>"$work/dist/$program"
   printf '\076\000new-%s' "$program" >>"$work/dist/$program"
 done <"$work/programs"
+printf '\000new-build\000' >>"$work/dist/ti-engine"
 printf 'staged data\n' >"$work/dist/ti-data"
 printf 'override data\n' >"$work/override/ti-data"
 mkdir -p "$work/source/dist"
@@ -82,6 +87,13 @@ cat >"$work/scenario.sh" <<'SCENARIO'
     command cp "$src" "$dest"
     command chmod "${2}" "$dest"
   }
+  sync() {
+    record sync "$@"
+    case ${FAIL_SYNC:-} in
+      backup) test "$#" != 3 ;;
+      directory) test "$#" != 2 ;;
+    esac
+  }
   date() { echo 20261115T120000Z; }
   mv() { record mv "$@"; guard "$@"; command mv "$@"; }
   cp() {
@@ -99,9 +111,13 @@ cat >"$work/scenario.sh" <<'SCENARIO'
     record systemctl "$@"
     if test "${1:-}" = list-units; then
       test "$*" = "list-units --plain --no-legend --state=activating,deactivating,reloading ti-engine@*" || return 97
-      case ${ENGINE_STATE:-active} in
+      local state=${ENGINE_STATE:-active}
+      if test "$state" = late-transition; then
+        if test -e "$work/queried"; then state=activating; else touch "$work/queried"; state=active; fi
+      fi
+      case $state in
         query-failed) return 1 ;;
-        activating|deactivating|reloading) echo "ti-engine@boost.service loaded $ENGINE_STATE" ;;
+        activating|deactivating|reloading) echo "ti-engine@boost.service loaded $state" ;;
       esac
       return 0
     fi
@@ -121,6 +137,7 @@ cat >"$work/scenario.sh" <<'SCENARIO'
       esac
     fi
   }
+  rm -f "$work/queried"
   : >"$work/calls"
   step_services
 SCENARIO
@@ -145,7 +162,7 @@ check_units() {
 }
 
 export TI_DIST=$work/dist
-# A release-managed installation keeps programs while provisioning services
+# A release-managed installation keeps its six programs while provisioning services
 # and the data step (docs/manual/server.md, Installing a build).
 while IFS= read -r program; do
   printf 'installed %s\n' "$program" >"$bin/$program"
@@ -161,22 +178,37 @@ for staged_engine in present absent; do
   if test "$staged_engine" = absent; then mv "$work/dist/ti-engine" "$work/staged-engine"; fi
   rm -f "$work/root/etc/systemd/system/ti-engine@.service"
   run_services
-  grep -Fq 'programs are managed by ti-release (releases/current names v1.2.3); not installing programs (docs/manual/server.md, Installing a build)' "$work/out" || fail 'missing release-managed diagnostic'
+  grep -Fq 'programs are managed by ti-release (releases/current names v1.2.3); skipping ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; services installs ti-gateway-heal and universe-rank (docs/manual/server.md, Installing a build)' "$work/out" || fail 'missing release-managed diagnostic'
   while IFS= read -r program; do
     cmp -s "$work/managed-bin/$program" "$bin/$program" || fail "managed installation changed $program"
-  done <"$work/programs"
+  done <"$work/release-programs"
+  for program in ti-gateway-heal universe-rank; do
+    cmp -s "$work/dist/$program" "$bin/$program" || fail "managed installation skipped $program"
+  done
   cmp -s "$work/managed-bin/BUILD" "$bin/BUILD" || fail 'managed installation changed BUILD'
   cmp -s "$work/dist/ti-data" "$bin/ti-data" || fail 'managed installation skipped data'
   test -f "$work/root/etc/systemd/system/ti-engine@.service" || fail 'managed installation skipped units'
   check_units
   if test "$staged_engine" = absent; then mv "$work/staged-engine" "$work/dist/ti-engine"; fi
 done
+# Service-owned programs still require native builds on managed installations.
+for program in ti-gateway-heal universe-rank; do
+  cp "$work/dist/$program" "$work/saved-program"
+  printf 'wrong architecture' >"$work/dist/$program"
+  run_scenario
+  test "$status" != 0 || fail "managed installation accepted invalid $program"
+  if grep -q '^install ' "$work/calls"; then fail 'invalid managed program installed files'; fi
+  mv "$work/saved-program" "$work/dist/$program"
+done
 rm "$work/root/opt/trend-investing/releases/current"
 # Engine transitions and a failed query preserve the installed engine and BUILD
 # (docs/manual/server.md, Installing a build).
 for state in activating deactivating reloading query-failed; do
   export ENGINE_STATE=$state
+  cp -R "$work/root" "$work/before-refusal"
   run_scenario
+  diff -r "$work/before-refusal" "$work/root" || fail "$state changed installed files"
+  rm -rf "$work/before-refusal"
   test "$status" != 0 || fail "accepted engine state $state"
   cmp -s "$work/managed-bin/ti-engine" "$bin/ti-engine" || fail "$state replaced engine"
   cmp -s "$work/managed-bin/BUILD" "$bin/BUILD" || fail "$state changed BUILD"
@@ -185,9 +217,22 @@ for state in activating deactivating reloading query-failed; do
   else
     grep -Fq 'an engine unit is mid-restart' "$work/out" || fail "missing $state diagnostic"
   fi
-  if grep -q '\.ti-engine.new' "$work/calls"; then fail "$state staged engine"; fi
+  if grep -Ev '^systemctl list-units ' "$work/calls"; then fail "$state changed files before refusal"; fi
 done
+export ENGINE_STATE=late-transition
+run_scenario
+test "$status" != 0 || fail 'late transition accepted'
+grep -Fq 'units, settings, data and Gateway files already provisioned' "$work/out" || fail 'late refusal lacks provisioning diagnostic'
+cmp -s "$work/managed-bin/ti-engine" "$bin/ti-engine" || fail 'late transition replaced engine'
 unset ENGINE_STATE
+# BUILD must be embedded in the staged engine before any installation.
+cp "$work/dist/ti-engine" "$work/stamped-engine"
+head -c 20 "$work/stamped-engine" >"$work/dist/ti-engine"
+run_scenario
+test "$status" != 0 || fail 'accepted engine without BUILD stamp'
+grep -Fq "ti-engine in $work/dist was not built as new-build; copy the whole build again" "$work/out" || fail 'missing mismatched BUILD diagnostic'
+if grep -q '^install ' "$work/calls"; then fail 'mismatched BUILD installed files'; fi
+mv "$work/stamped-engine" "$work/dist/ti-engine"
 printf 'old engine\n' >"$bin/ti-engine"
 printf 'old-build\n' >"$bin/BUILD"
 # A hard link models the old inode held open by a running engine.
@@ -306,9 +351,26 @@ engine_move = calls.index(f'mv -f {b}/.ti-engine.new {b}/ti-engine')
 build_move = calls.index(f'mv -f {b}/.BUILD.new {b}/BUILD')
 backup_move = calls.index(f'mv -f {b}/.ti-engine.bak.new {b}/ti-engine.keep-build.20261115T120000Z.bak')
 assert calls[backup].endswith(b + '/.ti-engine.bak.new')
-assert engine_stage < build_stage < backup < backup_move < engine_move < build_move
+backup_sync = calls.index(f'sync -- {b}/ti-engine.keep-build.20261115T120000Z.bak {b}')
+directory_sync = calls.index(f'sync -- {b}')
+assert engine_stage < build_stage < backup < backup_move < backup_sync < engine_move < build_move < directory_sync
 assert Path(b + '/BUILD').read_bytes() == b'new-build\n'
 PYCODE
+
+# A failed durability operation refuses at its installation boundary.
+for sync_target in backup directory; do
+  printf 'sync engine\n' >"$bin/ti-engine"
+  printf 'sync-build\n' >"$bin/BUILD"
+  export FAIL_SYNC=$sync_target
+  run_scenario
+  test "$status" != 0 || fail "failed $sync_target sync succeeded"
+  if test "$sync_target" = backup; then
+    grep -qx 'sync engine' "$bin/ti-engine" || fail 'failed backup sync replaced engine'
+    grep -qx 'sync-build' "$bin/BUILD" || fail 'failed backup sync replaced BUILD'
+  fi
+  if grep -q '^systemctl restart ti-dashboard.service$' "$work/calls"; then fail 'failed sync continued provisioning'; fi
+  unset FAIL_SYNC
+done
 
 # A retry in the same second preserves an existing timestamped backup too.
 printf 'another engine\n' >"$bin/ti-engine"

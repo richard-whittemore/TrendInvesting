@@ -33,12 +33,14 @@
 # not built from. TI_ALLOW_DIRTY=1 overrides that for a local experiment;
 # never install such a binary on the server.
 #
-# Install on the server (owner step, see docs/manual/server.md, Installing a build):
-# with dist/ copied beside deploy/, `sudo deploy/provision.sh services`
-# requires BUILD beside the binaries and refuses, installing nothing,
-# if any of the eight is not built for the server's architecture, and
-# installs all eight. A running engine uses the
-# new binary at its next fresh run (docs/manual/server.md, Installing a build).
+# Install on the server (docs/manual/server.md, Installing a build).
+# On a services-managed server, copy dist/ beside deploy/ and run
+# `sudo deploy/provision.sh services`. It validates the architecture of all
+# eight programs and requires the engine's embedded stamp to match BUILD.
+# On a ti-release-managed server (releases/current exists), install builds
+# with ti-release. Services still installs units, settings, ti-data,
+# ti-gateway-heal and universe-rank. A running engine picks up the new binary
+# at its next fresh run (docs/manual/server.md, Installing a build).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

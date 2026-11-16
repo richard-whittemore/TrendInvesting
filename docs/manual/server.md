@@ -13,8 +13,10 @@ provisioner and units: [mac-mini](mac-mini.md) says what differs there.*
 On a ti-release-managed server, where
 `/opt/trend-investing/releases/current` exists, use `ti-release` to install
 builds. It records the release tag in `bin/BUILD`. The services step skips
-the eight programs on these servers and still provisions units, libexec scripts,
-settings and configuration stubs. The data step is installed as usual.
+`ti-engine`, `ti-reporter`, `ti-dashboard`, `operator`, `journal-query` and
+`ti-gateway-start` on these servers. It still provisions units, libexec scripts,
+settings and configuration stubs, and validates and installs `ti-gateway-heal`
+and `universe-rank`. The data step is installed as usual.
 
 For a server installed through services, copy the built programs to the
 server, then run
@@ -30,9 +32,10 @@ there. A dirty tree is refused. `TI_ALLOW_DIRTY=1` is for local experiments
 only and must never be used for a server build. The identity must be one
 non-empty ASCII line, contain only letters, digits, dots, underscores or
 hyphens, and be at most 64 characters, with an optional final newline.
-The services step checks this and any installed `bin/BUILD` before replacing
-files. A missing staged program leaves an installed copy in place. Its unit
-fails only if no copy is installed.
+The services step checks this and any installed `bin/BUILD`, and requires
+the staged engine to contain the BUILD stamp as a literal string before
+installing files. A missing staged program leaves an installed copy in place.
+Its unit fails only if no copy is installed.
 
 If the staged engine has exactly the same bytes as the installed engine,
 the services step leaves the engine in place, updates `bin/BUILD` through a
@@ -42,9 +45,9 @@ For a changed engine, both the engine and `BUILD` are copied to temporary
 names in `/opt/trend-investing/bin/` before making a backup. The engine is
 then renamed into place, followed by `BUILD`. A running engine keeps its open
 binary and picks up the installed binary at its next fresh run. Before
-replacing a changed engine, the services step refuses while any engine unit
-is activating, deactivating or reloading, or if systemd cannot answer the
-query. An active engine can keep running.
+any writes, and again before replacing a changed engine, the services step
+refuses while any engine unit is activating, deactivating or reloading, or if
+systemd cannot answer the query. An active engine can keep running.
 
 The backup is named `ti-engine.<old BUILD>.bak`, or `ti-engine.bak` when
 there is no installed `BUILD`. An existing backup with the same bytes can
@@ -52,7 +55,10 @@ be reused. If its bytes differ, the new backup gets a UTC timestamp, such as
 `ti-engine.<old BUILD>.20261115T120000Z.bak`. Backups are never overwritten.
 If that timestamped name also holds different bytes, installation stops
 before replacing the engine. The services step logs the old and new build
-identities and the backup name after installation.
+identities and the backup name after installation. Before replacing the engine,
+it syncs the backup file and its directory with GNU coreutils `sync`. After
+renaming the engine and BUILD into place, it syncs the directory again. A
+failed sync stops installation.
 
 ## What it is and why
 
@@ -1495,8 +1501,11 @@ Paste `policy.hujson` again once you have found the cause.
   prompt ("Unlocking the secrets after a boot").
 - **Every Sunday:** approve the Gateway's phone prompt.
 - **Installing a build:** follow [Installing a build](#installing-a-build)
-  to build and copy a fresh `dist/` including `BUILD`, then install it with
-  `sudo deploy/provision.sh services`. Install a new data job build only with
+  for the server’s installation method. On a services-managed server, copy a
+  fresh `dist/` including `BUILD` and run `sudo deploy/provision.sh services`.
+  On a ti-release-managed server (`releases/current` exists), install the
+  build with `ti-release`. Services still installs units, settings, `ti-data`,
+  `ti-gateway-heal` and `universe-rank`. Install a new data job build only with
   a fresh engine run, or after checking it reproduces the current run's files.
 - **The dashboard on the tailnet:** `sudo tailscale serve --bg 8088`, the
   port its unit listens on.
