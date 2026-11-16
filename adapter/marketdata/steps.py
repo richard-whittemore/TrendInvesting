@@ -177,6 +177,8 @@ def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
         # (manual, Dividend currencies).
         fx.check_history(existing, fetched)
         fx.require_fresh(fetched, fetch_day)
+        if max(fetched, default=dt.date.min) < max(existing, default=dt.date.min):
+            raise fx.MarketDataError('stale ECB archive: it ends before the newest recorded fixing')
         boundary = getattr(existing, 'covered_through', dt.date.min)
         fx.require_continuous(fetched, boundary)
         rec['covered_before'] = boundary.isoformat() if boundary != dt.date.min else None

@@ -359,6 +359,17 @@ class CoverageAndMergeTest(unittest.TestCase):
                              now=lambda: dt.datetime(2026, 3, 10, 8, tzinfo=dt.timezone.utc))
             self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
 
+    def test_a_same_day_copy_older_than_the_recordings_is_stale(self):
+        with tempfile.TemporaryDirectory() as d:
+            late = lambda: dt.datetime(2026, 3, 4, 23, tzinfo=dt.timezone.utc)
+            later = lambda: dt.datetime(2026, 3, 4, 23, 30, tzinfo=dt.timezone.utc)
+            steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=late)
+            before = {p.name: p.read_bytes() for p in Path(d).glob('*.json')}
+            older = CSV.replace('2026-03-04,2,4,N/A,\n', '')
+            with self.assertRaisesRegex(fx.MarketDataError, 'stale ECB archive'):
+                steps.run_fx(DAY, d, get=lambda url: (archive(older), url), now=later)
+            self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
+
     def test_same_second_fetch_fails_without_changing_recordings(self):
         for mode in ('same', 'extension', 'revision', 'withdrawal', 'backdating'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
