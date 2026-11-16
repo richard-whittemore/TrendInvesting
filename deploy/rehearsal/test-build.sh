@@ -102,6 +102,12 @@ expect "an unknown architecture is refused" 1 "$(run_build riscv --arch riscv64)
 test ! -e "$work/riscv" || expect "nothing is built for an unknown architecture" absent present
 expect "a missing architecture is refused" 1 "$(run_build noarch --arch)"
 
+git -C "$clone" -c user.name=test -c user.email=test@invalid tag -a -m "a tag the services step cannot name" release/v1
+expect "a stamp the services step would refuse is refused" 1 "$(run_build slash)"
+grep -q "release/v1" "$work/slash.out" || expect "the refusal names the stamp" release/v1 "$(cat "$work/slash.out")"
+test ! -e "$work/slash" || expect "nothing is built under an unusable stamp" absent present
+git -C "$clone" tag -d release/v1 >/dev/null
+
 touch "$clone/untracked.go"
 expect "a dirty tree is refused for arm64" 1 "$(run_build dirty --arch arm64)"
 grep -q "dirty" "$work/dirty.out" || expect "the refusal says the tree is dirty" dirty "$(cat "$work/dirty.out")"

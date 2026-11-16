@@ -65,6 +65,12 @@ case $stamp in
     fi
     ;;
 esac
+# BUILD carries the stamp, and the services step accepts only this form
+# (docs/manual/server.md, "Installing a build").
+if ! printf '%s\n' "$stamp" | LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}'; then
+  printf 'build-engine: the stamp %s cannot be a build identity (letters, digits, . _ - only, at most 64); build from a commit without such a tag\n' "$stamp" >&2
+  exit 1
+fi
 out=${out:-$repo/dist}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
