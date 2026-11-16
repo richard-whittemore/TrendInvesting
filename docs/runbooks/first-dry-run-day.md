@@ -16,7 +16,7 @@ its close. Dry-run sends nothing to IBKR, ever.*
 > `services` installs the programs in `dist/`, including `ti-engine`, using
 > the BUILD identity and atomic replacement described in
 > [server](../manual/server.md), "Installing a build". Once `ti-release`
-> manages the server, `services` skips those eight programs and still
+> manages the server, `services` skips the six programs ti-release installs (it still installs ti-gateway-heal and universe-rank from TI_DIST) and still
 > provisions units, libexec scripts, settings and configuration stubs.
 > The data step is installed as usual. Existing engine settings are kept.
 
@@ -802,7 +802,7 @@ timer's doing):
   (rewritten every run), and the staged programs including `ti-engine`.
   Follow [server](../manual/server.md), "Installing a build", for the BUILD
   requirement and atomic engine replacement. On a ti-release-managed server,
-  `services` skips the eight programs and still installs the data step and
+  `services` skips the six programs ti-release installs (it still installs ti-gateway-heal and universe-rank from TI_DIST) and still installs the data step and
   provisions the service files. What it **keeps**,
   byte for byte: every engine configuration (`engines/*.config`), every
   settings file already on the server (`engines/*.env`; the shipped one is

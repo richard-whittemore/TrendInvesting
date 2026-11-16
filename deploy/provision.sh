@@ -870,6 +870,7 @@ CONF
         # (docs/manual/server.md, "Installing a build"). No engine is restarted.
         if test -f "$bin/ti-engine" && cmp -s "$bin/ti-engine" "$dist/ti-engine"; then
           printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
+          sync -- "$bin/.BUILD.new" || die "could not sync staged BUILD"
           mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
           sync -- "$bin" || die "could not sync installed BUILD"
           chown root:root "$bin/ti-engine"
@@ -902,6 +903,7 @@ $busy"
         fi
         install -m 0755 "$dist/$b" "$bin/.ti-engine.new" || die "could not stage ti-engine"
         printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
+        sync -- "$bin/.ti-engine.new" "$bin/.BUILD.new" || die "could not sync staged ti-engine and BUILD"
         if test "$backup" != none && ! test -e "$bin/$backup"; then
           cp -p "$bin/ti-engine" "$bin/.ti-engine.bak.new" || die "could not back up ti-engine"
           mv -f "$bin/.ti-engine.bak.new" "$bin/$backup" || die "could not publish ti-engine backup"
