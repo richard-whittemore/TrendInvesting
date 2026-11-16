@@ -98,9 +98,9 @@ class ActionsTest(unittest.TestCase):
 
     def test_load_actions_merges_recordings(self):
         with tempfile.TemporaryDirectory() as d:
-            for kind, rows, a, b in (("splits", [{"ticker": "A"}], "2026-01-01", "2026-02-01"),
-                                     ("splits", [{"ticker": "B"}], "2026-02-02", "2026-03-01"),
-                                     ("dividends", [{"ticker": "C"}], "2026-01-01", "2026-03-01")):
+            for kind, rows, a, b in (("splits", [{"id": "SA", "ticker": "A"}], "2026-01-01", "2026-02-01"),
+                                     ("splits", [{"id": "SB", "ticker": "B"}], "2026-02-02", "2026-03-01"),
+                                     ("dividends", [{"id": "DC", "ticker": "C"}], "2026-01-01", "2026-03-01")):
                 write_window(d, kind, a, b, rows)
             got = history.load_actions(d, "splits", D(2026, 1, 1), D(2026, 3, 1))
             self.assertEqual([r["ticker"] for r in got], ["A", "B"])
@@ -121,12 +121,55 @@ class ActionsTest(unittest.TestCase):
             out = [c for _, c in adjust.adjusted_closes(h, "A", splits, divs)]
             self.assertEqual([round(c, 9) for c in out], [49.0, 49.0, 49.0, 50.0])   # 0.5 once, 0.98 once
 
-    def test_an_identical_row_without_an_id_counts_once(self):
-        row = {"ticker": "A", "execution_date": "2026-03-04", "split_from": 1, "split_to": 2}
+    def test_an_action_row_without_an_id_is_refused_naming_kind_and_window(self):
+        rows = {"splits": {"ticker": "A", "execution_date": "2026-03-04", "split_from": 1, "split_to": 2},
+                "dividends": {"ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0}}
+        for kind, row in rows.items():
+            for identity in ({}, {"id": None}, {"id": ""}, {"id": " "}, {"id": "\t"},
+                             {"id": 42}, {"id": True}, {"id": False}, {"id": []},
+                             {"id": ["bad"]}, {"id": {}}, {"id": {"bad": 1}}):
+                with self.subTest(kind=kind, identity=identity), tempfile.TemporaryDirectory() as d:
+                    write_window(d, kind, "2026-01-01", "2026-03-20", [dict(row, **identity)])
+                    with self.assertRaises(history.ConflictingActions) as caught:
+                        history.load_actions(d, kind, D(2026, 1, 1), D(2026, 3, 20))
+                    self.assertEqual(str(caught.exception),
+                                     "{} row without an id in the window 2026-01-01 to 2026-03-20 "
+                                     "(ticker A)".format(kind))
+
+    def test_a_nonblank_string_id_is_kept_verbatim(self):
+        row = {"id": " D1\t", "ticker": "SPY", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0}
         with tempfile.TemporaryDirectory() as d:
-            write_window(d, "splits", "2026-01-01", "2026-03-20", [row])
-            write_window(d, "splits", "2026-01-02", "2026-03-23", [dict(row)])
-            self.assertEqual(history.load_actions(d, "splits", D(2026, 1, 1), D(2026, 3, 23)), [row])
+            write_window(d, "dividends", "2026-01-01", "2026-03-20", [row])
+            self.assertEqual(history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 20)), [row])
+
+    def test_an_id_less_dividend_for_an_unrequested_ticker_is_ignored_only_with_a_filter(self):
+        spy = {"id": "D1", "ticker": "SPY", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0}
+        other = {"ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 2.0}
+        with tempfile.TemporaryDirectory() as d:
+            write_window(d, "dividends", "2026-01-01", "2026-03-20", [other, spy])
+            self.assertEqual(history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 20),
+                                                  tickers={"SPY"}), [spy])
+            with self.assertRaises(history.ConflictingActions):
+                history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 20))
+
+    def test_an_id_less_row_with_a_requested_or_unknown_ticker_refuses_a_filtered_read(self):
+        for ticker in ({"ticker": "SPY"}, {}, {"ticker": None}, {"ticker": 42},
+                       {"ticker": True}, {"ticker": []}, {"ticker": {}},
+                       {"ticker": ""}, {"ticker": " "}, {"ticker": "\t"}):
+            with self.subTest(ticker=ticker), tempfile.TemporaryDirectory() as d:
+                row = dict(ticker, ex_dividend_date="2026-03-05", cash_amount=1.0)
+                write_window(d, "dividends", "2026-01-01", "2026-03-20", [row])
+                with self.assertRaises(history.ConflictingActions):
+                    history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 20), tickers={"SPY"})
+
+    def test_two_id_less_copies_of_one_dividend_are_refused_not_both_returned(self):
+        first = {"ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0,
+                 "declaration_date": "2026-02-01"}
+        with tempfile.TemporaryDirectory() as d:
+            write_window(d, "dividends", "2026-01-01", "2026-03-20", [first])
+            write_window(d, "dividends", "2026-01-02", "2026-03-23", [dict(first, declaration_date="2026-02-02")])
+            with self.assertRaises(history.ConflictingActions):
+                history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 23))
 
     def test_conflicting_copies_of_one_action_are_refused(self):
         with tempfile.TemporaryDirectory() as d:

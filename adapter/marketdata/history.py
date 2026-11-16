@@ -5,8 +5,8 @@ session for every US stock (unadjusted), so 260 sessions of closes for the
 whole market cost 260 requests (about 54 minutes at 5 a minute). Splits and
 dividends come from the bulk reference endpoints, filtered by date and
 paginated, and are recorded per window; windows overlap, so an action read
-from several is counted once (by Massive's id, or the whole row when it has
-none). Copies of one id conflict when they differ in a field that reaches
+from several is counted once, by Massive's id; a row without an id is
+refused, because it cannot be told from a second copy of one action. Copies of one id conflict when they differ in a field that reaches
 the stream (ticker, the date, the cash amount or the split ratio), or in a
 dividend's currency or type, which say what that cash amount is. The windows
 must cover the requested range. Recordings are never overwritten,
@@ -40,7 +40,8 @@ class Gap(Exception):
 
 
 class ConflictingActions(Exception):
-    """Two recordings hold different copies of one corporate action."""
+    """Two recordings hold different copies of one corporate action, or a
+    recorded corporate action has no usable id."""
 
 
 def _path(directory, day):
@@ -162,21 +163,30 @@ def load_actions(directory, kind, first, last, tickers=None):
     ex_dividend_date or cash_amount for dividends; ticker, execution_date,
     split_from or split_to for splits. A dividend's currency or dividend_type
     also conflicts, because they say what that cash_amount is. Other revisions keep
-    the full first copy. Rows without an id are keyed by their full canonical
-    body, so only identical rows without an id count once.
+    the full first copy. An id must be a string with a non-whitespace character.
+    A row without a usable id raises ConflictingActions naming
+    the kind, ticker and recorded window it came from, because it cannot be told
+    from a second copy of one action, which would be counted twice.
 
     With ``tickers`` (a set), only those tickers' rows are returned and a
     conflict is raised only when either copy is one of theirs, so a revised
     figure for an instrument the caller never reads does not refuse it; a
-    copy that moves an action onto or off one of them still does."""
+    copy that moves an action onto or off one of them still does. A row without
+    a usable id is ignored only if its ticker is a non-blank string outside the set."""
     windows, rows, seen = [], [], {}
     fields = DIVIDEND_FIELDS if kind == "dividends" else SPLIT_FIELDS
     for path in sorted(glob.glob(os.path.join(directory, kind + "_*_*.json"))):
         rec = record.read(path)
         windows.append((dt.date.fromisoformat(rec["from"]), dt.date.fromisoformat(rec["session"])))
         for r in rec["rows"]:
-            body = _canonical(r)
-            key = ("id", r["id"]) if r.get("id") else ("row", body)
+            row_id = r.get("id")
+            if not isinstance(row_id, str) or not row_id.strip():
+                ticker = r.get("ticker")
+                if tickers is not None and isinstance(ticker, str) and ticker.strip() and ticker not in tickers:
+                    continue
+                raise ConflictingActions("{} row without an id in the window {} to {} (ticker {})".format(
+                    kind, rec["from"], rec["session"], r.get("ticker")))
+            key = ("id", r["id"])
             material = _canonical({field: r[field] for field in fields if field in r})
             if key in seen:
                 kept, ticker = seen[key]
