@@ -1505,24 +1505,37 @@ fixing dates, each in a small immutable `fx-ecb_<fixing-date>.json` containing
 that date's rates, source, URL, session and fetch time. Storage grows by about
 1 KB per fixing day after the bootstrap. A fixing already recorded must match
 exactly, including which currencies are available. A difference refuses with
-"ECB revised the <date> fixing" and preserves the recordings.
+"ECB revised the <date> fixing" and preserves the recordings. New fixings must
+be dated after the latest recorded fixing; backdated additions refuse so a
+completed conversion window cannot change. Every fixing must be dated no later
+than the UTC date of its recording's `fetched_at`, checked on write and read.
 
 Encoding reads the union of all FX recordings, rejects conflicting duplicate
-dates and excludes fixings after the stream's last session. FX recordings do
-not enter the split/dividend manifest that triggers published-file rechecks.
+dates. Coverage uses the newest fixing date in that union, including dates
+after the stream's last session; conversion uses only the dividend's prior
+window. FX recordings do not enter the split/dividend manifest that triggers published-file rechecks.
 Rechecking an older session cannot add a backdated action-manifest change.
-The download has a 120-second monotonic deadline and a 20 MB byte cap. The
-CSV's declared and actual uncompressed size are capped at 50 MB. Sector labels
+The body read has a 120-second monotonic deadline and a 20 MB byte cap.
+The connection uses a 60-second per-operation socket timeout; the data unit
+is bounded by `TimeoutStartSec=1h`. The CSV's declared and actual uncompressed size are capped at 50 MB. Sector labels
 are recorded before the ECB request so an ECB outage preserves that day's
 labels. Missing required conversion input refuses publication. These information
 rates adjust historical prices for ranking and never price an order.
 
 A dividend paid in currency X becomes dollars as cash × (USD per EUR) /
-(X per EUR), using its ex-dividend date's fixing. EUR needs only USD per
-EUR; USD passes through unchanged and needs no rate recording. If the
-date has no fixing, the latest fixing within the preceding five calendar
-days is used. A missing currency, an uncovered currency or an unavailable
-rate skips that dividend's adjustment. The existing exclusion diagnostics
+(X per EUR), using the latest usable fixing dated strictly before the ex-dividend
+date, from ex-date − 1 through ex-date − 5 calendar days. The ex-date's own
+fixing is never used: the factor's P is the prior session's close. EUR needs
+only USD per EUR; USD passes through unchanged and needs no rate recording.
+
+Let C be the newest fixing date in the union of recorded FX inputs. If
+C < ex-date − 1, the window is incomplete: publication refuses with MissingData
+and a later firing retries, even if an older usable fixing exists or the
+currency is uncovered. Once C ≥ ex-date − 1, an uncovered currency or a window
+with no usable fixing skips that dividend's adjustment. Recorded fixings are
+immutable and new dates must be after C, so later recordings cannot change
+this conversion or skip. A missing or malformed currency is unavailable without
+loading FX and follows the same skip handling. The existing exclusion diagnostics
 name the ticker, ex-date, currency and reason. For a universe member, the
 first trading session on or after that ex-date is omitted from its history,
 so a ranking cannot span the unadjusted jump. Required and held instruments
@@ -1536,11 +1549,13 @@ date. Boost's SPY USD path needs no ECB data.
 
 ## Upgrading to dividend currency conversion
 
-A running IRA run needs a fresh run after this upgrade, with operator approval
-and the one-time warm-up. Previously published IRA files treated non-USD cash
-as dollars, so conversion changes their bytes when they are re-encoded. Preserve
-the old run and its evidence. Rechecking a published file with missing ECB input
-or differing bytes names the fresh-run remedy. Boost is unaffected.
+An existing run needs a fresh run only if its published files fail to re-encode
+under the new currency rules, including missing required FX input or differing
+bytes. In practice, this affects runs where a universe member had a non-USD
+dividend in the published files' window: those files previously treated the cash
+as dollars. The fresh run needs operator approval and the one-time warm-up;
+preserve the old run and its evidence. Runs whose published files still
+re-encode byte for byte continue unchanged. Boost is unaffected.
 
 ## What can go wrong, and what the step does
 

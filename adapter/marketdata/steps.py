@@ -143,6 +143,9 @@ def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
                               fetched_at=_stamp(now), url=url, body=fx.csv_body(raw)))
     fx.merge(dict(existing), fetched)
     new = {day: row for day, row in fetched.items() if day not in existing}
+    # Completed conversion windows cannot gain dates (manual, Dividend currencies).
+    if existing and any(day <= max(existing) for day in new):
+        raise MissingData('ECB backdated fixing within recorded coverage')
     batches = [new] if not existing else [{day: row} for day, row in sorted(new.items())]
     path = os.path.join(directory, recording.filename({'kind': fx.KIND, 'session': str(max(fetched))}))
     if not new:

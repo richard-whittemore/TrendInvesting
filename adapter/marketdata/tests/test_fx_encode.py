@@ -1,4 +1,5 @@
 """Currency adjustment through both encoders, using synthetic recordings."""
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +17,7 @@ def set_currency(directory, currency):
     record.write(directory, rec)
 
 
-def rates_record(directory, text='Date,USD,GBP\n2026-11-27,2,4\n'):
+def rates_record(directory, text='Date,USD,GBP\n2026-11-26,2,4\n'):
     return record.write(directory, dict(kind=fx.KIND, source=fx.SOURCE, session=str(LAST),
                                         fetched_at='2026-11-30T23:30:00Z', url=fx.URL, body=text))
 
@@ -52,7 +53,7 @@ class FXEncodingTest(unittest.TestCase):
     def test_uncovered_and_stale_rates_skip_and_record_via_existing_exclusions(self):
         for compact in (False, True):
             for currency, text, reason in [('ZZZ', 'Date,USD,GBP\n2026-11-27,2,4\n', 'not covered'),
-                                            ('GBP', 'Date,USD,GBP\n2026-11-21,2,4\n', '5 calendar days'),
+                                            ('GBP', 'Date,USD,GBP\n2026-11-27,N/A,N/A\n2026-11-21,2,4\n', '5 calendar days'),
                                             (None, 'Date,USD,GBP\n2026-11-27,2,4\n', 'currency')]:
                 with self.subTest(compact=compact, currency=currency), tempfile.TemporaryDirectory() as d:
                     build(d)
@@ -123,3 +124,62 @@ class FXEncodingTest(unittest.TestCase):
                 else:
                     self.assertAlmostEqual(bar_of(got, 'CCC', '2026-11-30')['adjusted']['close'], 50)
                 self.assertIn('ZZZ', excluded['CCC'][0].reason)
+
+
+class StableConversionTest(unittest.TestCase):
+    def encoded(self, directory, compact):
+        return ''.join(json.dumps(e, separators=(',', ':'), allow_nan=False) + '\n' for e in stream(directory, compact)).encode()
+
+    def add_rates(self, directory, day, usd=2, gbp=4):
+        return record.write(directory, dict(kind=fx.KIND, source=fx.SOURCE, session=day,
+                            fetched_at=day + 'T23:30:00Z', url=fx.URL,
+                            body='Date,USD,GBP\n{},{},{}\n'.format(day, usd, gbp)))
+
+    def test_ex_date_fixing_arriving_after_publication_preserves_bytes(self):
+        for compact in (False, True):
+            with self.subTest(compact=compact), tempfile.TemporaryDirectory() as d:
+                build(d)
+                set_currency(d, 'GBP')
+                self.add_rates(d, '2026-11-26')
+                published = self.encoded(d, compact)
+                self.add_rates(d, '2026-11-27', usd=8, gbp=4)
+                self.assertEqual(self.encoded(d, compact), published)
+                self.add_rates(d, '2026-12-01', usd=16, gbp=4)
+                self.assertEqual(self.encoded(d, compact), published)
+
+    def test_incomplete_prior_day_refuses_then_retries_stably(self):
+        for compact in (False, True):
+            for currency in ('GBP', 'ZZZ'):
+                with self.subTest(compact=compact, currency=currency), tempfile.TemporaryDirectory() as d:
+                    build(d)
+                    set_currency(d, currency)
+                    self.add_rates(d, '2026-11-25')
+                    with self.assertRaisesRegex(steps.MissingData, 'coverage'):
+                        self.encoded(d, compact)
+                    self.add_rates(d, '2026-11-26', usd=4, gbp=4)
+                    published = self.encoded(d, compact)
+                    self.add_rates(d, '2026-11-27', usd=8, gbp=4)
+                    self.assertEqual(self.encoded(d, compact), published)
+
+    def test_malformed_currency_needs_no_fx_and_skips_member(self):
+        for compact in (False, True):
+            for currency in (None, '', 'gbp', [], {}, 1):
+                with self.subTest(compact=compact, currency=currency), tempfile.TemporaryDirectory() as d:
+                    build(d)
+                    set_currency(d, currency)
+                    excluded = {}
+                    with mock.patch.object(fx, 'load', side_effect=AssertionError('malformed currency loads FX')):
+                        got = stream(d, compact, excluded)
+                    self.assertIn('currency', excluded['CCC'][0].reason)
+                    self.assertTrue(got)
+
+    def test_coverage_uses_union_even_when_newest_fixing_is_after_stream(self):
+        for compact in (False, True):
+            with self.subTest(compact=compact), tempfile.TemporaryDirectory() as d:
+                build(d)
+                set_currency(d, 'GBP')
+                self.add_rates(d, '2026-11-25')
+                self.add_rates(d, '2026-12-01')
+                published = self.encoded(d, compact)
+                self.add_rates(d, '2026-12-02', usd=8, gbp=4)
+                self.assertEqual(self.encoded(d, compact), published)

@@ -76,18 +76,29 @@ def parse(text):
         raise MissingData('malformed ECB history: {}'.format(e)) from None
 
 
+def valid_currency(currency):
+    """Currency syntax accepted by conversion (manual, Dividend currencies)."""
+    return isinstance(currency, str) and len(currency) == 3 and currency.isalpha() and currency.isupper()
+
+
 def usd(cash, currency, day, rates):
-    """Ex-date cross rate, or the latest fixing at most five calendar days earlier."""
+    """Use a complete prior five-day window (manual, Dividend currencies).
+
+    The ex-date fixing is never eligible: the factor uses the prior close.
+    Incomplete coverage must refuse before any unavailable-conversion skip.
+    """
     if currency == 'USD':
         return cash
-    if not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha() or not currency.isupper():
+    if not valid_currency(currency):
         raise Unavailable('missing or malformed dividend currency')
     if rates is None:
         raise MissingData('ECB history recording is required for {}'.format(currency))
+    if not rates or max(rates) < day - dt.timedelta(days=1):
+        raise MissingData('ECB coverage incomplete for dividend on {}'.format(day))
     if currency != 'EUR' and not any(currency in row for row in rates.values()):
         raise Unavailable('currency {} not covered by ECB'.format(currency))
     fixing = None
-    for i in range(6):
+    for i in range(1, 6):
         candidate = rates.get(day - dt.timedelta(days=i), {})
         if 'USD' in candidate and (currency == 'EUR' or currency in candidate):
             fixing = candidate
@@ -169,8 +180,11 @@ def checked(rec, session=None):
         recorded_day = dt.date.fromisoformat(rec['session'])
         if session is not None and recorded_day != session:
             raise ValueError('session differs from filename')
-        dt.datetime.strptime(rec['fetched_at'], '%Y-%m-%dT%H:%M:%SZ')
-        return parse(rec['body'])
+        fetched_day = dt.datetime.strptime(rec['fetched_at'], '%Y-%m-%dT%H:%M:%SZ').date()
+        rates = parse(rec['body'])
+        if max(rates) > fetched_day:
+            raise MissingData('ECB fixing dated after UTC fetch date')
+        return rates
     except (KeyError, TypeError, ValueError):
         raise MissingData('malformed ECB recording') from None
 

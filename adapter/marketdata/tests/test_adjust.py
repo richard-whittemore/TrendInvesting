@@ -6,7 +6,7 @@ from marketdata import adjust, fx
 
 D = dt.date
 DAYS = [D(2026, 3, 3), D(2026, 3, 4), D(2026, 3, 5)]
-RATES = fx.parse('Date,USD,GBP\n2026-03-04,2,4\n')
+RATES = fx.parse('Date,USD,GBP\n2026-03-04,2,4\n2026-03-03,2,4\n')
 
 
 class DividendCurrencyTest(unittest.TestCase):

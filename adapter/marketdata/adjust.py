@@ -44,7 +44,11 @@ class CannotAdjust(Exception):
 
 
 class SkippedDividend(CannotAdjust):
-    """An unavailable conversion: only this dividend is omitted (ADR 0019)."""
+    """An unavailable conversion, with handling determined by the caller.
+
+    The manual's "Dividend currencies" section omits it for a universe member
+    and refuses a held or required instrument. An unknown is not zero (ADR 0019).
+    """
 
     def __init__(self, message, day, row):
         super().__init__(message, day)

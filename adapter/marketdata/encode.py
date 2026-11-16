@@ -399,11 +399,12 @@ def _universe_rows(directory, day, rec, max_age_days, named, listing=None):
     return [rows[s] for s in sorted(rows)], skipped
 
 
-def _rates(directory, last, by_ticker, listing=None):
+def _rates(directory, by_ticker, listing=None):
     """Union immutable fixings once per encode. USD needs no rate recording."""
-    if not any(r.get("currency") not in (None, "USD") for _, dividends in by_ticker.values() for r in dividends):
+    if not any(fx.valid_currency(r.get("currency")) and r["currency"] != "USD"
+               for _, dividends in by_ticker.values() for r in dividends):
         return None
-    return fx.load(directory, last, listing=listing,
+    return fx.load(directory, listing=listing,
                    read=(lambda path: _read_listed(directory, os.path.basename(path), listing)) if listing is not None else None)
 
 
@@ -674,7 +675,7 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     for r in _actions(directory, "dividends", start, last, scope):
         by_ticker[r.get("ticker")][1].append(r)
 
-    rates = _rates(directory, last, by_ticker)
+    rates = _rates(directory, by_ticker)
     factors, out = {}, {}   # out: ticker -> {session left out: reason}
     for ticker in sorted(wanted | members):
         if ticker in named:
@@ -922,7 +923,7 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
     if actions_failed is not None:
         raise actions_failed
 
-    rates = _rates(directory, last, by_ticker, listing)
+    rates = _rates(directory, by_ticker, listing)
     factors, out = {}, {}   # out: ticker -> the sessions it is left out of, with why
     for ticker in sorted(named | members):
         if ticker in named:

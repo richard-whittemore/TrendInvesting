@@ -65,9 +65,10 @@ class FXRecordingTest(unittest.TestCase):
     def test_currency_rates_and_five_day_window(self):
         from marketdata import fx
         rates = fx.parse(CSV)
-        self.assertEqual(fx.usd(2, 'EUR', DAY, rates), 4)
+        self.assertEqual(fx.usd(2, 'EUR', DAY, rates), 6)
         self.assertEqual(fx.usd(2, 'GBP', DAY, rates), 1)
         self.assertEqual(fx.usd(2, 'USD', DAY, None), 2)
+        rates[dt.date(2026, 3, 9)] = {}
         self.assertEqual(fx.usd(2, 'GBP', dt.date(2026, 3, 9), rates), 1)
         for currency, date, reason in [('GBP', dt.date(2026, 3, 10), '5'),
                                        ('ZZZ', DAY, 'not covered'),
@@ -104,6 +105,7 @@ class FXRecordingTest(unittest.TestCase):
         from marketdata import fx
         rates = fx.parse(CSV)
         self.assertEqual(fx.usd(2, 'JPY', DAY, rates), 0.5)
+        rates[dt.date(2026, 3, 8)] = {}
         with self.assertRaisesRegex(fx.Unavailable, '5'):
             fx.usd(2, 'JPY', dt.date(2026, 3, 9), rates)
 
@@ -120,7 +122,8 @@ class ImmutableFixingTest(unittest.TestCase):
             bootstrap = steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
             original = Path(bootstrap).read_bytes()
             later = CSV + '2026-03-05,5,10,20,\n'
-            path = steps.run_fx(DAY, d, get=lambda url: (archive(later), url), now=NOW)
+            path = steps.run_fx(DAY, d, get=lambda url: (archive(later), url),
+                                now=lambda: dt.datetime(2026, 3, 5, 23, tzinfo=dt.timezone.utc))
             self.assertEqual(Path(path).name, fx.KIND + '_2026-03-05.json')
             self.assertEqual(fx.parse(record.read(path)['body']), {dt.date(2026, 3, 5): {'USD': 5, 'GBP': 10, 'JPY': 20}})
             self.assertEqual(Path(bootstrap).read_bytes(), original)
@@ -134,7 +137,8 @@ class ImmutableFixingTest(unittest.TestCase):
             original = Path(path).read_bytes()
             revised = CSV.replace(',2,4,', ',3,4,') + '2026-03-05,5,10,20,\n'
             with self.assertRaisesRegex(steps.MissingData, 'ECB revised the 2026-03-04 fixing'):
-                steps.run_fx(DAY, d, get=lambda url: (archive(revised), url), now=NOW)
+                steps.run_fx(DAY, d, get=lambda url: (archive(revised), url),
+                             now=lambda: dt.datetime(2026, 3, 5, 23, tzinfo=dt.timezone.utc))
             self.assertEqual(Path(path).read_bytes(), original)
             self.assertEqual(len(list(Path(d).iterdir())), 1)
 
@@ -210,3 +214,51 @@ class ImmutableFixingTest(unittest.TestCase):
             self.assertEqual(fx.parse(record.read(path)['body']), {DAY: {}})
             with self.assertRaisesRegex(steps.MissingData, 'ECB'):
                 steps.run_fx(DAY, d, get=lambda url: (archive(missing), 'https://example.com'), now=NOW)
+
+
+class PriorFixingTest(unittest.TestCase):
+    def test_prior_day_coverage_is_required_even_for_uncovered_currency(self):
+        rates = {DAY - dt.timedelta(days=2): {'USD': 2, 'GBP': 4}}
+        for currency in ('GBP', 'ZZZ'):
+            with self.subTest(currency=currency), self.assertRaisesRegex(steps.MissingData, 'coverage'):
+                fx.usd(2, currency, DAY, rates)
+
+    def test_holiday_fallback_uses_only_days_two_through_five(self):
+        for lag in range(2, 6):
+            with self.subTest(lag=lag):
+                rates = {DAY: {'USD': 99, 'GBP': 1},
+                         DAY - dt.timedelta(days=1): {},
+                         DAY - dt.timedelta(days=lag): {'USD': lag, 'GBP': 2}}
+                self.assertEqual(fx.usd(2, 'GBP', DAY, rates), lag)
+        rates = {DAY: {'USD': 99, 'GBP': 1}, DAY - dt.timedelta(days=1): {},
+                 DAY - dt.timedelta(days=6): {'USD': 2, 'GBP': 4}}
+        with self.assertRaises(fx.Unavailable):
+            fx.usd(2, 'GBP', DAY, rates)
+
+    def test_future_fixing_refused_on_write(self):
+        future = CSV + '2026-03-05,5,10,20,\n'
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(steps.MissingData, 'fetch'):
+                steps.run_fx(DAY, d, get=lambda url: (archive(future), url), now=NOW)
+            self.assertEqual(list(Path(d).iterdir()), [])
+
+    def test_future_fixing_refused_on_read(self):
+        future = CSV + '2026-03-05,5,10,20,\n'
+        rec = dict(kind=fx.KIND, source=fx.SOURCE, session=str(DAY),
+                   fetched_at='2026-03-04T23:00:00Z', url=fx.URL, body=future)
+        with self.assertRaisesRegex(steps.MissingData, 'fetch'):
+            fx.checked(rec)
+        with tempfile.TemporaryDirectory() as d:
+            record.write(d, rec)
+            with self.assertRaisesRegex(steps.MissingData, 'fetch'):
+                fx.load(d)
+
+    def test_new_fixing_cannot_fill_a_completed_historical_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
+            before = Path(path).read_bytes()
+            backfilled = CSV + '2026-03-03,9,10,20,\n'
+            with self.assertRaisesRegex(steps.MissingData, 'backdated'):
+                steps.run_fx(DAY, d, get=lambda url: (archive(backfilled), url), now=NOW)
+            self.assertEqual(Path(path).read_bytes(), before)
+            self.assertEqual(len(list(Path(d).iterdir())), 1)
