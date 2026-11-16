@@ -338,6 +338,16 @@ class CoverageAndMergeTest(unittest.TestCase):
                              now=lambda: dt.datetime(2026, 3, 6, 8, tzinfo=dt.timezone.utc))
             self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
 
+    def test_stale_download_that_withdraws_a_fixing_still_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
+            before = {p.name: p.read_bytes() for p in Path(d).glob('*.json')}
+            withdrawn = CSV.replace('2026-03-04,2,4,N/A,\n', '')
+            with self.assertRaisesRegex(steps.MissingData, 'ECB history no longer contains the 2026-03-04 fixing'):
+                steps.run_fx(DAY, d, get=lambda url: (archive(withdrawn), url),
+                             now=lambda: dt.datetime(2026, 3, 10, 8, tzinfo=dt.timezone.utc))
+            self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
+
     def test_same_second_fetch_fails_without_changing_recordings(self):
         for mode in ('same', 'extension', 'revision', 'withdrawal', 'backdating'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:

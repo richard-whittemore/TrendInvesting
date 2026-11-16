@@ -173,8 +173,10 @@ def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
             fetched = fx.checked(rec, fetch_day)
         except MissingData as e:
             raise fx.MarketDataError('invalid ECB archive: {}'.format(e)) from None
-        fx.require_fresh(fetched, fetch_day)
+        # Disagreement with the recorded history outranks a stale download
+        # (manual, Dividend currencies).
         fx.check_history(existing, fetched)
+        fx.require_fresh(fetched, fetch_day)
         boundary = getattr(existing, 'covered_through', dt.date.min)
         fx.require_continuous(fetched, boundary)
         rec['covered_before'] = boundary.isoformat() if boundary != dt.date.min else None
