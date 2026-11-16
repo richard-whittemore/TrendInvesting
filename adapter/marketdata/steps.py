@@ -11,6 +11,7 @@ ranked names (about 1500 requests, over 5 hours) does not, and needs IBKR
 history or a paid plan.
 """
 import datetime as dt
+import glob
 import os
 import zoneinfo
 
@@ -130,18 +131,40 @@ def run_bars(client, instruments, session, directory, lookback_days=400, now=_no
 
 
 def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
-    """Fetch ECB history once for this session, or validate its immutable recording."""
+    """Record new immutable ECB fixings (manual, Dividend currencies)."""
     from . import fx
     require_settled(session, now, settle)
-    path = os.path.join(directory, recording.filename({'kind': fx.KIND, 'session': session.isoformat()}))
-    if os.path.exists(path):
+    try:
+        existing = fx.load(directory)
+    except fx.NoRecording:
+        existing = {}
+    raw, url = (get or fx.http_get)(fx.URL)
+    fetched = fx.checked(dict(kind=fx.KIND, source=fx.SOURCE, session=str(session),
+                              fetched_at=_stamp(now), url=url, body=fx.csv_body(raw)))
+    fx.merge(dict(existing), fetched)
+    new = {day: row for day, row in fetched.items() if day not in existing}
+    batches = [new] if not existing else [{day: row} for day, row in sorted(new.items())]
+    path = os.path.join(directory, recording.filename({'kind': fx.KIND, 'session': str(max(fetched))}))
+    if not new:
+        # A bootstrap can hold the fixing under a later date's filename.
+        for candidate in sorted(glob.glob(os.path.join(directory, fx.KIND + '_*.json'))):
+            if max(fetched) in fx.checked(recording.read(candidate)):
+                return candidate
+    for rates in batches:
+        day = max(rates)
+        rec = dict(kind=fx.KIND, source=fx.SOURCE, session=day.isoformat(), fetched_at=_stamp(now),
+                   url=url, body=fx.body(rates))
+        fx.checked(rec, day)
+        path = os.path.join(directory, recording.filename(rec))
         try:
-            fx.checked(recording.read(path), session)
-        except (recording.Corrupt, OSError, ValueError, KeyError, TypeError) as e:
-            raise MissingData('unreadable ECB recording: {}'.format(e)) from None
-        return path
-    body, url = (get or fx.http_get)(fx.URL)
-    rec = dict(kind=fx.KIND, source=fx.SOURCE, session=session.isoformat(), fetched_at=_stamp(now),
-               url=url, body=fx.csv_body(body))
-    fx.checked(rec)
-    return recording.write(directory, rec)
+            recording.write(directory, rec)
+        except recording.AlreadyRecorded:
+            try:
+                winner = fx.checked(recording.read(path), day)
+            except (recording.Corrupt, OSError, ValueError, KeyError, TypeError) as e:
+                raise MissingData('unreadable ECB recording: {}'.format(e)) from None
+            fx.merge(dict(winner), rates)
+            if any(date not in winner for date in rates):
+                raise MissingData('ECB recording does not hold the fetched fixings')
+    fx.load(directory)
+    return path

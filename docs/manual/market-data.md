@@ -1498,11 +1498,24 @@ which writes the sessions again from its recordings, and start the adapter
 ## Dividend currencies
 
 The momentum data job fetches the ECB's [full history of euro reference
-rates](https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip) once per
-recorded session. It extracts the CSV with Python's standard library and
-keeps the whole CSV in `fx-ecb_<session>.json`, with its source, URL, session
-and fetch time. Encoding reads that recording only. These information rates
-adjust historical prices for ranking; they never price an order.
+rates](https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip) and extracts
+the CSV with Python's standard library. The first fetch records one bootstrap
+history file through its latest fixing date. Later fetches record only new
+fixing dates, each in a small immutable `fx-ecb_<fixing-date>.json` containing
+that date's rates, source, URL, session and fetch time. Storage grows by about
+1 KB per fixing day after the bootstrap. A fixing already recorded must match
+exactly, including which currencies are available. A difference refuses with
+"ECB revised the <date> fixing" and preserves the recordings.
+
+Encoding reads the union of all FX recordings, rejects conflicting duplicate
+dates and excludes fixings after the stream's last session. FX recordings do
+not enter the split/dividend manifest that triggers published-file rechecks.
+Rechecking an older session cannot add a backdated action-manifest change.
+The download has a 120-second monotonic deadline and a 20 MB byte cap. The
+CSV's declared and actual uncompressed size are capped at 50 MB. Sector labels
+are recorded before the ECB request so an ECB outage preserves that day's
+labels. Missing required conversion input refuses publication. These information
+rates adjust historical prices for ranking and never price an order.
 
 A dividend paid in currency X becomes dollars as cash × (USD per EUR) /
 (X per EUR), using its ex-dividend date's fixing. EUR needs only USD per
@@ -1514,9 +1527,20 @@ name the ticker, ex-date, currency and reason. For a universe member, the
 first trading session on or after that ex-date is omitted from its history,
 so a ranking cannot span the unadjusted jump. Required and held instruments
 retain the existing fail-closed refusal when an adjustment is unavailable.
-A converted amount at or below zero, at or above the prior close (restated
-onto the ex-date share basis), or not finite is refused. Valid dividends on
-the same ex-date are still applied. Boost's SPY USD path needs no ECB data.
+For an unavailable-conversion skip, other valid dividends on the same ex-date
+are still applied. A converted amount at or below zero, at or above the prior
+close (restated onto the ex-date share basis), or not finite refuses a required
+or held instrument. For a universe member, invalid converted cash removes that
+date's actions and excludes one session, including any other dividends on that
+date. Boost's SPY USD path needs no ECB data.
+
+## Upgrading to dividend currency conversion
+
+A running IRA run needs a fresh run after this upgrade, with operator approval
+and the one-time warm-up. Previously published IRA files treated non-USD cash
+as dollars, so conversion changes their bytes when they are re-encoded. Preserve
+the old run and its evidence. Rechecking a published file with missing ECB input
+or differing bytes names the fresh-run remedy. Boost is unaffected.
 
 ## What can go wrong, and what the step does
 
@@ -1527,7 +1551,7 @@ for the recording and encoding steps.
 | What you see | What the program does | What you do |
 | --- | --- | --- |
 | A dividend's currency is uncovered, missing, or has no usable ECB fixing within five calendar days | That dividend adjustment is skipped; the existing `excluded` diagnostic records ticker, ex-date, currency and reason. A universe member loses the ex-date session so ranking cannot cross the unknown adjustment; a required or held instrument refuses the stream | Check the dividend's currency and the recorded ECB CSV ("Dividend currencies"). Never substitute dollars or zero |
-| The ECB recording is missing or malformed, or converted dividend cash is outside 0 < cash < prior close | Encoding refuses cleanly; the data job publishes no stream. The cash refusal names ticker and ex-date | Check the recorded input and the issuer's dividend notice; preserve the existing recordings |
+| The ECB recording is missing or malformed, or converted dividend cash is outside 0 < cash < prior close | Missing or malformed ECB input refuses publication. Invalid converted cash refuses required or held instruments, naming ticker and ex-date. For universe members it removes that date's actions and excludes one session | Check the recorded input and the issuer's dividend notice; preserve the existing recordings |
 | `ti-data refused:` "no secrets file", "cannot read MASSIVE_API_KEY from the secrets file" or "MASSIVE_API_KEY is not set in the secrets file" | No file is written; the unit shows as failed. The key is never printed | Put the key on the `MASSIVE_API_KEY=` line of `secrets.env` (`sudo ti-secrets edit secrets.env`; the file is stored encrypted), then `sudo systemctl start ti-data` ("What can go wrong" under "The daily data job") |
 | `ti-data refused:` "run ... has no stream yet: run the warm-up once first" | No file is written | Run the one-time warm-up with the date it names ("The one-time warm-up") |
 | `ti-data refused:` the engine's durable log "cannot be read", "is not an engine durable log", "holds no committed configuration input: start the engine first", "holds no committed input, so it names no run", or the run's first input "is not its configuration" | No file is written | Start the engine once (so `run.env` and its log exist), check `TI_RUN`, and restore a log that cannot be read from the backup as the engine wrote it; never edit it |

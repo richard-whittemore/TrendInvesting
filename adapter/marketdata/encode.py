@@ -400,7 +400,7 @@ def _universe_rows(directory, day, rec, max_age_days, named, listing=None):
 
 
 def _rates(directory, last, by_ticker, listing=None):
-    """One checked snapshot per encode. USD needs no rate recording."""
+    """Union immutable fixings once per encode. USD needs no rate recording."""
     if not any(r.get("currency") not in (None, "USD") for _, dividends in by_ticker.values() for r in dividends):
         return None
     return fx.load(directory, last, listing=listing,

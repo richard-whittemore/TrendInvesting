@@ -10,6 +10,7 @@ import glob
 import io
 import math
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,13 @@ from .steps import MissingData
 KIND = kinds.FX
 SOURCE = 'ecb-euro-reference-rates'
 URL = 'https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip'
+MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+MAX_CSV_BYTES = 50 * 1024 * 1024
+DOWNLOAD_SECONDS = 120
+
+
+class NoRecording(MissingData):
+    """No recorded ECB input is available for conversion."""
 
 
 class Unavailable(Exception):
@@ -107,12 +115,26 @@ OPENER = urllib.request.build_opener(ECBOnlyRedirect())
 def http_get(url, opener=OPENER.open):
     if not _source(url):
         raise MarketDataError('refusing a URL outside HTTPS on ECB')
+    deadline = time.monotonic() + DOWNLOAD_SECONDS
     try:
         with opener(urllib.request.Request(url, headers={'User-Agent': 'TrendInvesting market-data'}), timeout=60) as resp:
             actual = resp.geturl()
             if not _source(actual):
                 raise MarketDataError('refusing a response outside HTTPS on ECB')
-            return resp.read(), actual
+            chunks, size = [], 0
+            while True:
+                if time.monotonic() >= deadline:
+                    raise MarketDataError('ECB download exceeded overall deadline')
+                chunk = resp.read1(65536)
+                if time.monotonic() >= deadline:
+                    raise MarketDataError('ECB download exceeded overall deadline')
+                size += len(chunk)
+                if size > MAX_DOWNLOAD_BYTES:
+                    raise MarketDataError('ECB download exceeded byte limit')
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b''.join(chunks), actual
     except (urllib.error.URLError, OSError) as e:
         raise MarketDataError('ECB request failed: {}'.format(type(e).__name__)) from None
 
@@ -120,7 +142,20 @@ def http_get(url, opener=OPENER.open):
 def csv_body(body):
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
-            text = archive.read('eurofxref-hist.csv').decode('utf-8-sig')
+            member = archive.getinfo('eurofxref-hist.csv')
+            if member.file_size > MAX_CSV_BYTES:
+                raise MissingData('ECB CSV exceeds uncompressed size limit')
+            chunks, size = [], 0
+            with archive.open(member) as contents:
+                while True:
+                    chunk = contents.read(min(65536, MAX_CSV_BYTES - size + 1))
+                    size += len(chunk)
+                    if size > MAX_CSV_BYTES:
+                        raise MissingData('ECB CSV exceeds uncompressed size limit')
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            text = b''.join(chunks).decode('utf-8-sig')
         parse(text)
         return text
     except (zipfile.BadZipFile, KeyError, UnicodeError, OSError, RuntimeError, ValueError) as e:
@@ -140,15 +175,37 @@ def checked(rec, session=None):
         raise MissingData('malformed ECB recording') from None
 
 
-def load(directory, session, listing=None, read=None):
-    """Read the newest snapshot on or before the run's last session, offline."""
+def merge(rates, incoming):
+    """Union immutable fixings, refusing revisions (manual, Dividend currencies)."""
+    for day, row in incoming.items():
+        if day in rates and rates[day] != row:
+            raise MissingData('ECB revised the {} fixing'.format(day))
+        rates[day] = row
+
+
+def body(rates):
+    """CSV for the supplied fixings, preserving unavailable currency cells."""
+    currencies = sorted({'USD'} | {c for row in rates.values() for c in row})
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator='\n')
+    writer.writerow(['Date'] + currencies)
+    for day, row in sorted(rates.items(), reverse=True):
+        writer.writerow([day.isoformat()] + [row.get(c, 'N/A') for c in currencies])
+    return out.getvalue()
+
+
+def load(directory, session=None, listing=None, read=None):
+    """Union every recording offline, excluding fixings after the stream end."""
     names = (os.path.basename(p) for p in glob.glob(os.path.join(directory, KIND + '_*.json'))) if listing is None else listing
-    candidates = sorted(n for n in names if n.startswith(KIND + '_') and n <= '{}_{}.json'.format(KIND, session))
+    candidates = sorted(n for n in names if n.startswith(KIND + '_') and n.endswith('.json'))
     if not candidates:
-        raise MissingData('no ECB history recording on or before {}'.format(session))
-    path = os.path.join(directory, candidates[-1])
-    try:
-        session = dt.date.fromisoformat(candidates[-1][len(KIND) + 1:-len('.json')])
-        return checked((read or record.read)(path), session)
-    except (record.Corrupt, OSError, ValueError, KeyError, TypeError) as e:
-        raise MissingData('unreadable ECB recording: {}'.format(e)) from None
+        raise NoRecording('no ECB history recording')
+    rates = {}
+    for name in candidates:
+        try:
+            recorded_day = dt.date.fromisoformat(name[len(KIND) + 1:-len('.json')])
+            incoming = checked((read or record.read)(os.path.join(directory, name)), recorded_day)
+            merge(rates, incoming)
+        except (record.Corrupt, OSError, ValueError, KeyError, TypeError) as e:
+            raise MissingData('unreadable ECB recording: {}'.format(e)) from None
+    return {day: row for day, row in rates.items() if session is None or day <= session}
