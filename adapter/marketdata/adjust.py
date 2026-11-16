@@ -24,11 +24,14 @@ is what the factor above needs: P and cash on the same, ex-date basis. When
 a split executes after the prior session and on or before D, the ex-date
 share is the post-split share, so P is first restated by that split's
 factor (a 2-for-1 split on D turns a prior close of 100 into 50).
-Closes and split ratios must be finite and positive, and cash finite and not
-negative. Anything that cannot be adjusted exactly raises CannotAdjust.
+Closes and split ratios must be finite and positive, and converted cash finite and strictly
+positive (and below the prior close). Missing, malformed or incomplete FX input
+raises MissingData. Instrument-specific adjustment failures raise CannotAdjust.
 """
 import datetime as dt
 import math
+
+from . import fx
 
 
 class CannotAdjust(Exception):
@@ -39,6 +42,18 @@ class CannotAdjust(Exception):
     def __init__(self, message, day=None):
         super().__init__(message)
         self.day = day
+
+
+class SkippedDividend(CannotAdjust):
+    """An unavailable conversion, with handling determined by the caller.
+
+    The manual's "Dividend currencies" section omits it for a universe member
+    and refuses a held or required instrument. An unknown is not zero (ADR 0019).
+    """
+
+    def __init__(self, message, day, row):
+        super().__init__(message, day)
+        self.row = row
 
 
 def _date(text):
@@ -52,7 +67,26 @@ def _finite(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
-def adjusted_closes(history, ticker, splits, dividends):
+def _cash_usd(row, ticker, day, rates):
+    """Positive USD cash per the manual's dividend-currency rule; ADR 0019
+    forbids substituting dollars or zero for an unavailable conversion."""
+    cash = row.get("cash_amount")
+    if not _finite(cash) or cash <= 0:
+        raise CannotAdjust("{} dividend on {} has cash {!r}".format(ticker, day, cash), day)
+    currency = row.get("currency")
+    if currency != "USD" and fx.valid_currency(currency) and callable(rates):
+        rates = rates()
+    try:
+        cash = fx.usd(cash, row.get("currency"), day, rates)
+    except fx.Unavailable as e:
+        raise SkippedDividend("{} dividend on {} currency {!r}: adjustment skipped: {}".format(
+            ticker, day, row.get("currency"), e), day, row) from None
+    if not _finite(cash) or cash <= 0:
+        raise CannotAdjust("{} dividend on {} has converted cash {!r}".format(ticker, day, cash), day)
+    return cash
+
+
+def adjusted_closes(history, ticker, splits, dividends, rates=None):
     """[(session, adjusted close)] for ``ticker`` over ``history``
     ([(session, bars)] oldest first, as history.load returns)."""
     closes = []   # (session index, session, raw close)
@@ -87,11 +121,9 @@ def adjusted_closes(history, ticker, splits, dividends):
         if r.get("ticker") != ticker:
             continue
         d = _date(r.get("ex_dividend_date"))
-        if not first_day < d <= last_day:
+        if not closes[0][1] < d <= last_day:
             continue
-        cash = r.get("cash_amount")
-        if not _finite(cash) or cash < 0:
-            raise CannotAdjust("{} dividend on {} has cash {!r}".format(ticker, d, cash))
+        cash = _cash_usd(r, ticker, d, rates)
         cash_by_date[d] = cash_by_date.get(d, 0.0) + cash
     for d, cash in sorted(cash_by_date.items()):
         pos = next(i for i, (day, _) in enumerate(history) if day >= d)   # first session on or after D
@@ -122,7 +154,7 @@ def _positive(value):
             and math.isfinite(value) and value > 0)
 
 
-def forward_factors(ticker, sessions, closes, splits, dividends, base):
+def forward_factors(ticker, sessions, closes, splits, dividends, base, rates=None):
     """{session: (split multiplier, total multiplier)} for every session of
     ``closes`` ({session: raw close}, one ticker) on or after ``base``.
 
@@ -181,9 +213,7 @@ def forward_factors(ticker, sessions, closes, splits, dividends, base):
         d = _date(r.get("ex_dividend_date"))
         if not first < d <= last:
             continue
-        cash = r.get("cash_amount")
-        if not (isinstance(cash, (int, float)) and not isinstance(cash, bool) and math.isfinite(cash) and cash >= 0):
-            raise CannotAdjust("{} dividend on {} has cash {!r}".format(ticker, d, cash), d)
+        cash = _cash_usd(r, ticker, d, rates)
         cash_by_date[d] = cash_by_date.get(d, 0.0) + cash
     for d, cash in sorted(cash_by_date.items()):
         if d in split_ratio:

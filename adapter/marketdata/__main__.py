@@ -1,4 +1,4 @@
-"""python3 -m marketdata {universe|bars|backfill|actions|sectors|encode|retract} --out DIR [--asof YYYY-MM-DD]
+"""python3 -m marketdata {universe|bars|backfill|actions|sectors|fx|encode|retract} --out DIR [--asof YYYY-MM-DD]
     [--instruments SPY,IEF,SHY] [--sessions N] [--lookback-days N] [--settle-minutes N]
 
 --asof defaults to today's New York date. A session is refused (exit 1,
@@ -7,7 +7,7 @@ nothing written) until its close plus the settle delay.
 Exit status 1 with a message on stderr when data is missing (nothing is
 written), for the caller to alert on. The Massive key comes from
 MASSIVE_API_KEY, --secrets-file, or the Mac Keychain, and is never printed;
-``sectors`` needs no key, and ``encode`` reads only the recordings in DIR,
+``sectors`` and ``fx`` need no key, and ``encode`` reads only the recordings in DIR,
 never the network, and writes the engines' input stream to --stream.
 ``retract --session D --reason TEXT`` records that the exchange cancelled
 the session D (no key, no network); the encoder then writes it as a
@@ -23,7 +23,7 @@ from . import encode, history, massive, nyse_calendar, sectors, steps
 
 def parse(argv, now=steps._now):
     ap = argparse.ArgumentParser(prog="marketdata")
-    ap.add_argument("what", choices=("universe", "bars", "backfill", "actions", "sectors", "encode", "retract"))
+    ap.add_argument("what", choices=("universe", "bars", "backfill", "actions", "sectors", "fx", "encode", "retract"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--asof", type=dt.date.fromisoformat, default=None)
     ap.add_argument("--instruments", default="SPY,IEF,SHY")
@@ -83,6 +83,12 @@ def main(argv):
             if not args.session:
                 raise ValueError("retract needs --session")
             print(encode.record_retraction(args.out, args.session, args.reason))
+            return 0
+        if args.what == "fx":
+            day = args.asof
+            while not nyse_calendar.is_trading_day(day):
+                day -= dt.timedelta(days=1)
+            print(steps.run_fx(day, args.out, settle=settle))
             return 0
         if args.what == "sectors":
             day = args.asof

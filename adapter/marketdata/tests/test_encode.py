@@ -59,7 +59,7 @@ def build(d, *, splits_windows=(("2026-11-01", "2026-11-27"), ("2026-11-20", "20
                          "rows": [split]})
     record.write(d, {"kind": "dividends", "source": "massive", "session": "2026-11-30", "from": "2026-11-01",
                      "fetched_at": stamp(LAST),
-                     "rows": [{"id": "V1", "ticker": "CCC", "ex_dividend_date": "2026-11-27", "cash_amount": 1.0}]})
+                     "rows": [{"id": "V1", "ticker": "CCC", "ex_dividend_date": "2026-11-27", "currency": "USD", "cash_amount": 1.0}]})
     if sector_session:
         fetched = stamp(D.fromisoformat(sector_session))   # the evening of the labels' own session
         record.write(d, {"kind": "sectors-iwv", "source": sectors.IWV_SOURCE, "session": sector_session,
@@ -215,7 +215,7 @@ def unadjustable_ddd(d):
     no prior close, so DDD cannot be adjusted exactly from 11-25 on."""
     record.write(d, {"kind": "dividends", "source": "massive", "session": "2026-11-25", "from": "2026-11-20",
                      "fetched_at": stamp(LAST),
-                     "rows": [{"id": "V2", "ticker": "DDD", "ex_dividend_date": "2026-11-25", "cash_amount": 0.1}]})
+                     "rows": [{"id": "V2", "ticker": "DDD", "ex_dividend_date": "2026-11-25", "currency": "USD", "cash_amount": 0.1}]})
 
 
 def rewrite(d, kind, day, ticker, **fields):
@@ -292,7 +292,7 @@ class UniverseMemberExclusionTest(unittest.TestCase):
         def undated(d):
             record.write(d, {"kind": "dividends", "source": "massive", "session": "2026-11-25", "from": "2026-11-20",
                              "fetched_at": stamp(LAST),
-                             "rows": [{"id": "V3", "ticker": "DDD", "ex_dividend_date": "soon", "cash_amount": 0.1}]})
+                             "rows": [{"id": "V3", "ticker": "DDD", "ex_dividend_date": "soon", "currency": "USD", "cash_amount": 0.1}]})
         stream, excluded = self.encoded(undated)
         self.assertEqual(sessions_with(stream, "DDD"), [])
         self.assertEqual([(g.first, g.last, g.sessions) for g in excluded["DDD"]], [(FIRST, LAST, 5)])
@@ -443,8 +443,8 @@ class ExclusionWindowTest(unittest.TestCase):
 
     def test_a_refused_dividend_keeps_that_sessions_close_for_the_next_sessions_dividend(self):
         days = span_sessions(256)
-        dividends = [{"id": "V1", "ticker": "AAA", "ex_dividend_date": days[1].isoformat(), "cash_amount": 100.0},
-                     {"id": "V2", "ticker": "AAA", "ex_dividend_date": days[2].isoformat(), "cash_amount": 0.5}]
+        dividends = [{"id": "V1", "ticker": "AAA", "ex_dividend_date": days[1].isoformat(), "currency": "USD", "cash_amount": 100.0},
+                     {"id": "V2", "ticker": "AAA", "ex_dividend_date": days[2].isoformat(), "currency": "USD", "cash_amount": 0.5}]
         days, stream, excluded = self.encoded(256, lambda i: 20.0, dividends=dividends)
         [gone] = excluded["AAA"]
         self.assertEqual((gone.first, gone.last, gone.sessions), (days[1], days[1], 1))
@@ -481,7 +481,7 @@ class ExclusionWindowTest(unittest.TestCase):
             if i == 9:
                 bar["h"] = 1.0   # high below close: no prior close for the dividend
             return bar
-        dividend = {"id": "V1", "ticker": "AAA", "ex_dividend_date": days[10].isoformat(), "cash_amount": 0.1}
+        dividend = {"id": "V1", "ticker": "AAA", "ex_dividend_date": days[10].isoformat(), "currency": "USD", "cash_amount": 0.1}
         days, stream, excluded = self.encoded(30, aaa, dividends=[dividend])
         self.assertEqual([(g.first, g.last, g.sessions) for g in excluded["AAA"]],
                          [(days[9], days[9], 1), (days[10], days[10], 1)])

@@ -10,7 +10,11 @@ SHY and a few dozen held stocks fit one overnight run; fetching all 500
 ranked names (about 1500 requests, over 5 hours) does not, and needs IBKR
 history or a paid plan.
 """
+import contextlib
 import datetime as dt
+import fcntl
+import os
+import time
 import zoneinfo
 
 from . import nyse_calendar, record as recording
@@ -126,3 +130,68 @@ def run_universe(client, session, directory, now=_now, grouped_body=None, settle
 def run_bars(client, instruments, session, directory, lookback_days=400, now=_now, settle=SETTLE):
     require_settled(session, now, settle)
     return recording.write(directory, fetch_bars(client, instruments, session, lookback_days, now=now))
+
+
+@contextlib.contextmanager
+def _fx_lock(directory):
+    """Serialize the shared FX chain through validation (manual, Dividend currencies)."""
+    if not os.path.isdir(directory):
+        raise MissingData('no data directory')
+    with open(os.path.join(directory, '.fx.lock'), 'a') as lock:
+        deadline = time.monotonic() + 300
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise MissingData('another job is recording ECB rates') from None
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
+    """Record new immutable ECB fixings (manual, Dividend currencies)."""
+    from . import fx
+    require_settled(session, now, settle)
+    with _fx_lock(directory):
+        try:
+            existing = fx.load(directory)
+        except fx.NoRecording:
+            existing = {}
+        raw, url = (get or fx.http_get)(fx.URL)
+        stamp = _stamp(now)
+        if getattr(existing, 'fetched_at', None) is not None and stamp <= existing.fetched_at:
+            raise fx.MarketDataError('system clock is behind the latest ECB recording')
+        fetch_day = dt.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').date()
+        rec = dict(kind=fx.KIND, source=fx.SOURCE, session=str(fetch_day),
+                   fetched_at=stamp, url=url, body=fx.csv_body(raw))
+        try:
+            fetched = fx.checked(rec, fetch_day)
+        except MissingData as e:
+            raise fx.MarketDataError('invalid ECB archive: {}'.format(e)) from None
+        # Disagreement with the recorded history outranks a stale download
+        # (manual, Dividend currencies).
+        fx.check_history(existing, fetched)
+        fx.require_fresh(fetched, fetch_day)
+        if max(fetched, default=dt.date.min) < max(existing, default=dt.date.min):
+            raise fx.MarketDataError('stale ECB archive: it ends before the newest recorded fixing')
+        boundary = getattr(existing, 'covered_through', dt.date.min)
+        fx.require_continuous(fetched, boundary)
+        rec['covered_before'] = boundary.isoformat() if boundary != dt.date.min else None
+        rec['body'] = fx.body({day: row for day, row in fetched.items() if day > boundary})
+        path = os.path.join(directory, recording.filename(rec))
+        try:
+            recording.write(directory, rec)
+        except recording.AlreadyRecorded:
+            union = fx.load(directory)
+            fx.check_history(union, fetched)
+            if any(day not in union for day in fetched):
+                raise MissingData('ECB fetch timestamp collision; retry at a later UTC second') from None
+            return path
+        union = fx.load(directory)
+        fx.check_history(union, fetched)
+        return path

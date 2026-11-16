@@ -851,7 +851,7 @@ class ReverifyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             job = self.daily(root)
             job.client.dividends = [{"id": "DIV1", "ticker": "SPY", "ex_dividend_date": "2026-03-10",
-                                     "cash_amount": 1.0}]
+                                     "currency": "USD", "cash_amount": 1.0}]
             self.assert_refused_naming(job, after_settle(D(2026, 3, 17)), job.stream_dir() / "boost-{}.jsonl".format(WARM))
             self.assertIn(("dividends", D(2026, 3, 3), D(2026, 3, 17)), job.client.calls)
 
@@ -862,7 +862,7 @@ class ReverifyTest(unittest.TestCase):
             job = self.daily(root)
             before = {p.name: p.read_bytes() for p in job.stream_dir().iterdir()}
             job.client.dividends = [{"id": "DIV1", "ticker": "SPY", "ex_dividend_date": "2026-03-17",
-                                     "cash_amount": 1.0}]
+                                     "currency": "USD", "cash_amount": 1.0}]
             status, _, err = job.main(after_settle(D(2026, 3, 17)))
             self.assertEqual(status, 0, err)
             self.assertEqual({n: (job.stream_dir() / n).read_bytes() for n in before}, before)
@@ -892,7 +892,7 @@ class ReverifyTest(unittest.TestCase):
         # are checked for conflicts.
         with tempfile.TemporaryDirectory() as root:
             job = self.daily(root)
-            row = {"id": "DIVO", "ticker": "OTHER", "ex_dividend_date": "2026-03-10", "cash_amount": 1.0}
+            row = {"id": "DIVO", "ticker": "OTHER", "ex_dividend_date": "2026-03-10", "currency": "USD", "cash_amount": 1.0}
             job.client.dividends = [row]
             self.assertEqual(job.main(after_settle(D(2026, 3, 17)))[0], 0)
             job.client.dividends = [dict(row, cash_amount=1.5)]
@@ -903,7 +903,7 @@ class ReverifyTest(unittest.TestCase):
     def test_a_revised_dividend_of_the_encoded_instrument_still_stops_the_job(self):
         with tempfile.TemporaryDirectory() as root:
             job = self.daily(root)
-            row = {"id": "DIVS", "ticker": "SPY", "ex_dividend_date": "2026-03-17", "cash_amount": 1.0}
+            row = {"id": "DIVS", "ticker": "SPY", "ex_dividend_date": "2026-03-17", "currency": "USD", "cash_amount": 1.0}
             job.client.dividends = [row]
             self.assertEqual(job.main(after_settle(D(2026, 3, 17)))[0], 0)
             job.client.dividends = [dict(row, cash_amount=1.5)]

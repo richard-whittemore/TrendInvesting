@@ -17,6 +17,8 @@ import json
 import os
 import tempfile
 
+from . import kinds
+
 
 class AlreadyRecorded(Exception):
     pass
@@ -63,7 +65,11 @@ def _canonical(record):
 
 def filename(record):
     """kind_session.json; a record covering a window (``from``) is named
-    kind_from_session.json."""
+    kind_from_session.json. FX fetches append their UTC timestamp, per the
+    manual's Dividend currencies recording rule."""
+    if record["kind"] == kinds.FX and record.get("session") != 'bootstrap':
+        stamp = record['fetched_at'].replace('-', '').replace(':', '')
+        return "{}_{}_{}.json".format(record['kind'], record['session'], stamp)
     if record.get("from"):
         return "{}_{}_{}.json".format(record["kind"], record["from"], record["session"])
     return "{}_{}.json".format(record["kind"], record["session"])

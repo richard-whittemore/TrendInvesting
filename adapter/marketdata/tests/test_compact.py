@@ -88,7 +88,7 @@ class CompactShapeTest(unittest.TestCase):
 class LaterMemberActionConflictTest(unittest.TestCase):
     def test_a_revised_action_for_a_member_first_listed_in_a_later_snapshot_refuses(self):
         for kind, ticker, changed in (("splits", "BBB", {"split_to": 3}),
-                                      ("dividends", "CCC", {"cash_amount": 1.5})):
+                                      ("dividends", "CCC", {"currency": "USD", "cash_amount": 1.5})):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as d:
                 build(d, sector_session="2026-11-27")
                 later = record.read(os.path.join(d, "universe_2026-11-30.json"))
@@ -112,7 +112,7 @@ class LaterMemberActionConflictTest(unittest.TestCase):
 
     def test_a_revised_action_for_a_member_listed_only_in_an_earlier_snapshot_refuses(self):
         # CCC is not ranked on the last session, so it can leave that snapshot.
-        kind, ticker, changed = "dividends", "CCC", {"cash_amount": 1.5}
+        kind, ticker, changed = "dividends", "CCC", {"currency": "USD", "cash_amount": 1.5}
         with tempfile.TemporaryDirectory() as d:
             build(d, sector_session="2026-11-27")
             path = os.path.join(d, "universe_2026-11-30.json")
@@ -379,8 +379,8 @@ def build_churn(d):
                               {"id": "S2", "ticker": "BIG", "execution_date": "2025-08-01", "split_from": 1, "split_to": 2}]})
     record.write(d, {"kind": "dividends", "source": "massive", "session": CHURN_LAST.isoformat(),
                      "from": CHURN_FIRST.isoformat(), "fetched_at": stamp(CHURN_LAST),
-                     "rows": [{"id": "V1", "ticker": "C02", "ex_dividend_date": "2025-10-15", "cash_amount": 0.5},
-                              {"id": "V2", "ticker": "C06", "ex_dividend_date": "2026-02-10", "cash_amount": 99.0}]})
+                     "rows": [{"id": "V1", "ticker": "C02", "ex_dividend_date": "2025-10-15", "currency": "USD", "cash_amount": 0.5},
+                              {"id": "V2", "ticker": "C06", "ex_dividend_date": "2026-02-10", "currency": "USD", "cash_amount": 99.0}]})
     encode.record_retraction(d, CHURN_RETRACTED, "NYSE closed for a national day of mourning",
                              recorded_at="2025-06-10T23:00:00Z")
 

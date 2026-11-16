@@ -101,7 +101,7 @@ import os
 import subprocess
 import tempfile
 
-from . import adjust, history, nyse_calendar, record, sectors
+from . import adjust, fx, history, nyse_calendar, record, sectors
 # The event types, schema versions and source the stream carries: one table
 # with the adapter that delivers it.
 from .kinds import BAR, CALENDAR, HISTORY, RETRACTED, SESSION_CLOSED, SOURCE, UNIVERSE
@@ -252,11 +252,11 @@ def load_sessions(directory, first, last, retracted=(), tickers=None):
 
 
 def list_recordings(directory):
-    """{file name: (inode, size, modification time)} for every bar and sector
+    """{file name: (inode, size, modification time)} for every bar, sector and FX
     recording in ``directory``: the listing a multi-pass reader takes once,
     so every pass reads the same files (iter_sessions)."""
     out = {}
-    for pattern in ("grouped_*.json", "universe_*.json", "sectors-*_*.json"):
+    for pattern in ("grouped_*.json", "universe_*.json", "sectors-*_*.json", fx.KIND + "_*.json"):
         for path in glob.glob(os.path.join(directory, pattern)):
             st = os.stat(path)
             out[os.path.basename(path)] = (st.st_ino, st.st_size, st.st_mtime_ns)
@@ -399,7 +399,22 @@ def _universe_rows(directory, day, rec, max_age_days, named, listing=None):
     return [rows[s] for s in sorted(rows)], skipped
 
 
-def _factors(ticker, loaded, days, actions, base):
+def _rates(directory, listing=None):
+    """Load the union once, when adjustment needs it (manual, Dividend currencies)."""
+    rates = None
+
+    def load():
+        nonlocal rates
+        if rates is None:
+            rates = fx.load(directory, listing=listing,
+                            read=(lambda path: _read_listed(directory, os.path.basename(path), listing))
+                            if listing is not None else None)
+        return rates
+
+    return load
+
+
+def _factors(ticker, loaded, days, actions, base, rates=None):
     """adjust.forward_factors for ``ticker``, after checking each of its bars;
     raises Malformed for a bad bar or anything that cannot be adjusted."""
     closes = {}
@@ -409,7 +424,7 @@ def _factors(ticker, loaded, days, actions, base):
             closes[s.day] = float(s.bars[ticker]["c"])
     splits, dividends = actions
     try:
-        return adjust.forward_factors(ticker, days, closes, splits, dividends, base)
+        return adjust.forward_factors(ticker, days, closes, splits, dividends, base, rates=rates)
     except adjust.CannotAdjust as e:
         raise Malformed(str(e)) from None
 
@@ -421,7 +436,7 @@ def _event_day(row, key):
         return None
 
 
-def _member_factors(ticker, loaded, days, actions, base):
+def _member_factors(ticker, loaded, days, actions, base, rates=None):
     """(factors, bad) for a ticker written only as a universe member: bad is
     {session: (reason, sessions)}, the first session left out, why, and how
     many sessions from it are left out. A malformed bar is not used and
@@ -450,10 +465,10 @@ def _member_factors(ticker, loaded, days, actions, base):
                 bad[s.day] = (str(e), 1)
                 continue
             closes[s.day] = float(s.bars[ticker]["c"])
-    return _member_factors_from(ticker, closes, bad, days, actions, base)
+    return _member_factors_from(ticker, closes, bad, days, actions, base, rates)
 
 
-def _member_factors_from(ticker, closes, bad, days, actions, base):
+def _member_factors_from(ticker, closes, bad, days, actions, base, rates=None):
     """_member_factors from the ticker's closes ({session: raw close} of its
     well-formed bars) and ``bad`` (its malformed sessions, as
     _member_factors records them; extended in place). ``closes`` may be any
@@ -464,12 +479,15 @@ def _member_factors_from(ticker, closes, bad, days, actions, base):
     splits, dividends = actions
     while True:
         try:
-            return adjust.forward_factors(ticker, days, closes, splits, dividends, base), bad
+            return adjust.forward_factors(ticker, days, closes, splits, dividends, base, rates=rates), bad
         except adjust.CannotAdjust as e:
             if e.day is None:
                 return {}, {days[0]: (str(e), len(days))}
-            kept = ([r for r in splits if _event_day(r, "execution_date") != e.day],
-                    [r for r in dividends if _event_day(r, "ex_dividend_date") != e.day])
+            if isinstance(e, adjust.SkippedDividend):
+                kept = (splits, [r for r in dividends if r is not e.row])
+            else:
+                kept = ([r for r in splits if _event_day(r, "execution_date") != e.day],
+                        [r for r in dividends if _event_day(r, "ex_dividend_date") != e.day])
             if kept != (splits, dividends):
                 day = next(d for d in days if d >= e.day)
                 bad[day] = ("; ".join(filter(None, (bad.get(day, ("", 1))[0], str(e)))), 1)
@@ -663,12 +681,13 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     for r in _actions(directory, "dividends", start, last, scope):
         by_ticker[r.get("ticker")][1].append(r)
 
+    rates = _rates(directory)
     factors, out = {}, {}   # out: ticker -> {session left out: reason}
     for ticker in sorted(wanted | members):
         if ticker in named:
-            factors[ticker] = _factors(ticker, loaded, days, by_ticker[ticker], base)
+            factors[ticker] = _factors(ticker, loaded, days, by_ticker[ticker], base, rates)
             continue
-        factors[ticker], bad = _member_factors(ticker, loaded, days, by_ticker[ticker], base)
+        factors[ticker], bad = _member_factors(ticker, loaded, days, by_ticker[ticker], base, rates)
         if bad:
             out[ticker] = _left_out(days, bad)
     for ticker in required:
@@ -910,10 +929,11 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
     if actions_failed is not None:
         raise actions_failed
 
+    rates = _rates(directory, listing)
     factors, out = {}, {}   # out: ticker -> the sessions it is left out of, with why
     for ticker in sorted(named | members):
         if ticker in named:
-            factors[ticker] = _factors(ticker, kept, days, by_ticker[ticker], base)
+            factors[ticker] = _factors(ticker, kept, days, by_ticker[ticker], base, rates)
             continue
         runs = malformed.get(ticker)
         # A malformed session that an action also leaves out carries both
@@ -925,7 +945,7 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
             j = bisect.bisect_left(days, d) if d is not None else len(days)
             if j < len(days) and runs is not None and days[j] in runs:
                 seeds[days[j]] = (runs.get(days[j]), 1)
-        _, bad = _member_factors_from(ticker, dict(closes.get(ticker, {})), seeds, days, by_ticker[ticker], base)
+        _, bad = _member_factors_from(ticker, dict(closes.get(ticker, {})), seeds, days, by_ticker[ticker], base, rates)
         if any(n > 1 for _, n in bad.values()):   # nothing could be adjusted: every session is left out
             left = _Runs(index)
             reason = next(iter(bad.values()))[0]
@@ -1064,7 +1084,7 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
                         known = {days[first_held + k]: v for k, v in enumerate(values) if not math.isnan(v)}
                         yield stream.make(HISTORY, "marketdata:history:{}:{}".format(ticker, session), end, fetched,
                                           _held_history(ticker, s.day, window, known, named, factors,
-                                                        closes, days, by_ticker, out, base))
+                                                        closes, days, by_ticker, out, base, rates))
                         del known
                         spans = needs[ticker]
                         spans.pop(0)
@@ -1086,7 +1106,7 @@ def _compact(directory, first, last, identity, required, optional, base, ahead, 
     return emit()
 
 
-def _held_history(ticker, day, window, held, named, factors, closes, days, by_ticker, out, base):
+def _held_history(ticker, day, window, held, named, factors, closes, days, by_ticker, out, base, rates=None):
     """_history from the closes pass 3 held for ``ticker`` (see _compact): a
     named instrument's factors are its own, a member's come from
     _member_factors_from over its pass-1 closes and the held ones (the
@@ -1096,7 +1116,7 @@ def _held_history(ticker, day, window, held, named, factors, closes, days, by_ti
     else:
         known = dict(closes.get(ticker, {}))
         known.update(held)
-        f, _ = _member_factors_from(ticker, known, {}, days, by_ticker[ticker], base)
+        f, _ = _member_factors_from(ticker, known, {}, days, by_ticker[ticker], base, rates)
     left_out = out.get(ticker, {})
     return {"instrument_id": ticker, "session": day.isoformat(), "adjusted_base": base.isoformat(),
             "closes": [{"session": d.isoformat(), "close": held[d] * f[d][1]}

@@ -86,7 +86,7 @@ class ActionsTest(unittest.TestCase):
             sp = {"status": "OK", "results": [{"ticker": "A", "execution_date": "2026-03-10", "split_from": 1, "split_to": 2}],
                   "next_url": "https://api.massive.com/v3/reference/splits?cursor=2"}
             sp2 = {"status": "OK", "results": [{"ticker": "B", "execution_date": "2026-03-11", "split_from": 10, "split_to": 1}]}
-            dv = {"status": "OK", "results": [{"ticker": "A", "ex_dividend_date": "2026-03-12", "cash_amount": 0.5}]}
+            dv = {"status": "OK", "results": [{"ticker": "A", "ex_dividend_date": "2026-03-12", "currency": "USD", "cash_amount": 0.5}]}
             client, opener, _ = make_client(sp, sp2, dv)
             paths = history.record_actions(client, D(2026, 3, 1), D(2026, 3, 27), d, now=lambda: NOW)
             self.assertEqual(len(paths), 2)
@@ -107,7 +107,7 @@ class ActionsTest(unittest.TestCase):
 
     def test_an_action_in_overlapping_windows_counts_once(self):
         split = {"id": "S1", "ticker": "A", "execution_date": "2026-03-04", "split_from": 1, "split_to": 2}
-        div = {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0}
+        div = {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "currency": "USD", "cash_amount": 1.0}
         with tempfile.TemporaryDirectory() as d:
             write_window(d, "splits", "2026-01-01", "2026-03-20", [split])
             write_window(d, "splits", "2026-01-02", "2026-03-23", [dict(split)])
@@ -174,14 +174,14 @@ class ActionsTest(unittest.TestCase):
     def test_conflicting_copies_of_one_action_are_refused(self):
         with tempfile.TemporaryDirectory() as d:
             write_window(d, "dividends", "2026-01-01", "2026-03-20",
-                         [{"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0}])
+                         [{"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "currency": "USD", "cash_amount": 1.0}])
             write_window(d, "dividends", "2026-01-02", "2026-03-23",
-                         [{"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.5}])
+                         [{"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "currency": "USD", "cash_amount": 1.5}])
             with self.assertRaises(history.ConflictingActions):
                 history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 23))
 
     def test_dividend_date_revisions_keep_the_first_copy(self):
-        first = {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0,
+        first = {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "currency": "USD", "cash_amount": 1.0,
                  "declaration_date": "2026-02-01", "record_date": "2026-03-06", "pay_date": "2026-03-20"}
         for changes in ({"declaration_date": "2026-02-02"},
                         {"record_date": "2026-03-09", "pay_date": "2026-03-23"}):
@@ -216,7 +216,7 @@ class ActionsTest(unittest.TestCase):
     def test_a_missing_compared_field_conflicts(self):
         for kind, first, field in (
                 ("dividends", {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05",
-                               "cash_amount": 1.0}, "cash_amount"),
+                               "currency": "USD", "cash_amount": 1.0}, "cash_amount"),
                 ("splits", {"id": "S1", "ticker": "A", "execution_date": "2026-03-04",
                             "split_from": 1, "split_to": 2}, "split_to")):
             revised = dict(first)
@@ -237,7 +237,7 @@ class ActionsTest(unittest.TestCase):
             self.assertEqual(history.load_actions(d, "splits", D(2026, 1, 1), D(2026, 3, 23)), [first])
 
     def test_a_conflict_is_checked_only_for_the_tickers_asked_for(self):
-        old = {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0}
+        old = {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "currency": "USD", "cash_amount": 1.0}
         spy = dict(old, ticker="SPY")
         for first, revised, refused in ((old, dict(old, cash_amount=1.5), False),   # another ticker's figure revised
                                         (old, spy, True),                           # an action moved onto the ticker
@@ -271,7 +271,7 @@ class ActionsTest(unittest.TestCase):
             self.assertEqual(history.load_actions(d, "splits", D(2026, 2, 3), D(2026, 3, 1)), [])
 
     def test_a_window_with_only_splits_recorded_resumes_with_dividends(self):
-        dv = {"status": "OK", "results": [{"ticker": "A", "ex_dividend_date": "2026-03-12", "cash_amount": 0.5}]}
+        dv = {"status": "OK", "results": [{"ticker": "A", "ex_dividend_date": "2026-03-12", "currency": "USD", "cash_amount": 0.5}]}
         with tempfile.TemporaryDirectory() as d:
             existing = write_window(d, "splits", "2026-03-01", "2026-03-27", [{"ticker": "A"}])
             before = slurp(existing)
@@ -352,7 +352,7 @@ class AdjustTest(unittest.TestCase):
 
     def test_a_dividend_scales_earlier_closes_by_one_minus_cash_over_prior_close(self):
         h = hist(*zip(DAYS, [100.0, 100.0, 98.0, 98.0]))
-        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 2.0}]
+        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "currency": "USD", "cash_amount": 2.0}]
         out = [c for _, c in adjust.adjusted_closes(h, "A", [], div)]
         self.assertEqual([round(c, 9) for c in out], [98.0, 98.0, 98.0, 98.0])
 
@@ -360,19 +360,19 @@ class AdjustTest(unittest.TestCase):
         h = hist(*zip(DAYS, [200.0, 100.0, 100.0, 100.0]))
         split = [{"ticker": "A", "execution_date": "2026-03-03", "split_from": 1, "split_to": 2},
                  {"ticker": "Z", "execution_date": "2026-03-03", "split_from": 1, "split_to": 9}]
-        div = [{"ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 10.0}]
+        div = [{"ticker": "A", "ex_dividend_date": "2026-03-05", "currency": "USD", "cash_amount": 10.0}]
         out = [round(c, 9) for _, c in adjust.adjusted_closes(h, "A", split, div)]
         self.assertEqual(out, [90.0, 90.0, 90.0, 100.0])   # 200 * 0.5 * 0.9 ; 100 * 0.9 ; 100*0.9
 
     def test_an_event_outside_the_history_is_ignored(self):
         h = hist(*zip(DAYS, [10.0] * 4))
-        div = [{"ticker": "A", "ex_dividend_date": "2026-03-02", "cash_amount": 1.0},
-               {"ticker": "A", "ex_dividend_date": "2026-06-01", "cash_amount": 1.0}]
+        div = [{"ticker": "A", "ex_dividend_date": "2026-03-02", "currency": "USD", "cash_amount": 1.0},
+               {"ticker": "A", "ex_dividend_date": "2026-06-01", "currency": "USD", "cash_amount": 1.0}]
         self.assertEqual([c for _, c in adjust.adjusted_closes(h, "A", [], div)], [10.0] * 4)
 
     def test_a_dividend_whose_prior_session_lacks_the_ticker_fails_closed(self):
         h = [(DAYS[0], [bar("A", 10.0)]), (DAYS[1], [bar("B", 10.0)]), (DAYS[2], [bar("A", 10.0)])]
-        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 1.0}]
+        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "currency": "USD", "cash_amount": 1.0}]
         with self.assertRaises(adjust.CannotAdjust):
             adjust.adjusted_closes(h, "A", [], div)
 
@@ -398,7 +398,7 @@ class AdjustTest(unittest.TestCase):
 
     def test_a_dividend_at_or_above_the_prior_close_fails_closed(self):
         h = hist(*zip(DAYS, [10.0] * 4))
-        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 10.0}]
+        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "currency": "USD", "cash_amount": 10.0}]
         with self.assertRaises(adjust.CannotAdjust):
             adjust.adjusted_closes(h, "A", [], div)
 
@@ -413,7 +413,7 @@ class AdjustTest(unittest.TestCase):
         # is the post-split share, so the prior close 100 is 50 on that basis.
         h = hist(*zip(DAYS, [100.0, 100.0, 48.0, 48.0]))
         split = [{"ticker": "A", "execution_date": "2026-03-04", "split_from": 1, "split_to": 2}]
-        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 2.0}]
+        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "currency": "USD", "cash_amount": 2.0}]
         out = [round(c, 9) for _, c in adjust.adjusted_closes(h, "A", split, div)]
         self.assertEqual(out, [48.0, 48.0, 48.0, 48.0])
 
@@ -421,15 +421,15 @@ class AdjustTest(unittest.TestCase):
         # Ordinary 2 and special 3 against a prior close of 100: (100 - 5) / 100,
         # not 0.98 x 0.97.
         h = hist(*zip(DAYS, [100.0, 100.0, 95.0, 95.0]))
-        div = [{"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 2.0},
-               {"id": "D2", "ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 3.0}]
+        div = [{"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-04", "currency": "USD", "cash_amount": 2.0},
+               {"id": "D2", "ticker": "A", "ex_dividend_date": "2026-03-04", "currency": "USD", "cash_amount": 3.0}]
         out = [round(c, 9) for _, c in adjust.adjusted_closes(h, "A", [], div)]
         self.assertEqual(out, [95.0, 95.0, 95.0, 95.0])
 
     def test_same_date_dividends_summing_to_the_prior_close_fail_closed(self):
         h = hist(*zip(DAYS, [10.0] * 4))
-        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 6.0},
-               {"ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 4.0}]
+        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "currency": "USD", "cash_amount": 6.0},
+               {"ticker": "A", "ex_dividend_date": "2026-03-04", "currency": "USD", "cash_amount": 4.0}]
         with self.assertRaises(adjust.CannotAdjust):
             adjust.adjusted_closes(h, "A", [], div)
 
@@ -447,7 +447,7 @@ class AdjustTest(unittest.TestCase):
         for cash in (nan, inf, -0.5, "1"):
             with self.assertRaises(adjust.CannotAdjust, msg=repr(cash)):
                 adjust.adjusted_closes(h, "A", [], [{"ticker": "A", "ex_dividend_date": "2026-03-04",
-                                                     "cash_amount": cash}])
+                                                     "currency": "USD", "cash_amount": cash}])
 
     def test_unknown_ticker_has_no_series(self):
         with self.assertRaises(adjust.CannotAdjust):

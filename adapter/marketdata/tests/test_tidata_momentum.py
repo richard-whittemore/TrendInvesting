@@ -21,6 +21,7 @@ from marketdata.tests.test_compact import (CHURN_DAILY_SHA256, CHURN_FIRST, CHUR
                                            build_churn, churn_ranker)
 from marketdata.tests.test_encode import IDENTITY, bars_for, build
 from marketdata.tests.test_sectors import iwv_csv, screener
+from marketdata.tests.test_fx import archive as fx_archive
 from marketdata.tests.test_tidata import CHAIN, SYNTHETIC_VALUE, after_settle
 
 D = dt.date
@@ -152,7 +153,8 @@ class MomentumJob:
         with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
             status = tidata.main(self.argv(*extra, ranker=ranker_path), now=lambda: now,
                                  client_factory=lambda key: self.client, ranker=self.ranker,
-                                 sectors_get=self.sectors_get)
+                                 sectors_get=self.sectors_get,
+                                 fx_get=lambda url: (fx_archive(), url))
         return status, out.getvalue(), err.getvalue()
 
     def stream_dir(self):
@@ -375,7 +377,7 @@ class MomentumHoldingsTest(unittest.TestCase):
 class MomentumActionScopeTest(unittest.TestCase):
     def conflict(self, data, kind, ticker, moved_to=None):
         if kind == "dividends":
-            row = {"id": "REVISION", "ticker": ticker, "ex_dividend_date": "2026-11-27", "cash_amount": 1.0}
+            row = {"id": "REVISION", "ticker": ticker, "ex_dividend_date": "2026-11-27", "currency": "USD", "cash_amount": 1.0}
             revised = dict(row, cash_amount=1.5)
         else:
             row = {"id": "REVISION", "ticker": ticker, "execution_date": "2026-11-27",
@@ -1013,7 +1015,7 @@ class ActionRecordingChangeTest(unittest.TestCase):
         self.assertIn("trad-ira-2026-11-25.jsonl", checked)
 
     def test_a_new_dividend_inside_an_older_file_stops_the_job_naming_it(self):
-        self.add_dividends([{"id": "V-late", "ticker": "IEF", "ex_dividend_date": "2026-11-24", "cash_amount": 0.5}])
+        self.add_dividends([{"id": "V-late", "ticker": "IEF", "ex_dividend_date": "2026-11-24", "currency": "USD", "cash_amount": 0.5}])
         with mock.patch.object(tidata, "ACTION_OVERLAP", dt.timedelta(days=1)):
             status, _, err = self.job.main(after_settle(D(2026, 12, 1)))
         self.assertEqual(status, 1)

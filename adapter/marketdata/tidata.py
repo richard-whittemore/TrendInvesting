@@ -164,7 +164,7 @@ import sys
 import tempfile
 from collections import namedtuple
 
-from . import encode, engine_log, history, kinds, massive, nyse_calendar, record, sectors, steps
+from . import encode, engine_log, fx, history, kinds, massive, nyse_calendar, record, sectors, steps
 
 ENGINE = "boost"
 MOMENTUM = "momentum"
@@ -917,6 +917,9 @@ def _verify_momentum(files, data, cfg, base, identity, engine_log, ranker, manif
                                            engine=MOMENTUM, ranker=ranker, retracted_through=last,
                                            without_universe=without.get(os.path.basename(path), without_universe))
             again = _digest_of(envelopes)
+        except fx.NoRecording as e:
+            raise Refused("the run's file {} needs ECB conversion input ({}); replace the run with a fresh run "
+                          "after this upgrade (docs/manual/market-data.md, \"Upgrading to dividend currency conversion\")".format(path, e)) from None
         except Exception as e:   # a recording missing, a gap or a conflict: the file cannot be re-derived
             raise Refused("the run's file {} cannot be encoded again from its recordings ({}: {}); this stops the "
                           "job for a person".format(path, type(e).__name__, e)) from None
@@ -924,7 +927,8 @@ def _verify_momentum(files, data, cfg, base, identity, engine_log, ranker, manif
             raise Refused("{} differs from the stream its recordings and the engine log {} give now; the "
                           "engine may already have read it, so it is not rewritten and nothing more is written "
                           "for the run: this stops the job for a person (docs/manual/market-data.md, "
-                          "\"A file already written differs\")".format(path, engine_log))
+                          "\"A file already written differs\"). For files published before dividend currency conversion, "
+                          "replace the run with a fresh run after this upgrade (\"Upgrading to dividend currency conversion\")".format(path, engine_log))
 
 
 def _file_digest(path):
@@ -1041,7 +1045,7 @@ def _record_universe(client, data, day, now, settle, warn):
 
 def run_momentum(data, streams, config, engine_log, key, now, settle, instance, ranker_bin=None, ranker=None,
                  session=None, backfill_from=None, client_factory=massive.Client, sectors_get=sectors.http_get,
-                 warn=None, reencode_all=False, rebuild_manifest=False):
+                 warn=None, reencode_all=False, rebuild_manifest=False, fx_get=fx.http_get):
     """Runs the momentum engine's job once (see above) and returns the stream's path. The ranker is
     ``ranker`` if given, else cmd/universe-rank at ``ranker_bin``, run on a private copy of the configuration's
     bytes checked against the engine's log, never on the file's path, which may change while the job runs."""
@@ -1073,7 +1077,7 @@ def run_momentum(data, streams, config, engine_log, key, now, settle, instance, 
                 ranker = encode.go_ranker([ranker_bin, "-config", checked])
             return _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session,
                                  backfill_from, client_factory, sectors_get, warn, cfg, log, reencode_all,
-                                 rebuild_manifest)
+                                 rebuild_manifest, fx_get)
     except Busy as e:
         # At the last morning firing nothing asks again before the 09:00 cutoff, and the run holding the lock
         # (a warm-up or a run by hand) has no OnFailure of its own: the firing fails, so it pages
@@ -1110,7 +1114,7 @@ def _instance_lock(streams, instance):
 
 
 def _action_set(data):
-    """{name: sha256} of every split and dividend recording: the action recordings an encoding reads."""
+    """{name: sha256} of split and dividend recordings checked for published streams."""
     out = {}
     for kind in history.KINDS:
         for path in glob.glob(os.path.join(data, kind + "_*_*.json")):
@@ -1119,8 +1123,8 @@ def _action_set(data):
 
 
 def _action_from(name):
-    """The first day of an action recording's window, from its name (record.filename: kind_from_session)."""
-    return dt.date.fromisoformat(name.split("_")[1])
+    """Earliest stream end that can read this input: an action window start."""
+    return dt.date.fromisoformat(name.removesuffix(".json").split("_")[1])
 
 
 def _manifest_entry(path, first, last, without):
@@ -1360,14 +1364,14 @@ def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ra
     file was checked against); by default they are read here, before this encodes any."""
     if now_set is None:
         now_set = _action_set(data)
-    before = manifest["actions"] if manifest else {}
+    before = {k: v for k, v in manifest["actions"].items() if not k.startswith(fx.KIND + "_")} if manifest else {}
     changed = {k for k in set(now_set) | set(before) if now_set.get(k) != before.get(k)}
     if not changed or not spans:
         return now_set
     reach = min(_action_from(k) for k in changed)
     affected = [s for s in spans if s[1] >= reach]
     if len(affected) > MAX_REENCODED and not reencode_all:
-        raise Refused("split and dividend recordings appeared or changed since the run's files were checked ({}), "
+        raise Refused("split or dividend recordings appeared or changed since the run's files were checked ({}), "
                       "reaching back to {}: the {} files published from {} on would have to be encoded again, more "
                       "than one firing checks ({}); nothing is written. Run the job once by hand with --reencode-all "
                       "(docs/manual/market-data.md, \"A job for the IRAs\")".format(
@@ -1377,7 +1381,7 @@ def _reencode_changed(manifest, spans, data, cfg, base, identity, engine_log, ra
 
 
 def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker, session, backfill_from,
-                  client_factory, sectors_get, warn, cfg, log, reencode_all, rebuild_manifest=False):
+                  client_factory, sectors_get, warn, cfg, log, reencode_all, rebuild_manifest=False, fx_get=fx.http_get):
     run_id = stream_run(os.path.join(streams, instance), engine_log, log, engine=MOMENTUM)
     identity = encode.Identity(log.configuration_hash, log.strategy_version, run_id)
     directory = os.path.join(streams, instance, run_id)
@@ -1407,11 +1411,19 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
         session = _session_before(session)
     if session < base:
         raise Refused("session {} precedes the run's base {}".format(session, base))
-    manifest, spans = _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker,
-                                 retracted, rebuild=rebuild_manifest)
     latest = settled_session(now(), settle)
     while latest in retracted:
         latest = _session_before(latest)
+    if session == latest:
+        _record_sectors(data, session, sectors_get, now, settle, warn)
+    try:
+        steps.run_fx(session, data, get=fx_get, now=now, settle=settle)
+    except steps.MissingData:
+        raise
+    except massive.MarketDataError as e:
+        warn("ECB history fetch failed ({}); continuing with recorded fixings".format(e))
+    manifest, spans = _published(directory, instance, existing, base, data, cfg, identity, engine_log, ranker,
+                                 retracted, rebuild=rebuild_manifest)
     for first, last, path in spans:
         if first <= session <= last:
             # The requested file is always encoded again: any recording it reads (a retraction, a bar, a
@@ -1435,8 +1447,6 @@ def _run_momentum(data, streams, engine_log, key, now, settle, instance, ranker,
     if previous is None and len([d for d in nyse_calendar.sessions(base, session) if d not in retracted]) < cfg.trend_closes:
         raise Refused("the history {}..{} holds fewer sessions than the {} closes of the trend".format(
             base, session, cfg.trend_closes))
-    if session == latest:
-        _record_sectors(data, session, sectors_get, now, settle, warn)
     client = _LatestSession(client_factory(key), session if session == latest else None)
     try:
         for day in span:
@@ -1625,7 +1635,7 @@ def awaiting_first_run(path, engine_streams=None):
     return True
 
 
-def main(argv, now=steps._now, client_factory=massive.Client, ranker=None, sectors_get=sectors.http_get):
+def main(argv, now=steps._now, client_factory=massive.Client, ranker=None, sectors_get=sectors.http_get, fx_get=fx.http_get):
     args = parse(argv)
     print("ti-data " + STAMP, file=sys.stderr)
     key = None   # held here, so every message printed below can have it replaced
@@ -1643,7 +1653,7 @@ def main(argv, now=steps._now, client_factory=massive.Client, ranker=None, secto
                                 ranker_bin=args.ranker, ranker=ranker, reencode_all=args.reencode_all,
                                 rebuild_manifest=args.rebuild_manifest,
                                 session=args.session, backfill_from=args.backfill_from,
-                                client_factory=client_factory, sectors_get=sectors_get)
+                                client_factory=client_factory, sectors_get=sectors_get, fx_get=fx_get)
         else:
             path = run(args.data, args.streams, args.config, args.engine_log, key, now,
                        dt.timedelta(minutes=args.settle_minutes), session=args.session,
