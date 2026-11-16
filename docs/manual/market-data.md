@@ -1503,11 +1503,16 @@ the CSV with Python's standard library. Each successful validated fetch writes
 one immutable file named `fx-ecb_<UTC-fetch-date>_<YYYYMMDDTHHMMSSZ>.json`.
 Its session is the UTC fetch date, and its body contains every downloaded
 fixing newer than the coverage boundary K before that fetch, plus source,
-URL and `fetched_at`. The first fetch bootstraps all history. A fetch with
+URL, `fetched_at` and `covered_before`, the K computed from the recordings
+present before writing. The first fetch bootstraps all history and stores
+`covered_before` as null. A fetch with
 no new fixings still records an empty CSV body, preserving coverage.
 The whole fetch is installed atomically through the recording writer, so a
 crash exposes either all of its fixings and coverage or none of them.
-Existing bootstrap and per-date recordings remain readable.
+On load, recordings are ordered by `fetched_at`. The first must be the
+bootstrap, and every later `covered_before` must equal K from the preceding
+recordings. A deleted or moved predecessor refuses with "ECB recording chain
+is broken at <name>".
 
 K is the maximum across recordings of each recording's newest fixing date
 and its `fetched_at` UTC date minus one day. A fixing already recorded must
@@ -1520,6 +1525,8 @@ writing and again against the reloaded union after writing. A same-second
 filename collision checks the winning recording and refuses with a retry
 message if the download contains additional fixings. Every fixing must be
 dated no later than its recording's UTC fetch date, checked on write and read.
+The two momentum instances’ timers are staggered, and an FX recording written
+by a losing concurrent fetch is checked again by the next firing.
 See "What can go wrong" below for the historical-revision recovery procedure.
 
 Encoding reads the union of all FX recordings, rejects conflicting duplicate
@@ -1532,7 +1539,7 @@ The connection uses a 60-second per-operation socket timeout; the data unit
 is bounded by `TimeoutStartSec=1h`. The CSV's declared and actual uncompressed size are capped at 50 MB. Sector labels
 are recorded before the ECB request so an ECB outage preserves that day's
 labels. A network, HTTP, size or deadline failure, an invalid ZIP response, or a
-malformed downloaded CSV warns and continues with existing recordings, writing
+malformed downloaded CSV or stale archive warns and continues with existing recordings, writing
 nothing. Well-formed revised, withdrawn or backdated histories refuse. Missing required conversion input refuses publication. These information
 rates adjust historical prices for ranking and never price an order.
 
@@ -1543,8 +1550,12 @@ fixing is never used: the factor's P is the prior session's close. EUR needs
 only USD per EUR; USD passes through unchanged and needs no rate recording.
 
 Let K be the later of the newest recorded fixing date and every recording's
-UTC fetch date minus one day. An archive fetched on day F holds all fixings
-through F − 1. If K < ex-date − 1, the window is incomplete and publication
+UTC fetch date minus one day. An archive fetched on UTC day F is complete
+only when its newest fixing reaches at least the last TARGET business day on
+or before F − 1. TARGET closes on weekends, 1 January, Good Friday, Easter
+Monday, 1 May, and 25 and 26 December. Good Friday and Easter Monday use
+computed Western Easter. An archive ending earlier is stale, warns and writes
+nothing, and grants no coverage. If K < ex-date − 1, the window is incomplete and publication
 refuses with MissingData. A later firing retries, even if an older usable
 fixing exists or the currency is uncovered. Once K ≥ ex-date − 1, an uncovered
 currency or a window with no usable fixing skips that dividend's adjustment.
@@ -1561,17 +1572,16 @@ are still applied. A converted amount at or below zero, at or above the prior
 close (restated onto the ex-date share basis), or not finite refuses a required
 or held instrument. For a universe member, invalid converted cash removes that
 date's actions and excludes one session, including any other dividends on that
-date. Boost's SPY USD path needs no ECB data.
+date.
 
 ## Upgrading to dividend currency conversion
 
-An existing run needs a fresh run only if its published files fail to re-encode
-under the new currency rules, including missing required FX input or differing
-bytes. In practice, this affects runs where a universe member had a non-USD
-dividend in the published files' window: those files previously treated the cash
-as dollars. The fresh run needs operator approval and the one-time warm-up;
-preserve the old run and its evidence. Runs whose published files still
-re-encode byte for byte continue unchanged. Boost is unaffected.
+After installing this change, replace the IRA run with a fresh run, including
+`operator approve` and the one-time warm-up. Published files may contain
+pre-conversion dividend adjustments outside the recheck window. Preserve the
+old run and its evidence. Boost needs no ECB input for valid positive USD
+dividends. Recorded dividends with zero cash or a missing or malformed
+currency now refuse, and none of the recorded SPY rows has either.
 
 ## What can go wrong, and what the step does
 
@@ -1583,6 +1593,9 @@ for the recording and encoding steps.
 | --- | --- | --- |
 | A dividend's currency is uncovered, missing, or has no usable ECB fixing within five calendar days | That dividend adjustment is skipped; the existing `excluded` diagnostic records ticker, ex-date, currency and reason. A universe member loses the ex-date session so ranking cannot cross the unknown adjustment; a required or held instrument refuses the stream | Check the dividend's currency and the recorded ECB CSV ("Dividend currencies"). Never substitute dollars or zero |
 | "ECB revised the <date> fixing" or "ECB history no longer contains the <date> fixing" | The firing refuses and preserves existing recordings | Look at the dated fixing on the ECB site. If the ECB really revised it, move the fx recordings aside into quarantine, as for other recordings, and let the next firing bootstrap again. Any IRA run whose files used the old rate needs a fresh run |
+| "ECB published a <date> fixing after <date> was treated as complete" | The firing refuses and preserves existing recordings | Check the dated fixing on the ECB site. If the ECB really revised it, move the fx recordings aside into quarantine and let the next firing bootstrap again. Any IRA run whose files used the old rate needs a fresh run |
+| "ECB recording chain is broken at <name>" | Publication refuses because a recording's predecessor boundary does not match | Restore the missing or moved recordings unchanged from backup and preserve the evidence |
+| "stale ECB archive" | The firing warns, writes no FX recording and continues with existing recordings, granting no coverage | Let the next firing retry. Required foreign-dividend conversion refuses while coverage is incomplete |
 | The ECB recording is missing or malformed, or converted dividend cash is outside 0 < cash < prior close | Missing or malformed ECB input refuses publication. Invalid converted cash refuses required or held instruments, naming ticker and ex-date. For universe members it removes that date's actions and excludes one session | Check the recorded input and the issuer's dividend notice; preserve the existing recordings |
 | `ti-data refused:` "no secrets file", "cannot read MASSIVE_API_KEY from the secrets file" or "MASSIVE_API_KEY is not set in the secrets file" | No file is written; the unit shows as failed. The key is never printed | Put the key on the `MASSIVE_API_KEY=` line of `secrets.env` (`sudo ti-secrets edit secrets.env`; the file is stored encrypted), then `sudo systemctl start ti-data` ("What can go wrong" under "The daily data job") |
 | `ti-data refused:` "run ... has no stream yet: run the warm-up once first" | No file is written | Run the one-time warm-up with the date it names ("The one-time warm-up") |

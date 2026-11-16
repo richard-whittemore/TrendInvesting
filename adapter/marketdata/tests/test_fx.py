@@ -1,6 +1,7 @@
 """ECB recording tests; rates and dates are synthetic, with no network."""
 import datetime as dt
 import io
+import lzma
 import tempfile
 import unittest
 import zipfile
@@ -34,7 +35,7 @@ class FXRecordingTest(unittest.TestCase):
             path = steps.run_fx(DAY, d, get=get, now=NOW)
             rec = record.read(path)
             self.assertEqual(rec, dict(kind=fx.KIND, source=fx.SOURCE, session=str(DAY),
-                                      fetched_at='2026-03-04T23:00:00Z', url=fx.URL, body=rec['body']))
+                                      fetched_at='2026-03-04T23:00:00Z', url=fx.URL, body=rec['body'], covered_before=None))
             self.assertEqual(fx.parse(rec['body']), fx.parse(CSV))
             self.assertEqual(steps.run_fx(DAY, d, get=get, now=NOW), path)
             self.assertEqual(calls, [fx.URL, fx.URL])
@@ -96,6 +97,7 @@ class FXRecordingTest(unittest.TestCase):
         from marketdata import __main__ as cli, fx
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.object(fx, 'http_get', return_value=(archive(), fx.URL)), \
+                    mock.patch.object(steps, '_stamp', return_value='2026-03-04T23:00:00Z'), \
                     mock.patch('sys.stdout', io.StringIO()), \
                     mock.patch('marketdata.massive.load_key', side_effect=AssertionError('ECB needs no key')):
                 status = cli.main(['fx', '--out', d, '--asof', str(DAY)])
@@ -146,13 +148,17 @@ class ImmutableFixingTest(unittest.TestCase):
     def test_union_includes_history_recorded_after_stream_and_rejects_conflicts(self):
         with tempfile.TemporaryDirectory() as d:
             rec = dict(kind=fx.KIND, source=fx.SOURCE, session='2026-03-06',
-                       fetched_at='2026-03-06T23:00:00Z', url=fx.URL, body=CSV)
+                       fetched_at='2026-03-06T23:00:00Z', url=fx.URL, body=CSV, covered_before=None)
             record.write(d, rec)
             self.assertEqual(fx.load(d, DAY), fx.parse(CSV))
             rec['session'] = '2026-03-07'
+            rec['fetched_at'] = '2026-03-07T23:00:00Z'
+            rec['covered_before'] = '2026-03-05'
             record.write(d, rec)
             self.assertEqual(fx.load(d, DAY), fx.parse(CSV))
             rec['session'] = '2026-03-08'
+            rec['fetched_at'] = '2026-03-08T23:00:00Z'
+            rec['covered_before'] = '2026-03-06'
             rec['body'] = CSV.replace(',2,4,', ',3,4,')
             record.write(d, rec)
             with self.assertRaisesRegex(steps.MissingData, 'ECB revised the 2026-03-04 fixing'):
@@ -269,7 +275,6 @@ class CoverageAndMergeTest(unittest.TestCase):
     def test_holiday_coverage_uses_utc_fetch_date(self):
         for ex, fixing, fetched, complete in [
                 ('2026-04-06', '2026-04-02', '2026-04-07', True),
-                ('2026-04-06', '2026-04-02', '2026-04-08', True),
                 ('2026-04-06', '2026-04-02', '2026-04-06', True),
                 ('2026-04-06', '2026-04-02', '2026-04-05', False),
                 ('2025-12-26', '2025-12-24', '2025-12-29', True)]:
@@ -361,7 +366,7 @@ class CoverageAndMergeTest(unittest.TestCase):
                 return path
             incoming = CSV + '2026-03-05,5,10,20,\n'
             with mock.patch.object(record, 'write', side_effect=concurrent_write):
-                with self.assertRaisesRegex(steps.MissingData, 'no longer contains'):
+                with self.assertRaisesRegex(steps.MissingData, 'chain is broken'):
                     steps.run_fx(DAY, d, get=lambda url: (archive(incoming), url),
                                  now=lambda: dt.datetime(2026, 3, 6, 8, tzinfo=dt.timezone.utc))
 
@@ -375,7 +380,7 @@ class CoverageAndMergeTest(unittest.TestCase):
                                       body='Date,USD,GBP,JPY\n2026-03-06,6,12,24\n'))
                 return write(directory, rec)
             with mock.patch.object(record, 'write', side_effect=concurrent_write):
-                with self.assertRaisesRegex(steps.MissingData, 'treated as complete'):
+                with self.assertRaisesRegex(steps.MissingData, 'chain is broken'):
                     steps.run_fx(DAY, d, get=lambda url: (archive(incoming), url),
                                  now=lambda: dt.datetime(2026, 3, 6, 23, tzinfo=dt.timezone.utc))
 
@@ -398,7 +403,7 @@ class FetchRecordingTest(unittest.TestCase):
             before = {p.name: p.read_bytes() for p in Path(d).iterdir()}
             with self.assertRaisesRegex(steps.MissingData,
                     'ECB published a 2026-04-03 fixing after 2026-04-06 was treated as complete'):
-                self.fetch(d, text + '2026-04-03,9,4\n', '2026-04-08T08:00:00')
+                self.fetch(d, text + '2026-04-03,9,4\n2026-04-07,2,4\n', '2026-04-08T08:00:00')
             self.assertEqual({p.name: p.read_bytes() for p in Path(d).iterdir()}, before)
 
     def test_crash_at_atomic_install_exposes_whole_fetch_or_none(self):
@@ -422,7 +427,7 @@ class FetchRecordingTest(unittest.TestCase):
                 self.assertEqual(len(list(Path(d).glob('*.json'))), 2 if installed else 1)
 
     def test_revision_and_withdrawal_give_operator_remedy(self):
-        for text in (CSV.replace(',2,4,', ',9,4,'), 'Date,USD,GBP,JPY\n2026-03-02,3,6,12\n'):
+        for text in (CSV.replace(',2,4,', ',9,4,'), 'Date,USD,GBP,JPY\n2026-03-04,2,4,N/A\n'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
                 steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
                 with self.assertRaises(steps.MissingData) as caught:
@@ -430,3 +435,72 @@ class FetchRecordingTest(unittest.TestCase):
                 self.assertEqual(len(list(Path(d).iterdir())), 1)
                 for phrase in ('ECB site', 'quarantine', 'bootstrap', 'fresh run'):
                     self.assertIn(phrase, str(caught.exception))
+
+
+class FetchIntegrityTest(unittest.TestCase):
+    def test_western_easter_and_target_closures(self):
+        for year, easter in [(2025, '2025-04-20'), (2026, '2026-04-05'), (2027, '2027-03-28')]:
+            day = dt.date.fromisoformat(easter)
+            self.assertEqual(fx.easter(year), day)
+            for closed in [day - dt.timedelta(days=2), day + dt.timedelta(days=1),
+                           dt.date(year, 1, 1), dt.date(year, 5, 1),
+                           dt.date(year, 12, 25), dt.date(year, 12, 26)]:
+                self.assertTrue(fx.target_closed(closed))
+            self.assertFalse(fx.target_closed(day + dt.timedelta(days=2)))
+
+    def test_stale_archive_writes_nothing_and_cannot_extend_coverage(self):
+        with tempfile.TemporaryDirectory() as d:
+            steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
+            before = {p.name: p.read_bytes() for p in Path(d).iterdir()}
+            with self.assertRaisesRegex(fx.MarketDataError, 'stale'):
+                steps.run_fx(DAY, d, get=lambda url: (archive(), url),
+                             now=lambda: dt.datetime(2026, 3, 6, 8, tzinfo=dt.timezone.utc))
+            self.assertEqual({p.name: p.read_bytes() for p in Path(d).iterdir()}, before)
+            self.assertEqual(fx.load(d).covered_through, DAY)
+
+    def test_target_holiday_fetch_is_complete(self):
+        for fetched, fixing in [('2026-04-06', '2026-04-02'), ('2026-12-26', '2026-12-24')]:
+            with self.subTest(fetched=fetched), tempfile.TemporaryDirectory() as d:
+                steps.run_fx(dt.date.fromisoformat(fixing), d,
+                             get=lambda url: (archive('Date,USD\n{},2\n'.format(fixing)), url),
+                             now=lambda: dt.datetime.fromisoformat(fetched + 'T08:00:00+00:00'))
+                self.assertEqual(fx.load(d).covered_through, dt.date.fromisoformat(fetched) - dt.timedelta(days=1))
+
+    def test_deleted_bootstrap_or_middle_recording_breaks_chain(self):
+        for removed in (0, 1):
+            with self.subTest(removed=removed), tempfile.TemporaryDirectory() as d:
+                paths = []
+                text = CSV
+                for day in (4, 5, 6):
+                    if day > 4:
+                        text += '2026-03-{:02d},2,4,8\n'.format(day)
+                    paths.append(steps.run_fx(DAY, d, get=lambda url: (archive(text), url),
+                                             now=lambda: dt.datetime(2026, 3, day, 23, tzinfo=dt.timezone.utc)))
+                self.assertIsNone(record.read(paths[0])['covered_before'])
+                self.assertEqual(record.read(paths[1])['covered_before'], str(DAY))
+                Path(paths[removed]).unlink()
+                with self.assertRaisesRegex(steps.MissingData, 'ECB recording chain is broken at ' + Path(paths[removed + 1]).name):
+                    fx.load(d)
+
+    def test_corrupt_deflate_is_a_download_error(self):
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED) as zipped:
+            zipped.writestr('eurofxref-hist.csv', CSV)
+        data = bytearray(out.getvalue())
+        offset = 30 + len('eurofxref-hist.csv')
+        data[offset] = 0xff
+        with self.assertRaisesRegex(fx.MarketDataError, 'malformed ECB archive'):
+            fx.csv_body(data)
+
+    def test_other_decompression_errors_are_download_errors(self):
+        for error in (lzma.LZMAError, EOFError, OSError):
+            with self.subTest(error=error):
+                with mock.patch.object(zipfile.ZipExtFile, 'read', side_effect=error('corrupt compressed stream')):
+                    with self.assertRaisesRegex(fx.MarketDataError, 'malformed ECB archive'):
+                        fx.csv_body(archive())
+
+    def test_backdating_includes_remedy(self):
+        recorded = fx.Rates(fx.parse(CSV), DAY)
+        with self.assertRaises(steps.MissingData) as caught:
+            fx.check_history(recorded, fx.parse(CSV + '2026-03-03,2,4,8\n'))
+        self.assertIn(fx.REMEDY, str(caught.exception))

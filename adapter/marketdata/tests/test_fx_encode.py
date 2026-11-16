@@ -19,7 +19,7 @@ def set_currency(directory, currency):
 
 def rates_record(directory, text='Date,USD,GBP\n2026-11-26,2,4\n'):
     return record.write(directory, dict(kind=fx.KIND, source=fx.SOURCE, session=str(LAST),
-                                        fetched_at='2026-11-30T23:30:00Z', url=fx.URL, body=text))
+                                        fetched_at='2026-11-30T23:30:00Z', url=fx.URL, body=text, covered_before=None))
 
 
 def ranker(requests):
@@ -131,7 +131,11 @@ class StableConversionTest(unittest.TestCase):
         return ''.join(json.dumps(e, separators=(',', ':'), allow_nan=False) + '\n' for e in stream(directory, compact)).encode()
 
     def add_rates(self, directory, day, usd=2, gbp=4):
-        return record.write(directory, dict(kind=fx.KIND, source=fx.SOURCE, session=day,
+        try:
+            covered = fx.load(directory).covered_through.isoformat()
+        except fx.NoRecording:
+            covered = None
+        return record.write(directory, dict(kind=fx.KIND, source=fx.SOURCE, session=day, covered_before=covered,
                             fetched_at=day + 'T23:30:00Z', url=fx.URL,
                             body='Date,USD,GBP\n{},{},{}\n'.format(day, usd, gbp)))
 

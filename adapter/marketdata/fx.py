@@ -8,6 +8,7 @@ import csv
 import datetime as dt
 import glob
 import io
+import lzma
 import math
 import os
 import time
@@ -15,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 
 from . import kinds, record
 from .massive import MarketDataError
@@ -82,6 +84,38 @@ def parse(text, allow_empty=False):
         return out
     except (ValueError, TypeError, IndexError, StopIteration, csv.Error) as e:
         raise MissingData('malformed ECB history: {}'.format(e)) from None
+
+
+def easter(year):
+    """Western Easter by Gregorian computus (manual, Dividend currencies)."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month, day = divmod(h + l - 7 * m + 114, 31)
+    return dt.date(year, month, day + 1)
+
+
+def target_closed(day):
+    """TARGET closing days used for freshness (manual, Dividend currencies)."""
+    sunday = easter(day.year)
+    return (day.weekday() >= 5 or (day.month, day.day) in
+            {(1, 1), (5, 1), (12, 25), (12, 26)} or
+            day in {sunday - dt.timedelta(days=2), sunday + dt.timedelta(days=1)})
+
+
+def require_fresh(rates, fetch_day):
+    """A complete archive reaches the prior TARGET day (manual, Dividend currencies)."""
+    expected = fetch_day - dt.timedelta(days=1)
+    while target_closed(expected):
+        expected -= dt.timedelta(days=1)
+    if max(rates, default=dt.date.min) < expected:
+        raise MarketDataError('stale ECB archive: newest fixing precedes {}'.format(expected))
 
 
 def valid_currency(currency):
@@ -178,7 +212,8 @@ def csv_body(body):
             text = b''.join(chunks).decode('utf-8-sig')
         parse(text)
         return text
-    except (zipfile.BadZipFile, KeyError, UnicodeError, OSError, RuntimeError, ValueError, MissingData) as e:
+    except (zipfile.BadZipFile, KeyError, UnicodeError, OSError, EOFError, zlib.error, lzma.LZMAError,
+            RuntimeError, ValueError, MissingData) as e:
         raise MarketDataError('malformed ECB archive: {}'.format(type(e).__name__)) from None
 
 
@@ -221,7 +256,7 @@ def check_history(recorded, incoming):
     covered = getattr(recorded, 'covered_through', max(recorded, default=dt.date.min))
     for day in sorted(incoming):
         if day <= covered and day not in recorded:
-            raise MissingData('ECB published a {} fixing after {} was treated as complete'.format(day, covered))
+            raise MissingData('ECB published a {} fixing after {} was treated as complete. {}'.format(day, covered, REMEDY))
 
 
 def body(rates):
@@ -238,15 +273,15 @@ def body(rates):
 def load(directory, session=None, listing=None, read=None):
     """Return the full union offline, filtering dates only if session is passed.
 
+    Validate predecessor coverage in fetch order (manual, Dividend currencies).
     Coverage includes every recording's newest fixing and UTC fetch date minus
-    one day (manual, Dividend currencies), including when dates are filtered.
+    one day, including when dates are filtered.
     """
     names = (os.path.basename(p) for p in glob.glob(os.path.join(directory, KIND + '_*.json'))) if listing is None else listing
     candidates = sorted(n for n in names if n.startswith(KIND + '_') and n.endswith('.json'))
     if not candidates:
         raise NoRecording('no ECB history recording')
-    rates = {}
-    covered = dt.date.min
+    recordings = []
     for name in candidates:
         try:
             suffix = name[len(KIND) + 1:-len('.json')]
@@ -255,8 +290,15 @@ def load(directory, session=None, listing=None, read=None):
             incoming = checked(rec, recorded_day)
             if '_' in suffix and name != record.filename(rec):
                 raise ValueError('fetch timestamp differs from filename')
-            merge(rates, incoming)
-            covered = max(covered, incoming.covered_through)
+            recordings.append((rec['fetched_at'], name, rec, incoming))
         except (record.Corrupt, OSError, ValueError, KeyError, TypeError) as e:
             raise MissingData('unreadable ECB recording: {}'.format(e)) from None
+    rates = {}
+    covered = dt.date.min
+    for _, name, rec, incoming in sorted(recordings):
+        expected = covered.isoformat() if covered != dt.date.min else None
+        if 'covered_before' not in rec or rec['covered_before'] != expected:
+            raise MissingData('ECB recording chain is broken at {}'.format(name))
+        merge(rates, incoming)
+        covered = max(covered, incoming.covered_through)
     return Rates({day: row for day, row in rates.items() if session is None or day <= session}, covered)

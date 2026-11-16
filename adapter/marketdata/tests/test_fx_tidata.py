@@ -43,14 +43,28 @@ class FXJobTest(unittest.TestCase):
             code, err = self.invoke(job, get)
             self.assertEqual(code, 0, err)
 
-    def test_bad_ecb_download_refuses_without_publishing(self):
+    def test_bad_ecb_download_uses_recordings_or_refuses_missing_rate(self):
+        for currency in ('USD', 'GBP'):
+            with self.subTest(currency=currency), tempfile.TemporaryDirectory() as d:
+                job = MomentumJob(d, ranker=ranker)
+                build(job.data)
+                set_currency(job.data, currency)
+                code, err = self.invoke(job, lambda url: (b'bad zip', url))
+                self.assertIn('ECB', err)
+                self.assertIn('continuing with recorded fixings', err)
+                self.assertEqual(code, 0 if currency == 'USD' else 1, err)
+                self.assertEqual(job.path(LAST).exists(), currency == 'USD')
+
+    def test_stale_archive_warns_and_publishes_from_existing_recordings(self):
         with tempfile.TemporaryDirectory() as d:
-            job = MomentumJob(d)
+            job = MomentumJob(d, ranker=ranker)
             build(job.data)
-            code, err = self.invoke(job, lambda url: (b'bad zip', url))
-            self.assertEqual(code, 1)
-            self.assertIn('ECB', err)
-            self.assertFalse(job.path(LAST).exists())
+            code, err = self.invoke(job, lambda url: (archive('Date,USD\n2026-11-26,2\n'), url))
+            self.assertEqual(code, 0, err)
+            self.assertIn('stale', err)
+            self.assertIn('continuing with recorded fixings', err)
+            self.assertTrue(job.path(LAST).exists())
+            self.assertEqual(list(job.data.glob(fx.KIND + '_*.json')), [])
 
     def test_fx_does_not_trigger_reencoding_even_in_legacy_manifest(self):
         from marketdata.tests.test_fx_encode import rates_record
@@ -84,7 +98,7 @@ class FXJobTest(unittest.TestCase):
             build(job.data)
             set_currency(job.data, 'EUR')
             with mock.patch.object(fx, 'usd', side_effect=lambda cash, currency, day, rates: cash):
-                code, err = self.invoke(job, lambda url: (archive(), url))
+                code, err = self.invoke(job, lambda url: (archive('Date,USD\n2026-11-27,2\n'), url))
             self.assertEqual(code, 0, err)
             for path in job.data.glob(fx.KIND + '_*.json'):
                 path.unlink()
@@ -106,7 +120,7 @@ class FXJobTest(unittest.TestCase):
                 elif currency == 'GBP':
                     record.write(job.data, dict(kind=fx.KIND, source=fx.SOURCE, session='2026-11-25',
                                                fetched_at='2026-11-25T23:00:00Z', url=fx.URL,
-                                               body='Date,USD,GBP\n2026-11-25,2,4\n'))
+                                               body='Date,USD,GBP\n2026-11-25,2,4\n', covered_before=None))
                 def fail(url):
                     raise fx.MarketDataError('ECB network outage')
                 code, err = self.invoke(job, fail)
@@ -145,7 +159,7 @@ class FXJobTest(unittest.TestCase):
 
     def test_revised_and_withdrawn_histories_still_refuse(self):
         from marketdata.tests.test_fx_encode import rates_record
-        for text in ('Date,USD,GBP\n2026-11-26,9,4\n',
+        for text in ('Date,USD,GBP\n2026-11-26,9,4\n2026-11-27,2,4\n',
                      'Date,USD,GBP\n2026-11-27,2,4\n'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
                 job = MomentumJob(d, ranker=ranker)
@@ -166,7 +180,7 @@ class FXJobTest(unittest.TestCase):
                 build(job.data)
                 set_currency(job.data, 'GBP')
                 steps.run_fx(LAST, job.data,
-                             get=lambda url: (archive('Date,USD,GBP\n2026-11-26,2,4\n'), url),
+                             get=lambda url: (archive('Date,USD,GBP\n2026-11-26,2,4\n2026-11-27,2,4\n'), url),
                              now=lambda: after_settle(LAST))
                 before = {p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}
                 code, err = self.invoke(job, lambda url: (response, url))

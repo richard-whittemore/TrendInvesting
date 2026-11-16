@@ -144,8 +144,10 @@ def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
     rec = dict(kind=fx.KIND, source=fx.SOURCE, session=str(fetch_day),
                fetched_at=stamp, url=url, body=fx.csv_body(raw))
     fetched = fx.checked(rec, fetch_day)
+    fx.require_fresh(fetched, fetch_day)
     fx.check_history(existing, fetched)
     boundary = getattr(existing, 'covered_through', dt.date.min)
+    rec['covered_before'] = boundary.isoformat() if boundary != dt.date.min else None
     rec['body'] = fx.body({day: row for day, row in fetched.items() if day > boundary})
     path = os.path.join(directory, recording.filename(rec))
     try:
