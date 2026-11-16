@@ -62,7 +62,7 @@ func TestResetSafetyRestartResumesWait(t *testing.T) {
 	// before its first exec, even though the previous supervisor already discounted it.
 	c = r.cfg(`echo 'IBC: Login has completed'`)
 	rendered := filepath.Join(r.dir, "rendered")
-	c.Render = []string{"sh", "-c", "echo rendered > " + rendered}
+	c.Render = []string{"sh", "-c", "echo rendered > " + shq(rendered)}
 	waits := 0
 	resetClock(r, &c, "2026-11-01T04:13:00Z", func(d time.Duration) {
 		waits++
@@ -82,7 +82,7 @@ func TestResetSafetyJournalFailureStillWaits(t *testing.T) {
 	for _, which := range []string{"stdout", "stderr"} {
 		t.Run(which, func(t *testing.T) {
 			r := newRig(t)
-			c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then echo '` + refusal + `'; fi`)
+			c := r.cfg(`if [ "$(wc -l < ` + shq(filepath.Join(r.dir, "launches")) + `)" -eq 1 ]; then echo '` + refusal + `'; fi`)
 			waits := 0
 			resetClock(r, &c, "2026-11-01T04:58:00Z", func(d time.Duration) {
 				waits++
@@ -105,7 +105,7 @@ func TestResetSafetyJournalFailureStillWaits(t *testing.T) {
 
 func TestResetSafetyChattyDescendantCannotOverrideWait(t *testing.T) {
 	r := newRig(t)
-	c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then
+	c := r.cfg(`if [ "$(wc -l < ` + shq(filepath.Join(r.dir, "launches")) + `)" -eq 1 ]; then
  (trap '' TERM; i=0; while [ $i -lt 100 ]; do echo descendant; sleep 0.02; i=$((i+1)); done) &
  echo '` + refusal + `'; wait
  fi`)
@@ -164,7 +164,7 @@ func TestResetSafetyPendingStopPreventsLaunch(t *testing.T) {
 
 func TestResetSafetyDecisionLogsActualDelayBeforeWait(t *testing.T) {
 	r := newRig(t)
-	c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then echo '` + refusal + `'; fi`)
+	c := r.cfg(`if [ "$(wc -l < ` + shq(filepath.Join(r.dir, "launches")) + `)" -eq 1 ]; then echo '` + refusal + `'; fi`)
 	log := &recordingJournal{}
 	want := "gateway-start: reset wait: login refused at 00:58 ET inside IBKR's nightly reset hour; waiting 2m until 01:00 ET (consumed reset allowances 1 of 4 in 24h)"
 	resetClock(r, &c, "2026-11-01T04:58:00Z", func(time.Duration) {
