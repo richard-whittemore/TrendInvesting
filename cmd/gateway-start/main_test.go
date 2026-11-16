@@ -33,6 +33,10 @@ type rig struct {
 	now   time.Time
 }
 
+// shq single-quotes a path for the stand-in shell; t.TempDir paths hold no
+// single quote, but they may hold a space.
+func shq(p string) string { return "'" + p + "'" }
+
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	d := t.TempDir()
@@ -41,7 +45,7 @@ func newRig(t *testing.T) *rig {
 
 func (r *rig) cfg(script string) config {
 	// Each launch leaves a mark, so a test can tell whether IBC was started.
-	marked := "echo x >>" + filepath.Join(r.dir, "launches") + "\n" + script
+	marked := "echo x >>" + shq(filepath.Join(r.dir, "launches")) + "\n" + script
 	return config{
 		Command:       []string{"sh", "-c", marked},
 		StateFile:     r.state,
@@ -257,7 +261,7 @@ func TestACounterThatCannotBeWrittenRefusesBeforeLaunch(t *testing.T) {
 func TestACountThatCannotBeReadAfterARefusalStopsIBCAndTheRetries(t *testing.T) {
 	r := newRig(t)
 	// The stand-in corrupts the counter, then refuses.
-	c := r.cfg(`echo garbage >` + r.state + `; echo "` + refusal + `"; sleep 30`)
+	c := r.cfg(`echo garbage >` + shq(r.state) + `; echo "` + refusal + `"; sleep 30`)
 	code, out := r.run(c)
 	if code != 77 || !strings.Contains(out, "login retries stopped") {
 		t.Fatalf("exit %d, want 77 saying 'login retries stopped': %s", code, out)
@@ -306,7 +310,7 @@ func TestAFailureToStartIBCOrTheRendererIsRestartable(t *testing.T) {
 func TestTheAttemptIsRecordedBeforeIBCIsLaunched(t *testing.T) {
 	r := newRig(t)
 	marker := filepath.Join(r.dir, "recorded")
-	code, out := r.run(r.cfg(`if [ -s ` + r.state + ` ]; then echo yes >` + marker + `; fi; echo "` + refusal + `"; exit 0`))
+	code, out := r.run(r.cfg(`if [ -s ` + shq(r.state) + ` ]; then echo yes >` + shq(marker) + `; fi; echo "` + refusal + `"; exit 0`))
 	if code != 75 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
@@ -823,7 +827,7 @@ func TestNightlyResetBoundariesUseNewYorkRegardlessOfTheClocksZone(t *testing.T)
 	} {
 		t.Run(tc.at, func(t *testing.T) {
 			r := newRig(t)
-			c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then echo '` + refusal + `'; else echo 'IBC: Login has completed'; fi`)
+			c := r.cfg(`if [ "$(wc -l < ` + shq(filepath.Join(r.dir, "launches")) + `)" -eq 1 ]; then echo '` + refusal + `'; else echo 'IBC: Login has completed'; fi`)
 			waits := 0
 			resetClock(r, &c, tc.at, func(d time.Duration) {
 				waits++
@@ -849,7 +853,7 @@ func TestThreeResetRefusalsPreserveOlderAttemptsAndNeverStopTheRetries(t *testin
 	r.now = time.Date(2026, 10, 31, 4, 8, 0, 0, time.UTC)
 	r.seed(r.now, r.now.Add(-time.Hour))
 	before, _ := os.ReadFile(r.state)
-	c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -le 3 ]; then echo '` + refusal + `'; else echo 'IBC: Login has completed'; fi`)
+	c := r.cfg(`if [ "$(wc -l < ` + shq(filepath.Join(r.dir, "launches")) + `)" -le 3 ]; then echo '` + refusal + `'; else echo 'IBC: Login has completed'; fi`)
 	waits := 0
 	resetClock(r, &c, "2026-10-31T04:08:00Z", func(d time.Duration) {
 		waits++
@@ -914,7 +918,7 @@ func TestResetRefusalAfterAnAcceptedLoginDoesNotRestoreTheOldCount(t *testing.T)
 	r := newRig(t)
 	r.now = time.Date(2026, 10, 31, 4, 8, 0, 0, time.UTC)
 	r.seed(r.now.Add(-time.Hour))
-	c := r.cfg(`echo 'IBC: Login has completed'; if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then echo '` + refusal + `'; fi`)
+	c := r.cfg(`echo 'IBC: Login has completed'; if [ "$(wc -l < ` + shq(filepath.Join(r.dir, "launches")) + `)" -eq 1 ]; then echo '` + refusal + `'; fi`)
 	waits := 0
 	resetClock(r, &c, "2026-10-31T04:08:00Z", func(time.Duration) {
 		waits++
@@ -931,7 +935,7 @@ func TestResetRefusalAfterAnAcceptedLoginDoesNotRestoreTheOldCount(t *testing.T)
 func TestResetRetryEndsIBCsDescendantsBeforeWaiting(t *testing.T) {
 	r := newRig(t)
 	pidFile := filepath.Join(r.dir, "child")
-	c := r.cfg(`if [ "$(wc -l < ` + filepath.Join(r.dir, "launches") + `)" -eq 1 ]; then sleep 3 & echo $! > ` + pidFile + `; echo '` + refusal + `'; wait; else echo 'IBC: Login has completed'; fi`)
+	c := r.cfg(`if [ "$(wc -l < ` + shq(filepath.Join(r.dir, "launches")) + `)" -eq 1 ]; then sleep 3 & echo $! > ` + shq(pidFile) + `; echo '` + refusal + `'; wait; else echo 'IBC: Login has completed'; fi`)
 	waits := 0
 	resetClock(r, &c, "2026-10-31T04:08:00Z", func(time.Duration) {
 		waits++
