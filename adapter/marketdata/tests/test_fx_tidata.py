@@ -15,10 +15,10 @@ from marketdata.tests.test_tidata_momentum import MomentumJob, sector_pages
 
 
 class FXJobTest(unittest.TestCase):
-    def invoke(self, job, get):
+    def invoke(self, job, get, now=None):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch('sys.stdout', out), mock.patch('sys.stderr', err):
-            code = tidata.main(job.argv('--backfill-from', '2026-11-23'), now=lambda: after_settle(LAST),
+            code = tidata.main(job.argv('--backfill-from', '2026-11-23'), now=now or (lambda: after_settle(LAST)),
                                client_factory=lambda key: job.client, ranker=job.ranker,
                                sectors_get=sector_pages, fx_get=get)
         return code, err.getvalue()
@@ -54,6 +54,23 @@ class FXJobTest(unittest.TestCase):
                 self.assertIn('continuing with recorded fixings', err)
                 self.assertEqual(code, 0 if currency == 'USD' else 1, err)
                 self.assertEqual(job.path(LAST).exists(), currency == 'USD')
+
+    def test_clock_not_later_than_latest_recording_warns_and_uses_existing_rates(self):
+        text = synthetic_history('Date,USD,GBP\n2026-11-26,2,4\n2026-11-27,2,4\n')
+        for seconds in (0, 1):
+            with self.subTest(seconds=seconds), tempfile.TemporaryDirectory() as d:
+                job = MomentumJob(d, ranker=ranker)
+                build(job.data)
+                set_currency(job.data, 'GBP')
+                steps.run_fx(LAST, job.data, get=lambda url: (archive(text), url),
+                             now=lambda: after_settle(LAST) + dt.timedelta(seconds=seconds))
+                before = {p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}
+                code, err = self.invoke(job, lambda url: (archive(text), url))
+                self.assertEqual(code, 0, err)
+                self.assertIn('system clock is behind the latest ECB recording', err)
+                self.assertIn('continuing with recorded fixings', err)
+                self.assertTrue(job.path(LAST).exists())
+                self.assertEqual({p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}, before)
 
     def test_stale_archive_warns_and_publishes_from_existing_recordings(self):
         with tempfile.TemporaryDirectory() as d:
@@ -166,7 +183,8 @@ class FXJobTest(unittest.TestCase):
                 build(job.data)
                 rates_record(job.data)
                 before = {p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}
-                code, err = self.invoke(job, lambda url: (archive(text), url))
+                code, err = self.invoke(job, lambda url: (archive(text), url),
+                                        now=lambda: dt.datetime(2026, 11, 30, 23, 30, 1, tzinfo=dt.timezone.utc))
                 self.assertEqual(code, 1, err)
                 self.assertIn('ECB', err)
                 self.assertFalse(job.path(LAST).exists())
@@ -181,7 +199,7 @@ class FXJobTest(unittest.TestCase):
                 set_currency(job.data, 'GBP')
                 steps.run_fx(LAST, job.data,
                              get=lambda url: (archive(synthetic_history('Date,USD,GBP\n2026-11-26,2,4\n2026-11-27,2,4\n')), url),
-                             now=lambda: after_settle(LAST))
+                             now=lambda: after_settle(LAST) - dt.timedelta(seconds=1))
                 before = {p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}
                 code, err = self.invoke(job, lambda url: (response, url))
                 self.assertEqual(code, 0, err)

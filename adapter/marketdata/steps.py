@@ -135,7 +135,8 @@ def run_bars(client, instruments, session, directory, lookback_days=400, now=_no
 @contextlib.contextmanager
 def _fx_lock(directory):
     """Serialize the shared FX chain through validation (manual, Dividend currencies)."""
-    os.makedirs(directory, exist_ok=True)
+    if not os.path.isdir(directory):
+        raise MissingData('no data directory')
     with open(os.path.join(directory, '.fx.lock'), 'a') as lock:
         deadline = time.monotonic() + 300
         while True:
@@ -163,6 +164,8 @@ def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
             existing = {}
         raw, url = (get or fx.http_get)(fx.URL)
         stamp = _stamp(now)
+        if getattr(existing, 'fetched_at', None) is not None and stamp <= existing.fetched_at:
+            raise fx.MarketDataError('system clock is behind the latest ECB recording')
         fetch_day = dt.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').date()
         rec = dict(kind=fx.KIND, source=fx.SOURCE, session=str(fetch_day),
                    fetched_at=stamp, url=url, body=fx.csv_body(raw))

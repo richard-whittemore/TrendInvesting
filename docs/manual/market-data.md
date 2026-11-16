@@ -1521,16 +1521,19 @@ with "ECB revised the <date> fixing". A downloaded history omitting any
 recorded fixing refuses with "ECB history no longer contains the <date>
 fixing". An unrecorded fixing dated on or before K refuses with "ECB published
 a <date> fixing after <date> was treated as complete". These checks run before
-writing and again against the reloaded union after writing. A same-second
-filename collision checks the winning recording and refuses with a retry
-message if the download contains additional fixings. Every fixing must be
+writing and again against the reloaded union after writing. Under the FX lock,
+a fetch whose `fetched_at` is not later than the latest recorded `fetched_at`
+fails with "system clock is behind the latest ECB recording": it warns, writes
+nothing and continues with existing recordings. Every fixing must be
 dated no later than its recording's UTC fetch date, checked on write and read.
 Concurrent FX fetches across momentum instances are serialized by an exclusive
 `flock` on `<data>/.fx.lock`, held from reading the predecessor and coverage
 through downloading, writing and rechecking the union. A waiting fetch reloads
 the predecessor and coverage after acquiring the lock. It polls for up to five
 minutes, then refuses with "another job is recording ECB rates". Closing the
-file releases the lock, including when a job exits or fails.
+file releases the lock, including when a job exits or fails. The data directory
+must already exist; the lock never creates it and refuses with "no data directory"
+when it is absent. Production supplies this directory.
 See "What can go wrong" below for the historical-revision recovery procedure.
 
 Encoding reads the union of all FX recordings, rejects conflicting duplicate
@@ -1563,8 +1566,12 @@ nothing, and grants no coverage. Each accepted archive must also contain a
 fixing row with a USD rate for every TARGET business day from
 max(previous K + 1, 2024-01-01) through its newest fixing. Bootstrap checks
 start on 2024-01-01. A missing row or USD rate makes the download incomplete,
-warns and writes nothing. Continuity
-before 2024-01-01 is unnecessary because no stream reads that far back.
+warns and writes nothing. The shared continuity and conversion floor is
+2024-01-01. A non-USD dividend whose conversion window starts before this
+floor (ex-date − 5 < 2024-01-01) refuses with MissingData:
+"dividend conversion before 2024-01-01 is not supported: <ex-date>".
+IRA streams read no dates before 2025, so normal operation never reaches this
+floor.
 If K < ex-date − 1, the window is incomplete and publication
 refuses with MissingData. A later firing retries, even if an older usable
 fixing exists or the currency is uncovered. Once K ≥ ex-date − 1, an uncovered

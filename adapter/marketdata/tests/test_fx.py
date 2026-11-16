@@ -54,7 +54,8 @@ class FXRecordingTest(unittest.TestCase):
             self.assertEqual(rec, dict(kind=fx.KIND, source=fx.SOURCE, session=str(DAY),
                                       fetched_at='2026-03-04T23:00:00Z', url=fx.URL, body=rec['body'], covered_before=None))
             self.assertEqual(fx.parse(rec['body']), fx.parse(CSV))
-            self.assertEqual(steps.run_fx(DAY, d, get=get, now=NOW), path)
+            with self.assertRaisesRegex(fx.MarketDataError, 'system clock is behind the latest ECB recording'):
+                steps.run_fx(DAY, d, get=get, now=NOW)
             self.assertEqual(calls, [fx.URL, fx.URL])
             self.assertEqual(fx.load(d, DAY)[DAY], {'USD': 2.0, 'GBP': 4.0})
 
@@ -237,10 +238,19 @@ class ImmutableFixingTest(unittest.TestCase):
             path = steps.run_fx(DAY, d, get=lambda url: (archive(missing), url), now=NOW)
             self.assertEqual(fx.parse(record.read(path)['body'])[dt.date(2023, 12, 29)], {})
             with self.assertRaisesRegex(steps.MissingData, 'ECB'):
-                steps.run_fx(DAY, d, get=lambda url: (archive(missing), 'https://example.com'), now=NOW)
+                steps.run_fx(DAY, d, get=lambda url: (archive(missing), 'https://example.com'),
+                             now=lambda: NOW() + dt.timedelta(seconds=1))
 
 
 class PriorFixingTest(unittest.TestCase):
+    def test_conversion_window_must_start_at_or_after_continuity_floor(self):
+        rates = fx.parse('Date,USD,GBP\n2023-12-28,2,4\n2024-01-01,2,4\n2024-01-05,2,4\n')
+        for day in (dt.date(2023, 12, 29), dt.date(2024, 1, 5)):
+            with self.subTest(day=day), self.assertRaisesRegex(
+                    steps.MissingData, 'dividend conversion before 2024-01-01 is not supported:'):
+                fx.usd(2, 'GBP', day, rates)
+        self.assertEqual(fx.usd(2, 'GBP', dt.date(2024, 1, 6), rates), 1)
+
     def test_prior_day_coverage_is_required_even_for_uncovered_currency(self):
         rates = {DAY - dt.timedelta(days=2): {'USD': 2, 'GBP': 4}}
         for currency in ('GBP', 'ZZZ'):
@@ -283,7 +293,8 @@ class PriorFixingTest(unittest.TestCase):
             before = Path(path).read_bytes()
             backfilled = CSV + '2026-03-01,9,10,20,\n'
             with self.assertRaisesRegex(steps.MissingData, 'treated as complete'):
-                steps.run_fx(DAY, d, get=lambda url: (archive(backfilled), url), now=NOW)
+                steps.run_fx(DAY, d, get=lambda url: (archive(backfilled), url),
+                             now=lambda: NOW() + dt.timedelta(seconds=1))
             self.assertEqual(Path(path).read_bytes(), before)
             self.assertEqual(len(list(Path(d).glob('*.json'))), 1)
 
@@ -316,7 +327,7 @@ class CoverageAndMergeTest(unittest.TestCase):
                              now=lambda: dt.datetime(2026, 3, 6, 8, tzinfo=dt.timezone.utc))
             self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
 
-    def test_same_second_fetch_collision_checks_winner(self):
+    def test_same_second_fetch_fails_without_changing_recordings(self):
         for mode in ('same', 'extension', 'revision', 'withdrawal', 'backdating'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
                 winner = CSV + '2026-03-05,5,10,20,\n'
@@ -335,14 +346,8 @@ class CoverageAndMergeTest(unittest.TestCase):
                                         now=lambda: dt.datetime(2026, 3, 6, 8, tzinfo=dt.timezone.utc))
 
                 run(winner)
-                if mode == 'same':
+                with self.assertRaisesRegex(fx.MarketDataError, 'system clock is behind the latest ECB recording'):
                     run(loser)
-                elif mode == 'extension':
-                    with self.assertRaisesRegex(steps.MissingData, 'timestamp collision'):
-                        run(loser)
-                else:
-                    with self.assertRaisesRegex(steps.MissingData, 'revised|no longer contains|treated as complete'):
-                        run(loser)
                 self.assertTrue((Path(d) / (fx.KIND + '_2026-03-06_20260306T080000Z.json')).exists())
                 expected = fx.parse(winner)
                 self.assertEqual(fx.load(d), expected)
@@ -424,7 +429,8 @@ class FetchRecordingTest(unittest.TestCase):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
                 steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
                 with self.assertRaises(steps.MissingData) as caught:
-                    steps.run_fx(DAY, d, get=lambda url: (archive(text), url), now=NOW)
+                    steps.run_fx(DAY, d, get=lambda url: (archive(text), url),
+                                 now=lambda: NOW() + dt.timedelta(seconds=1))
                 self.assertEqual(len(list(Path(d).glob('*.json'))), 1)
                 for phrase in ('ECB site', 'quarantine', 'bootstrap', 'fresh run'):
                     self.assertIn(phrase, str(caught.exception))
@@ -565,6 +571,14 @@ class FetchSafetyTest(unittest.TestCase):
             self.assertEqual(record.read(second_path)['covered_before'], '2024-01-02')
             self.assertEqual(fx.load(d).covered_through, dt.date(2024, 1, 3))
             self.assertEqual(len(list(Path(d).glob('*.json'))), 2)
+
+    def test_shared_lock_requires_existing_data_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / 'missing'
+            with self.assertRaisesRegex(steps.MissingData, 'no data directory'):
+                with steps._fx_lock(missing):
+                    pass
+            self.assertFalse(missing.exists())
 
     def test_shared_lock_wait_is_bounded(self):
         import fcntl

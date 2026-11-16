@@ -29,14 +29,16 @@ URL = 'https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip'
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 MAX_CSV_BYTES = 50 * 1024 * 1024
 DOWNLOAD_SECONDS = 120
+CONTINUITY_FLOOR = dt.date(2024, 1, 1)
 
 
 class Rates(dict):
-    """Fixings and their final coverage date (manual, Dividend currencies)."""
+    """Fixings, coverage and latest fetch timestamp (manual, Dividend currencies)."""
 
-    def __init__(self, rates, covered_through):
+    def __init__(self, rates, covered_through, fetched_at=None):
         super().__init__(rates)
         self.covered_through = covered_through
+        self.fetched_at = fetched_at
 
 
 class NoRecording(MissingData):
@@ -121,7 +123,7 @@ def require_fresh(rates, fetch_day):
 
 def require_continuous(rates, covered):
     """Require new TARGET-day USD fixings since 2024 (manual, Dividend currencies)."""
-    day = max(covered, dt.date(2023, 12, 31)) + dt.timedelta(days=1)
+    day = max(covered + dt.timedelta(days=1), CONTINUITY_FLOOR)
     newest = max(rates, default=dt.date.min)
     while day <= newest:
         if not target_closed(day) and 'USD' not in rates.get(day, {}):
@@ -144,6 +146,8 @@ def usd(cash, currency, day, rates):
         return cash
     if not valid_currency(currency):
         raise Unavailable('missing or malformed dividend currency')
+    if day - dt.timedelta(days=5) < CONTINUITY_FLOOR:
+        raise MissingData('dividend conversion before {} is not supported: {}'.format(CONTINUITY_FLOOR, day))
     if rates is None:
         raise MissingData('ECB history recording is required for {}'.format(currency))
     covered = max(max(rates, default=dt.date.min), getattr(rates, 'covered_through', dt.date.min))
@@ -312,4 +316,5 @@ def load(directory, session=None, listing=None, read=None):
             raise MissingData('ECB recording chain is broken at {}'.format(name))
         merge(rates, incoming)
         covered = max(covered, incoming.covered_through)
-    return Rates({day: row for day, row in rates.items() if session is None or day <= session}, covered)
+    return Rates({day: row for day, row in rates.items() if session is None or day <= session},
+                 covered, max(recording[0] for recording in recordings))
