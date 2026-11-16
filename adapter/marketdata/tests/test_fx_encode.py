@@ -200,3 +200,53 @@ class LazyRatesTest(unittest.TestCase):
                 with mock.patch.object(fx, 'load', side_effect=AssertionError('unapplied dividend loads FX')):
                     got = stream(d, compact)
                 self.assertTrue(got)
+
+
+class FetchToIRAEncodingTest(unittest.TestCase):
+    def build_april(self, directory):
+        import datetime as dt
+        from marketdata.tests.test_encode import row
+        days = [dt.date(2026, 4, 1), dt.date(2026, 4, 2), dt.date(2026, 4, 6)]
+        for day in days:
+            record.write(directory, dict(kind='grouped', source='massive', session=str(day),
+                         fetched_at=str(day) + 'T23:00:00Z', adjusted=False,
+                         bars=[row('GPT', 20 if day < days[-1] else 19)]))
+        record.write(directory, dict(kind='dividends', source='massive', session=str(days[-1]),
+                     fetched_at='2026-04-06T23:00:00Z', **{'from': str(days[0])},
+                     rows=[dict(id='synthetic', ticker='GPT', ex_dividend_date=str(days[-1]),
+                                cash_amount=2, currency='GBP')]))
+        record.write(directory, dict(kind='splits', source='massive', session=str(days[-1]),
+                     fetched_at='2026-04-06T23:00:00Z', **{'from': str(days[0])}, rows=[]))
+        return days
+
+    def test_holiday_and_crash_fetches_reach_ira_encode(self):
+        import datetime as dt
+        from marketdata.tests.test_fx import FetchRecordingTest
+        fetch = FetchRecordingTest().fetch
+        text = 'Date,USD,GBP\n2026-04-02,2,4\n'
+        for crash in (None, 'before', 'after'):
+            with self.subTest(crash=crash), tempfile.TemporaryDirectory() as d:
+                days = self.build_april(d)
+                fetch(d, text, '2026-04-02T23:00:00')
+                link = record.os.link
+                def install(src, dst):
+                    if crash == 'after':
+                        link(src, dst)
+                    raise OSError('synthetic crash')
+                if crash:
+                    with mock.patch.object(record.os, 'link', side_effect=install):
+                        with self.assertRaisesRegex(OSError, 'synthetic crash'):
+                            fetch(d, text + '2026-04-03,6,4\n2026-04-06,8,4\n', '2026-04-07T08:00:00')
+                else:
+                    fetch(d, text, '2026-04-07T08:00:00')
+                def encoded():
+                    return list(encode.iter_encode(d, days[0], days[-1], IDENTITY, required=['GPT']))
+                if crash == 'before':
+                    with self.assertRaisesRegex(steps.MissingData, 'coverage'):
+                        encoded()
+                else:
+                    got = encoded()
+                    self.assertEqual(fx.load(d).covered_through, dt.date(2026, 4, 6))
+                    cash_usd = 3 if crash == 'after' else 1
+                    self.assertAlmostEqual(bar_of(got, 'GPT', '2026-04-06')['adjusted']['close'],
+                                           19 * 20 / (20 - cash_usd))

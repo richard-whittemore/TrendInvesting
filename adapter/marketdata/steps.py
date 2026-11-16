@@ -139,37 +139,29 @@ def run_fx(session, directory, get=None, now=_now, settle=SETTLE):
     except fx.NoRecording:
         existing = {}
     raw, url = (get or fx.http_get)(fx.URL)
-    fetched = fx.checked(dict(kind=fx.KIND, source=fx.SOURCE, session=str(session),
-                              fetched_at=_stamp(now), url=url, body=fx.csv_body(raw)))
+    stamp = _stamp(now)
+    fetch_day = dt.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').date()
+    rec = dict(kind=fx.KIND, source=fx.SOURCE, session=str(fetch_day),
+               fetched_at=stamp, url=url, body=fx.csv_body(raw))
+    fetched = fx.checked(rec, fetch_day)
     fx.check_history(existing, fetched)
-    if not existing:
-        rec = dict(kind=fx.KIND, source=fx.SOURCE, session='bootstrap', fetched_at=_stamp(now),
-                   url=url, body=fx.body(fetched))
-        try:
-            recording.write(directory, rec)
-        except recording.AlreadyRecorded:
-            pass
-        existing = fx.load(directory)
-        fx.check_history(existing, fetched)
-    new = {day: row for day, row in fetched.items() if day not in existing}
-    for day, row in sorted(new.items()):
-        rec = dict(kind=fx.KIND, source=fx.SOURCE, session=day.isoformat(), fetched_at=_stamp(now),
-                   url=url, body=fx.body({day: row}))
-        fx.checked(rec, day)
-        written = False
-        try:
-            recording.write(directory, rec)
-            written = True
-        except recording.AlreadyRecorded:
-            pass
+    boundary = getattr(existing, 'covered_through', dt.date.min)
+    rec['body'] = fx.body({day: row for day, row in fetched.items() if day > boundary})
+    path = os.path.join(directory, recording.filename(rec))
+    try:
+        recording.write(directory, rec)
+    except recording.AlreadyRecorded:
         union = fx.load(directory)
         fx.check_history(union, fetched)
-        if written:
-            # A concurrently recorded later fixing must not hide a backdated addition
-            # made by this write (manual, Dividend currencies).
-            del union[day]
-            fx.check_history(union, fetched)
-    # Return the recording holding the newest fetched fixing, including a bootstrap.
-    for candidate in sorted(glob.glob(os.path.join(directory, fx.KIND + '_*.json'))):
-        if max(fetched) in fx.checked(recording.read(candidate)):
-            return candidate
+        if any(day not in union for day in fetched):
+            raise MissingData('ECB fetch timestamp collision; retry at a later UTC second') from None
+        return path
+    union = fx.load(directory)
+    fx.check_history(union, fetched)
+    # A concurrent fetch can complete a window before this fetch is installed
+    # (manual, Dividend currencies). Recheck its coverage without our own file.
+    others = [os.path.basename(p) for p in glob.glob(os.path.join(directory, fx.KIND + '_*.json'))
+              if os.path.basename(p) != os.path.basename(path)]
+    if others:
+        fx.check_history(fx.load(directory, listing=others), fetched)
+    return path

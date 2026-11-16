@@ -25,7 +25,8 @@ a split executes after the prior session and on or before D, the ex-date
 share is the post-split share, so P is first restated by that split's
 factor (a 2-for-1 split on D turns a prior close of 100 into 50).
 Closes and split ratios must be finite and positive, and converted cash finite and strictly
-positive (and below the prior close). Anything that cannot be adjusted exactly raises CannotAdjust.
+positive (and below the prior close). Missing, malformed or incomplete FX input
+raises MissingData. Instrument-specific adjustment failures raise CannotAdjust.
 """
 import datetime as dt
 import math
@@ -120,7 +121,7 @@ def adjusted_closes(history, ticker, splits, dividends, rates=None):
         if r.get("ticker") != ticker:
             continue
         d = _date(r.get("ex_dividend_date"))
-        if not first_day < d <= last_day:
+        if not closes[0][1] < d <= last_day:
             continue
         cash = _cash_usd(r, ticker, d, rates)
         cash_by_date[d] = cash_by_date.get(d, 0.0) + cash

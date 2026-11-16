@@ -44,7 +44,7 @@ class Unavailable(Exception):
     """No usable fixing for the dividend's currency and date."""
 
 
-def parse(text):
+def parse(text, allow_empty=False):
     """{date: {currency: units per EUR}}; N/A is missing, never zero."""
     try:
         rows = csv.reader(io.StringIO(text), skipinitialspace=True, strict=True)
@@ -77,7 +77,7 @@ def parse(text):
                     raise ValueError('non-positive or non-finite rate')
                 rates[currency] = value
             out[day] = rates
-        if not out:
+        if not out and not allow_empty:
             raise ValueError('no fixings')
         return out
     except (ValueError, TypeError, IndexError, StopIteration, csv.Error) as e:
@@ -178,8 +178,8 @@ def csv_body(body):
             text = b''.join(chunks).decode('utf-8-sig')
         parse(text)
         return text
-    except (zipfile.BadZipFile, KeyError, UnicodeError, OSError, RuntimeError, ValueError) as e:
-        raise MissingData('malformed ECB archive: {}'.format(type(e).__name__)) from None
+    except (zipfile.BadZipFile, KeyError, UnicodeError, OSError, RuntimeError, ValueError, MissingData) as e:
+        raise MarketDataError('malformed ECB archive: {}'.format(type(e).__name__)) from None
 
 
 def checked(rec, session=None):
@@ -190,31 +190,38 @@ def checked(rec, session=None):
         if session is not None and recorded_day != session:
             raise ValueError('session differs from filename')
         fetched_day = dt.datetime.strptime(rec['fetched_at'], '%Y-%m-%dT%H:%M:%SZ').date()
-        rates = parse(rec['body'])
-        if max(rates) > fetched_day:
+        rates = parse(rec['body'], allow_empty=True)
+        if max(rates, default=dt.date.min) > fetched_day:
             raise MissingData('ECB fixing dated after UTC fetch date')
-        return Rates(rates, max(max(rates), fetched_day - dt.timedelta(days=1)))
+        return Rates(rates, max(max(rates, default=dt.date.min), fetched_day - dt.timedelta(days=1)))
     except (KeyError, TypeError, ValueError):
         raise MissingData('malformed ECB recording') from None
+
+
+REMEDY = ('Check the dated fixing on the ECB site. If the ECB really revised it, '
+          'move the fx recordings aside into quarantine and let the next firing bootstrap again. '
+          'Any IRA run whose files used the old rate needs a fresh run '
+          '(docs/manual/market-data.md, What can go wrong).')
 
 
 def merge(rates, incoming):
     """Union immutable fixings, refusing revisions (manual, Dividend currencies)."""
     for day, row in incoming.items():
         if day in rates and rates[day] != row:
-            raise MissingData('ECB revised the {} fixing'.format(day))
+            raise MissingData('ECB revised the {} fixing. {}'.format(day, REMEDY))
         rates[day] = row
 
 
 def check_history(recorded, incoming):
     """Refuse revised, withdrawn or backdated fixings (manual, Dividend currencies)."""
-    newest = max(incoming)
     for day in recorded:
-        if day <= newest and day not in incoming:
-            raise MissingData('ECB history no longer contains the {} fixing'.format(day))
+        if day not in incoming:
+            raise MissingData('ECB history no longer contains the {} fixing. {}'.format(day, REMEDY))
     merge(dict(recorded), incoming)
-    if recorded and any(day <= max(recorded) for day in incoming if day not in recorded):
-        raise MissingData('ECB backdated fixing within recorded coverage')
+    covered = getattr(recorded, 'covered_through', max(recorded, default=dt.date.min))
+    for day in sorted(incoming):
+        if day <= covered and day not in recorded:
+            raise MissingData('ECB published a {} fixing after {} was treated as complete'.format(day, covered))
 
 
 def body(rates):
@@ -243,8 +250,11 @@ def load(directory, session=None, listing=None, read=None):
     for name in candidates:
         try:
             suffix = name[len(KIND) + 1:-len('.json')]
-            recorded_day = 'bootstrap' if suffix == 'bootstrap' else dt.date.fromisoformat(suffix)
-            incoming = checked((read or record.read)(os.path.join(directory, name)), recorded_day)
+            recorded_day = 'bootstrap' if suffix == 'bootstrap' else dt.date.fromisoformat(suffix.split('_')[0])
+            rec = (read or record.read)(os.path.join(directory, name))
+            incoming = checked(rec, recorded_day)
+            if '_' in suffix and name != record.filename(rec):
+                raise ValueError('fetch timestamp differs from filename')
             merge(rates, incoming)
             covered = max(covered, incoming.covered_through)
         except (record.Corrupt, OSError, ValueError, KeyError, TypeError) as e:

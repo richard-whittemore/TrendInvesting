@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from marketdata import fx, record, tidata
+from marketdata import fx, record, steps, tidata
 from marketdata.tests.test_encode import build, LAST, IDENTITY
 from marketdata.tests.test_fx import archive
 from marketdata.tests.test_fx_encode import set_currency, ranker
@@ -38,7 +38,7 @@ class FXJobTest(unittest.TestCase):
             for detail in ['excluded CCC', '2026-11-27', 'ZZZ', 'not covered', 'skipped']:
                 self.assertIn(detail, err)
             self.assertEqual(calls, [fx.URL])
-            path = job.data / (fx.KIND + '_bootstrap.json')
+            path = next(job.data.glob(fx.KIND + '_*.json'))
             self.assertEqual(record.read(path)['source'], fx.SOURCE)
             code, err = self.invoke(job, get)
             self.assertEqual(code, 0, err)
@@ -143,9 +143,9 @@ class FXJobTest(unittest.TestCase):
                 self.assertTrue(job.path(LAST).exists())
 
 
-    def test_malformed_revised_and_withdrawn_histories_still_refuse(self):
+    def test_revised_and_withdrawn_histories_still_refuse(self):
         from marketdata.tests.test_fx_encode import rates_record
-        for text in ('bad', 'Date,USD,GBP\n2026-11-26,9,4\n',
+        for text in ('Date,USD,GBP\n2026-11-26,9,4\n',
                      'Date,USD,GBP\n2026-11-27,2,4\n'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
                 job = MomentumJob(d, ranker=ranker)
@@ -156,4 +156,21 @@ class FXJobTest(unittest.TestCase):
                 self.assertEqual(code, 1, err)
                 self.assertIn('ECB', err)
                 self.assertFalse(job.path(LAST).exists())
+                self.assertEqual({p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}, before)
+
+
+    def test_invalid_200_warns_and_uses_recordings(self):
+        for response in (b'<html>maintenance</html>', archive('bad')):
+            with self.subTest(response=response[:10]), tempfile.TemporaryDirectory() as d:
+                job = MomentumJob(d, ranker=ranker)
+                build(job.data)
+                set_currency(job.data, 'GBP')
+                steps.run_fx(LAST, job.data,
+                             get=lambda url: (archive('Date,USD,GBP\n2026-11-26,2,4\n'), url),
+                             now=lambda: after_settle(LAST))
+                before = {p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}
+                code, err = self.invoke(job, lambda url: (response, url))
+                self.assertEqual(code, 0, err)
+                self.assertIn('continuing with recorded fixings', err)
+                self.assertTrue(job.path(LAST).exists())
                 self.assertEqual({p.name: p.read_bytes() for p in job.data.glob(fx.KIND + '_*.json')}, before)

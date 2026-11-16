@@ -41,3 +41,15 @@ class DividendCurrencyTest(unittest.TestCase):
     def test_missing_rates_are_a_recording_failure(self):
         with self.assertRaisesRegex(fx.MissingData, 'ECB'):
             self.forward('EUR', rates=None)
+
+    def test_gpt_dividends_through_first_observed_close_need_no_fx(self):
+        history = [(D(2026, 3, 2), []), (D(2026, 3, 3), []),
+                   (D(2026, 3, 4), [dict(T='GPT', c=20)]),
+                   (D(2026, 3, 5), [dict(T='GPT', c=21)])]
+        for ex in ('2026-03-03', '2026-03-04'):
+            with self.subTest(ex=ex):
+                def rates():
+                    self.fail('irrelevant dividend requested FX')
+                got = adjust.adjusted_closes(history, 'GPT', [],
+                      [dict(ticker='GPT', ex_dividend_date=ex, cash_amount=2, currency='GBP')], rates=rates)
+                self.assertEqual(got, [(D(2026, 3, 4), 20), (D(2026, 3, 5), 21)])
