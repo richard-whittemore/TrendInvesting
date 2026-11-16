@@ -62,6 +62,10 @@ cp "$repo/cmd/engine/testdata/momentum-dry-run.json" "$dist/momentum-dry-run.jso
 for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query gateway-start:ti-gateway-start gateway-heal:ti-gateway-heal universe-rank:universe-rank; do
   (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build -o "$dist/${tool#*:}" "./cmd/${tool%%:*}")
 done
+# Publish the engine's stamp beside the completed build
+# (docs/manual/server.md, Installing a build).
+printf '%s\n' rehearsal >"$dist/.BUILD.new"
+mv -f "$dist/.BUILD.new" "$dist/BUILD"
 # Compile-time clock injection only for the systemd healer drill. The normal
 # ti-gateway-heal binary above remains the one provisioning installs.
 (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \

@@ -579,16 +579,18 @@ elf_machine() {
 # Go program in DIST is not an ELF file for this machine's architecture
 # (dist/ built for the other machine: deploy/build-engine.sh builds
 # linux/amd64 for Lightsail, linux/arm64 with --arch arm64 for the Mac mini).
-# ti-engine is checked too, though the owner installs it by hand.
+# Includes ti-engine, installed atomically by services (docs/manual/server.md,
+# "Installing a build").
 require_native_programs() {
   local dist=$1 machine want b got
+  local programs=${2:-"ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start ti-gateway-heal universe-rank"}
   machine=$(uname -m)
   case $machine in
     x86_64) want=62 ;;
     aarch64) want=183 ;;
     *) die "no Go build for $machine; not installing" ;;
   esac
-  for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start ti-gateway-heal universe-rank; do
+  for b in $programs; do
     test -f "$dist/$b" || continue
     got=$(elf_machine "$dist/$b")
     test "$got" = "$want" || die "$dist/$b is not a Linux program for this machine ($machine; its ELF machine is ${got:-none, not ELF}): build it with deploy/build-engine.sh for this machine and copy dist/ again; nothing installed"
@@ -723,9 +725,51 @@ install_mac_adapter_unit() {
       "$here/systemd/ti-adapter@.service" >"$unit_dir/ti-adapter@.service"
 }
 
+# Validate the raw identity before shell substitution can discard bytes
+# (docs/manual/server.md, "Installing a build"). Accept one ASCII line,
+# with an optional final newline, bounded for backup filenames.
+valid_build_identity() {
+  test -f "$1" &&
+    test "$(wc -c <"$1")" -le 65 &&
+    test "$(wc -l <"$1")" -le 1 &&
+    test "$(LC_ALL=C awk 'END {print NR}' "$1")" -eq 1 &&
+    test "$(LC_ALL=C tr -d 'A-Za-z0-9._\n-' <"$1" | wc -c)" -eq 0 &&
+    LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$1"
+}
+
 step_services() {
+  # Refuse transitions and failed queries before any writes
+  # (docs/manual/server.md, Installing a build). Rehearsals have no systemd.
+  if test "$rehearsal" != 1; then
+    local busy
+    if ! busy=$(systemctl list-units --plain --no-legend --state=activating,deactivating,reloading 'ti-engine@*' 2>/dev/null); then
+      die "could not ask systemd whether an engine unit is mid-restart; nothing installed"
+    fi
+    if test -n "$busy"; then
+      die "an engine unit is mid-restart; nothing installed. Wait until it is active or stopped:
+$busy"
+    fi
+  fi
+  # Release-managed builds are installed through ti-release
+  # (docs/manual/server.md, Installing a build).
+  local current=/opt/trend-investing/releases/current
   local dist=${TI_DIST:-$here/../dist} b
-  require_native_programs "$dist"
+  # Match deploy/release.sh's programs list (server.md, Installing a build).
+  local release_programs="ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start"
+  local programs="$release_programs ti-gateway-heal universe-rank"
+  if test -e "$current"; then programs="ti-gateway-heal universe-rank"; fi
+  require_native_programs "$dist" "$programs"
+  # Validate identities before installation (docs/manual/server.md, Installing a build).
+  local bin=/opt/trend-investing/bin old_build=none new_build=
+  if ! test -e "$current" && test -f "$dist/ti-engine"; then
+    valid_build_identity "$dist/BUILD" || die "ti-engine in $dist has no valid BUILD; deploy/build-engine.sh writes it"
+    new_build=$(cat "$dist/BUILD")
+    LC_ALL=C grep -aqF -- "$new_build" "$dist/ti-engine" || die "ti-engine in $dist was not built as $new_build; copy the whole build again"
+    if test -f "$bin/BUILD"; then
+      valid_build_identity "$bin/BUILD" || die "invalid build identity in $bin/BUILD"
+      old_build=$(cat "$bin/BUILD")
+    fi
+  fi
   # Preserve the owner's joint login choice; stale selectors must be resolved
   # before installation (docs/manual/server.md, The Traditional IRA's Gateway).
   if test -e "$etc/gateway-login"; then
@@ -797,27 +841,85 @@ GATEWAY_MAJOR=${GATEWAY_MAJOR}
 TI_GATEWAY_RESTART_TIME=11:45 PM
 TI_GATEWAY_COLD_RESTART=09:00
 CONF
-  # The data step (deploy/build-data.sh), when its file is beside deploy/;
-  # without it the unit fails when the timer fires, so the gap is seen.
-  local data_job=${TI_DATA_BUILD:-$here/../dist/ti-data}
+  # The data step comes from TI_DIST (default dist/ beside deploy/), unless
+  # TI_DATA_BUILD selects it. A missing staged program leaves any installed
+  # copy in place; its unit fails only if none is installed (server.md).
+  local data_job=${TI_DATA_BUILD:-$dist/ti-data}
   if test -f "$data_job"; then
     install -m 0755 "$data_job" /opt/trend-investing/bin/ti-data
     log "installed the data step from $data_job"
   else
     log "no $data_job: the data step is not installed (deploy/build-data.sh builds it)"
   fi
-  # The reporter, the dashboard, the owner's two tools and universe-rank (the
+  # The engine, the reporter, the dashboard, the owner's two tools and universe-rank (the
   # Go ranker the IRAs' data job runs: ti-data@.service), built for the
-  # server beside ti-engine by deploy/build-engine.sh (the server has no Go)
-  # and copied to dist/ beside deploy/. A missing one is named here, and its
-  # unit fails when it runs, so the gap is seen. The owner records instructions
+  # server by deploy/build-engine.sh (the server has no Go)
+  # and staged in TI_DIST (default dist/ beside deploy/). A missing staged
+  # program leaves any installed copy in place; its unit fails only if none
+  # is installed (docs/manual/server.md). The owner records instructions
   # as `sudo -u ti-operator operator ...` and runs `sudo -u ti-trader
   # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
   # PATH includes /usr/local/bin, where each is linked.
-  local dist=${TI_DIST:-$here/../dist} b
-  for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start ti-gateway-heal universe-rank; do
+  if test -e "$current"; then
+    log "programs are managed by ti-release (releases/current names $(cat "$current")); skipping $release_programs; services installs ti-gateway-heal and universe-rank (docs/manual/server.md, Installing a build)"
+  fi
+  for b in $programs; do
     if test -f "$dist/$b"; then
-      install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
+      if test "$b" = ti-engine; then
+        # Preserve the running inode and a backup before the atomic rename
+        # (docs/manual/server.md, "Installing a build"). No engine is restarted.
+        if test -f "$bin/ti-engine" && cmp -s "$bin/ti-engine" "$dist/ti-engine"; then
+          printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
+          sync -- "$bin/.BUILD.new" || die "could not sync staged BUILD"
+          mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
+          sync -- "$bin" || die "could not sync installed BUILD"
+          chown root:root "$bin/ti-engine"
+          chmod 0755 "$bin/ti-engine"
+          log "ti-engine already at $new_build"
+          continue
+        fi
+        # Refuse transitions and failed queries before replacement
+        # (docs/manual/server.md, Installing a build). Rehearsals have no systemd.
+        if test "$rehearsal" != 1; then
+          local busy
+          if ! busy=$(systemctl list-units --plain --no-legend --state=activating,deactivating,reloading 'ti-engine@*' 2>/dev/null); then
+            die "could not ask systemd whether an engine unit is mid-restart; units, settings, data and Gateway files already provisioned; ti-engine unchanged"
+          fi
+          if test -n "$busy"; then
+            die "an engine unit is mid-restart; units, settings, data and Gateway files already provisioned; ti-engine unchanged. Wait until it is active or stopped:
+$busy"
+          fi
+        fi
+        local backup=none
+        if test -f "$bin/ti-engine"; then
+          backup=ti-engine.bak
+          if test -f "$bin/BUILD"; then backup="ti-engine.$old_build.bak"; fi
+          if test -e "$bin/$backup" && ! cmp -s "$bin/$backup" "$bin/ti-engine"; then
+            backup="${backup%.bak}.$(date -u +%Y%m%dT%H%M%SZ).bak"
+            if test -e "$bin/$backup" && ! cmp -s "$bin/$backup" "$bin/ti-engine"; then
+              die "backup already exists with different contents: $bin/$backup"
+            fi
+          fi
+        fi
+        install -m 0755 "$dist/$b" "$bin/.ti-engine.new" || die "could not stage ti-engine"
+        printf '%s\n' "$new_build" | install -m 0644 /dev/stdin "$bin/.BUILD.new" || die "could not stage BUILD"
+        sync -- "$bin/.ti-engine.new" "$bin/.BUILD.new" || die "could not sync staged ti-engine and BUILD"
+        if test "$backup" != none && ! test -e "$bin/$backup"; then
+          cp -p "$bin/ti-engine" "$bin/.ti-engine.bak.new" || die "could not back up ti-engine"
+          mv -f "$bin/.ti-engine.bak.new" "$bin/$backup" || die "could not publish ti-engine backup"
+        fi
+        # Persist recovery bytes before replacement (server.md, Installing a build).
+        if test "$backup" != none; then
+          sync -- "$bin/$backup" "$bin" || die "could not sync ti-engine backup"
+        fi
+        mv -f "$bin/.ti-engine.new" "$bin/ti-engine" || die "could not replace ti-engine"
+        mv -f "$bin/.BUILD.new" "$bin/BUILD" || die "could not replace BUILD"
+        sync -- "$bin" || die "could not sync installed ti-engine and BUILD"
+        log "installed ti-engine $new_build over $old_build (backup $backup)"
+        continue
+      else
+        install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
+      fi
       log "installed $b from $dist"
     else
       log "no $dist/$b: $b is not installed (deploy/build-engine.sh builds it)"

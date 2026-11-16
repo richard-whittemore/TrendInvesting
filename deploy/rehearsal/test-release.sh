@@ -181,6 +181,7 @@ fresh_server() {
   mkdir -p "$TI_PREFIX/bin" "$TI_LINK_DIR"
   local p
   for p in $programs; do fake_program "$TI_PREFIX/bin/$p" "echo $p hand"; chmod 0755 "$TI_PREFIX/bin/$p"; done
+  printf 'hand-build\n' >"$TI_PREFIX/bin/BUILD"
   : >"$work/ctl.log"
   rm -f "$work/ctl.log.lists" "$work/ctl.log.active" "$work/ctl.log.maint" "$work/ctl.log.opencalls" "$work/ctl.log.other" "$work/ctl.log.start3" "$work/ctl.log.busy"
   : >"$work/gh.log"
@@ -243,7 +244,9 @@ state() { cat "$TI_PREFIX/releases/$1" 2>/dev/null || echo none; }
 nonzero() { test "$1" -ne 0 && echo nonzero || echo "$1"; }
 not_current() { if test "$(state current)" = "$2"; then fail "$1: current is $2"; fi; }
 all_are() { # description build: every program in bin is that build's
-  local p
+  local p identity=$2
+  if test "$identity" = hand; then identity=hand-build; fi
+  expect "$1: BUILD" "$identity" "$(cat "$TI_PREFIX/bin/BUILD")"
   for p in $programs; do expect "$1: $p" "echo $p $2" "$(installed "$p")"; done
 }
 
@@ -253,6 +256,22 @@ for bad in ../x main v1/../../x "v1 0" "" --unverified; do
   expect "tag '$bad' is refused" nonzero "$(nonzero "$(run "$bad")")"
 done
 expect "nothing downloaded for a bad tag" none "$(state current)"
+
+# Release tags must fit the installed BUILD identity (server manual,
+# Installing a build); the boundary is checked before any download.
+long_tag=v$(printf '%064d' 0)
+make_release "$long_tag"
+expect "a 65-character tag is refused" nonzero "$(nonzero "$(run "$long_tag")")"
+grep -q 'is not a release tag' "$work/out" || fail 'overlong tag bypassed tag validation'
+test ! -s "$work/curl.log" || fail 'overlong tag reached downloads'
+all_are "overlong tag leaves bin untouched" hand
+expect "overlong tag leaves release state untouched" none "$(state current)"
+fresh_server
+boundary_tag=v$(printf '%063d' 0)
+make_release "$boundary_tag"
+expect "a 64-character tag installs" 0 "$(run "$boundary_tag")"
+all_are "maximum-length release identity" "$boundary_tag"
+fresh_server
 
 # An engine unit mid-restart: refused, nothing installed or restarted.
 expect "an engine mid-restart is refused" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY=1 run v1.0.0)")"
@@ -642,6 +661,38 @@ grep -q "another ti-release is running" "$work/out" || fail "the lock message is
 if grep -q "ALERT" "$work/out"; then fail "a false ALERT during a legitimate swap: $(cat "$work/out")"; fi
 test -d "$TI_PREFIX/releases/.replaced" && test -d "$TI_PREFIX/releases/.lock" || fail "the refused run disturbed the lock or .replaced"
 rm -rf "$TI_PREFIX/releases/.lock" "$TI_PREFIX/releases/.replaced"
+
+# Initial snapshots restore only valid one-line BUILD identities
+# (docs/manual/server.md, Installing a build).
+for identity in missing empty slash overlong nul trailing-nul extra-newline embedded-newline non-ascii valid no-newline boundary; do
+  fresh_server
+  expected=initial
+  case $identity in
+    missing) rm "$TI_PREFIX/bin/BUILD" ;;
+    empty) : >"$TI_PREFIX/bin/BUILD" ;;
+    slash) printf 'bad/build\n' >"$TI_PREFIX/bin/BUILD" ;;
+    overlong) printf '%065d\n' 0 >"$TI_PREFIX/bin/BUILD" ;;
+    nul) printf 'valid\000suffix\n' >"$TI_PREFIX/bin/BUILD" ;;
+    trailing-nul) printf 'valid\000' >"$TI_PREFIX/bin/BUILD" ;;
+    extra-newline) printf 'valid\n\n' >"$TI_PREFIX/bin/BUILD" ;;
+    embedded-newline) printf 'valid\nother' >"$TI_PREFIX/bin/BUILD" ;;
+    non-ascii) printf 'valid\377\n' >"$TI_PREFIX/bin/BUILD" ;;
+    valid) expected=Build_1.2-3; printf '%s\n' "$expected" >"$TI_PREFIX/bin/BUILD" ;;
+    no-newline) expected=Build_1.2-3; printf '%s' "$expected" >"$TI_PREFIX/bin/BUILD" ;;
+    boundary) expected=$(printf '%064d' 0); printf '%s\n' "$expected" >"$TI_PREFIX/bin/BUILD" ;;
+  esac
+  cp -R "$TI_PREFIX/bin" "$work/initial-$identity"
+  expect "release snapshots $identity BUILD" 0 "$(run v1.0.0)"
+  expect "rollback with $identity BUILD succeeds" 0 "$(run --rollback)"
+  printf '%s\n' "$expected" >"$work/expected-BUILD"
+  cmp -s "$work/expected-BUILD" "$TI_PREFIX/bin/BUILD" || fail "rollback with $identity BUILD did not restore $expected"
+  for p in $programs; do
+    expect "rollback with $identity BUILD restores $p" "echo $p hand" "$(installed "$p")"
+  done
+  if test "$identity" != missing; then
+    cmp -s "$work/initial-$identity/BUILD" "$TI_PREFIX/releases/initial/BUILD" || fail "saved $identity BUILD was changed"
+  fi
+done
 
 # The first release.
 fresh_server

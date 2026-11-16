@@ -8,6 +8,58 @@ need to know to look after it. Paper trading runs here. The Mac mini's
 container is only a local rehearsal of this server, set up by the same
 provisioner and units: [mac-mini](mac-mini.md) says what differs there.*
 
+## Installing a build
+
+On a ti-release-managed server, where
+`/opt/trend-investing/releases/current` exists, use `ti-release` to install
+builds. It records the release tag in `bin/BUILD`. The services step skips
+`ti-engine`, `ti-reporter`, `ti-dashboard`, `operator`, `journal-query` and
+`ti-gateway-start` on these servers. It still provisions units, libexec scripts,
+settings and configuration stubs, and validates and installs `ti-gateway-heal`
+and `universe-rank`. The data step is installed as usual.
+
+For a server installed through services, copy the built programs to the
+server, then run
+`sudo env TI_DIST=/path/to/build deploy/provision.sh services` from the checkout.
+The services step installs all eight programs from `deploy/build-engine.sh`,
+including `ti-engine`. It also installs `ti-data` from that same directory.
+`TI_DATA_BUILD` can select a different data-job file. With `TI_DIST` unset,
+the build directory defaults to `dist/` beside `deploy/`.
+
+When the build directory contains `ti-engine`, it must also contain `BUILD`.
+`deploy/build-engine.sh` writes the build stamp of a clean, committed tree
+there. A dirty tree is refused. `TI_ALLOW_DIRTY=1` is for local experiments
+only and must never be used for a server build. The identity must be one
+non-empty ASCII line, contain only letters, digits, dots, underscores or
+hyphens, and be at most 64 characters, with an optional final newline.
+The services step checks this and any installed `bin/BUILD`, and requires
+the staged engine to contain the BUILD stamp as a literal string before
+installing files. A missing staged program leaves an installed copy in place.
+Its unit fails only if no copy is installed.
+
+If the staged engine has exactly the same bytes as the installed engine,
+the services step leaves the engine in place, updates `bin/BUILD` through a
+temporary file and logs `ti-engine already at <build>`.
+
+For a changed engine, both the engine and `BUILD` are copied to temporary
+names in `/opt/trend-investing/bin/` before making a backup. The engine is
+then renamed into place, followed by `BUILD`. A running engine keeps its open
+binary and picks up the installed binary at its next fresh run. Before
+any writes, and again before replacing a changed engine, the services step
+refuses while any engine unit is activating, deactivating or reloading, or if
+systemd cannot answer the query. An active engine can keep running.
+
+The backup is named `ti-engine.<old BUILD>.bak`, or `ti-engine.bak` when
+there is no installed `BUILD`. An existing backup with the same bytes can
+be reused. If its bytes differ, the new backup gets a UTC timestamp, such as
+`ti-engine.<old BUILD>.20261115T120000Z.bak`. Backups are never overwritten.
+If that timestamped name also holds different bytes, installation stops
+before replacing the engine. The services step logs the old and new build
+identities and the backup name after installation. Before replacing the engine,
+it syncs the backup file and its directory with GNU coreutils `sync`. After
+renaming the engine and BUILD into place, it syncs the directory again. A
+failed sync stops installation.
+
 ## What it is and why
 
 One virtual machine at AWS Lightsail: Ubuntu 24.04 LTS, x86_64 (IBKR ships
@@ -22,7 +74,12 @@ client: the rendered IBC settings reject incoming connections from any address
 but the server's own and trust none. The firewall also denies ports 4001–4004,
 but that is a second layer, not the guard: Tailscale's own rules let tailnet
 traffic through before the firewall looks. On a server set up earlier, apply
-all of this with: `git pull`, `sudo deploy/provision.sh services` (installs the changed `render-ibc-config.sh` into `/usr/local/libexec/trend-investing`. `services` reinstalls the five programs (`ti-data`, `ti-reporter`, `ti-dashboard`, `operator`, `journal-query`) found in the checkout's `dist/`, and never `ti-engine`. `dist/` on this server holds the builds copied from the Mac at the first install and has not been changed since. That holds until the first `ti-release`; after that, run `services` only with `dist/` moved aside (or do upgrades only through `ti-release`). If you are unsure, move `dist/` aside before running `services` (the programs already installed then stay)), `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
+all of this with `git pull`, copy a fresh build including `BUILD` into `dist/`,
+then run `sudo deploy/provision.sh services`. For another build directory, use
+`sudo env TI_DIST=/path/to/build deploy/provision.sh services`. This installs the changed `render-ibc-config.sh`
+into `/usr/local/libexec/trend-investing` and all available built programs,
+including `ti-engine`, as described in "Installing a build" above. Running
+engines pick up the new binary at their next fresh run. Then run `sudo deploy/provision.sh gateway` (repairs `/opt/ibc` modes), `sudo deploy/provision.sh twsapi` (rebuilds the adapter environment with open modes), `sudo deploy/provision.sh firewall`, then `sudo systemctl restart ti-gateway` (the Gateway logs in again; after a cold
 start expect an IBKR Mobile prompt). `services` copies the repository's engine
 `.env` files over `/etc/trend-investing/engines/` and keeps every `.config`
 already there (see the caution under the file table). Then check, as the owner: the Gateway log shows `Login has completed`, and `sudo grep -E '^(AcceptIncomingConnectionAction|TrustedTwsApiClientIPs)=' /run/ti-gateway/config.ini` prints `AcceptIncomingConnectionAction=reject` and `TrustedTwsApiClientIPs=` (an empty list). The guards are: the IBC files' modes; those two settings (the real guard); the Gateway's read-only API, which holds in dry-run only (once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices before turning read-only off); and the firewall's deny of ports 4001 and 4002, a second layer that Tailscale's own input rules may bypass. Closing the port at the network level for tailnet devices is done with Tailscale access rules, a separate owner step. Each `provision.sh` step is safe to repeat.
@@ -1443,13 +1500,13 @@ Paste `policy.hujson` again once you have found the cause.
 - **After every boot:** `sudo ti-unlock`, then approve the Gateway's phone
   prompt ("Unlocking the secrets after a boot").
 - **Every Sunday:** approve the Gateway's phone prompt.
-- **Installing a build:** build on the Mac with `deploy/build-engine.sh`
-  (and `deploy/build-data.sh`), copy `dist/` beside `deploy/`, `sudo install`
-  the engine, and run `sudo deploy/provision.sh services`, which installs the
-  reporter, the dashboard, `operator`, `journal-query` and `ti-data` and
-  restarts the dashboard (`docs/runbooks/lightsail-deployment.md`). A new data job build only with
-  a fresh engine run, or after checking it reproduces the current run's
-  files.
+- **Installing a build:** follow [Installing a build](#installing-a-build)
+  for the server’s installation method. On a services-managed server, copy a
+  fresh `dist/` including `BUILD` and run `sudo deploy/provision.sh services`.
+  On a ti-release-managed server (`releases/current` exists), install the
+  build with `ti-release`. Services still installs units, settings, `ti-data`,
+  `ti-gateway-heal` and `universe-rank`. Install a new data job build only with
+  a fresh engine run, or after checking it reproduces the current run's files.
 - **The dashboard on the tailnet:** `sudo tailscale serve --bg 8088`, the
   port its unit listens on.
 

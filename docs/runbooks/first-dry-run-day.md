@@ -13,12 +13,12 @@ its close. Dry-run sends nothing to IBKR, ever.*
 > yours; if a `services` from such a checkout ran after step 1, do step 1
 > again (it is safe to repeat) and restart nothing else.
 >
-> **It also reinstalls every Go program in the checkout's `dist/`** over
-> `/opt/trend-investing/bin` and restarts the dashboard on it. On the live
-> server, once a `ti-release` has installed newer builds, move `dist/` aside
-> (or leave it empty) before `services`, else a stale `dist/` downgrades them
-> (`docs/runbooks/lightsail-deployment.md`). The settings files
-> (`engines/*.env`) are kept as `boost.config` is.
+> `services` installs the programs in `dist/`, including `ti-engine`, using
+> the BUILD identity and atomic replacement described in
+> [server](../manual/server.md), "Installing a build". Once `ti-release`
+> manages the server, `services` skips the six programs ti-release installs (it still installs ti-gateway-heal and universe-rank from TI_DIST) and still
+> provisions units, libexec scripts, settings and configuration stubs.
+> The data step is installed as usual. Existing engine settings are kept.
 
 **How to use the blocks.** Paste one block at a time into your login shell on
 the server, then compare what it printed with the "expect" block under it.
@@ -65,7 +65,7 @@ systemctl is-active ti-gateway
 ss -ltn 'sport = :4002' | grep -c LISTEN
 test -f /opt/trend-investing/adapter/adapter/ibkr/cli.py || { echo "STOP: adapter code missing: run sudo deploy/provision.sh adapter"; exit 1; }
 echo adapter-code-installed
-{ test -x /opt/trend-investing/bin/ti-data && test -x /opt/trend-investing/bin/ti-engine; } || { echo "STOP: programs missing: from the checkout, with the programs copied from the Mac into dist/, install ti-data with sudo deploy/provision.sh services (only before step 1; see the warning at the top) and ti-engine with sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine, then start this step again"; exit 1; }
+{ test -x /opt/trend-investing/bin/ti-data && test -x /opt/trend-investing/bin/ti-engine; } || { echo "STOP: programs missing: from the checkout, with the programs copied from the Mac into dist/, follow docs/manual/server.md, Installing a build, to provision the programs, then start this step again"; exit 1; }
 echo programs-installed
 sudo test ! -e /var/lib/trend-investing/engines/boost/run.env || { echo "STOP: run.env already exists: this is not a first start; do not go on (see 'If the engine halts on its first reading')"; exit 1; }
 echo no-run-env
@@ -799,13 +799,11 @@ timer's doing):
   template `ti-adapter@.service` and every other unit file (replaced), the
   Flex reader's staggered times for the IRA (the drop-in),
   `/etc/trend-investing/adapters/trad-ira.json` once, `gateway.env`
-  (rewritten every run), and **every Go program present in the checkout's
-  `dist/`** (`ti-data`, `ti-reporter`, `ti-dashboard`, `operator`,
-  `journal-query`, `ti-gateway-start`, `universe-rank`; never `ti-engine`)
-  over `/opt/trend-investing/bin`. So on the live server run it with `dist/`
-  moved aside, or with a `dist/` that holds only the builds you mean to
-  install: a stale `dist/` downgrades the programs a `ti-release` installed
-  (`docs/runbooks/lightsail-deployment.md`). What it **keeps**,
+  (rewritten every run), and the staged programs including `ti-engine`.
+  Follow [server](../manual/server.md), "Installing a build", for the BUILD
+  requirement and atomic engine replacement. On a ti-release-managed server,
+  `services` skips the six programs ti-release installs (it still installs ti-gateway-heal and universe-rank from TI_DIST) and still installs the data step and
+  provisions the service files. What it **keeps**,
   byte for byte: every engine configuration (`engines/*.config`), every
   settings file already on the server (`engines/*.env`; the shipped one is
   put beside it as `<name>.env.example`), the adapters' configurations and
@@ -815,12 +813,8 @@ timer's doing):
   `ti-dashboard` (on whatever `ti-dashboard` it just installed), and disables (never stops) the engines and adapters, which
   are never enabled at boot. Boost's engine and adapter keep running.
 - `sudo deploy/provision.sh adapter` (the adapter's code).
-- The engine and reporter binaries built on the Mac
-  (`sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine`
-  and the same for `ti-reporter`), at :01 to :03 past a 5-minute mark (the
-  reporter fires every 5 minutes) or with `ti-reporter@boost.timer` stopped;
-  a running Boost engine is not touched by a new binary until it is next
-  started.
+- For engine and reporter builds from the Mac, follow
+  [server](../manual/server.md), "Installing a build".
 
 Because `services` keeps a `trad-ira.env` the server already has, add by
 hand the two lines the IRA's adapter and engine need if it lacks them

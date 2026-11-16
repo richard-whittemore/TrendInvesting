@@ -122,8 +122,9 @@ case ${1:-} in
     test $# -eq 1 || usage
     mode=release
     tag=$1
-    # A tag names a folder and a URL path: only a version tag is accepted.
-    if ! [[ $tag =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || [[ $tag == *..* ]]; then
+    # A version tag names a folder, URL path and bounded BUILD identity
+    # (docs/manual/server.md, Installing a build).
+    if ! [[ $tag =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || [[ $tag == *..* ]] || test "${#tag}" -gt 64; then
       die "'$tag' is not a release tag (a version such as v1.2.3)"
     fi
     ;;
@@ -489,6 +490,18 @@ commit_on_main() {
   test "$main_status" = identical || test "$main_status" = behind || return 1
 }
 
+# Validate the raw identity before shell substitution can discard bytes
+# (docs/manual/server.md, "Installing a build"). Accept one ASCII line,
+# with an optional final newline, bounded for backup filenames.
+valid_build_identity() {
+  test -f "$1" &&
+    test "$(wc -c <"$1")" -le 65 &&
+    test "$(wc -l <"$1")" -le 1 &&
+    test "$(LC_ALL=C awk 'END {print NR}' "$1")" -eq 1 &&
+    test "$(LC_ALL=C tr -d 'A-Za-z0-9._\n-' <"$1" | wc -c)" -eq 0 &&
+    LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$1"
+}
+
 # install_from DIR: install every program DIR/checksums.txt lists. Each is
 # written under a temporary name and renamed over the old one, so a running
 # process keeps the file it started from and no half-written program is ever
@@ -496,11 +509,17 @@ commit_on_main() {
 # (this runs where set -e is off) and the installed files are compared with
 # the checksums, so a failed copy or rename returns non-zero.
 install_from() {
-  local dir=$1 p
+  local dir=$1 p identity=${2:-${1##*/}}
+  if test "$identity" = initial && valid_build_identity "$dir/BUILD"; then identity=$(cat "$dir/BUILD"); fi
+  # Keep the installed identity with the engine for the services backup
+  # label (docs/manual/server.md, "Installing a build").
+  install -m 0644 /dev/null "$bin/.BUILD.new" || return 1
+  printf '%s\n' "$identity" >"$bin/.BUILD.new" || return 1
   for p in $(listed "$dir"); do
     install -m 0755 "$dir/$p" "$bin/.$p.new" || return 1
     mv -f "$bin/.$p.new" "$bin/$p" || { rm -f "$bin/.$p.new"; return 1; }
   done
+  mv -f "$bin/.BUILD.new" "$bin/BUILD" || return 1
   install -d -m 0755 "$link_dir" || return 1
   for p in operator journal-query; do
     if test -x "$bin/$p"; then ln -sfn "$bin/$p" "$link_dir/$p" || return 1; fi
@@ -561,6 +580,7 @@ snapshot_installed() {
   local d=$releases/initial p
   rm -rf "$d"
   mkdir -p "$d"
+  if test -f "$bin/BUILD"; then cp "$bin/BUILD" "$d/BUILD"; fi
   : >"$d/checksums.txt"
   for p in $programs; do
     test -f "$bin/$p" || continue
@@ -660,7 +680,7 @@ if test "$mode" = release; then
     fi
   fi
   ensure_window
-  if ! install_from "$stage" || ! restart_dashboard_verified; then
+  if ! install_from "$stage" "$tag" || ! restart_dashboard_verified; then
     log "$tag did not install, or the dashboard did not stay up on it; putting $cur back"
     put_back "$cur" || true
     die "release $tag not installed; the previous build ($cur) was put back"

@@ -74,6 +74,7 @@ scenario() {
     ln() { record ln "$@"; }
     rm() { record rm "$@"; }
     mv() { record mv "$@"; }
+    sync() { record sync "$@"; }
     tar() { record tar "$@"; }
     systemd-tmpfiles() { record systemd-tmpfiles "$@"; }
     fetch() { record fetch "$@"; }
@@ -119,8 +120,10 @@ elf() {
 # dist DIR MACHINE: the five Go programs, all for MACHINE.
 dist() {
   mkdir -p "$1"
+  printf 'test-build\n' >"$1/BUILD"
   local b
   for b in ti-engine ti-reporter ti-dashboard operator journal-query; do elf "$1/$b" "$2"; done
+  printf 'test-build\n' >>"$1/ti-engine"
 }
 
 # --- The TWS API pin each target installs from.

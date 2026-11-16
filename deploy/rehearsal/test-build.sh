@@ -47,6 +47,8 @@ build_setting() { go version -m "$1" | awk -F'\t' -v k="$2" '$2 == "build" && in
 # binary (by its ELF header and its recorded GOOS and GOARCH) stamped $stamp.
 check_build() {
   local dir=$1 goarch=$2 machine=$3 p
+  expect "BUILD matches the binary stamp" "$stamp" "$(cat "$dir/BUILD")"
+  LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$dir/BUILD" || expect "BUILD fits services identity validation" valid invalid
   for p in $programs; do
     expect "$p is an ELF file for $goarch" "$machine" "$(elf_machine "$dir/$p")"
     expect "$p records GOOS linux" linux "$(build_setting "$dir/$p" GOOS)"
@@ -99,6 +101,12 @@ expect "a missing --out directory is refused" 1 "$(run_build noout --out)"
 expect "an unknown architecture is refused" 1 "$(run_build riscv --arch riscv64)"
 test ! -e "$work/riscv" || expect "nothing is built for an unknown architecture" absent present
 expect "a missing architecture is refused" 1 "$(run_build noarch --arch)"
+
+git -C "$clone" -c user.name=test -c user.email=test@invalid tag -a -m "a tag the services step cannot name" release/v1
+expect "a stamp the services step would refuse is refused" 1 "$(run_build slash)"
+grep -q "release/v1" "$work/slash.out" || expect "the refusal names the stamp" release/v1 "$(cat "$work/slash.out")"
+test ! -e "$work/slash" || expect "nothing is built under an unusable stamp" absent present
+git -C "$clone" tag -d release/v1 >/dev/null
 
 touch "$clone/untracked.go"
 expect "a dirty tree is refused for arm64" 1 "$(run_build dirty --arch arm64)"

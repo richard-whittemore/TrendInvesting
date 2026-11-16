@@ -12,14 +12,15 @@
 #
 #   deploy/build-engine.sh            writes dist/ti-engine, dist/ti-gateway-start, dist/ti-reporter,
 #                                     dist/ti-dashboard, dist/operator,
-#                                     dist/journal-query, dist/ti-gateway-heal and dist/universe-rank
+#                                     dist/journal-query, dist/ti-gateway-heal,
+#                                     dist/universe-rank and dist/BUILD
 #                                     for linux/amd64, and prints the platform
 #                                     and the stamp
 #   deploy/build-engine.sh --arch arm64
-#                                     the same eight for linux/arm64, from the
+#                                     the same eight and BUILD for linux/arm64, from the
 #                                     same commit with the same stamp
 #   deploy/build-engine.sh ... --out DIR
-#                                     writes the eight into DIR instead of
+#                                     writes the eight and BUILD into DIR instead of
 #                                     dist/, which is left as it was
 #
 # The architecture changes nothing but GOARCH: the default build is the one
@@ -32,11 +33,14 @@
 # not built from. TI_ALLOW_DIRTY=1 overrides that for a local experiment;
 # never install such a binary on the server.
 #
-# Install on the server (owner step, see docs/runbooks/lightsail-deployment.md):
-# with dist/ copied beside deploy/, `sudo deploy/provision.sh services`
-# refuses, installing nothing, if any of the eight is not built for the
-# server's architecture, and installs the other seven; then
-#   sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine
+# Install on the server (docs/manual/server.md, Installing a build).
+# On a services-managed server, copy dist/ beside deploy/ and run
+# `sudo deploy/provision.sh services`. It validates the architecture of all
+# eight programs and requires the engine's embedded stamp to match BUILD.
+# On a ti-release-managed server (releases/current exists), install builds
+# with ti-release. Services still installs units, settings, ti-data,
+# ti-gateway-heal and universe-rank. A running engine picks up the new binary
+# at its next fresh run (docs/manual/server.md, Installing a build).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -63,9 +67,16 @@ case $stamp in
     fi
     ;;
 esac
+# BUILD carries the stamp, and the services step accepts only this form
+# (docs/manual/server.md, "Installing a build").
+if ! printf '%s\n' "$stamp" | LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}'; then
+  printf 'build-engine: the stamp %s cannot be a build identity (letters, digits, . _ - only, at most 64); build from a commit without such a tag\n' "$stamp" >&2
+  exit 1
+fi
 out=${out:-$repo/dist}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
+rm -f "$out/BUILD"
 cd "$repo"
 GOOS=linux GOARCH=$goarch CGO_ENABLED=0 make --no-print-directory engine BUILD_STAMP="$stamp"
 mv bin/ti-engine "$out/ti-engine"
@@ -74,4 +85,8 @@ for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journa
     -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$stamp" \
     -o "$out/${tool#*:}" "./cmd/${tool%%:*}"
 done
+# The build identity the services step requires beside ti-engine
+# (docs/manual/server.md, "Installing a build").
+printf '%s\n' "$stamp" >"$out/.BUILD.new"
+mv -f "$out/.BUILD.new" "$out/BUILD"
 printf 'build-engine: %s/ti-engine, ti-reporter, ti-dashboard, operator, journal-query, ti-gateway-start, ti-gateway-heal and universe-rank for linux/%s stamped %s\n' "$out" "$goarch" "$stamp"
