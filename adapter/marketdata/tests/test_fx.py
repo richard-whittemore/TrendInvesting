@@ -342,9 +342,20 @@ class CoverageAndMergeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
             before = {p.name: p.read_bytes() for p in Path(d).glob('*.json')}
-            withdrawn = CSV.replace('2026-03-04,2,4,N/A,\n', '')
-            with self.assertRaisesRegex(steps.MissingData, 'ECB history no longer contains the 2026-03-04 fixing'):
+            withdrawn = CSV.replace('2026-03-03,', '2026-03-03X,', 1)
+            withdrawn = '\n'.join(line for line in withdrawn.split('\n') if not line.startswith('2026-03-03X,')) + '\n'
+            with self.assertRaisesRegex(steps.MissingData, 'ECB history no longer contains the 2026-03-03 fixing'):
                 steps.run_fx(DAY, d, get=lambda url: (archive(withdrawn), url),
+                             now=lambda: dt.datetime(2026, 3, 10, 8, tzinfo=dt.timezone.utc))
+            self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
+
+    def test_an_older_cut_off_copy_is_stale_not_withdrawn(self):
+        with tempfile.TemporaryDirectory() as d:
+            steps.run_fx(DAY, d, get=lambda url: (archive(), url), now=NOW)
+            before = {p.name: p.read_bytes() for p in Path(d).glob('*.json')}
+            older = CSV.replace('2026-03-04,2,4,N/A,\n', '')
+            with self.assertRaisesRegex(fx.MarketDataError, 'stale ECB archive'):
+                steps.run_fx(DAY, d, get=lambda url: (archive(older), url),
                              now=lambda: dt.datetime(2026, 3, 10, 8, tzinfo=dt.timezone.utc))
             self.assertEqual({p.name: p.read_bytes() for p in Path(d).glob('*.json')}, before)
 

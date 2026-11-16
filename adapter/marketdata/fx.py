@@ -269,8 +269,11 @@ def merge(rates, incoming):
 
 def check_history(recorded, incoming):
     """Refuse revised, withdrawn or backdated fixings (manual, Dividend currencies)."""
+    # A copy that ends earlier is stale, not a withdrawal: only a recorded
+    # date inside the download's own range can have been withdrawn.
+    newest = max(incoming, default=dt.date.min)
     for day in recorded:
-        if day not in incoming:
+        if day <= newest and day not in incoming:
             raise MissingData('ECB history no longer contains the {} fixing. {}'.format(day, REMEDY))
     merge(dict(recorded), incoming)
     covered = getattr(recorded, 'covered_through', max(recorded, default=dt.date.min))
