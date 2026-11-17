@@ -2,7 +2,7 @@
 import math
 import re
 from datetime import time
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 from collections import namedtuple
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -98,9 +98,10 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     An older configuration now waits through that window after connection
     or incomplete-reconcile failures. This is safe because nothing is sent
     while waiting and validation bounds the window to 120 minutes. Both
-    endpoints must fall within 22:00–03:00 inclusive in its own zone, and
-    the window must not cross 03:00. The scheduled 1100/2110 restoration
-    deadline remains separate.
+    endpoints must fall within 22:00–03:00 inclusive in New York time, and
+    the window must not cross 03:00. nightly_restart_zone must be exactly
+    America/New_York, the zone of the no-connection policy and US restart.
+    The scheduled 1100/2110 restoration deadline remains separate.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -148,10 +149,8 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
         minutes = (end.hour * 60 + end.minute - start.hour * 60 - start.minute) % (24 * 60)
         if minutes > 120:
             raise ConfigError("nightly restart window must be at most 120 minutes")
-        try:
-            ZoneInfo(self.nightly_restart_zone)
-        except (TypeError, ValueError, ZoneInfoNotFoundError):
-            raise ConfigError("nightly_restart_zone must name an installed IANA time zone") from None
+        if self.nightly_restart_zone != "America/New_York":
+            raise ConfigError("nightly_restart_zone must be America/New_York")
         if not isinstance(self.host, str) or not self.host:
             raise ConfigError("host must be a non-empty string")
         if not _is_int(self.port) or not 1 <= self.port <= 65535:

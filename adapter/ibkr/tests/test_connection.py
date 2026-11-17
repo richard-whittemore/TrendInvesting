@@ -112,10 +112,10 @@ class NightlyRestartTests(unittest.TestCase):
             h.conn.connect_with_backoff()
         self.assertEqual(len(h.fake.called("connect")), 1)
 
-    def test_configured_window_uses_its_zone_and_bounds(self):
-        h = self.harness(datetime(2026, 11, 18, 23, 0, tzinfo=timezone.utc),
+    def test_configured_window_uses_new_york_time_and_bounds(self):
+        h = self.harness(datetime(2026, 11, 19, 4, 0, tzinfo=timezone.utc),
                          nightly_restart_start="22:00", nightly_restart_end="23:01",
-                         nightly_restart_zone="UTC")
+                         nightly_restart_zone="America/New_York")
         h.fake.connect_behaviours = ["refused", "ok"]
         h.conn.connect_with_backoff()
         self.assertEqual(h.sleeps, [60.0])
