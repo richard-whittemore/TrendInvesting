@@ -97,8 +97,10 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     policy window (docs/manual/ibkr-adapter.md, nightly Gateway restart).
     An older configuration now waits through that window after connection
     or incomplete-reconcile failures. This is safe because nothing is sent
-    while waiting and validation bounds the window to 120 minutes. The
-    scheduled 1100/2110 restoration deadline remains separate.
+    while waiting and validation bounds the window to 120 minutes. Both
+    endpoints must fall within 22:00–03:00 inclusive in its own zone, and
+    the window must not cross 03:00. The scheduled 1100/2110 restoration
+    deadline remains separate.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -141,6 +143,8 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
             raise ConfigError("nightly restart start and end must differ")
         start = time.fromisoformat(self.nightly_restart_start)
         end = time.fromisoformat(self.nightly_restart_end)
+        if any(time(3) < endpoint < time(22) for endpoint in (start, end)):
+            raise ConfigError("nightly restart window must stay within 22:00 through 03:00")
         minutes = (end.hour * 60 + end.minute - start.hour * 60 - start.minute) % (24 * 60)
         if minutes > 120:
             raise ConfigError("nightly restart window must be at most 120 minutes")

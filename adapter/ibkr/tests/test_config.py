@@ -30,13 +30,20 @@ class ConfigTests(unittest.TestCase):
                 config(**overrides)
 
     def test_nightly_window_is_at_most_two_hours_including_across_midnight(self):
-        for start, end in (("09:00", "11:01"), ("23:40", "01:41")):
+        for start, end in (("22:00", "00:01"), ("23:40", "01:41")):
             with self.subTest(start=start, end=end), self.assertRaises(ConfigError):
                 config(nightly_restart_start=start, nightly_restart_end=end)
-        for start, end in (("23:40", "01:00"), ("09:00", "11:00")):
+        for start, end in (("23:40", "01:00"), ("22:00", "00:00"), ("01:00", "03:00")):
             with self.subTest(start=start, end=end):
                 cfg = config(nightly_restart_start=start, nightly_restart_end=end)
                 self.assertEqual((cfg.nightly_restart_start, cfg.nightly_restart_end), (start, end))
+
+    def test_nightly_window_stays_within_overnight_span_in_its_own_zone(self):
+        for start, end in (("09:00", "11:00"), ("21:30", "23:00"),
+                           ("02:00", "03:01"), ("03:00", "04:00")):
+            with self.subTest(start=start, end=end), self.assertRaises(ConfigError):
+                config(nightly_restart_start=start, nightly_restart_end=end,
+                       nightly_restart_zone="UTC")
 
     def test_valid_configuration(self):
         c = config()

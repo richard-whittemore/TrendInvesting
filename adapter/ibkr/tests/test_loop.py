@@ -246,6 +246,49 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(len(self.fake.called("connect")), 1)
         self.assertEqual(self.fake.placed, [])
 
+    def test_incomplete_executions_in_nightly_window_wait_and_reread(self):
+        self.received = datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc)
+        self.fake.end_executions = False
+        self.assertTrue(self.fake.end_open_orders)
+        loop = self.loop()
+        start = self.clock.now
+        loop._now = lambda: self.received + timedelta(seconds=self.clock.now - start)
+        waits = []
+
+        def sleep(seconds):
+            waits.append(seconds)
+            self.assertFalse(loop.ready())
+            self.assertFalse(self.fake.connected)
+            self.assertEqual(self.fake.placed, [])
+            self.assertEqual(self.engine.inputs(), [])
+            self.assertEqual(len(self.fake.called("req_executions")), 1)
+            self.clock.now += seconds
+            self.assertEqual(loop.conn.now_utc(), datetime(2026, 11, 18, 6, 0, tzinfo=timezone.utc))
+            self.fake.end_executions = True
+        loop._sleep = sleep
+        loop.start()
+        self.assertTrue(loop.ready())
+        self.assertEqual(len(waits), 1)
+        self.assertGreater(waits[0], 3800)
+        self.assertEqual(len(self.fake.called("connect")), 2)
+        self.assertGreater(len(self.fake.called("req_executions")), 1)
+        self.assertEqual(self.fake.placed, [])
+
+    def test_incomplete_executions_outside_nightly_window_stop(self):
+        self.received = datetime(2026, 11, 18, 6, 0, tzinfo=timezone.utc)
+        self.fake.end_executions = False
+        self.assertTrue(self.fake.end_open_orders)
+        loop = self.loop()
+        with self.assertRaises(BrokerOrdersIncomplete) as raised:
+            loop.start()
+        self.assertEqual(raised.exception.missing, ("executions",))
+        self.assertTrue(self.fake.connected)
+        self.assertFalse(loop.ready())
+        self.assertEqual(len(self.fake.called("connect")), 1)
+        self.assertEqual(len(self.fake.called("req_executions")), 1)
+        self.assertEqual(self.fake.placed, [])
+        self.assertEqual(self.engine.inputs(), [])
+
     def test_broker_order_mismatch_in_nightly_window_stops(self):
         self.received = datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc)
         self.fake.open_orders = [self.manual_order()]
