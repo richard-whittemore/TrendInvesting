@@ -39,6 +39,7 @@ from relay import (RELEASED, EarlierRunInput, HandoverRecordInvalid, PendingInpu
                    read_engine_log, resolve, retire_order, run_identity, settle_ended_run)
 import relay as relay_module
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
+from orders import BrokerOrdersIncomplete
 
 TESTDATA = tests_dir / "testdata"
 SESSION = date(2026, 10, 16)
@@ -208,6 +209,52 @@ class LoopTests(unittest.TestCase):
                            new_id=Ids())
         self.addCleanup(loop.close)
         return loop
+
+    def test_incomplete_broker_orders_in_nightly_window_wait_and_reread(self):
+        self.received = datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc)
+        self.fake.end_open_orders = False
+        loop = self.loop()
+        start = self.clock.now
+        loop._now = lambda: self.received + timedelta(seconds=self.clock.now - start)
+        waits = []
+
+        def sleep(seconds):
+            waits.append(seconds)
+            self.assertFalse(loop.ready())
+            self.assertFalse(self.fake.connected)
+            self.assertEqual(self.fake.placed, [])
+            self.assertEqual(self.engine.inputs(), [])
+            self.clock.now += seconds
+            self.fake.end_open_orders = True
+        loop._sleep = sleep
+        loop.start()
+        self.assertTrue(loop.ready())
+        self.assertEqual(len(waits), 1)
+        self.assertGreater(waits[0], 3800)
+        self.assertEqual(len(self.fake.called("connect")), 2)
+        self.assertEqual(loop._reconcile_cutoffs, 0)
+        self.assertEqual(loop._reconciliation_unread, 0)
+
+    def test_incomplete_broker_orders_outside_nightly_window_stop(self):
+        self.received = datetime(2026, 11, 18, 6, 0, tzinfo=timezone.utc)
+        self.fake.end_open_orders = False
+        loop = self.loop()
+        with self.assertRaises(BrokerOrdersIncomplete):
+            loop.start()
+        self.assertTrue(self.fake.connected)
+        self.assertFalse(loop.ready())
+        self.assertEqual(len(self.fake.called("connect")), 1)
+        self.assertEqual(self.fake.placed, [])
+
+    def test_broker_order_mismatch_in_nightly_window_stops(self):
+        self.received = datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc)
+        self.fake.open_orders = [self.manual_order()]
+        loop = self.loop()
+        with self.assertRaises(ReconcileMismatch):
+            loop.start()
+        self.assertFalse(loop.ready())
+        self.assertEqual(len(self.fake.called("connect")), 1)
+        self.assertEqual(self.fake.placed, [])
 
     def test_incomplete_start_reconcile_waits_for_nightly_end_without_adopting_missing_cash(self):
         self.received = datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc)

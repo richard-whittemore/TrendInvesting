@@ -616,12 +616,16 @@ the order stays released:
 ## Nightly Gateway restart
 
 The Gateway normally restarts late each evening. If its connection fails,
-or an account reconciliation is incomplete, between **23:40 and 01:00
+or an account reconciliation is incomplete, including an incomplete read
+of broker orders or executions, between **23:40 and 01:00
 America/New_York**, the adapter stays running. Its journal says
 `nightly Gateway restart; waiting quietly until ... before connecting again`.
 It closes the failed session and makes no connection attempts during the
-remaining window. You do not need to reset its failed state or start it again.
-A stop request still stops it promptly while it waits.
+remaining window. It discards the incomplete read, sends nothing while
+waiting and resets the read budgets. Order or execution mismatches still
+stop the adapter inside and outside the window.
+After an incomplete read, the adapter resumes automatically when the window
+ends. A stop request still stops it promptly while it waits.
 
 At 01:00 ET it connects again with a fresh normal attempt budget and reads
 and reconciles the account afresh before sending anything. An unavailable
@@ -633,7 +637,10 @@ The adapter JSON configuration can override `nightly_restart_start`
 (default `"23:40"`), `nightly_restart_end` (`"01:00"`) and
 `nightly_restart_zone` (`"America/New_York"`). Times are `HH:MM`, start
 inclusive and end exclusive; an earlier end means the following day. The
-zone must be an installed IANA time zone. These daily retry-wait settings
+window must be at most 120 minutes, measured from start to end across
+midnight when needed. Older configurations use the default 80-minute
+window and now wait through it after these failures. The zone must be an
+installed IANA time zone. These daily retry-wait settings
 apply even if the shared maintenance file is absent or empty. They do not
 change that file's 1100/2110 restoration deadlines, the exit-3 Gateway healer,
 or the service's `Restart=no` and owner veto rules. The shared schedule's

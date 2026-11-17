@@ -31,8 +31,11 @@ MARK_TIMEOUT = 15
 # paper_sending_enabled is the switch that lets the real IBKR client place
 # an order (real_client.IbapiClient.can_place_orders): left out, it is off.
 # account_snapshot_version and resolve_contracts are the momentum engine's
-# inputs (ADR 0026 points 2 and 3): left out, they are Boost's, so a Boost
-# configuration written before them reads exactly as it did.
+# inputs (ADR 0026 points 2 and 3): left out, they are Boost's.
+# The three nightly keys are the timing-default exception. Their defaults
+# match the no-connection policy window (docs/manual/ibkr-adapter.md,
+# nightly Gateway restart). An older configuration now waits through that
+# window. Nothing is sent while waiting, and validation bounds it to 120 minutes.
 _OPTIONAL = {"paper_sending_enabled": False, "account_snapshot_version": 3, "resolve_contracts": False,
              "gateway_clock_check_interval": 43200, "nightly_restart_start": "23:40",
              "nightly_restart_end": "01:00", "nightly_restart_zone": "America/New_York"}
@@ -56,10 +59,11 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
 
     One engine per account, each with its own client ID to one IB Gateway
     (ADR 0026 point 8, decided 2026-10-16). Except gateway_clock_check_interval
-    (43200 seconds, 12 hours), every timing value is required: ADR 0019 makes them versioned operational configuration with
-    no permissive defaults. restore_timeout is how long Gateway may stay cut
-    off from IBKR's servers (codes 1100/2110) before the adapter gives up
-    waiting for Gateway's own restoration and reconnects. commission_wait
+    (43200 seconds, 12 hours) and the three nightly keys described below,
+    every timing value is required as versioned operational configuration
+    with no permissive defaults (ADR 0019). restore_timeout is how long
+    Gateway may stay cut off from IBKR's servers (codes 1100/2110) before the
+    adapter gives up waiting for Gateway's own restoration and reconnects. commission_wait
     is how long an execution may wait for IBKR's commission report, without
     which its fill cannot be recorded, before the adapter stops for a
     person (reports.OrderReportJournal). con_ids is the contract map: the
@@ -89,9 +93,12 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     The supported interval is 1 to 48 hours; see docs/manual/reconciliation.md.
 
     nightly_restart_start, nightly_restart_end and nightly_restart_zone
-    default to 23:40, 01:00 and America/New_York. They bound quiet waiting
-    after connection or incomplete-reconcile failures, separately from the
-    scheduled 1100/2110 restoration deadline (manual, nightly Gateway restart).
+    default to 23:40, 01:00 and America/New_York, matching the no-connection
+    policy window (docs/manual/ibkr-adapter.md, nightly Gateway restart).
+    An older configuration now waits through that window after connection
+    or incomplete-reconcile failures. This is safe because nothing is sent
+    while waiting and validation bounds the window to 120 minutes. The
+    scheduled 1100/2110 restoration deadline remains separate.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -132,6 +139,11 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
                 raise ConfigError("{} must be HH:MM (00:00 through 23:59)".format(name))
         if self.nightly_restart_start == self.nightly_restart_end:
             raise ConfigError("nightly restart start and end must differ")
+        start = time.fromisoformat(self.nightly_restart_start)
+        end = time.fromisoformat(self.nightly_restart_end)
+        minutes = (end.hour * 60 + end.minute - start.hour * 60 - start.minute) % (24 * 60)
+        if minutes > 120:
+            raise ConfigError("nightly restart window must be at most 120 minutes")
         try:
             ZoneInfo(self.nightly_restart_zone)
         except (TypeError, ValueError, ZoneInfoNotFoundError):
