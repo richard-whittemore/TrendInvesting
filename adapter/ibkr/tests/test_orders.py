@@ -431,7 +431,7 @@ class EasternLabelTests(unittest.TestCase):
         t = Tracked(lambda report: None)  # the harness's own tracker; the one under test follows
         t.tracker = OrderTracker(ACCOUNT, 11, reports.append)
         t.h.conn.subscribe(t.tracker.on_event)
-        before = datetime.now(timezone.utc)
+        before = t.h.conn.now_utc()
         t.cb.exec_details(-1, contract(), execution(exec_id="x.03", time="20261016 09:30:01 US/Eastern"))
         t.drain()
         fill = [r for r in reports if isinstance(r, ExecutionReport)][0]

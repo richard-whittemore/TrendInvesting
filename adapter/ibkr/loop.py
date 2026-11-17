@@ -761,7 +761,27 @@ class AdapterLoop:
         """Whether the link is up and reconciled since it last connected or was restored."""
         return self.conn is not None and self.conn.connected and not self.conn.needs_reconciliation
 
+    def _wait_for_nightly_reconcile(self, err):
+        """Defer incomplete reads during the nightly restart (manual, nightly Gateway restart; ADR 0019).
+
+        Inside the window, an incomplete read leaves the adapter running.
+        It discards the read, closes the link, sends nothing and resets the
+        read budgets, then re-reads after the window ends (ADR 0019).
+        """
+        if not self.conn.wait_for_nightly_restart():
+            raise err
+        log.info("ibkr reconcile deferred through nightly restart: %s", err)
+        self._reconcile_cutoffs = 0
+        self._reconciliation_unread = 0
+
     def reconcile(self):
+        """Reconcile the link, deferring incomplete reads through the nightly restart window."""
+        try:
+            self._reconcile_link()
+        except (ReconcileIncomplete, BrokerOrdersIncomplete) as err:
+            self._wait_for_nightly_reconcile(err)
+
+    def _reconcile_link(self):
         """Read IBKR's account in full, match its open orders and executions to the journal, then mark the link reconciled.
 
         A link lost or dropped during the reads (the open orders never
@@ -771,6 +791,7 @@ class AdapterLoop:
         reconciled (Connection.drop), so nothing is sent meanwhile (ADR
         0025 point 5). RECONCILE_CUTOFFS such cut-offs in a row, with no
         reconcile completed between them, stop the adapter for a person
+        outside the nightly restart window
         (ReconcileIncomplete, naming the last drop's reason): a link that
         drops in every reconcile would otherwise cycle with nothing sent
         and no one told (fail closed and tell a person, AGENTS.md).
@@ -899,6 +920,14 @@ class AdapterLoop:
             raise LinkChanged("the link to IB Gateway was lost or dropped during the reconcile's reads")
 
     def _send_reconciliation(self):
+        """Record an owed reconciliation, deferring incomplete reads through the nightly restart window."""
+        try:
+            return self._read_reconciliation()
+        except ReconcileIncomplete as err:
+            self._wait_for_nightly_reconcile(err)
+            return False
+
+    def _read_reconciliation(self):
         """Record the reconciliation a reconcile owes the engine, from a fresh read with nothing awaiting its commission.
 
         The read holds one cutoff, as the broker snapshot's does (ADR 0019):
@@ -907,6 +936,7 @@ class AdapterLoop:
         the read, or positions or cash could not be read, nothing is recorded
         and the next step tries again. Positions or cash unread in
         SNAPSHOT_ATTEMPTS reads in a row stop the adapter for a person
+        outside the nightly restart window
         (ReconcileIncomplete), as the broker snapshot's reading does. True
         once it is recorded.
         """
@@ -971,7 +1001,8 @@ class AdapterLoop:
             if not self._reconciliation_due or self._send_reconciliation():
                 if self.delivery is not None:
                     self.delivery.deliver()
-            self._drain()
+            if self.ready():
+                self._drain()
 
     def run(self, should_stop):
         """start, then step until should_stop() is true; the adapter's files are released however it ends."""

@@ -155,6 +155,7 @@ class FakeTWS(TWSApi):
         self.drop_during_summary = False
         self.open_orders = []
         self.end_open_orders = True
+        self.end_executions = True
         # reqAllOpenOrders answered in batches of this many orders, each
         # batch and the list's end arriving only as the adapter next waits
         # for a callback, so the list ends behind the answers to the
@@ -460,7 +461,8 @@ class FakeTWS(TWSApi):
             # IBKR follows each execution with its commission report.
             if ex.execId in self.commissions:
                 self.callbacks.commission_report(self.commissions[ex.execId])
-        self.callbacks.exec_details_end(req_id)
+        if self.end_executions:
+            self.callbacks.exec_details_end(req_id)
 
     # -- market data -----------------------------------------------------
     def req_mkt_data(self, req_id, contract_):

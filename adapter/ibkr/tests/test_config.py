@@ -20,6 +20,40 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ConfigError):
                 config(gateway_clock_check_interval=bad)
 
+    def test_nightly_window_defaults_and_invalid_configuration(self):
+        cfg = config()
+        self.assertEqual((cfg.nightly_restart_start, cfg.nightly_restart_end, cfg.nightly_restart_zone),
+                         ("23:40", "01:00", "America/New_York"))
+        for overrides in ({"nightly_restart_start": "25:00"}, {"nightly_restart_end": "23:40"},
+                          {"nightly_restart_zone": "Not/AZone"}):
+            with self.subTest(overrides=overrides), self.assertRaises(ConfigError):
+                config(**overrides)
+
+    def test_nightly_window_requires_new_york_zone(self):
+        self.assertEqual(config().nightly_restart_zone, "America/New_York")
+        self.assertEqual(config(nightly_restart_zone="America/New_York").nightly_restart_zone,
+                         "America/New_York")
+        for zone in ("Asia/Tokyo", "UTC"):
+            with self.subTest(zone=zone), self.assertRaises(ConfigError):
+                config(nightly_restart_start="23:00", nightly_restart_end="01:00",
+                       nightly_restart_zone=zone)
+
+    def test_nightly_window_is_at_most_two_hours_including_across_midnight(self):
+        for start, end in (("22:00", "00:01"), ("23:40", "01:41")):
+            with self.subTest(start=start, end=end), self.assertRaises(ConfigError):
+                config(nightly_restart_start=start, nightly_restart_end=end)
+        for start, end in (("23:40", "01:00"), ("22:00", "00:00"), ("01:00", "03:00")):
+            with self.subTest(start=start, end=end):
+                cfg = config(nightly_restart_start=start, nightly_restart_end=end)
+                self.assertEqual((cfg.nightly_restart_start, cfg.nightly_restart_end), (start, end))
+
+    def test_nightly_window_stays_within_overnight_span_in_new_york(self):
+        for start, end in (("09:00", "11:00"), ("21:30", "23:00"),
+                           ("02:00", "03:01"), ("03:00", "04:00")):
+            with self.subTest(start=start, end=end), self.assertRaises(ConfigError):
+                config(nightly_restart_start=start, nightly_restart_end=end,
+                       nightly_restart_zone="America/New_York")
+
     def test_valid_configuration(self):
         c = config()
         self.assertEqual((c.host, c.port, c.client_id, c.mode), ("127.0.0.1", 4002, 11, "dry-run"))

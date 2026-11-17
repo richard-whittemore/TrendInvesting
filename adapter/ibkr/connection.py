@@ -160,6 +160,7 @@ class Connection:
                  wall_clock=_utc_now, maintenance=None, stop_event=None):
         self.api = api
         self.maintenance = maintenance or MaintenanceSchedule()
+        self._nightly_restart = config.nightly_restart_schedule()
         self.stop_event = stop_event
         self.api.stop_event = stop_event
         self._maintenance_end = None
@@ -767,6 +768,29 @@ class Connection:
             if event.name in ("open_order", "order_status"):
                 quiet_until = self._monotonic() + quiet
 
+    def wait_for_nightly_restart(self):
+        """On a failure inside the nightly window, close and wait; otherwise return False.
+
+        Rule: docs/manual/ibkr-adapter.md, nightly Gateway restart. A failed
+        reading is discarded, never replaced by zero (ADR 0019). Reuse the
+        stop-aware wait and pin elapsed time so a clock rollback cannot
+        prolong this wait (ADR 0025, scheduled interruptions).
+        """
+        now = self.now_utc()
+        end = self._nightly_restart.window_end(now)
+        if end is None:
+            return False
+        deadline = self._monotonic() + (end - now).total_seconds()
+        self.needs_reconciliation = True
+        self._abandon()
+        log.info("ibkr link: nightly Gateway restart; waiting quietly until %s before connecting again", end.isoformat())
+        self._report("reconnecting", "nightly-restart")
+        while True:
+            remaining = min((end - self.now_utc()).total_seconds(), deadline - self._monotonic())
+            if remaining <= 0:
+                return True
+            self._wait(remaining)
+
     def connect_with_backoff(self):
         """Retry connection failures; an own-close 326 gets a fixed release grace.
 
@@ -794,6 +818,10 @@ class Connection:
                 delay = min(delay * 2, cfg.backoff_max)
             except ConnectFailed as err:
                 log.info("ibkr connect attempt=%d failed: %s", attempt, err)
+                if self.wait_for_nightly_restart():
+                    attempt = 1
+                    delay = cfg.backoff_initial
+                    continue
                 if attempt >= cfg.max_connect_attempts:
                     self._report("gave-up", str(err), attempt=attempt)
                     raise ConnectFailed("gave up after {} attempts: {}".format(attempt, err)) from None

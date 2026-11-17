@@ -1,5 +1,8 @@
 """The IBKR adapter's connection configuration (ADR 0025; ADR 0026 point 8)."""
 import math
+import re
+from datetime import time
+from zoneinfo import ZoneInfo
 from collections import namedtuple
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -16,6 +19,7 @@ _FIELDS = (
     "backoff_initial", "backoff_max", "max_connect_attempts", "commission_wait",
     "con_ids", "paper_sending_enabled", "mark_timeout",
     "account_snapshot_version", "resolve_contracts", "gateway_clock_check_interval",
+    "nightly_restart_start", "nightly_restart_end", "nightly_restart_zone",
 )
 # The recommended mark_timeout, as the deployed example sets it: IBKR ends a
 # market-data snapshot only at the end of its 11-second snapshot window (TWS
@@ -27,10 +31,14 @@ MARK_TIMEOUT = 15
 # paper_sending_enabled is the switch that lets the real IBKR client place
 # an order (real_client.IbapiClient.can_place_orders): left out, it is off.
 # account_snapshot_version and resolve_contracts are the momentum engine's
-# inputs (ADR 0026 points 2 and 3): left out, they are Boost's, so a Boost
-# configuration written before them reads exactly as it did.
+# inputs (ADR 0026 points 2 and 3): left out, they are Boost's.
+# The three nightly keys are the timing-default exception. Their defaults
+# match the no-connection policy window (docs/manual/ibkr-adapter.md,
+# nightly Gateway restart). An older configuration now waits through that
+# window. Nothing is sent while waiting, and validation bounds it to 120 minutes.
 _OPTIONAL = {"paper_sending_enabled": False, "account_snapshot_version": 3, "resolve_contracts": False,
-             "gateway_clock_check_interval": 43200}
+             "gateway_clock_check_interval": 43200, "nightly_restart_start": "23:40",
+             "nightly_restart_end": "01:00", "nightly_restart_zone": "America/New_York"}
 # The account.snapshot versions the adapter writes: 3, positions and net
 # liquidation, which Boost reads (internal/event AccountSnapshotPositionsVersion),
 # and 4, with IBKR's settled and total cash, which the momentum engine reads
@@ -51,10 +59,11 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
 
     One engine per account, each with its own client ID to one IB Gateway
     (ADR 0026 point 8, decided 2026-10-16). Except gateway_clock_check_interval
-    (43200 seconds, 12 hours), every timing value is required: ADR 0019 makes them versioned operational configuration with
-    no permissive defaults. restore_timeout is how long Gateway may stay cut
-    off from IBKR's servers (codes 1100/2110) before the adapter gives up
-    waiting for Gateway's own restoration and reconnects. commission_wait
+    (43200 seconds, 12 hours) and the three nightly keys described below,
+    every timing value is required as versioned operational configuration
+    with no permissive defaults (ADR 0019). restore_timeout is how long
+    Gateway may stay cut off from IBKR's servers (codes 1100/2110) before the
+    adapter gives up waiting for Gateway's own restoration and reconnects. commission_wait
     is how long an execution may wait for IBKR's commission report, without
     which its fill cannot be recorded, before the adapter stops for a
     person (reports.OrderReportJournal). con_ids is the contract map: the
@@ -83,6 +92,17 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     an older link is unchecked until a natural handshake (ADR 0019).
     The supported interval is 1 to 48 hours; see docs/manual/reconciliation.md.
 
+    nightly_restart_start, nightly_restart_end and nightly_restart_zone
+    default to 23:40, 01:00 and America/New_York, matching the no-connection
+    policy window (docs/manual/ibkr-adapter.md, nightly Gateway restart).
+    An older configuration now waits through that window after connection
+    or incomplete-reconcile failures. This is safe because nothing is sent
+    while waiting and validation bounds the window to 120 minutes. Both
+    endpoints must fall within 22:00–03:00 inclusive in New York time, and
+    the window must not cross 03:00. nightly_restart_zone must be exactly
+    America/New_York, the zone of the no-connection policy and US restart.
+    The scheduled 1100/2110 restoration deadline remains separate.
+
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
     an error built from it can leak one into a log.
@@ -109,7 +129,28 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
         cfg._validate()
         return cfg
 
+    def nightly_restart_schedule(self):
+        """The daily quiet retry window (docs/manual/ibkr-adapter.md, nightly Gateway restart)."""
+        from maintenance import MaintenanceSchedule
+        return MaintenanceSchedule([(set(range(7)), time.fromisoformat(self.nightly_restart_start),
+                                     time.fromisoformat(self.nightly_restart_end), ZoneInfo(self.nightly_restart_zone))])
+
     def _validate(self):
+        for name in ("nightly_restart_start", "nightly_restart_end"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value):
+                raise ConfigError("{} must be HH:MM (00:00 through 23:59)".format(name))
+        if self.nightly_restart_start == self.nightly_restart_end:
+            raise ConfigError("nightly restart start and end must differ")
+        start = time.fromisoformat(self.nightly_restart_start)
+        end = time.fromisoformat(self.nightly_restart_end)
+        if any(time(3) < endpoint < time(22) for endpoint in (start, end)):
+            raise ConfigError("nightly restart window must stay within 22:00 through 03:00")
+        minutes = (end.hour * 60 + end.minute - start.hour * 60 - start.minute) % (24 * 60)
+        if minutes > 120:
+            raise ConfigError("nightly restart window must be at most 120 minutes")
+        if self.nightly_restart_zone != "America/New_York":
+            raise ConfigError("nightly_restart_zone must be America/New_York")
         if not isinstance(self.host, str) or not self.host:
             raise ConfigError("host must be a non-empty string")
         if not _is_int(self.port) or not 1 <= self.port <= 65535:
