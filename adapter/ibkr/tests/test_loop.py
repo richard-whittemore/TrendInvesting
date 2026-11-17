@@ -209,6 +209,85 @@ class LoopTests(unittest.TestCase):
         self.addCleanup(loop.close)
         return loop
 
+    def test_incomplete_start_reconcile_waits_for_nightly_end_without_adopting_missing_cash(self):
+        self.received = datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc)
+        self.fake.summary = []
+        loop = self.loop()
+        start = self.clock.now
+        loop._now = lambda: self.received + timedelta(seconds=self.clock.now - start)
+        waits = []
+
+        def sleep(seconds):
+            waits.append(seconds)
+            self.assertFalse(loop.ready())
+            self.assertFalse(loop.outbox.load())
+            self.clock.now += seconds
+            self.fake.summary = list(SUMMARY)
+        loop._sleep = sleep
+        loop.start()
+        self.assertTrue(loop.ready())
+        self.assertEqual(waits, [3900.0])
+        self.assertEqual(len(self.fake.called("connect")), 2)
+
+    def test_reconcile_cutoffs_in_nightly_window_wait_and_reset_the_cutoff_budget(self):
+        fake = NeverQuietAfterARead()
+        fake.summary = list(SUMMARY)
+        loop = self.loop(fake)
+        self.never_quiet(fake, 1)
+        fake.never_pauses = True
+        self.received = datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc)
+        start = self.clock.now
+        loop._now = lambda: self.received + timedelta(seconds=self.clock.now - start)
+        waits = []
+
+        def sleep(seconds):
+            waits.append(seconds)
+            self.assertFalse(loop.ready())
+            self.clock.now += seconds
+            fake.never_pauses = False
+        loop._sleep = sleep
+        loop.start()
+        self.assertTrue(loop.ready())
+        self.assertEqual(len(waits), 1)
+        self.assertGreater(waits[0], 3800)
+        self.assertEqual(loop._reconcile_cutoffs, 0)
+        self.assertEqual(len(fake.called("connect")), RECONCILE_CUTOFFS + 1)
+
+    def test_incomplete_owed_reconciliation_in_nightly_window_waits_and_reconnects(self):
+        loop = self.loop()
+        loop.start()
+        self.received = datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc)
+        start = self.clock.now
+        loop.conn._wall_clock = lambda: self.received + timedelta(seconds=self.clock.now - start)
+        loop._reconciliation_due = True
+        self.fake.summary = []
+        loop._reconciliation_unread = 2
+        self.session_closed(loop)
+        waits = []
+
+        def sleep(seconds):
+            if seconds < 60:
+                self.clock.now += seconds
+                return
+            waits.append(seconds)
+            self.assertFalse(loop.ready())
+            self.assertEqual(len(loop.outbox.load()), 1)
+            self.clock.now += seconds
+            self.fake.summary = list(SUMMARY)
+        loop.conn._sleep = sleep
+        loop.step()
+        self.assertEqual(len(waits), 1)
+        self.assertGreater(waits[0], 3890)
+        self.assertFalse(loop.ready())
+        self.assertEqual(loop._reconciliation_unread, 0)
+        self.assertEqual(len(loop.outbox.load()), 1)
+        self.assertEqual(self.engine.inputs(), [])
+        loop.outbox.strike(loop.outbox.load()[0]["id"])
+        loop.step()
+        self.assertTrue(loop.ready())
+        self.assertFalse(loop._reconciliation_due)
+        self.assertEqual(self.fake.placed, [])
+
     def settle(self, loop, steps=60):
         for _ in range(steps):
             loop.step()

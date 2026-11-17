@@ -1,5 +1,7 @@
 """Connecting to IB Gateway, reconnecting with backoff, and detecting a lost link."""
 import logging
+import threading
+from datetime import datetime, timedelta, timezone
 import sys
 import unittest
 from types import SimpleNamespace
@@ -13,7 +15,7 @@ from fake_tws import FakeTWS, ACCOUNT
 from config import AdapterConfig
 from quantities import quantity_scale
 from tws import Event
-from connection import AccountNotManaged, Connection, ClientIdInUse, ConnectFailed, NotConnected
+from connection import AccountNotManaged, Connection, ClientIdInUse, ConnectFailed, NotConnected, StopRequested
 
 
 def config(**overrides):
@@ -46,11 +48,77 @@ class Harness:
             self.clock.now += seconds
 
         self.conn = Connection(self.fake, config(**overrides), status_sink=self.statuses.append,
-                               sleep=sleep, monotonic=self.clock)
+                               sleep=sleep, monotonic=self.clock,
+                               wall_clock=lambda: datetime(2026, 10, 17, 13, 30, tzinfo=timezone.utc))
         self.fake.quantity_scale = quantity_scale(self.conn.config)
 
     def states(self):
         return [s.state for s in self.statuses]
+
+
+class NightlyRestartTests(unittest.TestCase):
+    def harness(self, at, **overrides):
+        h = Harness(max_connect_attempts=2, **overrides)
+        start = h.clock.now
+        h.conn._wall_clock = lambda: at + timedelta(seconds=h.clock.now - start)
+        return h
+
+    def test_failure_in_window_waits_without_connecting_and_recovers_with_fresh_budget(self):
+        h = self.harness(datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc))
+        h.fake.connect_behaviours = ["refused", "refused", "ok"]
+        original = h.fake.connect
+        attempts = []
+
+        def connect(*args):
+            attempts.append(h.conn.now_utc())
+            return original(*args)
+        h.fake.connect = connect
+        h.conn.connect_with_backoff()
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(attempts[1], datetime(2026, 11, 18, 6, 0, tzinfo=timezone.utc))
+        self.assertEqual(h.sleeps, [3900.0, 1.0])
+        self.assertNotIn("gave-up", h.states())
+        self.assertTrue(h.conn.needs_reconciliation)
+
+    def test_outside_window_keeps_normal_budget(self):
+        h = self.harness(datetime(2026, 11, 18, 6, 0, tzinfo=timezone.utc))
+        h.fake.connect_behaviours = ["refused"] * 3
+        with self.assertRaises(ConnectFailed):
+            h.conn.connect_with_backoff()
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        self.assertEqual(h.sleeps, [1.0])
+        self.assertEqual(h.states()[-1], "gave-up")
+
+    def test_window_ending_mid_backoff_restarts_budget_at_end(self):
+        h = self.harness(datetime(2026, 11, 18, 5, 59, 59, tzinfo=timezone.utc),
+                         backoff_initial=8.0)
+        h.fake.connect_behaviours = ["refused", "refused", "ok"]
+        h.conn.connect_with_backoff()
+        self.assertEqual(h.sleeps, [1.0, 8.0])
+        self.assertEqual(len(h.fake.called("connect")), 3)
+
+    def test_stop_interrupts_nightly_wait(self):
+        h = self.harness(datetime(2026, 11, 18, 4, 55, tzinfo=timezone.utc))
+        h.fake.connect_behaviours = ["refused", "ok"]
+        event = threading.Event()
+        h.conn.stop_event = event
+
+        def wait(seconds):
+            self.assertEqual(seconds, 3900.0)
+            event.set()
+            return True
+        event.wait = wait
+        with self.assertRaises(StopRequested):
+            h.conn.connect_with_backoff()
+        self.assertEqual(len(h.fake.called("connect")), 1)
+
+    def test_configured_window_uses_its_zone_and_bounds(self):
+        h = self.harness(datetime(2026, 11, 18, 10, 0, tzinfo=timezone.utc),
+                         nightly_restart_start="09:00", nightly_restart_end="10:01",
+                         nightly_restart_zone="UTC")
+        h.fake.connect_behaviours = ["refused", "ok"]
+        h.conn.connect_with_backoff()
+        self.assertEqual(h.sleeps, [60.0])
 
 
 class ConnectTests(unittest.TestCase):

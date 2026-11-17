@@ -761,7 +761,21 @@ class AdapterLoop:
         """Whether the link is up and reconciled since it last connected or was restored."""
         return self.conn is not None and self.conn.connected and not self.conn.needs_reconciliation
 
+    def _wait_for_nightly_reconcile(self, err):
+        """Keep incomplete reads fail closed during the nightly restart (manual, nightly Gateway restart; ADR 0019)."""
+        if not self.conn.wait_for_nightly_restart():
+            raise err
+        log.info("ibkr reconcile deferred through nightly restart: %s", err)
+        self._reconcile_cutoffs = 0
+        self._reconciliation_unread = 0
+
     def reconcile(self):
+        try:
+            self._reconcile_link()
+        except ReconcileIncomplete as err:
+            self._wait_for_nightly_reconcile(err)
+
+    def _reconcile_link(self):
         """Read IBKR's account in full, match its open orders and executions to the journal, then mark the link reconciled.
 
         A link lost or dropped during the reads (the open orders never
@@ -899,6 +913,13 @@ class AdapterLoop:
             raise LinkChanged("the link to IB Gateway was lost or dropped during the reconcile's reads")
 
     def _send_reconciliation(self):
+        try:
+            return self._read_reconciliation()
+        except ReconcileIncomplete as err:
+            self._wait_for_nightly_reconcile(err)
+            return False
+
+    def _read_reconciliation(self):
         """Record the reconciliation a reconcile owes the engine, from a fresh read with nothing awaiting its commission.
 
         The read holds one cutoff, as the broker snapshot's does (ADR 0019):
@@ -971,7 +992,8 @@ class AdapterLoop:
             if not self._reconciliation_due or self._send_reconciliation():
                 if self.delivery is not None:
                     self.delivery.deliver()
-            self._drain()
+            if self.ready():
+                self._drain()
 
     def run(self, should_stop):
         """start, then step until should_stop() is true; the adapter's files are released however it ends."""

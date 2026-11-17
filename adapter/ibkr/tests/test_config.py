@@ -20,6 +20,15 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ConfigError):
                 config(gateway_clock_check_interval=bad)
 
+    def test_nightly_window_defaults_and_invalid_configuration(self):
+        cfg = config()
+        self.assertEqual((cfg.nightly_restart_start, cfg.nightly_restart_end, cfg.nightly_restart_zone),
+                         ("23:40", "01:00", "America/New_York"))
+        for overrides in ({"nightly_restart_start": "25:00"}, {"nightly_restart_end": "23:40"},
+                          {"nightly_restart_zone": "Not/AZone"}):
+            with self.subTest(overrides=overrides), self.assertRaises(ConfigError):
+                config(**overrides)
+
     def test_valid_configuration(self):
         c = config()
         self.assertEqual((c.host, c.port, c.client_id, c.mode), ("127.0.0.1", 4002, 11, "dry-run"))
