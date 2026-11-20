@@ -42,7 +42,9 @@ for text in ("`sudo deploy/provision.sh services` from a checkout of the merged 
              "[Installing a build](#installing-a-build)",
              "installs and loads the guard before installing the Gateway units",
              "Both Gateways keep running and take the new dependency at their next start",
-             "Optionally run `sudo deploy/provision.sh firewall` to re-apply ufw"):
+             "Alternatively run `sudo deploy/provision.sh firewall`",
+             "Both paths install the guard and the Gateway units with their new dependency",
+             "neither restarts a Gateway"):
     assert text in install, text
 owner = manual.split("As the owner, check:", 1)[1].split("## Closing the Gateway", 1)[0]
 assert "tailscale ip -4" not in owner and "/dev/tcp/" not in owner
@@ -95,7 +97,7 @@ grep -q '^install -m 0644 .*systemd/ti-gateway-guard.service /etc/systemd/system
 grep -qx 'systemctl daemon-reload' "$TEST_CALLS"
 grep -qx 'systemctl enable ti-gateway-guard.service' "$TEST_CALLS"
 python3 - "$TEST_CALLS" <<'PY'
-import pathlib, sys
+import pathlib, re, sys
 lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
 expected = ["ufw --force enable", "systemctl daemon-reload",
             "systemctl enable ti-gateway-guard.service",
@@ -103,6 +105,14 @@ expected = ["ufw --force enable", "systemctl daemon-reload",
             "systemctl start ti-gateway-guard.service"]
 positions = [lines.index(call) for call in expected]
 assert positions == sorted(positions), lines
+for name in ("ti-gateway.service", "ti-gateway@.service"):
+    installs = [i for i, line in enumerate(lines)
+                if line.startswith("install -m 0644 ") and f"/systemd/{name} /etc/systemd/system/" in line]
+    assert installs, f"firewall did not install {name}"
+    assert all(i > positions[-1] for i in installs), lines
+    assert "systemctl daemon-reload" in lines[max(installs) + 1:], lines
+assert not any(re.search(r"^systemctl (start|stop|restart|enable) .*ti-gateway(?:@[^ ]*|)\.service(?: |$)", line)
+               for line in lines), lines
 assert not any("restart" in line or "--now ti-gateway-guard" in line for line in lines), lines
 PY
 # Reprovisioning must load the table even when the oneshot is already active.

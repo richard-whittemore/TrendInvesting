@@ -217,7 +217,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	// failure page is resolved by a clean firing.
 	for flag, value := range map[string]string{
 		"-units":         "ti-engine@boost.service,ti-engine@trad-ira.service,ti-engine@roth-ira.service,ti-adapter-boost.service,ti-adapter@trad-ira.service,ti-adapter@roth-ira.service,ti-gateway.service,ti-gateway@trad-ira.service",
-		"-resolve-units": "ti-data.service,ti-data@trad-ira.service,ti-data@roth-ira.service,ti-flex@boost.service,ti-flex@trad-ira.service,ti-flex@roth-ira.service,ti-memory.service",
+		"-resolve-units": "ti-data.service,ti-data@trad-ira.service,ti-data@roth-ira.service,ti-flex@boost.service,ti-flex@trad-ira.service,ti-flex@roth-ira.service,ti-memory.service,ti-gateway-guard.service",
 		"-self-unit":     "ti-reporter@boost.service",
 	} {
 		if i := indexOf(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != value {

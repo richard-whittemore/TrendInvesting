@@ -1464,3 +1464,43 @@ func TestAStaleFailedSampleOfAResolvedInvocationDoesNotPageAgain(t *testing.T) {
 		}
 	}
 }
+
+// A loaded RemainAfterExit guard is active (exited); ActiveState=active ends
+// its failure episode (docs/manual/server.md, "The server's own guard on the Gateway's ports").
+func TestGatewayGuardActiveExitedResolvesItsFailure(t *testing.T) {
+	const unit = "ti-gateway-guard.service"
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	systemd.invoke(firstRun)
+	systemd.fail(unit)
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), t0.Add(time.Hour), unit); err != nil {
+		t.Fatal(err)
+	}
+	systemd.fail()
+	systemd.state(unit, "active")
+	script, err := os.ReadFile(systemd.systemctl())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(systemd.systemctl(), bytes.ReplaceAll(script, []byte("SubState=running"), []byte("SubState=exited")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := firing(t, r, dir, systemd, t0.Add(2*time.Hour), "ti-adapter-boost.service", "-resolve-units", unit); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(r.to(pdHost), `"event_action":"resolve"`); n != 1 {
+		t.Fatalf("active (exited) guard resolved %d incidents, want 1", n)
+	}
+	systemd.fail(unit)
+	const nextRun = "fedcba9876543210fedcba9876543210"
+	systemd.invoke(nextRun)
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, nextRun), t0.Add(3*time.Hour), unit); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, unit); n != 2 {
+			t.Errorf("%s pages=%d, want 2 across recovery", host, n)
+		}
+	}
+}

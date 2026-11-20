@@ -590,6 +590,17 @@ TEST_LEAK='ip() { record ip "$@"; }; tailscale() { record tailscale "$@"; }' \
 called "systemctl enable ti-gateway-guard.service" || fail "Lightsail firewall does not enable the Gateway guard"
 called "nft -f /etc/nftables/ti-gateway-guard.nft" || fail "Lightsail firewall does not load the guard ruleset"
 called "systemctl start ti-gateway-guard.service" || fail "Lightsail firewall does not start the Gateway guard"
+for unit in ti-gateway.service ti-gateway@.service; do
+  called "install -m 0644 $work/deploy/systemd/$unit $work/units/" || fail "firewall does not install $unit"
+  guard_line=$(grep -n '^systemctl start ti-gateway-guard.service$' "$work/calls" | cut -d: -f1)
+  install_line=$(grep -n "^install -m 0644 $work/deploy/systemd/$unit $work/units/$" "$work/calls" | cut -d: -f1)
+  test -n "$install_line" && test "$install_line" -gt "$guard_line" || fail "firewall must install $unit after starting the guard"
+  reload_line=$(grep -n '^systemctl daemon-reload$' "$work/calls" | tail -1 | cut -d: -f1)
+  test -n "$install_line" && test "$reload_line" -gt "$install_line" || fail "firewall must reload after installing $unit"
+done
+if grep -Eq '^systemctl (start|stop|restart|enable) .*ti-gateway(@[^ ]*)?\.service( |$)' "$work/calls"; then
+  fail "firewall changes a Gateway's running or enabled state"
+fi
 allow_line=$(grep -n '^ufw allow in on tailscale0' "$work/calls" | head -1 | cut -d: -f1 || true)
 test -n "$allow_line" || fail "Lightsail's firewall step no longer allows tailscale0: $(cat "$work/calls")"
 for port in 4001 4002; do

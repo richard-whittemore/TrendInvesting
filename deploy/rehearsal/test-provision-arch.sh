@@ -242,7 +242,12 @@ first_install = next(i for i, call in enumerate(calls) if call.startswith("insta
 staging = next(i for i, call in enumerate(calls) if "libexec/stage-gateway-login.sh" in call)
 unit = next(i for i, call in enumerate(calls) if "systemd/ti-gateway.service" in call)
 assert migration < first_install <= staging < unit
-assert calls[unit + 1] == "systemctl daemon-reload"
+template = next(i for i, call in enumerate(calls) if "systemd/ti-gateway@.service" in call)
+assert template == unit + 1
+assert calls[template + 1] == "systemctl daemon-reload"
+for name in ("ti-gateway.service", "ti-gateway@.service"):
+    installs = [call for call in calls if call.startswith("install -m 0644 ") and f"/systemd/{name} " in call]
+    assert len(set(installs)) == 1, f"conflicting installs for {name}: {installs}"
 assert "render-ibc-config.sh" in calls[staging]
 guard_calls = [
     "install -d -m 0755 /etc/nftables",

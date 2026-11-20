@@ -754,6 +754,9 @@ gateway_guard_install() {
   systemctl enable ti-gateway-guard.service
   nft -f /etc/nftables/ti-gateway-guard.nft
   systemctl start ti-gateway-guard.service
+  install -m 0644 "$here/systemd/ti-gateway.service" "$unit_dir/"
+  install -m 0644 "$here/systemd/ti-gateway@.service" "$unit_dir/"
+  systemctl daemon-reload
 }
 
 step_services() {

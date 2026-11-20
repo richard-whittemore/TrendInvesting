@@ -32,7 +32,7 @@ func directive(t *testing.T, path, section, key string) []string {
 // the reporter are never restarted by systemd (the reporter is fired by its
 // timer), so a failed one is paged by the hook with its own name.
 func TestEveryTradingUnitHandsItsFailureToTheHook(t *testing.T) {
-	for _, path := range []string{engineUnitPath, reporterUnitPath, "../../deploy/systemd/ti-data.service", "../../deploy/systemd/ti-data@.service", "../../deploy/systemd/ti-flex@.service"} {
+	for _, path := range []string{engineUnitPath, reporterUnitPath, "../../deploy/systemd/ti-data.service", "../../deploy/systemd/ti-data@.service", "../../deploy/systemd/ti-flex@.service", "../../deploy/systemd/ti-gateway-guard.service"} {
 		if got := directive(t, path, "[Unit]", "OnFailure"); len(got) != 1 || got[0] != "ti-unit-failed@%n.service" {
 			t.Errorf("%s: OnFailure = %v, want ti-unit-failed@%%n.service", path, got)
 		}
@@ -193,5 +193,49 @@ func TestEveryUnitThatLoadsASecretRefusesToStartWhileTheSecretsAreLocked(t *test
 	// failed-unit page and the Flex reader (secrets and account).
 	if loaders != 9 {
 		t.Errorf("%d LoadCredential= lines across the units, want 9", loaders)
+	}
+}
+
+// The guard's OnFailure command pages through the same channels as the engine
+// (docs/manual/server.md, "The server's own guard on the Gateway's ports").
+func TestTheGatewayGuardHookAsItsUnitRunsItPagesOnceThroughTheChannels(t *testing.T) {
+	execStart := directive(t, hookUnitPath, "[Service]", "ExecStart")
+	if len(execStart) != 1 {
+		t.Fatalf("ExecStart = %v", execStart)
+	}
+	reports, credentials := t.TempDir(), t.TempDir()
+	line := strings.ReplaceAll(strings.ReplaceAll(execStart[0], "-channel ntfy,pushover,github-issues", "-channel ntfy,pagerduty"), "/var/lib/trend-investing/reports", reports)
+	args := expandExecStart(line, map[string]string{"%i": "ti-gateway-guard.service", "%d": credentials}, nil)
+	if len(args) == 0 || args[0] != "/opt/trend-investing/bin/ti-reporter" || args[1] != "notify-unit-failed" {
+		t.Fatalf("ExecStart runs %v", args)
+	}
+	if args[len(args)-1] != "ti-gateway-guard.service" {
+		t.Errorf("the failed unit must be the last argument: %v", args)
+	}
+	r := &relay{sent: map[string][]string{}}
+	secrets := "TI_NTFY_TOPIC=t\nTI_NTFY_SERVER=https://ntfy.private.test\nTI_PAGERDUTY_ROUTING_KEY=k\nTI_PAGERDUTY_URL=https://events.pagerduty.test/v2/enqueue\n"
+	if err := os.WriteFile(filepath.Join(credentials, "secrets"), []byte(secrets), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The server's journalctl is not on this machine: a stand-in.
+	systemd := newStandInSystemd(t)
+	args = append([]string{args[1]}, append([]string{"-journalctl", systemd.journalctl()}, args[2:]...)...)
+	// systemd hands the hook the failed unit and its invocation.
+	monitor := env(map[string]string{"MONITOR_UNIT": "ti-gateway-guard.service", "MONITOR_INVOCATION_ID": firstRun})
+	for i := 0; i < 2; i++ {
+		if err := run(args, monitor, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r}); err != nil {
+			t.Fatalf("the hook as the unit runs it: %v", err)
+		}
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, "ti-gateway-guard.service"); n != 1 {
+			t.Errorf("%s pages=%d, want 1", host, n)
+		}
+	}
+	if text := strings.Join(r.to(pdHost), "\n"); !strings.Contains(text, `"severity":"critical"`) {
+		t.Errorf("guard failure was not urgent: %s", text)
+	}
+	if _, err := os.Stat(filepath.Join(reports, "unit-failures.json")); err != nil {
+		t.Errorf("no record beside the reporters' state: %v", err)
 	}
 }
