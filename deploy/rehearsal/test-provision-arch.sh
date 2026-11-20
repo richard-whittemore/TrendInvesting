@@ -62,6 +62,7 @@ scenario() {
       if test "${3:-}" = /dev/stdin || test "${5:-}" = /dev/stdin; then dest=${*: -1}; cat >"$TEST_CALLS.${dest//\//_}"; fi
     }
     systemctl() { record systemctl "$@"; }
+    nft() { record nft "$@"; }
     secrets_migrate() {
       record secrets-migrate
       test "${FAKE_MIGRATION_REFUSED:-0}" != 1
@@ -241,9 +242,23 @@ first_install = next(i for i, call in enumerate(calls) if call.startswith("insta
 staging = next(i for i, call in enumerate(calls) if "libexec/stage-gateway-login.sh" in call)
 unit = next(i for i, call in enumerate(calls) if "systemd/ti-gateway.service" in call)
 assert migration < first_install <= staging < unit
-assert calls[unit + 1] == "systemctl daemon-reload"
+template = next(i for i, call in enumerate(calls) if "systemd/ti-gateway@.service" in call)
+assert template == unit + 1
+assert calls[template + 1] == "systemctl daemon-reload"
+for name in ("ti-gateway.service", "ti-gateway@.service"):
+    installs = [call for call in calls if call.startswith("install -m 0644 ") and f"/systemd/{name} " in call]
+    assert len(set(installs)) == 1, f"conflicting installs for {name}: {installs}"
 assert "render-ibc-config.sh" in calls[staging]
-assert unit == staging + 1
+guard_calls = [
+    "install -d -m 0755 /etc/nftables",
+    next(call for call in calls if call.startswith("install -m 0644 ") and "etc/nftables/ti-gateway-guard.nft" in call),
+    next(call for call in calls if call.startswith("install -m 0644 ") and "systemd/ti-gateway-guard.service" in call),
+    "systemctl daemon-reload",
+    "systemctl enable ti-gateway-guard.service",
+    "nft -f /etc/nftables/ti-gateway-guard.nft",
+    "systemctl start ti-gateway-guard.service",
+]
+assert calls[staging + 1:unit] == guard_calls, "Lightsail services must install and start the guard before installing ti-gateway.service"
 assert not any(call.startswith("systemctl restart ti-gateway") for call in calls)
 PYCODE
 

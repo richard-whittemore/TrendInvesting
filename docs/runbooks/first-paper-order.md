@@ -140,20 +140,26 @@ know they are right):
 | Enable ActiveX and Socket Clients | on | Without it the adapter's connection is refused |
 | Read-Only API | **on (leave it on) for now** | A read-only API refuses every order, which is what you want until the moment of the first order. On the server this is `TWS_READONLY_API=yes` in `ibkr-login-joint.env`, the shipped value. You turn it off in B4, immediately before the first order, and back on afterwards (C) |
 | Trusted IPs | `127.0.0.1` only | The adapter runs on the same machine as the Gateway. Do not add another address, and do not open the port in any firewall: the server's firewall already allows inbound traffic on the Tailscale interface only |
-| Allow connections from localhost only | on | Same reason |
+| Allow connections from localhost only | on for the Mac | On the server the Gateway listens on every interface; check the nftables guard below and IBC's reject setting |
 | Master API client ID | **11** (Boost's client ID) | IBKR shows an API client the executions of other clients, of TWS and of IBKR's own app only when its client ID is the Master API client ID. The adapter asks for every client's executions to check that nothing executed since the close (`docs/manual/paper-trading.md`, "A paper day"); with this set, its list has them all. On the server, set it once in Gateway's own settings as for the others (IBC does not set it); the adapter's check of the holdings and cash since the previous close does not depend on it |
 
-Check that the Gateway is listening on 4002 and only on this machine. On the
-server run `ss -ltn | grep 4002`; you should see one line whose local address
-is `127.0.0.1:4002` (after the Gateway has logged in; it does not listen
-before). On the Mac run `lsof -nP -iTCP:4002 -sTCP:LISTEN`; you should see
+Check that the Gateway is listening on 4002. On the server run
+`ss -ltnp | grep 4002`; a `0.0.0.0` or `*` listen is expected (after the
+Gateway has logged in; it does not listen before). Run
+`sudo nft list table inet ti_gateway_guard` and check the input hook at
+priority -10 and `tcp dport 4001-4004 iifname != "lo" drop`. Follow the owner
+checks in [the server's own guard on the Gateway's ports](../manual/server.md#the-servers-own-guard-on-the-gateways-ports),
+including confirming the adapters still connect. From the Mac,
+`nc -vz -G 5 trend-investing-1 4002` must time out while the Gateway is
+listening. This Mac probe is also blocked by the Tailscale policy; the nft
+listing shows the server's own guard. On the Mac run `lsof -nP -iTCP:4002 -sTCP:LISTEN`; you should see
 the Gateway's Java process listening on `127.0.0.1:4002` or `localhost:4002`.
 If nothing is listening, the Gateway is not logged in yet or its API is off:
 check the login (A3), then Gateway's API settings above (Enable ActiveX and
-Socket Clients, port 4002), and run the check again. If the address is
+Socket Clients, port 4002), and run the check again. On the Mac, if the address is
 `0.0.0.0` or `*` (every interface), "Allow connections from localhost only"
 is off: turn it on and check again before going on.
-Then check, as the owner: the Gateway log shows `Login has completed`, and `sudo grep -E '^(AcceptIncomingConnectionAction|TrustedTwsApiClientIPs)=' /run/ti-gateway/config.ini` (run on the server, not the Mac: it is the Linux IBC runtime file) prints `AcceptIncomingConnectionAction=reject` and `TrustedTwsApiClientIPs=` (an empty list). The guards are: the IBC files' modes; those two settings (the real guard); the Gateway's read-only API, which holds in dry-run only (once paper sending is on, the IBC `reject` setting is the only guard inside the Gateway, so add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices before turning read-only off); and the firewall's deny of ports 4001 and 4002, a second layer that Tailscale's own input rules may bypass. Closing the port at the network level for tailnet devices is done with Tailscale access rules, a separate owner step.
+Then check, as the owner: the Gateway log shows `Login has completed`, and `sudo grep -E '^(AcceptIncomingConnectionAction|TrustedTwsApiClientIPs)=' /run/ti-gateway/config.ini` (run on the server, not the Mac: it is the Linux IBC runtime file) prints `AcceptIncomingConnectionAction=reject` and `TrustedTwsApiClientIPs=` (an empty list). The guards are: the IBC files' modes; those two settings; the server's `inet ti_gateway_guard` nftables table, which drops non-loopback TCP connections to ports 4001–4004 independently of Tailscale and IBC; the Gateway's read-only API, which holds in dry-run only; and ufw's denies, a second layer that Tailscale's own input rules may bypass. Before turning read-only off, also add the Tailscale access rules that close ports 4001 and 4002 to tailnet devices, a separate owner step.
 The
 firewall's deny of 4001 and 4002 is only a second layer, since Tailscale's own
 rules accept tailnet traffic first; IBC's `BindAddress` is the command

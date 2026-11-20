@@ -357,3 +357,46 @@ func TestInstanceLogoutPageRewritesEveryJointRemedy(t *testing.T) {
 		}
 	}
 }
+
+// The port guard's failure uses the shared hook; other guard names remain
+// outside the allowlist (docs/manual/server.md, "A failed unit").
+func TestGatewayGuardTradingUnitName(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		accepted bool
+	}{
+		{"ti-gateway-guard.service", true},
+		{"ti-gateway-guardx.service", false},
+		{"ti-gateway-guard@x.service", false},
+		{"ti-gateway-guard.timer", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkTradingUnits("-units", []string{tc.name}); (err == nil) != tc.accepted {
+				t.Fatalf("accepted=%v, want %v: %v", err == nil, tc.accepted, err)
+			}
+		})
+	}
+}
+
+// Every reporter samples the shared guard to resolve its incident after it
+// loads successfully (docs/manual/server.md, "A failed unit").
+func TestGatewayGuardReporterResolveList(t *testing.T) {
+	starts := directive(t, reporterUnitPath, "[Service]", "ExecStart")
+	if len(starts) != 1 {
+		t.Fatalf("ExecStart = %v", starts)
+	}
+	args := strings.Fields(starts[0])
+	i := indexOf(args, "-resolve-units")
+	if i < 0 || i+1 >= len(args) {
+		t.Fatal("missing -resolve-units")
+	}
+	found := false
+	for _, unit := range strings.Split(args[i+1], ",") {
+		if unit == "ti-gateway-guard.service" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("-resolve-units omits ti-gateway-guard.service")
+	}
+}

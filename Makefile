@@ -141,6 +141,7 @@ deploy-test:
 	./deploy/mac-mini/test-refusals.sh
 	./deploy/rehearsal/test-operator-user.sh
 	./deploy/rehearsal/test-ibc-modes.sh
+	./deploy/rehearsal/test-gateway-guard.sh
 	./deploy/rehearsal/test-adapter-venv.sh
 
 # make check runs the momentum memory-budget test on its two-year fixture;

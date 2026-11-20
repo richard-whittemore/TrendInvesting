@@ -127,7 +127,7 @@ Times below are New York time unless marked UTC (the memory timer uses UTC).
 | `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; Boost's and both IRA reporter timers are enabled | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, until the engine has been started once it logs that it is waiting for the account's first run, skips only the reading of the log, and otherwise runs as usual ("The reporter before the first run", below); it fails, with a message, until the `secrets.env` entries below are filled in |
 | `ti-memory.timer` | Triggers the memory sampler ([Measuring the server](#measuring-the-server)) | Every five minutes in UTC; the sampler appends only within the selected week | Installed; the owner enables it for the measurement week |
 | `ti-memory.service` | Records server total memory, unit counters and installed schedules | On each memory timer firing or a manual start; stopped after two minutes | Requires `memory.env`; failed samples page once and a good run resolves the episode |
-| `ti-unit-failed@.service` | The page that a unit failed: the engine, the adapter, the reporter, the data jobs, the Flex readers and the memory sampler each name it in `OnFailure=`, so systemd starts one instance, named after the failed unit (for the engine, `ti-unit-failed@ti-engine@boost.service.service`), the moment that unit fails. It sends one urgent page through the reporter's channels naming the unit, the failed run's last journal line and the manual row to read ("A failed unit", below) | Only when one of those units fails; never by itself otherwise | Installed by `provision.sh services` with the other units |
+| `ti-unit-failed@.service` | The page that a unit failed: the engine, the adapter, the reporter, the Gateways, the data jobs, the Flex readers, the memory sampler and the Gateway port guard each name it in `OnFailure=`, so systemd starts one instance, named after the failed unit (for the engine, `ti-unit-failed@ti-engine@boost.service.service`), the moment that unit fails. It sends one urgent page through the reporter's channels naming the unit, the failed run's last journal line and the manual row to read ("A failed unit", below) | Only when one of those units fails; never by itself otherwise | Installed by `provision.sh services` with the other units |
 | `ti-dashboard.service` | The read-only dashboard, on loopback port 8088 | Starts at boot (enabled) | Built and installed by `provision.sh services`; it finds the Boost engine's current run, the newest link of its chain of runs, on every request and follows the chain of runs back to the first, so a restart or an upgrade of the engine needs no dashboard restart. It shows a message, not a figure, until the engine has run once |
 | `ti-ntfy.service` | Your own ntfy server: the only place the daily summary goes ("Your own ntfy server", below). Listens on the server's Tailscale address, port 2586, and nowhere else | Starts at boot once `provision.sh ntfy` has enabled it; tried again every 10 seconds if the Tailscale address is not up yet | Installed by `provision.sh ntfy`, which you run after joining Tailscale. Not part of `provision.sh all` |
 | `tailscaled` | Tailscale | At boot | Installed by `provision.sh base` |
@@ -1405,16 +1405,76 @@ failed unit").
    approve the phone prompt if one comes. Check `journalctl -u ti-gateway`
    shows `Login has completed`. The page resolves within 5 minutes.
 
+## The server's own guard on the Gateway's ports
+
+The Gateway listens on every interface (`*` or `0.0.0.0`), even though only
+the server's own adapters should connect. The server drops TCP traffic to
+ports 4001–4004 unless it arrives on loopback (`lo`). This covers IPv4 and
+IPv6, independently of Tailscale's access policy and IBC's
+`AcceptIncomingConnectionAction=reject`, which stays in place.
+
+Tailscale's input rules can accept tailnet traffic before ufw sees it, so
+ufw's denies alone do not close these ports. The separate nftables table
+`inet ti_gateway_guard` runs on input at priority -10, before the usual
+filter priority 0. A drop in any nftables base chain is final: an accept in
+Tailscale's other chains cannot override it. The table touches only these
+TCP ports; ufw's denies remain a second layer.
+
+Run `sudo deploy/provision.sh firewall` after Tailscale is signed in. It
+refuses to proceed without `nft` (install Ubuntu's `nftables` package if
+needed), installs `/etc/nftables/ti-gateway-guard.nft`, enables
+`ti-gateway-guard.service`, loads the table directly with `nft -f`, and starts
+the service if it is not already active. The `services` step also installs
+and enables the guard before installing the Gateway units. The service
+loads the table at each boot; both Gateway units require it to succeed
+before starting. Rehearsals and the
+Mac-mini container skip firewall provisioning. An ufw reset does not remove
+this separate table. Do not flush the nftables ruleset or delete the table;
+if it is removed by hand, restore it with
+`sudo nft -f /etc/nftables/ti-gateway-guard.nft`. Stopping the guard service
+leaves the table in place. Never stop or restart ti-gateway-guard while a
+Gateway runs, because both Gateways require it and would stop with it.
+Reload rules with `sudo nft -f /etc/nftables/ti-gateway-guard.nft`, never by
+restarting the unit.
+
+**Installing the guard on a running server.** Run
+`sudo deploy/provision.sh services` from a checkout of the merged commit,
+following the prerequisites in [Installing a build](#installing-a-build),
+the usual path for installing merged builds. This installs and loads the
+guard before installing the Gateway units and restarts no Gateway. Both
+Gateways keep running and take the new dependency at their next start.
+Alternatively run `sudo deploy/provision.sh firewall` to re-apply ufw and
+upgrade the guard and Gateway units. Both paths install the guard and the
+Gateway units with their new dependency; neither restarts a Gateway. Then
+check with the owner checks below.
+
+As the owner, check:
+
+1. `sudo nft list table inet ti_gateway_guard` shows the input hook at
+   priority -10 and `tcp dport 4001-4004 iifname != "lo" drop`.
+2. `systemctl status ti-gateway-guard --no-pager` shows `active (exited)`.
+3. `ss -ltnp | grep 400` shows the logged-in Gateways listening. A wildcard
+   address is expected on this server; check the table rather than trying to
+   change the listening address.
+4. Confirm the adapters still connect to `127.0.0.1` and their logs show no
+   connection loss: `sudo journalctl -u ti-adapter-boost -u ti-adapter@trad-ira
+   -u ti-adapter@roth-ira --since '10 minutes ago' --no-pager`.
+5. From the Mac, `nc -vz -G 5 trend-investing-1 4002` must time out
+   while the Gateway is listening. This Mac probe is also blocked by the
+   Tailscale policy; the nft listing shows the server's own guard.
+
 ## Closing the Gateway's ports to your other devices
 
 Tailscale lets every device on your tailnet reach every port on the server
-unless a rule says otherwise, and the server's own firewall cannot stop that.
+unless a rule says otherwise. The server's nftables guard above closes the
+Gateway's ports independently; the tailnet policy adds protection before
+traffic reaches the server.
 The Gateway's API ports (4001 live, 4002 paper) should be reachable from the
 server alone. Tailscale's access rules are enforced before traffic reaches the
 server, so they close those ports to your Mac, your phone and any device you
 add later. Do this before the Read-Only API is turned off (first-paper-order
-runbook, B4 step 2): after that, the Gateway's `reject` setting would be the
-only guard inside it.
+runbook, B4 step 2). Keep both the server's nftables table and the Gateway's
+`reject` setting in place as well.
 
 The policy is `deploy/tailscale/policy.hujson`. It lets your own devices reach
 each other, and reach the server on three ports only: 22 (SSH), 443 (the
@@ -1521,6 +1581,8 @@ A reboot is not a crash, so each engine's next start is a fresh run you
 approve ([restart](restart.md)). Schedule reboots for a Sunday, after the
 cold re-login, so one phone prompt serves both.
 
+If no IBKR phone prompt arrives, check `systemctl status ti-gateway-guard --no-pager`: a failed guard keeps both Gateways stopped and pages "ti-gateway-guard.service failed"; reload it with `sudo nft -f /etc/nftables/ti-gateway-guard.nft`, then `sudo systemctl start ti-gateway-guard` and start the Gateway with `sudo systemctl start ti-gateway`.
+
 ## Reading the logs and the kill switch on the server
 
 `journal-query` and `operator` are installed on the server, in
@@ -1565,7 +1627,8 @@ already at IBKR in IBKR's own app.
 
 ## A failed unit
 
-The engine, the adapter, the reporter and the data job each name
+The engine, the adapter, the reporter, the Gateways, the data jobs, the Flex
+readers, the memory sampler and the Gateway port guard each name
 `ti-unit-failed@%n.service` in `OnFailure=`. When one fails, systemd starts that unit under the failed
 unit's name (for the engine, `ti-unit-failed@ti-engine@boost.service.service`;
 the rehearsal starts it under a real systemd), which runs `ti-reporter
@@ -1608,6 +1671,13 @@ stop, not after two sessions of silence.
   evening it is a quiet wait that writes no stream (market data chapter,
   "The free plan's timing"): the next trading day's morning firing records
   the session, or you run `ti-data --session <date>` once Massive serves it.
+- The Gateway port guard (`ti-gateway-guard.service`) pages once through the
+  same hook. Every reporter samples it through `-resolve-units`: if the hook
+  could not deliver, a firing retries the page. It never reminds or holds back
+  the heartbeat. A firing that sees it `active (exited)` after a successful
+  load resolves the incident; this is the normal state of its oneshot with
+  `RemainAfterExit=yes`. Fix the rules and load the guard as described under
+  "The server's own guard on the Gateway's ports".
 - The reason is the failed run's own last journal line. A run that wrote
   nothing (a start systemd refused, such as a missing `run.env`) is explained
   by systemd's own line about that run, such as "Failed to load environment
@@ -1660,7 +1730,7 @@ stop, not after two sessions of silence.
 | A page from Healthchecks (through Pushover) that your check `trend-investing-reporter` is down | The reporter has not finished a clean firing for 20 minutes (period 5 minutes plus 15 minutes' grace). Nothing on the server sent this page; it works even when the server is dead | Check the server is up and reachable over Tailscale (the dashboard, or `ssh`). If it is: `systemctl list-timers ti-reporter@boost.timer`, then `journalctl -u ti-reporter@boost -n 50` for the run's error. If the server is dead, start it from the Lightsail console, then read "After a reboot" |
 | The reporter's journal says "the heartbeat ping was not sent: ..." | The reporter's run is unaffected; it will ping again at the next firing. The reason is the kind of failure only (an address that is not an absolute URL, the service not reached or not answering in time, or the status it answered), never the address | If the pages from Healthchecks come anyway, check `TI_HEARTBEAT_URL` in `secrets.env` is the check's full ping address and that the server can reach the internet. A single line during a Healthchecks outage needs nothing |
 | No page from Healthchecks when you stop the timer (the test above) | The check is not wired: the address is missing or wrong, the period or grace is wrong, or the Pushover integration is not ticked on the check | Healthchecks' page for the check shows the last ping; fix the address, the 5-minute period, the 15-minute grace, or the integration |
-| A page from the server, titled with the unit's name and ending "failed", that a trading unit failed | The engine, the adapter or the reporter stopped; only the adapter's exit-3 Gateway remedy may trigger the bounded healer. Otherwise systemd does not restart them; or the data job failed, which its timer runs again at the next firing. See "A failed unit" below | Read the manual row the page names, then `journalctl -u <unit>`. To veto adapter healing, `sudo systemctl reset-failed <adapter>` (row `owner-stopped`); stopping an already failed adapter alone is not a veto |
+| A page from the server, titled with the unit's name and ending "failed", that a trading unit failed | The engine, the adapter or the reporter stopped; only the adapter's exit-3 Gateway remedy may trigger the bounded healer. Otherwise systemd does not restart them; or the data job failed, which its timer runs again at the next firing; or the Gateway port guard (`ti-gateway-guard.service`) failed to load. See "A failed unit" above | Read the manual row the page names, then `journalctl -u <unit>`. To veto adapter healing, `sudo systemctl reset-failed <adapter>` (row `owner-stopped`); stopping an already failed adapter alone is not a veto |
 | `provision.sh firewall` printed "SKIPPED firewall: Tailscale is not signed in yet" | The firewall is not changed, so the public door is still open | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh firewall` again |
 | The disk fills | An engine that cannot write its log stops deciding and releases nothing more (ADR 0027); the data job writes nothing; the reporter cannot save its state | Free space, then resume or start as `docs/runbooks/durable-log.md` says |
 | The server's clock drifts behind IBKR's | The engine counts the account reading as stale and blocks every sell (`stale-broker-snapshot`); the sale back to 98% is withheld and you are alerted to that. The reporter's own clock check pages you first, within 10 minutes of the drift ("The server's clock failed its check") | Run the clock check ("The clock", above); fix the time syncing (or, on the Mac mini, the Mac's automatic date and time), then wait for the next close |

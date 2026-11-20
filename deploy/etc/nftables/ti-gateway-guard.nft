@@ -1,0 +1,12 @@
+# Only loopback may reach the Gateway API (docs/manual/server.md,
+# "The server's own guard on the Gateway's ports"). A drop in any nftables
+# base chain is final, regardless of Tailscale's accepts in other chains.
+# Replace only our table atomically, including on the first load or a rerun.
+table inet ti_gateway_guard {}
+delete table inet ti_gateway_guard
+table inet ti_gateway_guard {
+    chain input {
+        type filter hook input priority -10; policy accept;
+        tcp dport 4001-4004 iifname != "lo" drop;
+    }
+}
