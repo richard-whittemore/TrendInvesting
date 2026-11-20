@@ -1,6 +1,7 @@
 [Unit]
 Description=Loopback-only access to the Gateway API ports
 After=network-pre.target
+OnFailure=ti-unit-failed@%n.service
 # Gateway startup requires this guard (docs/manual/server.md,
 # "The server's own guard on the Gateway's ports"). Stopping keeps the rules.
 

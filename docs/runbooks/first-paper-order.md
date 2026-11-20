@@ -149,8 +149,10 @@ Gateway has logged in; it does not listen before). Run
 `sudo nft list table inet ti_gateway_guard` and check the input hook at
 priority -10 and `tcp dport 4001-4004 iifname != "lo" drop`. Follow the owner
 checks in [the server's own guard on the Gateway's ports](../manual/server.md#the-servers-own-guard-on-the-gateways-ports),
-including confirming the adapters still connect and a probe from another
-tailnet device fails. On the Mac run `lsof -nP -iTCP:4002 -sTCP:LISTEN`; you should see
+including confirming the adapters still connect. From the Mac,
+`nc -vz -G 5 trend-investing-1 4002` must time out while the Gateway is
+listening. This Mac probe is also blocked by the Tailscale policy; the nft
+listing shows the server's own guard. On the Mac run `lsof -nP -iTCP:4002 -sTCP:LISTEN`; you should see
 the Gateway's Java process listening on `127.0.0.1:4002` or `localhost:4002`.
 If nothing is listening, the Gateway is not logged in yet or its API is off:
 check the login (A3), then Gateway's API settings above (Enable ActiveX and

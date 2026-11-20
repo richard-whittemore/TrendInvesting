@@ -1434,12 +1434,17 @@ if it is removed by hand, restore it with
 `sudo nft -f /etc/nftables/ti-gateway-guard.nft`. Stopping the guard service
 leaves the table in place. Never stop or restart ti-gateway-guard while a
 Gateway runs, because both Gateways require it and would stop with it.
+Reload rules with `sudo nft -f /etc/nftables/ti-gateway-guard.nft`, never by
+restarting the unit.
 
 **Installing the guard on a running server.** Run
-`sudo deploy/provision.sh firewall` from a checkout of the merged commit;
-it installs the guard and loads the table without restarting the Gateways.
-The Gateways keep running; their unit files take the new Requires at the
-next start. Then check with the owner checks below.
+`sudo deploy/provision.sh services` from a checkout of the merged commit,
+following the prerequisites in [Installing a build](#installing-a-build),
+the usual path for installing merged builds. This installs and loads the
+guard before installing the Gateway units and restarts no Gateway. Both
+Gateways keep running and take the new dependency at their next start.
+Optionally run `sudo deploy/provision.sh firewall` to re-apply ufw. Then
+check with the owner checks below.
 
 As the owner, check:
 
@@ -1452,19 +1457,9 @@ As the owner, check:
 4. Confirm the adapters still connect to `127.0.0.1` and their logs show no
    connection loss: `sudo journalctl -u ti-adapter-boost -u ti-adapter@trad-ira
    -u ti-adapter@roth-ira --since '10 minutes ago' --no-pager`.
-5. Try the server's own Tailscale address from the server:
-
-   ```sh
-   timeout 5 bash -c '</dev/tcp/$(tailscale ip -4)/4002' && echo OPEN || echo blocked
-   ```
-
-   A blocked connection fails or times out. However, Linux normally routes
-   its own addresses through `lo`, so this self-probe can print `OPEN` even
-   with the guard working. It cannot prove non-loopback filtering. From
-   another tailnet device, `nc -vz -G 5 trend-investing-1 4002` on the Mac
-   must fail or time out while the Gateway is listening. The tailnet policy
-   may also block that probe; inspect the nftables table as well to verify
-   the server's independent guard.
+5. From the Mac, `nc -vz -G 5 trend-investing-1 4002` must time out
+   while the Gateway is listening. This Mac probe is also blocked by the
+   Tailscale policy; the nft listing shows the server's own guard.
 
 ## Closing the Gateway's ports to your other devices
 
@@ -1583,6 +1578,8 @@ after the unlock. **Every engine and the adapter stay stopped.**
 A reboot is not a crash, so each engine's next start is a fresh run you
 approve ([restart](restart.md)). Schedule reboots for a Sunday, after the
 cold re-login, so one phone prompt serves both.
+
+If no IBKR phone prompt arrives, check `systemctl status ti-gateway-guard --no-pager`: a failed guard keeps both Gateways stopped and pages "ti-gateway-guard.service failed"; reload it with `sudo nft -f /etc/nftables/ti-gateway-guard.nft`, then `sudo systemctl start ti-gateway-guard` and start the Gateway with `sudo systemctl start ti-gateway`.
 
 ## Reading the logs and the kill switch on the server
 

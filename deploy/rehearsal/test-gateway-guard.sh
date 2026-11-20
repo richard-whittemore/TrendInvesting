@@ -23,7 +23,7 @@ assert text.count("drop") == 1 and text.count("tcp dport") == 1
 assert "flush ruleset" not in text, "must preserve other firewall tables"
 unit = (deploy / "systemd/ti-gateway-guard.service").read_text()
 for line in ("Type=oneshot", "RemainAfterExit=yes", "After=network-pre.target",
-             "WantedBy=multi-user.target",
+             "WantedBy=multi-user.target", "OnFailure=ti-unit-failed@%n.service",
              "ExecStart=/usr/sbin/nft -f /etc/nftables/ti-gateway-guard.nft"):
     assert line in unit.splitlines(), line
 assert not any(line.startswith("Before=") and "@.service" in line for line in unit.splitlines()), "template is not an ordering target"
@@ -36,9 +36,32 @@ for name in ("ti-gateway.service", "ti-gateway@.service"):
 manual = (deploy.parent / "docs/manual/server.md").read_text()
 assert "sudo systemctl restart ti-gateway-guard" not in manual
 assert "sudo nft -f /etc/nftables/ti-gateway-guard.nft" in manual
-assert "Installing the guard on a running server" in manual
-assert "checkout of the merged commit" in manual
-assert "next start" in manual
+install = manual.split("**Installing the guard on a running server.**", 1)[1].split("As the owner, check:", 1)[0]
+install = " ".join(install.split())
+for text in ("`sudo deploy/provision.sh services` from a checkout of the merged commit",
+             "[Installing a build](#installing-a-build)",
+             "installs and loads the guard before installing the Gateway units",
+             "Both Gateways keep running and take the new dependency at their next start",
+             "Optionally run `sudo deploy/provision.sh firewall` to re-apply ufw"):
+    assert text in install, text
+owner = manual.split("As the owner, check:", 1)[1].split("## Closing the Gateway", 1)[0]
+assert "tailscale ip -4" not in owner and "/dev/tcp/" not in owner
+assert "`nc -vz -G 5 trend-investing-1 4002`" in owner
+assert "must time out" in " ".join(owner.split())
+assert "also blocked by the Tailscale policy" in " ".join(owner.split())
+assert "nft listing shows the server's own guard" in " ".join(owner.split())
+assert "never by restarting the unit" in " ".join(manual.split())
+reboot = manual.split("## After a reboot", 1)[1].split("## Reading the logs", 1)[0]
+for text in ("systemctl status ti-gateway-guard --no-pager",
+             "ti-gateway-guard.service failed",
+             "sudo nft -f /etc/nftables/ti-gateway-guard.nft",
+             "sudo systemctl start ti-gateway-guard", "sudo systemctl start ti-gateway"):
+    assert text in reboot, text
+paper = (deploy.parent / "docs/runbooks/first-paper-order.md").read_text()
+a4 = paper.split("### A4.", 1)[1].split("### A5.", 1)[0]
+assert "tailscale ip -4" not in a4 and "/dev/tcp/" not in a4
+assert "`nc -vz -G 5 trend-investing-1 4002`" in a4
+assert "also blocked by the Tailscale policy" in " ".join(a4.split())
 rehearsal = (deploy / "rehearsal/inside-systemd.sh").read_text()
 assert '/etc/systemd/system/ti-gateway-guard.service.d' in rehearsal and 'ExecStart=/bin/true' in rehearsal, "systemd rehearsal needs a guard stand-in without kernel firewall access"
 PY
