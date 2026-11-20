@@ -107,6 +107,7 @@ cat >"$work/scenario.sh" <<'SCENARIO'
   rm() { guard "$@"; command rm "$@"; }
   ln() { record ln "$@"; }
   runuser() { record runuser "$@"; }
+  nft() { record nft "$@"; }
   systemctl() {
     record systemctl "$@"
     if test "${1:-}" = list-units; then

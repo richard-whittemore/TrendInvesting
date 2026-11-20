@@ -1405,16 +1405,79 @@ failed unit").
    approve the phone prompt if one comes. Check `journalctl -u ti-gateway`
    shows `Login has completed`. The page resolves within 5 minutes.
 
+## The server's own guard on the Gateway's ports
+
+The Gateway listens on every interface (`*` or `0.0.0.0`), even though only
+the server's own adapters should connect. The server drops TCP traffic to
+ports 4001–4004 unless it arrives on loopback (`lo`). This covers IPv4 and
+IPv6, independently of Tailscale's access policy and IBC's
+`AcceptIncomingConnectionAction=reject`, which stays in place.
+
+Tailscale's input rules can accept tailnet traffic before ufw sees it, so
+ufw's denies alone do not close these ports. The separate nftables table
+`inet ti_gateway_guard` runs on input at priority -10, before the usual
+filter priority 0. A drop in any nftables base chain is final: an accept in
+Tailscale's other chains cannot override it. The table touches only these
+TCP ports; ufw's denies remain a second layer.
+
+Run `sudo deploy/provision.sh firewall` after Tailscale is signed in. It
+refuses to proceed without `nft` (install Ubuntu's `nftables` package if
+needed), installs `/etc/nftables/ti-gateway-guard.nft`, enables
+`ti-gateway-guard.service`, loads the table directly with `nft -f`, and starts
+the service if it is not already active. The `services` step also installs
+and enables the guard before installing the Gateway units. The service
+loads the table at each boot; both Gateway units require it to succeed
+before starting. Rehearsals and the
+Mac-mini container skip firewall provisioning. An ufw reset does not remove
+this separate table. Do not flush the nftables ruleset or delete the table;
+if it is removed by hand, restore it with
+`sudo nft -f /etc/nftables/ti-gateway-guard.nft`. Stopping the guard service
+leaves the table in place. Never stop or restart ti-gateway-guard while a
+Gateway runs, because both Gateways require it and would stop with it.
+
+**Installing the guard on a running server.** Run
+`sudo deploy/provision.sh firewall` from a checkout of the merged commit;
+it installs the guard and loads the table without restarting the Gateways.
+The Gateways keep running; their unit files take the new Requires at the
+next start. Then check with the owner checks below.
+
+As the owner, check:
+
+1. `sudo nft list table inet ti_gateway_guard` shows the input hook at
+   priority -10 and `tcp dport 4001-4004 iifname != "lo" drop`.
+2. `systemctl status ti-gateway-guard --no-pager` shows `active (exited)`.
+3. `ss -ltnp | grep 400` shows the logged-in Gateways listening. A wildcard
+   address is expected on this server; check the table rather than trying to
+   change the listening address.
+4. Confirm the adapters still connect to `127.0.0.1` and their logs show no
+   connection loss: `sudo journalctl -u ti-adapter-boost -u ti-adapter@trad-ira
+   -u ti-adapter@roth-ira --since '10 minutes ago' --no-pager`.
+5. Try the server's own Tailscale address from the server:
+
+   ```sh
+   timeout 5 bash -c '</dev/tcp/$(tailscale ip -4)/4002' && echo OPEN || echo blocked
+   ```
+
+   A blocked connection fails or times out. However, Linux normally routes
+   its own addresses through `lo`, so this self-probe can print `OPEN` even
+   with the guard working. It cannot prove non-loopback filtering. From
+   another tailnet device, `nc -vz -G 5 trend-investing-1 4002` on the Mac
+   must fail or time out while the Gateway is listening. The tailnet policy
+   may also block that probe; inspect the nftables table as well to verify
+   the server's independent guard.
+
 ## Closing the Gateway's ports to your other devices
 
 Tailscale lets every device on your tailnet reach every port on the server
-unless a rule says otherwise, and the server's own firewall cannot stop that.
+unless a rule says otherwise. The server's nftables guard above closes the
+Gateway's ports independently; the tailnet policy adds protection before
+traffic reaches the server.
 The Gateway's API ports (4001 live, 4002 paper) should be reachable from the
 server alone. Tailscale's access rules are enforced before traffic reaches the
 server, so they close those ports to your Mac, your phone and any device you
 add later. Do this before the Read-Only API is turned off (first-paper-order
-runbook, B4 step 2): after that, the Gateway's `reject` setting would be the
-only guard inside it.
+runbook, B4 step 2). Keep both the server's nftables table and the Gateway's
+`reject` setting in place as well.
 
 The policy is `deploy/tailscale/policy.hujson`. It lets your own devices reach
 each other, and reach the server on three ports only: 22 (SSH), 443 (the

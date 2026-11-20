@@ -214,7 +214,7 @@ CONF
       ca-certificates curl unzip unattended-upgrades python3 tzdata sudo nano gnupg >/dev/null
   else
     apt-get install -y -qq --no-install-recommends \
-      ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
+      ca-certificates curl unzip xvfb xauth ufw nftables unattended-upgrades \
       libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata iptables gnupg >/dev/null
   fi
 
@@ -737,6 +737,25 @@ valid_build_identity() {
     LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$1"
 }
 
+# Install and load the guard without stopping running Gateways
+# (docs/manual/server.md, "The server's own guard on the Gateway's ports").
+# Rehearsals use their /bin/true stand-in; the Mac mini has no Linux Gateway.
+gateway_guard_require_nft() {
+  command -v nft >/dev/null 2>&1 || die "nft is required for the Gateway port guard; install nftables and re-run provision.sh firewall"
+}
+
+gateway_guard_install() {
+  if test "$rehearsal" = 1 || mac_mini; then return 0; fi
+  gateway_guard_require_nft
+  install -d -m 0755 /etc/nftables
+  install -m 0644 "$here/etc/nftables/ti-gateway-guard.nft" /etc/nftables/
+  install -m 0644 "$here/systemd/ti-gateway-guard.service" "$unit_dir/"
+  systemctl daemon-reload
+  systemctl enable ti-gateway-guard.service
+  nft -f /etc/nftables/ti-gateway-guard.nft
+  systemctl start ti-gateway-guard.service
+}
+
 step_services() {
   # Refuse transitions and failed queries before any writes
   # (docs/manual/server.md, Installing a build). Rehearsals have no systemd.
@@ -795,6 +814,7 @@ $busy"
   install -m 0755 "$here/gateway-login.sh" /usr/local/sbin/ti-gateway-login
   install -m 0755 "$here/libexec/stage-gateway-login.sh" "$here/libexec/render-ibc-config.sh" /usr/local/libexec/trend-investing/
   if ! mac_mini; then
+    gateway_guard_install
     install -m 0644 "$here/systemd/ti-gateway.service" "$unit_dir/"
     if test "$rehearsal" != 1; then systemctl daemon-reload; fi
   fi
@@ -1124,23 +1144,24 @@ step_firewall() {
     log "SKIPPED firewall: Tailscale is not signed in yet (owner step: sudo tailscale up --ssh). Re-run 'provision.sh firewall' after."
     return 0
   fi
+  gateway_guard_require_nft
   log "firewall: deny all inbound except Tailscale"
   ufw --force reset >/dev/null
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
   # The Gateway's API ports (4002 paper, 4001 live) are for the server's own
-  # engines and adapters on 127.0.0.1, which ufw does not filter. The denies
-  # come first, so the tailscale0 allow below never reaches them; the reset
-  # above keeps a rerun from stacking duplicates. This is a second layer, not
-  # the guard: tailscaled's own input chain accepts tailscale0 traffic before
-  # ufw's chains, so the Gateway refuses non-local API clients itself
-  # (render-ibc-config.sh: AcceptIncomingConnectionAction=reject).
+  # engines and adapters on 127.0.0.1, which ufw does not filter. These denies
+  # are a second layer: tailscaled can accept before ufw. The dedicated nft
+  # table drops non-loopback traffic independently of those accepts; IBC also
+  # rejects non-local clients (docs/manual/server.md,
+  # "The server's own guard on the Gateway's ports").
   ufw deny in proto tcp to any port 4001 >/dev/null
   ufw deny in proto tcp to any port 4002 >/dev/null
   ufw deny in proto tcp to any port 4003 >/dev/null
   ufw deny in proto tcp to any port 4004 >/dev/null
   ufw allow in on tailscale0 >/dev/null
   ufw --force enable >/dev/null
+  gateway_guard_install
   log "also close port 22 in the Lightsail firewall tab (owner step)"
 }
 

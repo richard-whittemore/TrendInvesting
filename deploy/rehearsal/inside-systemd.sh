@@ -86,6 +86,16 @@ test -z "$(on_disk "$marker")" || fail "the migrated secret is on disk: $(on_dis
 for u in ti-gateway.service ti-gateway@.service ti-engine@.service ti-adapter-boost.service ti-adapter@.service ti-data.service ti-data@.service ti-reporter@.service ti-flex@.service ti-unit-failed@.service; do
   cp "/deploy/systemd/$u" /etc/systemd/system/
 done
+# The rehearsal skips kernel firewalls (docs/manual/server.md,
+# "The server's own guard on the Gateway's ports"). Keep the real dependency
+# and ordering, replacing only the privileged command inside this container.
+cp /deploy/systemd/ti-gateway-guard.service /etc/systemd/system/
+install -d /etc/systemd/system/ti-gateway-guard.service.d
+cat >/etc/systemd/system/ti-gateway-guard.service.d/rehearsal.conf <<'UNIT'
+[Service]
+ExecStart=
+ExecStart=/bin/true
+UNIT
 install -D -m 0755 /dist/ti-engine /opt/trend-investing/bin/ti-engine
 install -D -m 0644 /deploy/etc/engines/boost.env /etc/trend-investing/engines/boost.env
 install -D -m 0644 /deploy/etc/engines/boost.config /etc/trend-investing/engines/boost.config

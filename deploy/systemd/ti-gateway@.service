@@ -2,6 +2,8 @@
 Description=IB Gateway under IBC for %i
 Documentation=https://github.com/IbcAlpha/IBC
 After=network-online.target
+Requires=ti-gateway-guard.service
+After=ti-gateway-guard.service
 Wants=network-online.target
 # Bound pre-start and renderer failures, then page (ADR 0019, Alerting;
 # docs/runbooks/gateway-login.md). ExecStartPre ignores RestartPreventExitStatus.

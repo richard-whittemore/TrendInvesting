@@ -241,6 +241,7 @@ scenario() {
     systemd-tmpfiles() { record systemd-tmpfiles "$@"; }
     fetch() { record fetch "$@"; }
     ufw() { record ufw "$@"; }
+    nft() { record nft "$@"; }
     tailscale() { record tailscale "$@"; return 1; }
     ip() { record ip "$@"; return 1; }
     mount() { record mount "$@"; return 1; }
@@ -542,6 +543,7 @@ if scenario lightsail aarch64 services; then fail "TI_TARGET=lightsail accepted 
 TEST_REHEARSAL=1 scenario "" x86_64 base || fail "Lightsail base failed: $(cat "$work/out")"
 called "fetch https://pkgs.tailscale.com" || fail "Lightsail base no longer fetches Tailscale"
 called "ufw" || fail "Lightsail base no longer installs ufw"
+called "nftables" || fail "Lightsail base does not install the Gateway guard's nft tool"
 if called "journald.conf.d"; then fail "Lightsail base changed the journal's settings"; fi
 
 scenario "" x86_64 services || fail "Lightsail services failed: $(cat "$work/out")"
@@ -551,6 +553,12 @@ for instance in trad-ira roth-ira; do
   grep -qx 'Environment=TI_HEARTBEAT=off' "$work/units/ti-reporter@$instance.service.d/heartbeat.conf" || fail "$instance reporter heartbeat is not disabled"
 done
 called "systemctl enable ti-gateway.service" || fail "Lightsail no longer enables the Gateway unit"
+called "/systemd/ti-gateway@.service" || fail "Lightsail does not install the Gateway template"
+called "install -m 0644 $work/deploy/etc/nftables/ti-gateway-guard.nft /etc/nftables/" || fail "services does not install the guard ruleset"
+called "install -m 0644 $work/deploy/systemd/ti-gateway-guard.service $work/units/" || fail "services does not install the guard unit"
+called "systemctl enable ti-gateway-guard.service" || fail "services does not enable the guard"
+if called "systemctl restart ti-gateway-guard"; then fail "services restarts the guard"; fi
+
 if called "systemctl mask"; then fail "Lightsail masks a unit"; fi
 called "/systemd/ti-gateway.service" || fail "Lightsail no longer installs the Gateway unit"
 called "systemctl enable --now ti-data.timer ti-data@trad-ira.timer ti-reporter@boost.timer" || fail "Lightsail no longer starts the timers"
@@ -567,6 +575,11 @@ for login in ibkr-login-trad-ira.env ibkr-login-roth-ira.env; do
   if called "$work/etc/$login"; then fail "$login must not be provisioned"; fi
 done
 
+TEST_LEAK='command() { if test "$*" = "-v nft"; then return 1; else builtin command "$@"; fi; }' \
+  scenario "" x86_64 services && fail "services accepted missing nft"
+said "nft is required for the Gateway port guard" || fail "services missing-nft refusal is unclear"
+if called "/systemd/ti-gateway.service" || called "/systemd/ti-gateway@.service"; then fail "services installs a Gateway without nft"; fi
+
 scenario "" x86_64 firewall || fail "Lightsail firewall failed: $(cat "$work/out")"
 said "Tailscale is not signed in" || fail "Lightsail's firewall step no longer checks Tailscale: $(cat "$work/out")"
 # Signed in to Tailscale: the Gateway's API ports (4002 paper, 4001 live) are
@@ -574,6 +587,9 @@ said "Tailscale is not signed in" || fail "Lightsail's firewall step no longer c
 # reaches them; local clients on 127.0.0.1 are not filtered by ufw.
 TEST_LEAK='ip() { record ip "$@"; }; tailscale() { record tailscale "$@"; }' \
   scenario "" x86_64 firewall || fail "Lightsail firewall (signed in) failed: $(cat "$work/out")"
+called "systemctl enable ti-gateway-guard.service" || fail "Lightsail firewall does not enable the Gateway guard"
+called "nft -f /etc/nftables/ti-gateway-guard.nft" || fail "Lightsail firewall does not load the guard ruleset"
+called "systemctl start ti-gateway-guard.service" || fail "Lightsail firewall does not start the Gateway guard"
 allow_line=$(grep -n '^ufw allow in on tailscale0' "$work/calls" | head -1 | cut -d: -f1 || true)
 test -n "$allow_line" || fail "Lightsail's firewall step no longer allows tailscale0: $(cat "$work/calls")"
 for port in 4001 4002; do
