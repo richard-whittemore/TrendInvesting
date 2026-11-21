@@ -328,3 +328,38 @@ func TestGatewayGraceCountsFromTheResetNightsEnd(t *testing.T) {
 		})
 	}
 }
+
+// A start dated ahead of the clock after a reset wait still supersedes the
+// reset night: ordinary logout handling resumes and the grace is not held to
+// the night's 01:00 end (docs/manual/server.md, "The Gateway is logged out").
+func TestGatewayFutureStartAfterResetWaitResumesOrdinaryHandling(t *testing.T) {
+	night := func(h, m int) time.Time { return time.Date(2024, time.January, 3, h, m, 0, 0, newYork) }
+	g := newStandInGateway(t)
+	g.ibc(stamp(time.Date(2024, time.January, 2, 23, 0, 0, 0, newYork), ibcCompleted), stamp(night(-1, 50), ibcRefused),
+		stamp(night(-1, 50), "host gateway-start[1]: gateway-start: reset wait: login refused at 23:50 ET inside IBKR's nightly reset hour; waiting 15m until 00:05 ET"),
+		stamp(night(3, 0), ibcStarting))
+	path := filepath.Join(t.TempDir(), "host-gateway.json")
+	raw := fmt.Sprintf(`{"logged_out_since":%q}`, night(-1, 50).Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sched, err := gatewayScheduleFrom(func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &policyRecorder{channel: "pushover"}
+	var first time.Time
+	for m := 40; m <= 70; m += 5 {
+		at := night(0, m)
+		if err := gatewayStep(path, gatewayJournalChecker(g.path(), []string{"ti-adapter-boost.service"}), func() (gatewayUnitSample, error) { return gatewayUnitSample{active: true}, nil },
+			"synthetic-host", sched, func() time.Time { return time.Time{} }, "", nil, []sender{p}, nil, func() time.Time { return at }, &pagingPolicy{}); err != nil {
+			t.Fatal(err)
+		}
+		if first.IsZero() && len(p.alerts) > 0 {
+			first = at
+		}
+	}
+	if !first.Equal(night(0, 40)) {
+		t.Errorf("first page at %s, want 00:40: the start supersedes the reset night", first.Format("15:04"))
+	}
+}

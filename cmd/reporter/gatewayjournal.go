@@ -247,7 +247,10 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 				if err != nil {
 					return gatewayEvidence{}, err
 				}
-				if at.Before(resetEnd) {
+				// A start dated ahead supersedes the night too: its time
+				// cannot place it after the night's end (server.md, "The
+				// Gateway is logged out").
+				if at.Before(resetEnd) || datedAhead(at, now) {
 					resetEnd = time.Time{}
 				}
 			}
