@@ -190,6 +190,12 @@ func Run(unit string, clock Clock, reader Reader, store Store, journal Journal, 
 		return err
 	}
 	if row != "" {
+		// No restart was issued, so release the reservation: a peer healer must
+		// not stand down as same-incident for a restart that never happened
+		// (server.md, Gateway healer).
+		if err := store.Save(prior); err != nil {
+			return err
+		}
 		return h.say(row, "before-restart")
 	}
 	restartErr := ctl.Act("restart", gatewayForAdapter(unit))

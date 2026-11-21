@@ -25,13 +25,13 @@ func TestGatewayReplacementDuringEvidencePreventsRestart(t *testing.T) {
 	}
 	assertRun(t, r, "logged-out")
 }
-func TestDurableSaveCrossingWindowRetainsReservation(t *testing.T) {
+func TestDurableSaveCrossingWindowReleasesReservation(t *testing.T) {
 	r := fixture()
 	r.at = time.Date(2026, 11, 3, 4, 39, 59, 0, time.UTC)
 	r.onSave = func() { r.at = r.at.Add(2 * time.Second) }
 	assertRun(t, r, "window")
-	if r.state.LastRestart.IsZero() {
-		t.Fatal("reservation discarded")
+	if !r.state.LastRestart.IsZero() {
+		t.Fatal("reservation kept although no restart was issued")
 	}
 }
 func TestLastAdapterStatusCrossingWindowPreventsStart(t *testing.T) {

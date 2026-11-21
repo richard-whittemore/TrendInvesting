@@ -164,6 +164,7 @@ class Connection:
         self.stop_event = stop_event
         self.api.stop_event = stop_event
         self._maintenance_end = None
+        self._maintenance_zone = None
         self._maintenance_deadline = None
         self._maintenance_expires_at = None
         self._maintenance_notice = None
@@ -1009,8 +1010,8 @@ class Connection:
                                      "window; a Gateway restart is the remedy")
 
     def _log_maintenance_wait(self):
-        from zoneinfo import ZoneInfo
-        local_end = self._maintenance_end.astimezone(ZoneInfo("America/New_York"))
+        # The end is rendered in the zone its window is configured in, not a fixed one.
+        local_end = self._maintenance_end.astimezone(self._maintenance_zone)
         ending = local_end.strftime("%H:%M %Z") + (", the later one" if local_end.fold else "")
         log.info("ibkr link: IBKR servers lost inside the scheduled window ending %s; waiting until %s",
                  ending, self._maintenance_expires_at.isoformat())
@@ -1022,7 +1023,7 @@ class Connection:
             if self._lost_at is None:
                 self._lost_at = self._monotonic()
                 now = self.now_utc()
-                self._maintenance_end = self.maintenance.window_end(now)
+                self._maintenance_end, self._maintenance_zone = self.maintenance.window_end_and_zone(now)
                 if self._maintenance_end is not None:
                     self._maintenance_expires_at = max(
                         self._maintenance_end, now + timedelta(seconds=self.config.restore_timeout))

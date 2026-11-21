@@ -426,6 +426,16 @@ class InterruptionTests(unittest.TestCase):
         self.assertEqual(len(waits), 2)
         self.assertEqual(len([s for s in logs.output if "state=connectivity-lost" in s]), 1)
 
+    def test_wait_journal_renders_the_end_in_the_windows_own_zone(self):
+        from maintenance import MaintenanceSchedule
+        h = self.harness(True)
+        h.conn.maintenance = MaintenanceSchedule.from_mapping({"windows": [
+            {"days": ["Sat"], "start": "00:00", "end": "12:00", "zone": "Europe/London"}]})
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            h.fake.hold_connectivity()
+            h.conn.pump(0)
+        self.assertTrue([s for s in logs.output if "scheduled window ending 12:00 GMT; waiting" in s], logs.output)
+
     def test_stale_id_grace_is_fixed_and_foreign_id_at_start_is_immediate(self):
         h = self.harness(False)
         h.fake.stale_client_seconds = 60

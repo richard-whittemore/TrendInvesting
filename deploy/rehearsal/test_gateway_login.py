@@ -75,14 +75,18 @@ class GatewayLoginTests(unittest.TestCase):
         return subprocess.run(["bash", "-c", script, "test", *args], text=True,
                               capture_output=True, env={**os.environ, "TMPDIR": str(self.root)})
 
-    def stage(self):
+    def stage(self, user=None, rehearsal=True):
         path = DEPLOY / "libexec/stage-gateway-login.sh"
         self.assertTrue(path.exists(), "stage-gateway-login.sh missing")
         # The local user stands in for the service identity on an unprivileged host.
         script = path.read_text().replace('pwd.getpwnam("ti-gateway")',
-                                         f'pwd.getpwnam({pwd.getpwuid(os.getuid()).pw_name!r})')
+                                         f'pwd.getpwnam({(user or pwd.getpwuid(os.getuid()).pw_name)!r})')
+        env = {**os.environ}
+        env.pop("TI_REHEARSAL", None)
+        if rehearsal:
+            env["TI_REHEARSAL"] = "1"
         return subprocess.run(["bash", "-c", script], text=True, capture_output=True,
-                              env={**os.environ,
+                              env={**env,
                                    "TI_GATEWAY_LOGIN_FILE": str(self.selector),
                                    "TI_GATEWAY_SECRETS_DIRECTORY": str(self.cred),
                                    "RUNTIME_DIRECTORY": str(self.run)})
@@ -177,6 +181,43 @@ class GatewayLoginTests(unittest.TestCase):
         selected.unlink()
         selected.symlink_to(target)
         self.missing_selected()
+        self.assertFalse((self.run / "login.env").exists())
+
+    def test_missing_service_user_is_not_a_secret_problem(self):
+        self.login()
+        result = self.stage(user="ti-no-such-user-for-test")
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("user", result.stderr)
+        self.assertIn("provision.sh services", result.stderr)
+        self.assertNotIn("ti-secrets edit", result.stderr)
+        self.assertFalse((self.run / "login.env").exists())
+
+    def test_destination_failure_is_not_a_secret_problem(self):
+        if os.getuid() == 0:
+            self.skipTest("root ignores directory modes")
+        self.login()
+        self.run.chmod(0o500)
+        self.addCleanup(self.run.chmod, 0o700)
+        result = self.stage()
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("could not write", result.stderr)
+        self.assertNotIn("ti-secrets edit", result.stderr)
+
+    def test_chown_failure_is_not_a_secret_problem(self):
+        if os.getuid() == 0:
+            self.skipTest("root may chown to anyone")
+        self.login()
+        result = self.stage(user="root")
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("ownership", result.stderr)
+        self.assertNotIn("ti-secrets edit", result.stderr)
+        self.assertFalse((self.run / "login.env").exists())
+
+    def test_path_overrides_need_rehearsal(self):
+        self.login()
+        result = self.stage(rehearsal=False)
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn("/etc/trend-investing/gateway-login", result.stderr)
         self.assertFalse((self.run / "login.env").exists())
 
     def test_selected_directory(self):
@@ -612,7 +653,8 @@ log() { echo "$*"; }
 die() { echo "$*" >&2; exit 1; }
 require_native_programs() { :; }
 secrets_migrate() { echo migration-refused >&2; return 64; }
-install() { echo installed >&2; exit 99; }
+install() { case "$*" in *secrets.sh*) return 0 ;; esac; echo installed >&2; exit 99; }
+ln() { :; }
 step_services
 '''
         result = self.shell(function + "\n" + harness, str(DEPLOY))
@@ -628,7 +670,9 @@ step_services
         self.assertIn("secrets_migrate", body)
         for name in ("stage-gateway-login.sh", "render-ibc-config.sh", "ti-gateway.service"):
             self.assertIn(name, body)
-        self.assertLess(body.index("secrets_migrate"), body.index("install "))
+        self.assertLess(body.index("ln -sfn ti-secrets /usr/local/sbin/ti-unlock"), body.index("secrets_migrate"))
+        self.assertLess(body.index("/usr/local/sbin/ti-secrets"), body.index("secrets_migrate"))
+        self.assertLess(body.index("secrets_migrate"), body.index('install -d -m 0755 "$etc"'))
         self.assertIn("systemctl daemon-reload", body)
         self.assertIn("systemctl is-failed --quiet ti-gateway.service", source)
 
@@ -762,7 +806,7 @@ class GatewayInstanceTests(unittest.TestCase):
             self.login(instance)
             runtime = self.root / instance
             runtime.mkdir()
-            env = {**os.environ, "TI_GATEWAY_INSTANCE": instance,
+            env = {**os.environ, "TI_REHEARSAL": "1", "TI_GATEWAY_INSTANCE": instance,
                    "TI_GATEWAY_API_PORT": port, "RUNTIME_DIRECTORY": str(runtime),
                    "TI_GATEWAY_LOGIN_FILE": str(self.selector),
                    "TI_GATEWAY_SECRETS_DIRECTORY": str(self.cred), "IBC_TEMPLATE": str(self.template)}
