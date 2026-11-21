@@ -14,13 +14,12 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
-	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
-// testConfigPath is the fixture every test in this package runs against,
-// mirroring cmd/backtest's own testdata/configuration.json (a distinct
-// strategy_id keeps a journal produced here from ever being mistaken for one
-// cmd/backtest produced, should the two ever land beside each other).
+// testConfigPath is the retired Turtle reducer fixture (ADR 0002), also
+// used for comparisons with cmd/backtest. Its distinct strategy ID keeps
+// the two commands' journals distinguishable.
 const testConfigPath = "testdata/configuration.json"
 
 // testConfiguration reads and validates testConfigPath, failing the test
@@ -36,15 +35,15 @@ func testConfiguration(t *testing.T) event.ConfigurationPayload {
 
 // flatBar returns a completed bar for instrument on
 // 2026-01-02+dayOffset days, priced identically flat in both required views
-// (split-adjusted and raw). Every bar this package's tests drive is built
-// from this one function so that no bar's high ever exceeds another's:
+// (split-adjusted and raw). The retired Turtle fixture uses these bars
+// so that no bar's high ever exceeds another's (ADR 0002):
 // internal/strategy.Reducer's breakout rule is a strict ">" over the
 // preceding EntryChannelLength highs, and a series that never changes can
 // never satisfy it. That keeps every test in this package independent of
 // internal/fills entirely (never composed here — see decider.go's decision
 // 1 comment) and of whether an account.snapshot was ever supplied
 // (cashAtPreviousClose is read only when a Signal is sized, and a flat
-// series never raises one).
+// series never raises one). Boost adds its adjusted view in boostBarEnvelope.
 func flatBar(instrument string, dayOffset int) event.CompletedBarPayload {
 	periodEnd := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC).AddDate(0, 0, dayOffset)
 	view := event.PriceView{
@@ -210,48 +209,34 @@ func startEngineInvocation(t *testing.T, invoke func(context.Context, io.Writer)
 	return stopFn
 }
 
-// assertJournalReplays checks ADR 0017's replay equivalence: the journal a
-// run of this command wrote must not merely be well-formed
-// (journal.Verify's chain, CheckIdentity, CheckSpan — all structural, none
-// of them ever applies an input to anything) but actually REPLAYS — a fresh
-// reducer, built from the journal's own header and its own recorded
-// configuration input, fed the journal's own inputs through
-// replay.Engine.Run, must reproduce the journal's own recorded decisions
-// exactly. This mirrors cmd/backtest's own replay verification
-// (cmd/backtest/replay.go's replayJournalInputs and configurationPayloadFrom)
-// closely enough to exercise the identical rule — replay.Engine.Run's
-// contiguity check and replay.Stamp — but is written directly against this
-// package's own journal rather than importing cmd/backtest's unexported
-// pieces, since the two are separate main packages.
-//
-// TestRunEndToEndOverASocket uses this helper to reject an unreplayable
-// journal whose configuration input and first adapter bar both claim
-// Sequence 1. journal.Verify, CheckIdentity, and Split can all pass such a
-// journal because none applies its inputs to a reducer; Engine.Run must
-// reject the duplicate sequence even when those structural checks pass.
+// assertJournalReplays reconstructs the target-weight handler from recorded
+// identity, configuration and start time, and reproduces every decision
+// (ADRs 0016, 0017 and 0026). Structural journal checks alone cannot catch
+// the configuration and first adapter input both claiming sequence 1;
+// replay must also accept the complete input stream contiguously.
 func assertJournalReplays(t *testing.T, header journal.Header, inputs, decisions []event.Envelope) {
 	t.Helper()
 
-	var cfg event.ConfigurationPayload
-	var found bool
+	var reducer replay.Handler
 	for _, input := range inputs {
-		if input.Type != event.ConfigurationEventType {
+		if input.Type != event.TargetWeightConfigurationEventType {
 			continue
 		}
+		var cfg event.TargetWeightConfigurationPayload
 		if err := json.Unmarshal(input.Payload, &cfg); err != nil {
-			t.Fatalf("decode the journal's own configuration payload: %v", err)
+			t.Fatalf("decode the journal's configuration: %v", err)
 		}
-		found = true
+		var err error
+		reducer, err = targetweight.New(header.StrategyVersion, cfg, targetweight.Options{DecideFrom: input.EventTime})
+		if err != nil {
+			t.Fatalf("construct the journal's handler: %v", err)
+		}
 		break
 	}
-	if !found {
-		t.Fatal("the journal records no configuration event; a reducer cannot be built to replay it")
+	if reducer == nil {
+		t.Fatal("the journal records no target-weight configuration event; a handler cannot be built to replay it")
 	}
 
-	reducer, err := strategy.NewReducer(header.StrategyVersion, cfg)
-	if err != nil {
-		t.Fatalf("construct a reducer from the journal's own header and configuration: %v", err)
-	}
 	engine, err := replay.New(reducer)
 	if err != nil {
 		t.Fatalf("replay.New: %v", err)
@@ -279,4 +264,50 @@ func writeBarsFixture(t *testing.T, dir string, bars []event.CompletedBarPayload
 		t.Fatalf("write bars fixture: %v", err)
 	}
 	return path
+}
+
+// mustTestAsOf returns the generic tests' declared start (ADR 0012).
+func mustTestAsOf(t *testing.T) time.Time {
+	t.Helper()
+	at, err := time.Parse(time.RFC3339, testAsOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return at
+}
+
+// boostBarEnvelope adds Boost's dividend-adjusted view to a flat SPY bar
+// (ADR 0026, point 1). Dates and raw prices stay identical across views.
+func boostBarEnvelope(t *testing.T, day int, sequence uint64, version, hash string) event.Envelope {
+	t.Helper()
+	bar := flatBar("SPY", day)
+	in := barEnvelope(t, bar, sequence, version, hash)
+	adjusted := bar.SplitAdjusted
+	adjusted.View = event.ViewAdjusted
+	raw, err := json.Marshal(event.CompletedBarAdjustedPayload{CompletedBarPayload: bar, Adjusted: adjusted, AdjustedBase: "2024-01-02"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.SchemaVersion = event.CompletedBarAdjustedVersion
+	in.Payload, in.PayloadHash = raw, event.HashPayload(raw)
+	return in
+}
+
+// assertWithheldBoostTarget checks the explicit no-snapshot decision and
+// its session timestamp (ADR 0026, point 3; ADR 0019 fail-closed rule).
+func assertWithheldBoostTarget(t *testing.T, in event.Envelope, at time.Time) {
+	t.Helper()
+	if in.Type != event.TargetsDecidedEventType {
+		t.Fatalf("decision type = %q, want %q", in.Type, event.TargetsDecidedEventType)
+	}
+	var p event.TargetsDecidedPayload
+	if err := json.Unmarshal(in.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !in.EventTime.Equal(at) || p.Outcome != event.TargetsOutcomeWithheld || p.WithheldReason != event.WithheldStaleAccountSnapshot {
+		t.Fatalf("decision = %+v at %s, want withheld for missing snapshot at %s", p, in.EventTime, at)
+	}
 }

@@ -18,11 +18,12 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
-	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
 
-const durableTestInstrument = "TEST"
+const durableTestInstrument = "SPY"
 
 // sessionInputs is day's bar and its Session's close, at the sequences
 // engine.go's wire contract gives them.
@@ -31,15 +32,15 @@ func sessionInputs(t *testing.T, day int, strategyVersion, configurationHash str
 	bar := flatBar(durableTestInstrument, day)
 	sequence := configurationSequence + 1 + 2*uint64(day)
 	return []event.Envelope{
-		barEnvelope(t, bar, sequence, strategyVersion, configurationHash),
+		boostBarEnvelope(t, day, sequence, strategyVersion, configurationHash),
 		sessionClosedEnvelope(t, bar, sequence+1, strategyVersion, configurationHash),
 	}
 }
 
 func testIdentity(t *testing.T) (strategyVersion, configurationHash string) {
 	t.Helper()
-	cfg := testConfiguration(t)
-	return event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "test-build"), event.ConfigurationHash(cfg)
+	cfg := boostConfiguration(t, boostConfigPath)
+	return event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, "test-build"), event.TargetWeightConfigurationHash(cfg)
 }
 
 // driveSessions sends days [from, to) over one connection. When logPath is
@@ -123,7 +124,7 @@ func uninterruptedJournal(t *testing.T, to int) []byte {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	out := filepath.Join(dir, "journal.jsonl")
-	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, build: "test-build"})
+	stop := startEngine(t, options{mode: modeDryRun, socketPath: socketPath, configPath: boostConfigPath, asOf: testAsOf, outPath: out, logPath: filepath.Join(dir, "run.log"), build: "test-build"})
 	driveSessions(t, socketPath, "", 0, to)
 	if err := stop(); err != nil {
 		t.Fatalf("the uninterrupted run: %v", err)
@@ -139,7 +140,7 @@ func TestARestartResumesFromTheDurableLog(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	stop := startEngine(t, options{mode: modeDryRun, socketPath: socketPath, configPath: boostConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, firstLog, 0, 4)
 	if err := stop(); err != nil {
 		t.Fatalf("the first run: %v", err)
@@ -147,12 +148,12 @@ func TestARestartResumesFromTheDurableLog(t *testing.T) {
 
 	secondLog := filepath.Join(dir, "second.log")
 	secondOut := filepath.Join(dir, "second.jsonl")
-	report := resumeEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: firstLog, build: "test-build"})
+	report := resumeEngine(t, options{mode: modeDryRun, socketPath: socketPath, configPath: boostConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, secondLog, 4, 8)
 	if err := report.stop(); err != nil {
 		t.Fatalf("the resumed run: %v", err)
 	}
-	if !strings.Contains(report.out.String(), "resumed 17 record(s)") {
+	if !strings.Contains(report.out.String(), "resumed 13 record(s)") {
 		t.Fatalf("the resumed run reported %q, want the records it resumed", report.out.String())
 	}
 
@@ -180,6 +181,31 @@ func resumeEngine(t *testing.T, opts options) resumed {
 	return resumed{stop: stop, out: out}
 }
 
+// tornLogAtInput interrupts the named input's record before its commit, so
+// recovery excludes its entire group, including decisions (ADR 0027 §5).
+func tornLogAtInput(t *testing.T, whole []byte, inputID string) []byte {
+	t.Helper()
+	lines := bytes.SplitAfter(whole, []byte("\n"))
+	offset := len(lines[0])
+	for _, line := range lines[1:] {
+		if len(line) == 0 {
+			continue
+		}
+		var decoded struct {
+			Record *journal.Record `json:"record"`
+		}
+		if err := json.Unmarshal(line, &decoded); err != nil {
+			t.Fatalf("decode the durable log line: %v", err)
+		}
+		if decoded.Record != nil && decoded.Record.Kind == journal.KindInput && decoded.Record.Envelope.ID == inputID {
+			return whole[:offset+len(line)/2]
+		}
+		offset += len(line)
+	}
+	t.Fatalf("the durable log has no input %s", inputID)
+	return nil
+}
+
 // TestARestartAfterACrashMidWriteResumesFromTheLastCommit: a crash part way
 // through an Append leaves a torn tail. The restart reports it, recovers
 // every committed group, and the adapter sends the torn input again, because
@@ -187,30 +213,42 @@ func resumeEngine(t *testing.T, opts options) resumed {
 func TestARestartAfterACrashMidWriteResumesFromTheLastCommit(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
-	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	firstLog := filepath.Join(t.TempDir(), "first.log")
+	stop := startEngine(t, options{mode: modeDryRun, socketPath: socketPath, configPath: boostConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, firstLog, 0, 3)
 	if err := stop(); err != nil {
 		t.Fatalf("the first run: %v", err)
 	}
-	// The crash: day 2's close was being written when the process died.
+	// ADR 0027 §6: the simulated crash directory holds only the crashed
+	// run, never a complete run beside a strict prefix of its records.
+	// Day 2's close was being written when the process died.
 	whole := readFile(t, firstLog)
-	lines := bytes.SplitAfter(whole, []byte("\n"))
-	tornLength := len(lines[len(lines)-2]) + len(lines[len(lines)-3])/2
+	strategyVersion, configurationHash := testIdentity(t)
+	tornInput := sessionInputs(t, 2, strategyVersion, configurationHash)[1]
+	tornBytes := tornLogAtInput(t, whole, tornInput.ID)
 	torn := filepath.Join(dir, "torn.log")
-	if err := os.WriteFile(torn, whole[:len(whole)-tornLength], 0o600); err != nil {
+	if err := os.WriteFile(torn, tornBytes, 0o600); err != nil {
 		t.Fatalf("write the torn log: %v", err)
+	}
+
+	recovered := recoverFile(t, torn)
+	full := recoverFile(t, firstLog)
+	if recovered.Torn == nil || len(recovered.Entries) != len(full.Entries)-2 {
+		t.Fatalf("the crash recovered %d of %d records with tail %+v, want the final close and its decision uncommitted", len(recovered.Entries), len(full.Entries), recovered.Torn)
+	}
+	last := recovered.Entries[len(recovered.Entries)-1]
+	if last.Kind != journal.KindInput || last.Envelope.Type != event.CompletedBarEventType || last.Envelope.Sequence != configurationSequence+5 {
+		t.Fatalf("the last committed record = %+v, want day 2's bar before its torn close", last)
 	}
 
 	secondOut := filepath.Join(dir, "second.jsonl")
 	secondLog := filepath.Join(dir, "second.log")
-	report := resumeEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: torn, build: "test-build"})
-	strategyVersion, configurationHash := testIdentity(t)
+	report := resumeEngine(t, options{mode: modeDryRun, socketPath: socketPath, configPath: boostConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: torn, build: "test-build"})
 	client, err := transport.Dial(socketPath)
 	if err != nil {
 		t.Fatalf("dial the engine: %v", err)
 	}
-	if _, err := client.Decide(context.Background(), sessionInputs(t, 2, strategyVersion, configurationHash)[1]); err != nil {
+	if _, err := client.Decide(context.Background(), tornInput); err != nil {
 		t.Fatalf("resend the torn input: %v", err)
 	}
 	// The same connection continues: the engine admits one at a time.
@@ -225,50 +263,97 @@ func TestARestartAfterACrashMidWriteResumesFromTheLastCommit(t *testing.T) {
 	if got, want := readFile(t, secondOut), uninterruptedJournal(t, 5); !bytes.Equal(got, want) {
 		t.Fatal("the resumed run's journal differs from an uninterrupted run's")
 	}
-	if !bytes.Equal(readFile(t, torn), whole[:len(whole)-tornLength]) {
+	if !bytes.Equal(readFile(t, torn), tornBytes) {
 		t.Fatal("resuming modified the log it resumed from")
 	}
 }
 
 func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
-	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
-	driveSessions(t, socketPath, firstLog, 0, 1)
-	if err := stop(); err != nil {
-		t.Fatalf("the first run: %v", err)
+	comp, err := compose(boostConfigPath, "test-build", mustTestAsOf(t))
+	if err != nil {
+		t.Fatal(err)
 	}
-	damaged := filepath.Join(dir, "damaged.log")
-	if err := os.WriteFile(damaged, append(readFile(t, firstLog), []byte("garbage\n")...), 0o600); err != nil {
-		t.Fatalf("write the damaged log: %v", err)
+	buffer := &memoryLog{}
+	log, err := journal.CreateLog(buffer, logHeader(comp))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	base := options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
-	for name, tc := range map[string]struct {
-		mutate func(*options)
-		want   string
-	}{
-		"resume without a log": {func(o *options) { o.resumePath = firstLog }, "-resume requires -log"},
-		"a log that exists":    {func(o *options) { o.logPath = firstLog }, "already exists"},
-		"a missing log": {func(o *options) {
-			o.logPath, o.resumePath = filepath.Join(dir, "m.log"), filepath.Join(dir, "missing.log")
-		}, "missing.log"},
-		"a damaged log": {func(o *options) { o.logPath, o.resumePath = filepath.Join(dir, "d.log"), damaged }, "damaged"},
-		"another start": {func(o *options) {
-			o.logPath, o.resumePath, o.asOf = filepath.Join(dir, "s.log"), firstLog, "2026-01-01T00:00:01Z"
-		}, "configuration input"},
-		"another build": {func(o *options) {
-			o.logPath, o.resumePath, o.build = filepath.Join(dir, "b.log"), firstLog, "other-build"
-		}, "does not resume across builds"},
-	} {
-		opts := base
-		opts.outPath = filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".jsonl")
-		tc.mutate(&opts)
-		err := run(context.Background(), opts, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Fatalf("%s: run() = %v, want an error saying %q", name, err, tc.want)
+	recorder := journal.NewDurableRecorder(comp.handler, log, journal.DefaultMaxRecords)
+	engine, err := replay.New(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := append([]event.Envelope{comp.configEnvelope}, sessionInputs(t, 0, comp.strategyVersion, comp.configurationHash)...)
+	for _, input := range inputs {
+		if _, err := engine.Apply(context.Background(), input); err != nil {
+			t.Fatalf("record the Boost resume fixture: %v", err)
 		}
+	}
+	for _, name := range []string{"resume without a log", "a log that exists", "a missing log", "a damaged log", "another start", "another build", "a log read fails after history validation"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			firstLog := filepath.Join(dir, "first.log")
+			if err := os.WriteFile(firstLog, buffer.Bytes(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := options{mode: modeDryRun, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: boostConfigPath, asOf: testAsOf, build: "test-build",
+				outPath: filepath.Join(dir, "out.jsonl"), logPath: filepath.Join(dir, "next.log"), resumePath: firstLog}
+			var want string
+			switch name {
+			case "resume without a log":
+				opts.logPath, want = "", "-resume requires -log"
+			case "a log that exists":
+				// ADR 0018: even a valid resume cannot overwrite its source.
+				opts.logPath, want = firstLog, "already exists"
+			case "a missing log":
+				opts.resumePath, want = filepath.Join(dir, "missing.log"), "missing.log"
+			case "a damaged log":
+				if err := os.WriteFile(firstLog, append(append([]byte(nil), buffer.Bytes()...), []byte("garbage\n")...), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				want = "damaged"
+			case "another start":
+				// ADR 0027: change the composed configuration input's time,
+				// preserving the logged input and its hash chain.
+				opts.asOf, want = "2026-01-01T00:00:01Z", "configuration input"
+			case "another build":
+				opts.build, want = "other-build", "does not resume across builds"
+			case "a log read fails after history validation":
+				// ADR 0027: successful history and approval reads cannot
+				// excuse a later read fault when rebuilding the run.
+				opened := openDurableLog
+				t.Cleanup(func() { openDurableLog = opened })
+				reads := 0
+				openDurableLog = func(path string) (io.ReadCloser, error) {
+					if path == firstLog {
+						reads++
+						if reads > 2 {
+							return nil, &fs.PathError{Op: "open", Path: path, Err: errDiskFault}
+						}
+					}
+					return opened(path)
+				}
+				want = "open the durable log to resume from"
+			}
+			before := readFile(t, firstLog)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := run(ctx, opts, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("run() = %v, want an error saying %q", err, want)
+			}
+			if name == "a log read fails after history validation" && !errors.Is(err, errDiskFault) {
+				t.Fatalf("run() = %v, want the log read fault", err)
+			}
+			if !bytes.Equal(readFile(t, firstLog), before) {
+				t.Fatal("the refused start modified its source log")
+			}
+			if opts.logPath != "" && opts.logPath != firstLog {
+				if _, err := os.Stat(opts.logPath); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("the refused start left a new log behind: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -294,7 +379,7 @@ func TestRunRefusesALogAtTheJournalPath(t *testing.T) {
 		"the same path, dot": dir + string(filepath.Separator) + "." + string(filepath.Separator) + "run.jsonl",
 		"the same path, up":  filepath.Join(dir, "sub") + string(filepath.Separator) + ".." + string(filepath.Separator) + "run.jsonl",
 	} {
-		opts := options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, logPath: logPath, build: "test-build"}
+		opts := options{mode: modeDryRun, socketPath: socketPath, configPath: boostConfigPath, asOf: testAsOf, outPath: out, logPath: logPath, build: "test-build"}
 		// Bounded, so a run that wrongly starts serving fails the test
 		// rather than hanging it.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -405,7 +490,7 @@ func TestTheEngineHoldsItsInstanceLockWhileItRunsWhateverLogItWrites(t *testing.
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	stop := startEngine(t, options{mode: modeDryRun, socketPath: socketPath, configPath: boostConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
 	if err := instanceLockShared(t, dir); !errors.Is(err, syscall.EWOULDBLOCK) {
 		t.Fatalf("a shared lock on the running engine's instance lock = %v, want EWOULDBLOCK: the engine holds it", err)
 	}
@@ -416,7 +501,7 @@ func TestTheEngineHoldsItsInstanceLockWhileItRunsWhateverLogItWrites(t *testing.
 	if err := instanceLockShared(t, dir); err != nil {
 		t.Fatalf("a shared lock on the stopped engine's instance lock = %v, want it granted", err)
 	}
-	report := resumeEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "second.jsonl"), logPath: filepath.Join(dir, "second.log"), resumePath: firstLog, build: "test-build"})
+	report := resumeEngine(t, options{mode: modeDryRun, socketPath: socketPath, configPath: boostConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "second.jsonl"), logPath: filepath.Join(dir, "second.log"), resumePath: firstLog, build: "test-build"})
 	if err := instanceLockShared(t, dir); !errors.Is(err, syscall.EWOULDBLOCK) {
 		t.Fatalf("a shared lock on the resumed engine's instance lock = %v, want EWOULDBLOCK: a resume continues the run, so it holds the lock", err)
 	}
@@ -445,7 +530,7 @@ func TestTheEngineRefusesToStartWhileItsInstanceLockIsHeld(t *testing.T) {
 	// Bounded, so a start that is not refused stops rather than serving.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err = run(ctx, options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "run.jsonl"), logPath: logPath, build: "test-build"}, io.Discard)
+	err = run(ctx, options{mode: modeDryRun, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: boostConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "run.jsonl"), logPath: logPath, build: "test-build"}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "engine.lock") || !strings.Contains(err.Error(), "another engine") {
 		t.Fatalf("run = %v, want a refusal naming the instance lock another engine holds", err)
 	}
@@ -519,7 +604,7 @@ func TestTheJournalAndTheDurableLogNeverNameTheInstanceLock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			opts := options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, tc.out), logPath: filepath.Join(dir, tc.log), build: "test-build"}
+			opts := options{mode: modeDryRun, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: boostConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, tc.out), logPath: filepath.Join(dir, tc.log), build: "test-build"}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			err := run(ctx, opts, io.Discard)
@@ -552,7 +637,7 @@ func TestAnInstanceLockTheFilesystemCannotTakeRefusesTheStartAndLeavesNoLog(t *t
 			logPath := filepath.Join(dir, "run.log")
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			err := run(ctx, options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "run.jsonl"), logPath: logPath, build: "test-build"}, io.Discard)
+			err := run(ctx, options{mode: modeDryRun, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: boostConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "run.jsonl"), logPath: logPath, build: "test-build"}, io.Discard)
 			if !errors.Is(err, fault) || !strings.Contains(err.Error(), "instance lock") {
 				t.Fatalf("run = %v, want a refusal naming the instance lock and %v", err, fault)
 			}
@@ -568,10 +653,10 @@ func TestAnInstanceLockTheFilesystemCannotTakeRefusesTheStartAndLeavesNoLog(t *t
 // new build, never a resume. The refusal must name both builds and the
 // procedure, and must not be confused with a changed configuration.
 func TestAResumeAcrossBuildsNamesTheUpgradeProcedure(t *testing.T) {
-	cfg := testConfiguration(t)
-	hash := event.ConfigurationHash(cfg)
-	old := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-1"))
-	next := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-2"))
+	cfg := boostConfiguration(t, momentumConfigPath)
+	hash := event.TargetWeightConfigurationHash(cfg)
+	old := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, "build-1"))
+	next := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, "build-2"))
 	err := checkResumable(journal.Recovery{Header: old}, next, event.Envelope{})
 	if err == nil {
 		t.Fatal("checkResumable accepted a log from another build")
@@ -595,10 +680,10 @@ func TestAResumeAcrossBuildsNamesTheUpgradeProcedure(t *testing.T) {
 // and -as-of must send the operator to the configuration correction, not to
 // the build-upgrade procedure, which would not fix the start time.
 func TestAChangedStartOutranksABuildChange(t *testing.T) {
-	cfg := testConfiguration(t)
-	hash := event.ConfigurationHash(cfg)
-	old := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-1"))
-	next := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-2"))
+	cfg := boostConfiguration(t, momentumConfigPath)
+	hash := event.TargetWeightConfigurationHash(cfg)
+	old := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, "build-1"))
+	next := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, "build-2"))
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	logged := event.Envelope{EventTime: start, RecordedAt: start}
 	composed := event.Envelope{EventTime: start.Add(time.Second), RecordedAt: start.Add(time.Second)}
@@ -614,7 +699,7 @@ func TestAChangedStartOutranksABuildChange(t *testing.T) {
 // backtest keeps -log optional. There is no default mode.
 func TestTheDurableLogIsRequiredOutsideABacktest(t *testing.T) {
 	dir := t.TempDir()
-	base := options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "e.sock"), configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
+	base := options{mode: modeDryRun, socketPath: filepath.Join(shortSocketDir(t), "e.sock"), configPath: boostConfigPath, asOf: testAsOf, build: "test-build"}
 	for _, mode := range []string{"dry-run", "paper", "live"} {
 		opts := base
 		opts.mode = mode
@@ -635,6 +720,8 @@ func TestTheDurableLogIsRequiredOutsideABacktest(t *testing.T) {
 		t.Errorf("an unknown mode: run() = %v, want a refusal naming -mode", err)
 	}
 
+	// Covers the retired Turtle reducer (ADR 0002): only its backtest
+	// mode permits an omitted durable log.
 	// With -log a mode that can reach a broker starts (a dry-run Boost
 	// configuration; the Turtle reducer runs only as a backtest); a backtest
 	// needs no log.
