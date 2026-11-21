@@ -14,7 +14,7 @@
 #                              also install the engine, only with all engine
 #                              instances stopped for an approved fresh run
 #   sudo ti-release --rollback put the previous non-engine build back
-#   sudo ti-release --engine --rollback also roll the engine back
+#   sudo ti-release --engine --rollback install the previous programs release's engine
 #   ti-release --status        print the programs and engine builds separately,
 #                              the previous programs tag, and whether a
 #                              kept build (.replaced or .rescue-*) is waiting;
@@ -56,7 +56,7 @@
 # The reporter starts afresh at each firing. Only the dashboard is restarted,
 # and it must stay active for three checks a second apart. A transitioning
 # engine unit, or systemd that cannot be asked, always blocks a release;
-# --engine also refuses active units. The check is repeated before the swap.
+# --engine also refuses active and failed units (ADR 0027 §6). The check is repeated before the swap.
 #
 # Two builds are kept under releases/, each with its checksums.txt: the
 # current one and the previous one (the hand-installed build, on the first
@@ -158,12 +158,32 @@ kept_tag() {
   fi
 }
 
+# Validate the raw identity before shell substitution can discard bytes
+# (docs/manual/server.md, "Installing a build"). Accept one ASCII line,
+# with an optional final newline, bounded for backup filenames.
+valid_build_identity() {
+  test -f "$1" &&
+    test "$(wc -c <"$1")" -le 65 &&
+    test "$(wc -l <"$1")" -le 1 &&
+    test "$(LC_ALL=C awk 'END {print NR}' "$1")" -eq 1 &&
+    test "$(LC_ALL=C tr -d 'A-Za-z0-9._\n-' <"$1" | wc -c)" -eq 0 &&
+    LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$1"
+}
+
 if test "$mode" = status; then
   st() { cat "$releases/$1" 2>/dev/null || true; }
   echo "current: $(st current)"
   echo "previous: $(st previous)"
-  echo "programs: $(st current)"
-  echo "engine: $(cat "$bin/BUILD" 2>/dev/null || echo unknown)"
+  if valid_build_identity "$bin/BUILD"; then echo "engine: $(cat "$bin/BUILD")"; else echo "engine: invalid"; fi
+  if test -d "$releases/.engine-before"; then
+    if valid_build_identity "$releases/.engine-before/initial/BUILD"; then
+      echo "engine before last --engine: $(cat "$releases/.engine-before/initial/BUILD")"
+    else
+      echo "engine before last --engine: invalid"
+    fi
+  else
+    echo "engine before last --engine: none"
+  fi
   lock_stale=0
   if test -d "$releases/.lock"; then
     lpid=$(cat "$releases/.lock/pid" 2>/dev/null || true)
@@ -275,13 +295,13 @@ refuse_if_engine_busy() {
   local busy states=activating,deactivating,reloading
   # An engine build changes only at an owner-approved fresh run (ADR 0027
   # §6; docs/manual/server.md, Installing a release).
-  if test "$engine" = 1; then states=active,$states; fi
+  if test "$engine" = 1; then states=active,failed,$states; fi
   if ! busy=$("$systemctl" list-units --plain --no-legend --state="$states" 'ti-engine@*' 2>/dev/null); then
     die "could not ask systemd whether an engine unit is mid-restart; nothing installed"
   fi
   if test -n "$busy"; then
     if test "$engine" = 1; then
-      die "engine units are active or mid-restart: $busy. Stop all ti-engine@ instances yourself, then approve a fresh run per docs/runbooks/durable-log.md before retrying --engine; nothing installed"
+      die "engine units are active, failed or mid-restart: $busy. See docs/runbooks/durable-log.md, 'Resume after a crash'; only once the owner has decided it is a fresh run, systemctl reset-failed ti-engine@<instance>. Stop all ti-engine@ instances yourself, then approve a fresh run before retrying --engine; nothing installed"
     fi
     printf 'ti-release: an engine unit is mid-restart; nothing installed. Wait until it is active or stopped:\n%s\n' "$busy" >&2
     exit 1
@@ -511,18 +531,6 @@ commit_on_main() {
   test "$main_status" = identical || test "$main_status" = behind || return 1
 }
 
-# Validate the raw identity before shell substitution can discard bytes
-# (docs/manual/server.md, "Installing a build"). Accept one ASCII line,
-# with an optional final newline, bounded for backup filenames.
-valid_build_identity() {
-  test -f "$1" &&
-    test "$(wc -c <"$1")" -le 65 &&
-    test "$(wc -l <"$1")" -le 1 &&
-    test "$(LC_ALL=C awk 'END {print NR}' "$1")" -eq 1 &&
-    test "$(LC_ALL=C tr -d 'A-Za-z0-9._\n-' <"$1" | wc -c)" -eq 0 &&
-    LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$1"
-}
-
 # install_from DIR: install the selected programs DIR/checksums.txt lists.
 # The engine and BUILD move together only with --engine (server manual,
 # "Installing a release"); recovery can explicitly exclude them. Each is
@@ -583,22 +591,30 @@ flush() {
 # put_back NAME: re-check the kept build NAME against its checksums and put it
 # back; says so loudly if it cannot.
 put_back() {
-  if ! check_dir "$releases/$1"; then
-    log "ALERT: the kept build $1 failed its checksums and was NOT put back; the programs in $bin may be a mix of builds: run sudo ti-release <a good tag>"
-    return 1
+  local restored=1 remedy='sudo ti-release <a good tag>' d=$releases/.engine-before/initial
+  if test "$engine" = 1; then remedy='sudo ti-release --engine <a good tag>'; fi
+  if check_dir "$releases/$1"; then
+    install_from "$releases/$1" "" 0 || restored=0
+  else
+    log "ALERT: the kept build $1 failed its checksums and was NOT put back; the programs in $bin may be a mix of builds: run $remedy"
+    restored=0
   fi
-  local restored=1
-  install_from "$releases/$1" "" 0 || restored=0
   if test "$engine" = 1; then
-    if ! check_dir "$releases/.engine-before/initial" || ! install_from "$releases/.engine-before/initial" initial 1; then restored=0; fi
+    if test ! -f "$d/ti-engine"; then
+      log "there was no engine before this install"
+      install_from "$d" initial 1 || restored=0
+    elif ! check_dir "$d" || ! install_from "$d" initial 1; then
+      restored=0
+    fi
+    if test ! -f "$d/BUILD"; then rm -f "$bin/BUILD" || restored=0; fi
   fi
   if test "$restored" = 0; then
-    log "ALERT: putting $1 back failed partway; the programs in $bin may be a mix of builds: run sudo ti-release <a good tag>"
+    log "ALERT: putting $1 back failed partway; the programs in $bin may be a mix of builds: run $remedy"
     return 1
   fi
   if test -f "$releases/$1/.starter-installed" && ! listed "$releases/$1" | grep -qx ti-gateway-start; then
     if ! install -m 0755 "$releases/$1/.starter-installed" "$bin/.ti-gateway-start.new" || ! mv -f "$bin/.ti-gateway-start.new" "$bin/ti-gateway-start"; then
-      log "ALERT: the previous ti-gateway-start could not be put back; the programs in $bin may be a mix of builds: run sudo ti-release <a good tag>"
+      log "ALERT: the previous ti-gateway-start could not be put back; the programs in $bin may be a mix of builds: run $remedy"
       return 1
     fi
   fi
@@ -793,6 +809,9 @@ if ! listed "$releases/$prev" | grep -qx ti-gateway-start; then
 fi
 test -n "$cur" && test -d "$releases/$cur" || die "the current build's folder is missing, so it could not be put back; nothing changed"
 check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) failed its checksums, so it could not be put back; nothing changed"
+if test "$engine" = 1 && test "$(cat "$bin/BUILD" 2>/dev/null || true)" != "$cur"; then
+  log "WARNING: installed engine build $(cat "$bin/BUILD" 2>/dev/null || echo unknown) differs from current programs build $cur; --engine --rollback installs the engine from previous programs release $prev, which may not be the engine that was running. Compare engine: with previous: in --status first."
+fi
 open_window
 refuse_if_engine_busy
 ensure_window

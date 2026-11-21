@@ -86,11 +86,14 @@ case $1 in
     if [[ "$*" == *active,* ]] && test -n "${FAKE_ENGINE_ACTIVE:-}"; then
       echo "$FAKE_ENGINE_ACTIVE.service loaded active running"; exit 0
     fi
+    if [[ "$*" == *failed* ]] && test -n "${FAKE_ENGINE_FAILED:-}"; then
+      echo "$FAKE_ENGINE_FAILED.service loaded failed failed"; exit 0
+    fi
     n=$(($(cat "$FAKE_CTL_LOG.lists" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE_CTL_LOG.lists"
     from=${FAKE_ENGINE_BUSY_FROM:-}
     if test -n "${FAKE_ENGINE_BUSY:-}"; then from=1; fi
     if test -e "$FAKE_CTL_LOG.busy"; then from=1; fi
-    if test -n "$from" && test "$n" -ge "$from"; then echo "ti-engine@boost.service loaded deactivating stop"; fi ;;
+    if test -n "$from" && test "$n" -ge "$from" && [[ "$*" == *"${FAKE_ENGINE_STATE:-deactivating}"* ]]; then echo "ti-engine@boost.service loaded ${FAKE_ENGINE_STATE:-deactivating} stop"; fi ;;
   is-active)
     if grep -q BAD "$TI_PREFIX/bin/ti-dashboard"; then exit 3; fi
     if grep -q FLAP "$TI_PREFIX/bin/ti-dashboard"; then
@@ -262,7 +265,7 @@ expect "plain release preserves engine bytes" "$engine_before" "$(sha "$TI_PREFI
 expect "plain release preserves engine BUILD" hand-build "$(cat "$TI_PREFIX/bin/BUILD")"
 grep -q 'engine.*left.*current build' "$work/out" || fail 'plain release does not explain preserved engine'
 expect "split status succeeds" 0 "$(run --status)"
-grep -q '^programs: v1.0.0' "$work/out" || fail 'status lacks programs build'
+grep -q '^current: v1.0.0' "$work/out" || fail 'status lacks programs build'
 grep -q '^engine: hand-build' "$work/out" || fail 'status lacks engine build'
 for unit in ti-engine@boost ti-engine@trad-ira; do
   expect "active $unit refuses engine release" nonzero "$(nonzero "$(FAKE_ENGINE_ACTIVE=$unit run --engine v1.1.0)")"
@@ -285,6 +288,64 @@ expect "plain rollback of split build" 0 "$(run --rollback)"
 expect "plain rollback keeps differing engine" 'echo ti-engine v1.1.0' "$(installed ti-engine)"
 expect "active rollback refused" nonzero "$(nonzero "$(FAKE_ENGINE_ACTIVE=ti-engine@trad-ira run --engine --rollback)")"
 if grep -E '^(start|stop|restart).*ti-engine' "$work/ctl.log"; then fail 'release controlled engine service'; fi
+
+fresh_server
+engine_before=$(sha "$TI_PREFIX/bin/ti-engine")
+build_before=$(sha "$TI_PREFIX/bin/BUILD")
+expect "plain failed dashboard release" nonzero "$(nonzero "$(run v1.2.0)")"
+expect "plain failure preserves engine bytes" "$engine_before" "$(sha "$TI_PREFIX/bin/ti-engine")"
+expect "plain failure preserves BUILD bytes" "$build_before" "$(sha "$TI_PREFIX/bin/BUILD")"
+for transition in activating deactivating reloading; do
+  fresh_server
+  expect "plain release refuses $transition engine" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY=1 FAKE_ENGINE_STATE=$transition run v1.0.0)")"
+  all_are "plain transition refusal preserves bin" hand
+  if grep -q '^restart' "$work/ctl.log"; then fail "plain transition refusal restarted a service"; fi
+done
+fresh_server
+expect "failed engine refuses engine release" nonzero "$(nonzero "$(FAKE_ENGINE_FAILED=ti-engine@boost run --engine v1.0.0)")"
+for remedy in 'ti-engine@boost' 'docs/runbooks/durable-log.md' 'Resume after a crash' 'only once the owner has decided it is a fresh run' 'systemctl reset-failed ti-engine@<instance>'; do
+  grep -Fq "$remedy" "$work/out" || fail "failed engine refusal lacks $remedy"
+done
+all_are "failed engine refusal preserves bin" hand
+expect "plain release permits failed engine" 0 "$(FAKE_ENGINE_FAILED=ti-engine@boost run v1.0.0)"
+expect "split engine rollback succeeds" 0 "$(run --engine --rollback)"
+grep -q 'WARNING:.*hand-build.*v1.0.0' "$work/out" || fail 'engine rollback lacks both differing builds'
+expect "engine backup status" 0 "$(run --status)"
+grep -qx 'engine before last --engine: hand-build' "$work/out" || fail 'status lacks saved engine identity'
+if grep -q '^programs:' "$work/out"; then fail 'status duplicates current as programs'; fi
+for bad_identity in nul multiline overlong; do
+  case $bad_identity in
+    nul) printf 'v1.0.0\0\n' >"$TI_PREFIX/bin/BUILD" ;;
+    multiline) printf 'v1.0.0\nv1.1.0\n' >"$TI_PREFIX/bin/BUILD" ;;
+    overlong) printf '%066d\n' 0 >"$TI_PREFIX/bin/BUILD" ;;
+  esac
+  expect "status with $bad_identity identity" 0 "$(run --status)"
+  grep -qx 'engine: invalid' "$work/out" || fail "status accepts $bad_identity identity"
+done
+fresh_server
+run v1.0.0 >/dev/null
+engine_before=$(sha "$TI_PREFIX/bin/ti-engine")
+build_before=$(sha "$TI_PREFIX/bin/BUILD")
+expect "same-tag engine save and programs restore fail" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 run --engine v1.0.0)")"
+expect "same-tag save failure restores engine independently" "$engine_before" "$(sha "$TI_PREFIX/bin/ti-engine")"
+expect "same-tag save failure restores BUILD independently" "$build_before" "$(sha "$TI_PREFIX/bin/BUILD")"
+grep -Fq 'sudo ti-release --engine <a good tag>' "$work/out" || fail 'engine restore ALERT lacks engine remedy'
+for missing in engine build both; do
+  fresh_server
+  case $missing in engine) rm "$TI_PREFIX/bin/ti-engine" ;; build) rm "$TI_PREFIX/bin/BUILD" ;; both) rm "$TI_PREFIX/bin/ti-engine" "$TI_PREFIX/bin/BUILD" ;; esac
+  expect "failed engine release with missing $missing" nonzero "$(nonzero "$(run --engine v1.2.0)")"
+  if test "$missing" != build; then
+    grep -q 'there was no engine before this install' "$work/out" || fail 'missing engine recovery lacks explanation'
+    if grep -q 'ALERT' "$work/out"; then fail 'missing engine recovery gives mixed-builds ALERT'; fi
+  else
+    expect "engine restored without prior BUILD" 'echo ti-engine hand' "$(installed ti-engine)"
+  fi
+  if test "$missing" != engine; then
+    test ! -e "$TI_PREFIX/bin/BUILD" || fail 'recovery invented a prior BUILD'
+  else
+    expect "prior BUILD restored" hand-build "$(cat "$TI_PREFIX/bin/BUILD")"
+  fi
+done
 
 fresh_server
 expect "no argument is refused" nonzero "$(nonzero "$(run)")"

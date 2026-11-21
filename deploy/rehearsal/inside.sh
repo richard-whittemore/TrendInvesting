@@ -1001,7 +1001,7 @@ rm /root/release-engine-active
 /root/deploy/release.sh --unverified --engine v9.9.9 >/root/release.out 2>&1 || fail "explicit engine release failed"
 cmp "$rel/v9.9.9/ti-engine" /opt/trend-investing/bin/ti-engine || fail "explicit engine release did not install engine"
 /root/deploy/release.sh --status >/root/release.out
-grep -q '^programs: v9.9.9' /root/release.out || fail "status lacks programs build"
+grep -q '^current: v9.9.9' /root/release.out || fail "status lacks programs build"
 grep -q '^engine: v9.9.9' /root/release.out || fail "status lacks engine build"
 /root/deploy/release.sh --rollback >/root/release.out 2>&1 || fail "plain rollback failed"
 cmp "$rel/v9.9.9/ti-engine" /opt/trend-investing/bin/ti-engine || fail "plain rollback changed engine"
