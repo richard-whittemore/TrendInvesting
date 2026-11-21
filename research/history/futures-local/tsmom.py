@@ -63,7 +63,7 @@ if _HERE not in sys.path:
 import backtest  # noqa: E402  (span_cagr, check_dates, HoldoutError, the defaults)
 import loader  # noqa: E402
 import rates  # noqa: E402
-import rules  # noqa: E402  (research/qc-cloud-futures/rules.py, put on sys.path by backtest)
+import rules  # noqa: E402  (research/history/qc-cloud-futures/rules.py, put on sys.path by backtest)
 import tsmom_markets  # noqa: E402
 
 DEFAULT_START = date(1985, 1, 1)

@@ -1158,7 +1158,7 @@ be. The baselines are the recorded runs, which trade on the first session.
     buy-and-hold of the traded ETF, with the span in each value.
 - **Local futures scripts.** `research/edge-search/futures/carry.py` and
   `blend.py` run the carry and blend studies on the
-  `research/futures-local` engine.
+  `research/history/futures-local` engine.
   - They need the Pinnacle CLC files (`PINNACLE_DIR`) and a TB3MS CSV
     (`TB3MS_CSV`). Neither is in the repository.
   - `carry.py --holdout` runs the single held-out carry run.

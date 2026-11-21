@@ -2,8 +2,8 @@
 (System 2, 55/20, 1% Unit, 2N stop, 1/2N Adds, long AND short) on
 back-adjusted continuous futures from Pinnacle Data's CLC database.
 
-research/qc-cloud-futures/rules.py is the single rule core: it is imported
-from there, never copied. research/qc-cloud-futures/main.py (the
+research/history/qc-cloud-futures/rules.py is the single rule core: it is imported
+from there, never copied. research/history/qc-cloud-futures/main.py (the
 QuantConnect version) is the spec for everything this file adds around it:
 the Session order, entries, Adds, exits, Unit caps, the Notional Account,
 Strength ranking and slippage. README.md lists every place this file
@@ -11,7 +11,7 @@ differs from main.py, and why.
 
 Why a local engine: QuantConnect's free futures data covers only ES before
 2007, and roll fills on sparse contracts distorted its P&L
-(research/qc-cloud-futures/README.md, "Cloud result"). Here signals, fills
+(research/history/qc-cloud-futures/README.md, "Cloud result"). Here signals, fills
 and P&L all come from one back-adjusted series per market. Back-adjusting
 removes the roll price jumps, so a roll moves no price. Its cost is
 charged separately (``_charge_rolls``).
@@ -38,7 +38,7 @@ if _RULE_CORE not in sys.path:
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-import rules  # noqa: E402  (research/qc-cloud-futures/rules.py)
+import rules  # noqa: E402  (research/history/qc-cloud-futures/rules.py)
 import loader  # noqa: E402
 import markets as market_table  # noqa: E402
 import rates  # noqa: E402

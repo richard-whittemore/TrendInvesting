@@ -9,8 +9,8 @@ reproduced or re-run.
 
 **This is not the production Go engine** (`internal/strategy`,
 `internal/sizing`, `internal/indicator`, `internal/fills`) and it is not the
-Turtle Baseline / Sublime research checks in `research/qc-cloud`,
-`research/qc-cloud-sublime`, and `research/qc-cloud-futures` (those have
+Turtle Baseline / Sublime research checks in `research/history/qc-cloud`,
+`research/history/qc-cloud-sublime`, and `research/history/qc-cloud-futures` (those have
 their own TDD suites, ADR citations, and a Go-engine fidelity check; see
 their own READMEs). This folder is a wider, faster, rougher search across
 published strategies — ETF trend rules, stock factors, timing effects, risk
@@ -168,13 +168,13 @@ backtest runs on their servers.
   bond holding for `portfolio/bonds.json`. `etf/rotation.py`'s `country_rot` mode ranks
   17 single-country funds outside the US the same way as `sector_rot`.
 - `futures/` — `carry.py` and `blend.py`, local studies on the
-  `research/futures-local` engine and the Pinnacle files, which are not in
+  `research/history/futures-local` engine and the Pinnacle files, which are not in
   the repository.
 
 ## How each script is run on QuantConnect Cloud
 
 Each script is a single self-contained `QCAlgorithm`. There is no
-`build_upload.py` step for this folder (unlike `research/qc-cloud`): every
+`build_upload.py` step for this folder (unlike `research/history/qc-cloud`): every
 file here is well under QuantConnect's Free-plan 32,000-character-per-file
 limit, so it is pasted as-is.
 
@@ -261,7 +261,7 @@ a single holdout run, and what it means for a holdout to be "spent" — is in
 
 - **Every script is syntax-checked** (`python3 -m py_compile`). None can be
   run locally, since each imports `AlgorithmImports`, which only
-  QuantConnect's cloud supplies. (`research/qc-cloud` and its siblings
+  QuantConnect's cloud supplies. (`research/history/qc-cloud` and its siblings
   avoid this by keeping their rules in a standard-library-only `rules.py`;
   these one-off searches do not.)
 - **`timing/test_timing.py`** covers the Boost strategy and the

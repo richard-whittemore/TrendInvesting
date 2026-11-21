@@ -3,7 +3,7 @@
 ## What this is, and what it is not
 
 This folder is a **free, research-only** check of a different question from
-`research/qc-cloud`'s own. That folder checks the *equity-adapted Baseline*
+`research/history/qc-cloud`'s own. That folder checks the *equity-adapted Baseline*
 (half Faith's Unit Volatility Fraction, long-only) against US stocks, and
 finds it loses money there after realistic costs -- see its own README.md.
 This folder checks Faith's **own, unadapted** system -- System 2, 55/20, his
@@ -17,17 +17,17 @@ This is **not** the production Go engine (`internal/strategy`,
 much simpler Python re-implementation of Faith's rules, built to run entirely
 inside QuantConnect's browser-based IDE, on the Free plan, with no
 locally-installed tools and no API key. It makes no claim of bit-for-bit
-parity with the Go engine, and it is not `research/qc-cloud`'s own code
+parity with the Go engine, and it is not `research/history/qc-cloud`'s own code
 copied and modified -- it is a fresh implementation, generalised for both
 directions and for futures' own contract mechanics from the start, and
-`rules.py` here is not imported by, or the same file as, `research/qc-cloud/rules.py`.
+`rules.py` here is not imported by, or the same file as, `research/history/qc-cloud/rules.py`.
 
 **No market data is committed to this repository.** This folder is text
 files only; QuantConnect supplies the price history when you run a backtest
 on their servers. The original version of this script and README was
 written without fetching any market data or any external documentation --
 every QuantConnect API name was drawn from this repository's own prior
-verified use of LEAN's Python API (`research/qc-cloud/main.py`,
+verified use of LEAN's Python API (`research/history/qc-cloud/main.py`,
 `adapter/lean/`) and this project's best understanding of LEAN's documented
 continuous-futures support, not from a live lookup. The cloud result below
 records that this has since compiled and run; "Uncertain about the API"
@@ -189,7 +189,7 @@ and AUD each alone; `metals-base` (copper alone); `energy-natgas` (natural
 gas alone, decoupled from oil since the shale era); `grains` and `softs`
 each as one undivided group -- is this script's own **considered, unverified**
 choice, made because Faith's text does not name a finer split for them.
-This is the same kind of caveat `research/qc-cloud/README.md`'s own
+This is the same kind of caveat `research/history/qc-cloud/README.md`'s own
 Morningstar-derived classification carries for equities: a reasoned mapping,
 not one this repository can verify without a live backtest.
 
@@ -314,7 +314,7 @@ similarly modelled in `rules.py`).
 ## Start date
 
 `TurtleFuturesResearch.START_DATE` is set to `(1998, 1, 1)` -- the same
-provisional figure `research/qc-cloud` uses for its own equity history. The
+provisional figure `research/history/qc-cloud` uses for its own equity history. The
 first cloud run (`e6ac962a864551841220445e4aec451b`, see "Cloud result"
 above) has since reported each market's own actual data start: only ES has
 data before April 2007, most other markets start mid-2007, HG/SI/GC start
@@ -337,7 +337,7 @@ diversified futures test (see "Cloud result").
   *The Turtle Rules*: the Heating Oil Unit-sizing worked example [T p.14-15]
   and the Gold and Crude Add ladders [T p.20], plus this script's own
   short-side mirror-image tests for each. Run with
-  `python3 -m unittest discover -s research/qc-cloud-futures -p "test_*.py"`,
+  `python3 -m unittest discover -s research/history/qc-cloud-futures -p "test_*.py"`,
   or via `make research-test` from the repository root.
 - `main.py` -- the thin `QCAlgorithm` that drives `rules.py` over the market
   list above.
@@ -345,9 +345,9 @@ diversified futures test (see "Cloud result").
   docstring and comment removed, via `ast`) to `dist/`, which fit
   QuantConnect's Free-plan 32,000-character-per-file limit (as built:
   `main.py` about 29,700 characters, `rules.py` about 14,900 -- run
-  `python3 research/qc-cloud-futures/build_upload.py` to rebuild and see the
+  `python3 research/history/qc-cloud-futures/build_upload.py` to rebuild and see the
   current count). Standard library only; identical in mechanism to
-  `research/qc-cloud/build_upload.py`.
+  `research/history/qc-cloud/build_upload.py`.
 - `dist/` -- `build_upload.py`'s output. Git-ignored: a build artifact, never
   the source of truth.
 - `test_build_upload.py` -- checks both stripped files stay under the limit,
@@ -357,13 +357,13 @@ diversified futures test (see "Cloud result").
 
 ## How to run it on QuantConnect
 
-Follow `research/qc-cloud/README.md`'s own "How to run it on QuantConnect"
+Follow `research/history/qc-cloud/README.md`'s own "How to run it on QuantConnect"
 step by step, substituting this folder's files: build with
-`python3 research/qc-cloud-futures/build_upload.py`, then paste
-`research/qc-cloud-futures/dist/main.py` and
-`research/qc-cloud-futures/dist/rules.py` into a **new** QuantConnect
+`python3 research/history/qc-cloud-futures/build_upload.py`, then paste
+`research/history/qc-cloud-futures/dist/main.py` and
+`research/history/qc-cloud-futures/dist/rules.py` into a **new** QuantConnect
 project (Python), named e.g. `turtle-futures-research` -- never mix this
-folder's files with `research/qc-cloud`'s own project, since the two are
+folder's files with `research/history/qc-cloud`'s own project, since the two are
 independent checks with independent `rules.py` files. **This backtest needs
 a Futures data add-on / subscription on your QuantConnect account** (check
 your account's Data tab before running, and be sure it stays inside your
@@ -374,7 +374,7 @@ run.
 
 ## How to find the results
 
-Identical mechanism to `research/qc-cloud`'s own "How to find the results":
+Identical mechanism to `research/history/qc-cloud`'s own "How to find the results":
 read the **statistics panel**, not the Logs tab (the Free plan's 10 KB log
 budget). The keys this script adds:
 
@@ -384,7 +384,7 @@ budget). The keys this script adds:
   of the Campaign's own initial 1-Unit risk).
 - `Commission` -- total ordinary trading commission, in dollars, LEAN's own
   default Interactive Brokers futures fee schedule (see "Deviations": unlike
-  `research/qc-cloud`, no custom fee model is written here).
+  `research/history/qc-cloud`, no custom fee model is written here).
 - `Rolls` -- how many rolls occurred and their total commission ("roll
   cost"), reported separately from `Commission`.
 - `Markets unavailable` -- which configured tickers this account's
@@ -402,23 +402,23 @@ budget). The keys this script adds:
    exactly, per direction. See "The rules, and their citations" above.
 2. **No cash/margin affordability model in `rules.py`.** Futures are
    margined (`SetBrokerageModel(...,
-   AccountType.Margin)`). `research/qc-cloud`'s own `SessionLedger` reserves
+   AccountType.Margin)`). `research/history/qc-cloud`'s own `SessionLedger` reserves
    cash for a Cash equity account's own affordability check; this script
    reserves Unit-cap headroom only (`rules.SessionCapLedger`) and leaves
    margin affordability to QuantConnect's own margin model, which fails an
    order outright (`OrderStatus.Invalid`) if it cannot be margined --
-   handled exactly like `research/qc-cloud`'s own anomaly path: the Unit-cap
+   handled exactly like `research/history/qc-cloud`'s own anomaly path: the Unit-cap
    reservation is released, nothing else happens, and no cash amount is
    estimated in pure Python for a check this repository cannot price
    without a live margin model.
-3. **No custom fee model.** `research/qc-cloud`'s equity script needed a
+3. **No custom fee model.** `research/history/qc-cloud`'s equity script needed a
    custom `RawShareFeeModel` because its orders are stated in split-adjusted
    shares while LEAN's own fee model charges per RAW share. Futures carry no
    split/raw distinction (a contract is a contract), so this script relies
    on `SetBrokerageModel`'s own default Interactive Brokers futures fee
    schedule directly, with no override.
 4. **The custom fill model targets `FutureFillModel`, not verified.**
-   `research/qc-cloud`'s equivalent subclasses `EquityFillModel`, a class
+   `research/history/qc-cloud`'s equivalent subclasses `EquityFillModel`, a class
    this repository has used before and confirmed works
    (`adapter/lean/orders.py`). `FutureFillModel` is this script's own,
    reasoned but UNVERIFIED guess at LEAN's equivalent per-security-type fill
@@ -443,15 +443,15 @@ budget). The keys this script adds:
 8. **No `PartiallyFilled` accumulation machinery**, no split/dividend
    handling, no point-in-time universe eligibility screen, no classification
    input beyond the fixed `CORRELATION_GROUPS` table above -- all
-   `research/qc-cloud` deviations that exist there specifically to handle
+   `research/history/qc-cloud` deviations that exist there specifically to handle
    equity-market mechanics (splits, dividends, a changing universe,
    fundamentals-derived sectors) this futures market list has no equivalent
    of. A `PartiallyFilled` order is still logged once, in full, and
-   otherwise ignored exactly as `research/qc-cloud/main.py` documents,
+   otherwise ignored exactly as `research/history/qc-cloud/main.py` documents,
    since the same ADR 0005/native-fill-model reasoning (an order fills its
    whole quantity or nothing) applies unchanged.
 9. **Local LEAN has no futures data.** This repository's usual fidelity
-   check (`research/qc-cloud/fidelity/`, comparing a local LEAN run against
+   check (`research/history/qc-cloud/fidelity/`, comparing a local LEAN run against
    the Go engine's own journal) has no equivalent here: there is no Go
    engine futures implementation to compare against, and no local futures
    market data to run LEAN against even if there were. Only `test_rules.py`
@@ -473,7 +473,7 @@ right place to start:
 
 1. **`FutureFillModel`'s exact class name and namespace.** This script
    subclasses it (`main.py`'s `_stop_limit_fill_model`) by direct analogy
-   with `research/qc-cloud`'s own confirmed `EquityFillModel` subclass.
+   with `research/history/qc-cloud`'s own confirmed `EquityFillModel` subclass.
    **Confirmed**: the recorded backtest compiled this subclass.
 2. **`AddFuture`'s exact keyword names** (`dataMappingMode`,
    `dataNormalizationMode`, `extendedMarketHours`) and whether
@@ -498,7 +498,7 @@ right place to start:
 6. **Whether `StopLimitOrder` accepts a negative quantity** (a short
    entry/Add) with `limitPrice` below `stopPrice`, the configuration this
    script relies on for a short's stop-limit sell, symmetric to a long's
-   stop-limit buy. `research/qc-cloud` has only ever exercised the long
+   stop-limit buy. `research/history/qc-cloud` has only ever exercised the long
    (buy) case. **Confirmed**: the recorded backtest traded both directions.
 7. **The back-adjustment continuity assumption** in "Continuous futures and
    roll handling", originally: that the back-adjusted continuous series and

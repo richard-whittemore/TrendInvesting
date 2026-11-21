@@ -9,7 +9,7 @@ rules.py is the pure rule core; this file is QuantConnect wiring only:
 universe selection, order placement, fill handling and the closing summary.
 The wiring (fill, slippage and fee models, raw-share handling, dividends,
 queued order events, settlement, retained symbols, re-placed Exit Orders,
-the SPY benchmark, runtime statistics) is carried from research/qc-cloud,
+the SPY benchmark, runtime statistics) is carried from research/history/qc-cloud,
 whose README records why each piece exists; README.md here lists what
 differs.
 """
@@ -37,7 +37,7 @@ def _stop_limit_buy_fill_price(level, price_cap, open_, high, low, slippage_amou
     """ADR 0005's stop-limit buy, as amended: triggers on a touch of
     ``level``, fills at max(level, open) within the cap, else works as a
     limit at the cap; slippage (ADR 0013) is added after the cap. None for
-    no fill this bar. Copied from research/qc-cloud/main.py."""
+    no fill this bar. Copied from research/history/qc-cloud/main.py."""
     if high < level:
         return None
     if open_ <= price_cap:
@@ -64,7 +64,7 @@ def _atr_slippage_model(atr_by_order_id):
 def _adr_0005_fill_model(slippage_model, fill_prices):
     """LEAN's EquityFillModel with ADR 0005's stop-limit fill for a buy;
     records each fill's price for the fee model, since LEAN's fee-model
-    parameters carry none. Copied from research/qc-cloud/main.py."""
+    parameters carry none. Copied from research/history/qc-cloud/main.py."""
 
     class Adr0005FillModel(EquityFillModel):
         def StopMarketFill(self, asset, order):
@@ -231,7 +231,7 @@ class SublimeResearch(QCAlgorithm):
         }
         self.SetWarmUp(self.WARMUP_BARS, Resolution.Daily)
 
-    # ----- Universe: research/qc-cloud's monthly top-N common stock --------
+    # ----- Universe: research/history/qc-cloud's monthly top-N common stock --------
 
     def CoarseSelectionFunction(self, coarse):
         current = self.Time.date()
