@@ -44,6 +44,7 @@ const (
 // hold no login event at all (silent), or neither (logged in).
 type gatewayEvidence struct {
 	out, silent bool
+	sessionErr  error
 	sessions    []time.Time
 	resetWait   bool
 	said        string
@@ -279,7 +280,7 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 		}
 		// Session notices never participate in login evidence (docs/manual/server.md,
 		// "When another login takes the Gateway's session"). A read fault still
-		// fails the firing without suppressing an established outage.
+		// fails the firing without suppressing logout detection or recovery.
 		sessions, err := journalQuery(journalctl, unit, sessionDetectedEvent)
 		if err == nil {
 			for _, line := range sessions {
@@ -293,7 +294,7 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 		}
 		if err != nil {
 			ev.sessions = nil
-			readErr = errors.Join(readErr, err)
+			ev.sessionErr = err
 		}
 		return ev, readErr
 	}

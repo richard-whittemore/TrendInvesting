@@ -16,22 +16,24 @@ type gatewaySessionNotice struct {
 	Resolving bool      `json:"resolving,omitempty"`
 }
 
-func (g gatewayTarget) sessionNotices(h *hostGateway, events []time.Time, host string, senders []sender, setAside []channelFault, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, record func() error) error {
-	if h.SessionNotifiedThrough == nil {
-		cutoff := now.Add(-15 * time.Minute)
-		// Include the boundary itself; only older lines are suppressed (server.md,
-		// "When another login takes the Gateway's session").
-		cutoff = cutoff.Add(-time.Nanosecond)
-		h.SessionNotifiedThrough = &cutoff
-	}
-	sort.Slice(events, func(i, j int) bool { return events[i].Before(events[j]) })
-	for _, at := range events {
-		if !at.After(*h.SessionNotifiedThrough) {
-			continue
+func (g gatewayTarget) sessionNotices(h *hostGateway, events []time.Time, scanned bool, host string, senders []sender, setAside []channelFault, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, record func() error) error {
+	if scanned {
+		if h.SessionNotifiedThrough == nil {
+			cutoff := now.Add(-15 * time.Minute)
+			// Include the boundary itself; only older lines are suppressed (server.md,
+			// "When another login takes the Gateway's session").
+			cutoff = cutoff.Add(-time.Nanosecond)
+			h.SessionNotifiedThrough = &cutoff
 		}
-		h.SessionNotices = append(h.SessionNotices, gatewaySessionNotice{At: at})
-		cursor := at
-		h.SessionNotifiedThrough = &cursor
+		sort.Slice(events, func(i, j int) bool { return events[i].Before(events[j]) })
+		for _, at := range events {
+			if !at.After(*h.SessionNotifiedThrough) {
+				continue
+			}
+			h.SessionNotices = append(h.SessionNotices, gatewaySessionNotice{At: at})
+			cursor := at
+			h.SessionNotifiedThrough = &cursor
+		}
 	}
 	if err := record(); err != nil {
 		return err
@@ -54,21 +56,21 @@ func (g gatewayTarget) sessionNotices(h *hostGateway, events []time.Time, host s
 
 func (g gatewayTarget) sendSessionNotice(n *gatewaySessionNotice, host string, senders []sender, setAside []channelFault, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, record func() error) (bool, error) {
 	key := "gateway-session:" + g.scope(host) + ":" + n.At.UTC().Format(time.RFC3339Nano)
+	deliveryPending := !n.Resolving && len(setAside) > 0
 	if !n.Resolving {
 		a := report.Alert{
 			Key: key, Kind: "gateway-session", Severity: report.Urgent, AccountID: host, At: n.At,
 			Title: fmt.Sprintf("%s: %s session used by another login", host, g.name()),
-			Body:  fmt.Sprintf("Another login, for example the IBKR app or website, used this Gateway's username (%s, event at %s). The Gateway is set to take the session back by itself, so no restart is normally needed. Stop using this Gateway's username anywhere else. If the Gateway's logged-out page follows, follow that page instead. See docs/manual/server.md, \"When another login takes the Gateway's session\".", g.unit(), n.At.UTC().Format(time.RFC3339Nano)),
+			Body:  fmt.Sprintf("Another login, for example the IBKR app or website, used this Gateway's username (%s, event at %s). IBC 3.24.2 documents primary as keeping or recovering the existing session against another TWS or Gateway session. The same is expected for the IBKR app or website, but is not yet confirmed by a real event. Stop using this Gateway's username anywhere else. If the Gateway's logged-out page follows, the setting did not hold, and that page's remedy applies. See docs/manual/server.md, \"When another login takes the Gateway's session\".", g.unit(), n.At.UTC().Format(time.RFC3339Nano)),
 		}
 		if err := deliver(senders, a, seen, sent, repeats, now, 0, record); err != nil {
 			return false, err
 		}
-		if len(setAside) > 0 {
-			return false, fmt.Errorf("reporter: Gateway session notice has channels set aside")
-		}
 		n.Resolving = true
-		if err := record(); err != nil {
-			return false, err
+		if !deliveryPending {
+			if err := record(); err != nil {
+				return false, err
+			}
 		}
 	}
 	failed, err := resolveAll(senders, key, seen, now)
@@ -79,6 +81,14 @@ func (g gatewayTarget) sendSessionNotice(n *gatewaySessionNotice, host string, s
 	for _, f := range setAside {
 		keep[f.channel] = true
 	}
+	if deliveryPending {
+		// Retain successful delivery receipts until set-aside channels return,
+		// while resolving their peers now (server.md, "When another login takes the Gateway's session").
+		for _, s := range senders {
+			keep[s.name()] = true
+		}
+		n.Resolving = false
+	}
 	forgetAlert(key, keep, seen, sent, repeats)
-	return !deliveredAnywhere(seen, key), errors.Join(err, record())
+	return !deliveryPending && !deliveredAnywhere(seen, key), errors.Join(err, record())
 }

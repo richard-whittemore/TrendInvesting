@@ -75,9 +75,11 @@ fi
 # change cannot alter it: how long IBC waits for the login dialog to appear
 # before restarting TWS. IBC 3.24.2 has no setting for a refused login; the
 # bounded retry is start-gateway.sh's.
-# IBC 3.24.2 config.ini documents primary: the existing session continues
-# and the new one ends; if another session ends it, it reconnects automatically.
-# See docs/manual/server.md, "When another login takes the Gateway's session".
+# primary keeps or recovers the existing session against another TWS or Gateway
+# session, as IBC 3.24.2 documents. The same is expected for the IBKR app and
+# website, but is not yet confirmed by a real event. If the Gateway's logged-out
+# page follows, the setting did not hold, and that page's remedy applies
+# (docs/manual/server.md, "When another login takes the Gateway's session").
 # Values go to awk through the environment, never the command line (ps).
 IBC_V_IbLoginId=$userid \
 IBC_V_IbPassword=$password \

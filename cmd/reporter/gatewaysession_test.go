@@ -60,7 +60,7 @@ func TestGatewaySessionNotice(t *testing.T) {
 				t.Errorf("resolutions=%d want=2", got)
 			}
 			joined := strings.Join(r.to("ntfy.private.test"), "\n")
-			for _, phrase := range []string{"IBKR app or website", "take the session back", "no restart", "Stop using", "logged-out page", "docs/manual/server.md", target.name()} {
+			for _, phrase := range []string{"IBKR app or website", "IBC 3.24.2 documents", "another TWS or Gateway session", "expected", "not yet confirmed by a real event", "setting did not hold", "remedy applies", "Stop using", "logged-out page", "docs/manual/server.md", target.name()} {
 				if !strings.Contains(joined, phrase) {
 					t.Errorf("missing %q in %s", phrase, joined)
 				}
@@ -221,5 +221,105 @@ func TestGatewaySessionPartialDeliveryRetriesOnlyMissingChannel(t *testing.T) {
 	}
 	if count(r.to("ntfy.private.test"), "session used by another login") != 1 {
 		t.Fatal("missing channel not retried once")
+	}
+}
+
+func TestGatewaySessionSetAsideResolvesHealthyChannels(t *testing.T) {
+	target := gatewayTarget{}
+	h := &hostGateway{}
+	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
+	healthy := &gatewayIntentSender{policyRecorder: policyRecorder{channel: "pagerduty"}}
+	returning := &gatewayIntentSender{policyRecorder: policyRecorder{channel: "ntfy"}}
+	record := func() error {
+		if len(h.SessionNotices) > 0 && h.SessionNotices[0].Resolving && len(returning.alerts) == 0 {
+			t.Error("persisted resolution-only state before set-aside channel took delivery")
+		}
+		return nil
+	}
+	at := tuesday(10, 0)
+	if err := target.sessionNotices(h, []time.Time{at}, true, "host", []sender{healthy}, []channelFault{{channel: "ntfy"}}, seen, sent, repeats, at, record); err != nil {
+		t.Errorf("set-aside channel added a notice error: %v", err)
+	}
+	if len(healthy.alerts) != 1 || len(healthy.resolutions) != 1 {
+		t.Errorf("healthy channel: pages=%d resolutions=%d", len(healthy.alerts), len(healthy.resolutions))
+	}
+	if len(h.SessionNotices) != 1 {
+		t.Fatal("notice lost before set-aside channel could take delivery")
+	}
+	for i := 1; i <= 2; i++ {
+		if err := target.sessionNotices(h, nil, true, "host", []sender{healthy, returning}, nil, seen, sent, repeats, at.Add(time.Duration(i)*time.Minute), record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(healthy.alerts) != 1 || len(returning.alerts) != 1 || len(returning.resolutions) != 1 || len(h.SessionNotices) != 0 {
+		t.Fatalf("retry: healthy pages=%d returned pages=%d resolutions=%d pending=%d", len(healthy.alerts), len(returning.alerts), len(returning.resolutions), len(h.SessionNotices))
+	}
+}
+
+func TestGatewaySessionReadFaultAllowsLogoutRecovery(t *testing.T) {
+	g := newStandInGateway(t)
+	g.logout()
+	r := &relay{sent: map[string][]string{}}
+	dir := t.TempDir()
+	for _, at := range []time.Time{tuesday(10, 0), tuesday(10, 10)} {
+		if err := gatewayRun(t, r, dir, g.path(), "boost", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gatewayPages(r) != 2 {
+		t.Fatal("outage did not open")
+	}
+	g.login(tuesday(10, 11))
+	g.flag("fail-session", true)
+	if err := gatewayRun(t, r, dir, g.path(), "boost", tuesday(10, 15)); err == nil || !strings.Contains(err.Error(), "Session query failed") {
+		t.Fatalf("session read fault lost: %v", err)
+	}
+	if count(r.to("events.pagerduty.test"), `"event_action":"resolve"`) != 1 {
+		t.Fatal("session read fault blocked logout resolution")
+	}
+	h, err := loadHostGateway(filepath.Join(dir, "host-gateway.json"))
+	if err != nil || h.Since != nil || h.Resolving {
+		t.Fatalf("outage remains open: %+v, %v", h, err)
+	}
+}
+
+func TestGatewaySessionSkippedFirstFiringDefersCursor(t *testing.T) {
+	target := gatewayTarget{instance: "trad-ira"}
+	path := filepath.Join(t.TempDir(), "gateway.json")
+	sched, err := gatewayScheduleFrom(func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := tuesday(10, 0)
+	skipped := true
+	checks := 0
+	p := &gatewayIntentSender{policyRecorder: policyRecorder{channel: "pagerduty"}}
+	check := func(time.Time) (gatewayEvidence, error) {
+		checks++
+		return gatewayEvidence{sessions: []time.Time{tuesday(10, 1)}, recoveredAt: at}, nil
+	}
+	sample := func() (gatewayUnitSample, error) {
+		if skipped {
+			return gatewayUnitSample{skipped: "inactive and disabled"}, nil
+		}
+		return gatewayUnitSample{active: true}, nil
+	}
+	step := func() error {
+		return target.step(path, check, sample, "host", sched, nil, "", nil, []sender{p}, nil, func() time.Time { return at })
+	}
+	if err := step(); err != nil {
+		t.Fatal(err)
+	}
+	h, err := loadHostGateway(path)
+	if err != nil || h.SessionNotifiedThrough != nil || checks != 0 {
+		t.Errorf("skipped firing initialized cursor or read journal: %+v, checks=%d, err=%v", h, checks, err)
+	}
+	skipped = false
+	at = tuesday(11, 0)
+	if err := step(); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 1 || len(p.alerts) != 0 {
+		t.Fatalf("first real read: checks=%d historical pages=%d", checks, len(p.alerts))
 	}
 }

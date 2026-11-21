@@ -204,6 +204,7 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 	} else {
 		ev, checkErr = check(now)
 	}
+	defer func() { retErr = errors.Join(retErr, ev.sessionErr) }()
 	if checkErr != nil && !ev.out {
 		return checkErr
 	}
@@ -260,7 +261,7 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 	}
 	// Notice faults must not prevent logout detection or recovery (server.md,
 	// "When another login takes the Gateway's session").
-	retErr = errors.Join(retErr, target.sessionNotices(&h, ev.sessions, host, senders, setAside, seen, sent, repeats, now, record))
+	retErr = errors.Join(retErr, target.sessionNotices(&h, ev.sessions, !skipped && ev.sessionErr == nil, host, senders, setAside, seen, sent, repeats, now, record))
 	scope := target.scope(host)
 	key := report.GatewayKey(scope)
 	observed, escalation := sent[channelKey("observed", key)], sent[channelKey("escalation", key)]
