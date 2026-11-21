@@ -273,7 +273,8 @@ func TestTheDeclaredModeMustBeTheConfiguredMode(t *testing.T) {
 		"a dry-run configuration started as paper": {modePaper, boostConfigPath, `does not match the configuration's mode "dry-run"`},
 		"a dry-run configuration started as live":  {modeLive, boostConfigPath, `does not match the configuration's mode "dry-run"`},
 		"a dry-run configuration as a backtest":    {modeBacktest, boostConfigPath, `does not match the configuration's mode "dry-run"`},
-		"a Turtle configuration in dry-run":        {modeDryRun, testConfigPath, "runs only in -mode backtest"},
+		// Covers the retired Turtle reducer (ADR 0002): it runs only as a backtest.
+		"a Turtle configuration in dry-run": {modeDryRun, testConfigPath, "runs only in -mode backtest"},
 	} {
 		opts := boostOptions(t, filepath.Join(dir, name))
 		if err := os.Mkdir(filepath.Join(dir, name), 0o700); err != nil {
