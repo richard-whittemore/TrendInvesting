@@ -10,7 +10,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
-const kindAccountChanged report.Kind = "account-changed"
+const kindAccountChanged = report.KindAccountChanged
 
 // reporterHistory composes the verified chain with the reporter's notice
 // (manual, "The history across restarts"). FollowChain checks the approved
