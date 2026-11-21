@@ -1,11 +1,19 @@
 # Whole shares in the IRAs: the minimum-lot rule (D7-L)
 
+*Note, 2026-11-21: the owner selected fractional shares (D7-F) for the IRAs on
+2026-10-29, and the IRA's shipped configuration uses them, so the IRA no
+longer buys whole shares only. The minimum-lot rule below still exists, for an
+account configured for whole shares, and still describes how that choice
+behaves. Under fractional shares it does not apply: see
+[momentum](momentum.md) for what the IRA does now.*
+
 ## What it does and why it exists
 
-The IRAs buy whole shares only. IBKR does not take fractional orders through
-the program's connection, and a one-share order costs a commission whatever
-its size. A small account can therefore be handed a target it cannot buy: the
-momentum book might ask for $300 of a stock that costs $450 a share.
+Under the whole-share choice (D7-L), an account buys whole shares only. A
+one-share order costs a commission whatever its size. A small account can
+therefore be handed a target it cannot buy: the momentum book might ask for
+$300 of a stock that costs $450 a share. (Fractional orders, D7-F, avoid
+this; see the note above.)
 
 The minimum-lot rule, called D7-L in the design (ADR 0026, point 2, and the
 2026-10-17 amendment to it), deals with this before any order is planned. For
