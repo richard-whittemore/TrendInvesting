@@ -77,7 +77,7 @@ func policyOf(policies []*pagingPolicy) *pagingPolicy {
 // at observation, or at the end of the last quiet window, never at delivery.
 // Only caller-observed open incidents reach here; recovery forgets their clock.
 func (p *pagingPolicy) route(senders []sender, a report.Alert, sent map[string]time.Time, now time.Time, every time.Duration) ([]sender, report.Alert, time.Duration, bool, error) {
-	if p == nil || p.bypass || a.Kind == kindSummary {
+	if p == nil || p.bypass || a.Kind == kindSummary || a.Kind == kindAccountChanged {
 		return senders, a, every, false, nil
 	}
 	near, err := report.SessionNear(now)
