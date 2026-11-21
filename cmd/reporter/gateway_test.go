@@ -59,6 +59,7 @@ echo "$*" >>'` + g.dir + `/argv'
 if [ -e '` + g.dir + `/rmwin' ]; then rm -f "$(cat '` + g.dir + `/rmwin')"; fi
 unit=""; pattern=""
 while [ $# -gt 0 ]; do case $1 in -u) unit=$2; shift;; -g) pattern=$2; shift;; esac; shift; done
+if [ "$pattern" = 'Existing session detected; event=Opened' ] && [ -e '` + g.dir + `/fail-session' ]; then echo "Session query failed" >&2; exit 2; fi
 if [ -e '` + g.dir + `/fail' ] || [ -e '` + g.dir + `/fail-'"$unit" ]; then echo "Failed to open journal files" >&2; exit 1; fi
 if [ -e '` + g.dir + `/noaccess' ] || [ -e '` + g.dir + `/noaccess-'"$unit" ]; then echo "Hint: You are currently not seeing messages from other users and the system."; echo "-- No entries --"; exit 0; fi
 out=$(cat '` + g.dir + `'/"$unit" 2>/dev/null)
@@ -690,9 +691,10 @@ func TestTheJournalIsAskedForShortISOTimesWithoutAPagerFourteenDaysBack(t *testi
 	raw, _ := os.ReadFile(filepath.Join(g.dir, "argv"))
 	calls := strings.Split(strings.TrimSpace(string(raw)), "\n")
 	// IBC's login events, the start program's reset-wait lines (read apart so no
-	// other line can count as a login event), and the adapter's link lines.
-	if len(calls) != 3 {
-		t.Fatalf("%d journal queries, want 3 (IBC, the reset wait and the adapter): %q", len(calls), calls)
+	// other line can count as a login event), the adapter's link lines, and
+	// IBC's existing-session dialogs (read apart so they never count as logins).
+	if len(calls) != 4 {
+		t.Fatalf("%d journal queries, want 4 (IBC, the reset wait, the adapter and the existing session): %q", len(calls), calls)
 	}
 	for _, c := range calls {
 		for _, want := range []string{"-o short-iso-precise", "--no-pager", "--since=-14d", "-g "} {

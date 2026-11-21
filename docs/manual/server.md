@@ -999,9 +999,12 @@ clean stop (`SuccessExitStatus=143`). The other failing exits, such as a
 refused login or the bound on login attempts, still fail the unit and page
 as described under "A failed unit".
 
-IBKR allows one session per username, so a Gateway stops at "Existing
-session detected" while you are signed in to Client Portal with its
-username. The two Gateways are switched off differently:
+IBKR allows one session per username. A running Gateway now ends any other
+sign-in with its username and pages the owner, as described in
+[When another login takes the Gateway's session](#when-another-login-takes-the-gateways-session)
+(the app and website behavior is expected but not yet confirmed by a real event).
+Stop the Gateway before signing in with its username. The two Gateways are
+switched off differently:
 
 - **The IRA's Gateway.** Before you sign in with the IRA's username, note
   its state with `systemctl is-enabled ti-gateway@trad-ira` and
@@ -1019,6 +1022,47 @@ username. The two Gateways are switched off differently:
   the reporter can page it as down, so open a maintenance window first
   (`sudo ti-maintenance start`) for a short sign-in. After you
   sign out, `sudo systemctl start ti-gateway` brings it back.
+
+## When another login takes the Gateway's session
+
+A phone login using the Gateway's IBKR username previously left the Gateway
+waiting at the “Existing session detected” dialog: IBC's `manual` setting
+left that choice to a person.
+
+Every Gateway now uses `ExistingSessionDetectedAction=primary`. IBC 3.24.2's
+`config.ini` documents this against another TWS or Gateway session: the
+existing session continues and the new one ends; if another session ends the
+existing session, it reconnects automatically. The same is expected for the
+IBKR app and website, but is not yet confirmed by a real event. The setting is
+used by Boost's `ti-gateway` and each `ti-gateway@<instance>`.
+
+The urgent page “IB Gateway session used by another login” (with the instance
+name for a separate Gateway) means another login, such as the IBKR app or
+website, used that Gateway's username. Stop using its username anywhere else.
+If the Gateway's logged-out page follows, the setting did not hold, and that
+page's remedy applies. This notice does not say the Gateway is down and does
+not keep a logged-out incident open. Its class is **capital-safety**: this
+urgent one-shot goes to every channel at once, at any hour, and resolves
+itself immediately after delivery. It cannot wait for session-near because it
+resolves at once. Channels that take delivery are resolved even while another
+channel is set aside; the notice stays pending until that channel returns and
+takes delivery.
+
+To look at the account, use the dashboard, or use a separate IBKR username
+for the app with access to the account. Keep the Gateway's username for the
+Gateway alone. Decide this choice again before live trading: live uses one
+login for every account, so a competing login can affect all of them.
+
+Each Gateway's owning reporter reads its journal every five minutes and pages
+each new “Existing session detected; event=Opened” line once. It keeps the
+newest seen timestamp and pending delivery receipts in its existing Gateway
+state. At the first real journal read without that timestamp, it records older
+lines as seen and pages only lines from the last 15 minutes, so installing it
+never pages an old event. A skipped firing for an inactive, disabled instance
+drains pending notices only; it does not read the journal or initialize that
+timestamp. An unreadable journal fails the
+check; it never means there was no event. The notice does not change login,
+logout or account evidence (ADR 0019).
 
 ## The Gateway is logged out
 

@@ -69,7 +69,7 @@ class GatewayLoginTests(unittest.TestCase):
             "ReloginAfterSecondFactorAuthenticationTimeout",
             "AcceptNonBrokerageAccountWarning", "LoginDialogDisplayTimeout",
             "CommandServerPort", "AcceptIncomingConnectionAction",
-            "TrustedTwsApiClientIPs")) + "\n")
+            "TrustedTwsApiClientIPs", "ExistingSessionDetectedAction")) + "\n")
 
     def shell(self, script, *args):
         return subprocess.run(["bash", "-c", script, "test", *args], text=True,
@@ -134,6 +134,7 @@ class GatewayLoginTests(unittest.TestCase):
         self.assertIn(f"IbLoginId=fixture-{selection}\n", config)
         self.assertIn(f"TradingMode={'live' if selection == 'live' else 'paper'}\n", config)
         self.assertIn("ReadOnlyApi=yes\n", config)
+        self.assertIn("ExistingSessionDetectedAction=primary\n", config)
         self.assertEqual((self.run / "config.ini").stat().st_mode & 0o777, 0o600)
         self.assertNotIn("synthetic", result.stdout + result.stderr)
 

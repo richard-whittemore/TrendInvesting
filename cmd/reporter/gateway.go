@@ -123,6 +123,8 @@ func (s gatewaySchedule) graceFrom(since, now time.Time) time.Time {
 // hostGateway is the host's record of the Gateway: the channels that took its
 // page and since when it has been seen logged out.
 type hostGateway struct {
+	SessionNotifiedThrough *time.Time             `json:"session_notified_through,omitempty"`
+	SessionNotices         []gatewaySessionNotice `json:"session_notices,omitempty"`
 	delivered
 	Since *time.Time `json:"logged_out_since,omitempty"`
 	// Resolving is set when the Gateway has recovered but a channel has not yet
@@ -202,6 +204,7 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 	} else {
 		ev, checkErr = check(now)
 	}
+	defer func() { retErr = errors.Join(retErr, ev.sessionErr) }()
 	if checkErr != nil && !ev.out {
 		return checkErr
 	}
@@ -250,12 +253,15 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 		repeats[k] = n
 	}
 	record := func() error {
-		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held})
+		raw, err := json.Marshal(hostGateway{delivered: deliveredOf(seen, sent, repeats, nil), Since: h.Since, Resolving: h.Resolving, Restarts: h.Restarts, Baseline: h.Baseline, Quiet: h.Quiet, StartFailing: h.StartFailing, RestartOnly: h.RestartOnly, Held: h.Held, SessionNotifiedThrough: h.SessionNotifiedThrough, SessionNotices: h.SessionNotices})
 		if err != nil {
 			return err
 		}
 		return writeAtomic(path, raw)
 	}
+	// Notice faults must not prevent logout detection or recovery (server.md,
+	// "When another login takes the Gateway's session").
+	retErr = errors.Join(retErr, target.sessionNotices(&h, ev.sessions, !skipped && ev.sessionErr == nil, host, senders, setAside, seen, sent, repeats, now, record))
 	scope := target.scope(host)
 	key := report.GatewayKey(scope)
 	observed, escalation := sent[channelKey("observed", key)], sent[channelKey("escalation", key)]

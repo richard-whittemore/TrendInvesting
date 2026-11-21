@@ -179,7 +179,7 @@ func TestGatewayAdapterReadFailureDoesNotSuppressIBCOutage(t *testing.T) {
 }
 
 func TestGatewayMainStateShapeRoundTripsUnchanged(t *testing.T) {
-	const raw = `{"keys":["ntfy:gateway-logged-out:synthetic"],"sent":{"ntfy:gateway-logged-out:synthetic":"2024-01-02T17:00:00Z"},"repeats":{"ntfy:gateway-logged-out:synthetic":2},"baselines":{"ntfy":"2024-01-02T16:00:00Z"},"logged_out_since":"2024-01-02T16:50:00Z","resolving":true,"restarts":7,"baseline":4,"quiet":1,"start_failing":true,"restart_only":true,"held_in_maintenance_until":"2024-01-02T18:00:00Z"}`
+	const raw = `{"keys":["ntfy:gateway-logged-out:synthetic"],"sent":{"ntfy:gateway-logged-out:synthetic":"2024-01-02T17:00:00Z"},"repeats":{"ntfy:gateway-logged-out:synthetic":2},"baselines":{"ntfy":"2024-01-02T16:00:00Z"},"logged_out_since":"2024-01-02T16:50:00Z","resolving":true,"restarts":7,"baseline":4,"quiet":1,"start_failing":true,"restart_only":true,"held_in_maintenance_until":"2024-01-02T18:00:00Z","session_notified_through":"2024-01-02T17:00:00Z","session_notices":[{"at":"2024-01-02T17:00:00Z","resolving":true}]}`
 	path := filepath.Join(t.TempDir(), "gateway.json")
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
