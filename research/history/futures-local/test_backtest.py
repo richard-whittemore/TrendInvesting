@@ -1,7 +1,7 @@
 """Unit tests for backtest.py, the local Pinnacle CLC Turtle backtester.
 
 Every price series here is synthetic and built in this file; no real
-market data is ever used (research/futures-local/README.md, "No market
+market data is ever used (research/history/futures-local/README.md, "No market
 data"). The hand-computed Campaigns use a flat warm-up that makes N exactly
 2.0 and both Entry Channel edges exact, so every level, fill and dollar
 below can be checked by hand.
@@ -340,7 +340,7 @@ def _write_bars(path, bars):
 
 
 class InterestTests(unittest.TestCase):
-    """research/futures-local/README.md, "Accrual": interest on the whole
+    """research/history/futures-local/README.md, "Accrual": interest on the whole
     cash equity, actual/360, with carry-forward of missing dates, zero
     before the first available rate, and no effect at all when
     ``Config.interest_rates`` is left at its default of ``None``.
@@ -440,7 +440,7 @@ class InterestTests(unittest.TestCase):
 
 
 class PerPeriodCagrTests(unittest.TestCase):
-    """research/futures-local/README.md, "Per-period CAGR"."""
+    """research/history/futures-local/README.md, "Per-period CAGR"."""
 
     def test_report_periods_cover_the_five_required_windows(self):
         result = backtest.Result()

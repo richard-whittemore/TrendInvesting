@@ -4,7 +4,7 @@ for QuantConnect Cloud's Free plan, which includes futures data.
 Research-only. This is NOT the production Go engine (internal/strategy,
 internal/sizing, internal/indicator, internal/fills) and carries no claim of
 bit-for-bit parity with it. It is also a SEPARATE check from
-research/qc-cloud, which tests the equity-adapted Baseline (half Faith's
+research/history/qc-cloud, which tests the equity-adapted Baseline (half Faith's
 Unit Volatility Fraction, long-only) against US stocks and finds it loses.
 This script asks a different question: does Faith's OWN, UNADAPTED system
 -- System 2, 55/20, 1% Unit Volatility Fraction, long AND short, on a
@@ -25,7 +25,7 @@ SetBrokerageModel(..., AccountType.Margin), Transactions.GetOrderTicket,
 ticket.Update(UpdateOrderFields(...))) are written against LEAN's
 documented Python API as best understood without network access (this
 script never fetches market data or documentation); the custom stop-limit
-fill/slippage model is adapted from research/qc-cloud/main.py's own
+fill/slippage model is adapted from research/history/qc-cloud/main.py's own
 Adr0005FillModel/NSlippageModel, generalised to trade both directions.
 README.md's "Uncertain about the API" section names every call this
 repository cannot independently verify -- the owner's first cloud run is
@@ -66,7 +66,7 @@ WARMUP_BARS = max(rules.ENTRY_CHANNEL_LENGTH, rules.STRENGTH_LOOKBACK_BARS + 1)
 # correlated subgroups follow Faith's own disclosed pairs where he names
 # one (heating oil/crude, gold/silver [T p.16]) and this script's own
 # considered, UNVERIFIED extension elsewhere (documented per market below
-# and in README.md) -- exactly the caveat research/qc-cloud/README.md
+# and in README.md) -- exactly the caveat research/history/qc-cloud/README.md
 # records for its own Morningstar-derived groups.
 # =============================================================================
 
@@ -124,7 +124,7 @@ CORRELATION_GROUPS = {
 # =============================================================================
 # A custom stop-limit fill model (ADR 0005, as amended 2026-09-24) and
 # slippage model (ADR 0013), generalised for both directions -- adapted
-# from research/qc-cloud/main.py's own Adr0005FillModel/NSlippageModel
+# from research/history/qc-cloud/main.py's own Adr0005FillModel/NSlippageModel
 # (equities, long only). LEAN's own native stop-limit fill (a) triggers
 # only on a strict cross, not an exact touch; (b) applies no slippage to a
 # stop-limit fill. This replaces StopLimitFill only; every stop-market
@@ -133,7 +133,7 @@ CORRELATION_GROUPS = {
 # native fill and slippage handling.
 #
 # Subclasses ``FutureFillModel`` -- LEAN's own per-security-type fill
-# model for futures, matching the pattern research/qc-cloud's own
+# model for futures, matching the pattern research/history/qc-cloud's own
 # Adr0005FillModel follows for ``EquityFillModel``. This class name is one
 # of the specific things this repository cannot verify without a live
 # QuantConnect run (README.md, "Uncertain about the API").
@@ -265,7 +265,7 @@ class TurtleFuturesResearch(QCAlgorithm):
 
     #: Faith's own Unit Volatility Fraction, the required default
     #: (rules.py's own module docstring and ADR 0003 explain why
-    #: this differs from research/qc-cloud's 0.5% equity halving). Set to
+    #: this differs from research/history/qc-cloud's 0.5% equity halving). Set to
     #: 0.005 to run the equity Baseline's own fraction here for comparison.
     UNIT_VOLATILITY_FRACTION = rules.UNIT_VOLATILITY_FRACTION
 
@@ -299,7 +299,7 @@ class TurtleFuturesResearch(QCAlgorithm):
         # Futures are margined: a Cash account
         # cannot hold a futures position at all in LEAN. Affordability is
         # therefore QuantConnect's own margin model's job, not rules.py's
-        # (README.md, "Deviations" -- unlike research/qc-cloud's own cash
+        # (README.md, "Deviations" -- unlike research/history/qc-cloud's own cash
         # ledger for a Cash equity account).
         self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Margin)
 
@@ -336,7 +336,7 @@ class TurtleFuturesResearch(QCAlgorithm):
         # SPY, for the buy-and-hold comparison the closing summary reports
         # -- never a traded or signalled
         # instrument, on its own dividend-adjusted, total-return basis
-        # (research/qc-cloud/README.md, "Deviations", #13, for the
+        # (research/history/qc-cloud/README.md, "Deviations", #13, for the
         # identical reasoning).
         self.spy = self.AddEquity(
             "SPY", Resolution.Daily, dataNormalizationMode=DataNormalizationMode.Adjusted).Symbol
@@ -351,7 +351,7 @@ class TurtleFuturesResearch(QCAlgorithm):
         self._exit_levels = {}                    # Exit Order id -> the level it rests at
         # LEAN can fill an amended order while the amendment is being made,
         # calling OnOrderEvent from inside this algorithm's own loop
-        # (research/qc-cloud's own documented anomaly). Events are
+        # (research/history/qc-cloud's own documented anomaly). Events are
         # therefore queued and handled one at a time.
         self._order_events = []
         self._handling = False
@@ -371,7 +371,7 @@ class TurtleFuturesResearch(QCAlgorithm):
         self.campaign_dollars_by_market = {}
         self.untracked_fills = 0
         # Declines are counted, not logged: the Free plan allows 10 KB of
-        # log per backtest (research/qc-cloud's own documented limit).
+        # log per backtest (research/history/qc-cloud's own documented limit).
         self.decline_counts = {}
 
         self.slippage_model = _n_slippage_model(self.n_by_order_id)
@@ -398,7 +398,7 @@ class TurtleFuturesResearch(QCAlgorithm):
                 security.SetSlippageModel(self.slippage_model)
             # Every other model (fee, margin, settlement) is left at
             # SetBrokerageModel's own Interactive-Brokers-Margin default:
-            # unlike research/qc-cloud's equity script, no split/dividend/
+            # unlike research/history/qc-cloud's equity script, no split/dividend/
             # raw-share complication exists here to work around.
 
     # -------------------------------------------------------------------
@@ -818,7 +818,7 @@ class TurtleFuturesResearch(QCAlgorithm):
     def _cancel_ticket(self, ticket):
         """Cancel a resting order, releasing its Unit-cap reservation (if
         any -- an Exit Order never registers one) only if nothing has
-        filled under it yet; mirrors research/qc-cloud/main.py's own
+        filled under it yet; mirrors research/history/qc-cloud/main.py's own
         identical anomaly-safe cancellation."""
         if ticket is None:
             return
@@ -892,7 +892,7 @@ class TurtleFuturesResearch(QCAlgorithm):
 
         if status == OrderStatus.PartiallyFilled:
             # PartiallyFilled is an ANOMALY here, exactly as
-            # research/qc-cloud/main.py documents for equities: this
+            # research/history/qc-cloud/main.py documents for equities: this
             # script's own ADR 0005 stop-limit fill model and LEAN's
             # native stop-market fill each fill an order's whole requested
             # quantity or nothing.
@@ -1086,7 +1086,7 @@ class TurtleFuturesResearch(QCAlgorithm):
 
     def _publish(self, key, value):
         """Report one summary figure both as a runtime statistic (kept
-        whatever the log budget) and a log line (research/qc-cloud/
+        whatever the log budget) and a log line (research/history/qc-cloud/
         README.md, "How to find the results")."""
         self.SetRuntimeStatistic(key, str(value))
         self.Log("research: {} = {}".format(key, value))

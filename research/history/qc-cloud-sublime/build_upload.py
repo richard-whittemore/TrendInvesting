@@ -3,14 +3,14 @@
 QuantConnect's web IDE caps each pasted file at 32,000 characters
 (README.md, "How to run it"), and main.py/rules.py exceed that once every
 comment and docstring is counted. This script writes stripped copies to
-research/qc-cloud/dist/ (git-ignored: a build artifact, never the source of
+research/history/qc-cloud-sublime/dist/ (git-ignored: a build artifact, never the source of
 truth read for comments or run for tests) -- module, class and function
 docstrings removed by walking the parsed AST, comments dropped as an
 unavoidable side effect of regenerating source with ``ast.unparse``.
 
 Usage, from the repository root:
 
-    python3 research/qc-cloud/build_upload.py
+    python3 research/history/qc-cloud-sublime/build_upload.py
 
 Standard library only, so this needs nothing installed beyond the Python 3
 (>=3.9, for ``ast.unparse``) already required to run test_rules.py.

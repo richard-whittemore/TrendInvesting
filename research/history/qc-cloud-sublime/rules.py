@@ -116,7 +116,7 @@ SHORT_SMA = 20
 #: [V 00:02:31-00:02:41]. PROXY.
 STRENGTH_LOOKBACK_BARS = 63
 
-#: Infrastructure conventions carried from research/qc-cloud, in ATR: an
+#: Infrastructure conventions carried from research/history/qc-cloud, in ATR: an
 #: entry rests as a stop-limit capped at level + 1 ATR (ADR 0005, as
 #: amended), and every fill slips 0.05 ATR against the trader (ADR 0013).
 GAP_BUFFER_ATR = 1.0
@@ -709,7 +709,7 @@ class RiskBudget:
 
 # ---------------------------------------------------------------------------
 # Price views, orders and costs (ADR 0004, 0005, 0013, 0024), carried from
-# research/qc-cloud/rules.py.
+# research/history/qc-cloud/rules.py.
 # ---------------------------------------------------------------------------
 
 #: The US equity minimum price variation, in raw dollars.
@@ -774,7 +774,7 @@ def exit_stop_price(level, bar_low, ratio, tick=RAW_TICK):
     """An Exit Order's resting price for the next Session: ``level`` floored
     to a raw tick, and at least one raw tick below the low of the bar it was
     decided after. LEAN evaluates an amended order against the bar it was
-    amended after (research/qc-cloud/README.md, Deviations #20); resting
+    amended after (research/history/qc-cloud/README.md, Deviations #20); resting
     below that bar's low means it can never fill from a bar already seen."""
     return min(raw_tick_floor(level, ratio, tick), raw_tick_floor(bar_low, ratio, tick) - tick / ratio)
 

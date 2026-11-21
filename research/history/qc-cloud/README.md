@@ -31,7 +31,7 @@ on their servers.
   handful of worked examples transcribed directly from
   `Methodology_Analysis.md` (which itself cites *The Original Turtle Trading
   Rules*, Curtis Faith, 2003, by page number). Run with
-  `python3 -m unittest discover -s research/qc-cloud -p "test_*.py"`, or via
+  `python3 -m unittest discover -s research/history/qc-cloud -p "test_*.py"`, or via
   `make research-test` from the repository root.
 - `main.py` -- the thin QuantConnect algorithm (`QCAlgorithm` subclass) that
   drives `rules.py` over a broad, point-in-time US equity universe.
@@ -39,7 +39,7 @@ on their servers.
   module/class/function docstring and comment removed, via `ast`) to
   `dist/`, the two files that actually fit QuantConnect's Free-plan
   32,000-character-per-file limit. See "How to run it", below. Standard
-  library only; run with `python3 research/qc-cloud/build_upload.py`.
+  library only; run with `python3 research/history/qc-cloud/build_upload.py`.
 - `dist/` -- `build_upload.py`'s output. Git-ignored: a build artifact,
   regenerated on demand, never the source of truth for comments or tests.
 - `test_build_upload.py` -- checks that both stripped files stay under the
@@ -73,19 +73,19 @@ on their servers.
    counted. From the repository root, run:
 
    ```
-   python3 research/qc-cloud/build_upload.py
+   python3 research/history/qc-cloud/build_upload.py
    ```
 
    This writes stripped copies -- comments and docstrings removed, the
-   rules and behaviour identical -- to `research/qc-cloud/dist/main.py` and
-   `research/qc-cloud/dist/rules.py`, and fails with a clear error if either
+   rules and behaviour identical -- to `research/history/qc-cloud/dist/main.py` and
+   `research/history/qc-cloud/dist/rules.py`, and fails with a clear error if either
    one is still at or over the limit. **Paste the two files from `dist/`,
    never the originals** -- QuantConnect will reject (or silently truncate)
    a file at or over 32,000 characters.
 6. **Replace `main.py`:**
    - Select all the text already in `main.py` (click inside the editor,
      then Ctrl+A / Cmd+A) and delete it.
-   - Open this repository's `research/qc-cloud/dist/main.py` in any text
+   - Open this repository's `research/history/qc-cloud/dist/main.py` in any text
      editor, select all its text, copy it, and paste it into QuantConnect's
      `main.py` editor.
 7. **Add `rules.py` as a second file:**
@@ -94,7 +94,7 @@ on their servers.
      usually a small **+** icon or a right-click menu offering **New
      File**.
    - Name the new file exactly `rules.py`.
-   - Open this repository's `research/qc-cloud/dist/rules.py`, select all,
+   - Open this repository's `research/history/qc-cloud/dist/rules.py`, select all,
      copy, and paste its contents into the new file.
    - You do **not** need to add `test_rules.py`, `build_upload.py`, or
      `README.md` to the QuantConnect project -- they exist for building the
@@ -578,7 +578,7 @@ data (the Go engine's acceptance runs use one), with a Go engine journal
 of the same instrument and span:
 
 ```
-research/qc-cloud/fidelity/run_local.sh <lean-workspace> <journal.jsonl>
+research/history/qc-cloud/fidelity/run_local.sh <lean-workspace> <journal.jsonl>
 ```
 
 `run_local.sh` copies `fidelity/lean_main.py` into the workspace's
@@ -590,7 +590,7 @@ sets only `FIXED_SYMBOLS = ("AAPL",)`, the 2003-01-01 to 2014-12-31 span
 and `WARMUP_BARS = 60` (the Go run's `warmup_bars`). The comparison alone:
 
 ```
-python3 research/qc-cloud/fidelity/compare_fills.py \
+python3 research/history/qc-cloud/fidelity/compare_fills.py \
     <lean-workspace>/research-fidelity/backtests/<run> <journal.jsonl> [--show 10]
 ```
 

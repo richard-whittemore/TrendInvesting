@@ -1,7 +1,7 @@
 """Unit tests for loader.py: the tolerant Pinnacle CLC text/CSV reader.
 
 Every fixture here is a few hand-written synthetic lines, never real market
-data (AGENTS.md; research/futures-local/README.md, "No market data").
+data (AGENTS.md; research/history/futures-local/README.md, "No market data").
 
 Run with `make research-test` from the repository root.
 """

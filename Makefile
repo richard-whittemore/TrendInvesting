@@ -77,28 +77,16 @@ adapter-test: research-test
 	cd adapter/ibkr && python3 -m unittest discover -s tests
 	cd adapter && python3 -m unittest discover -s marketdata/tests -t .
 
-# The research checks' rule cores (research/qc-cloud for the Turtle
-# Baseline, research/qc-cloud-sublime for the Sublime control,
-# research/qc-cloud-futures for Faith's own unadapted system on futures,
-# and research/futures-local, the local Pinnacle CLC backtester that
-# imports research/qc-cloud-futures/rules.py):
-# standard-library Python only, no QuantConnect imports, so they run here
-# without any LEAN environment. Each main.py (the QuantConnect algorithm)
-# cannot be imported outside QuantConnect's own AlgorithmImports
-# environment -- none of the three folders' local LEAN checks have futures
-# data for the third one -- so research/qc-cloud and research/qc-cloud-futures
-# are also syntax-checked here with python3 -m py_compile; every folder's
-# own test_build_upload.py additionally compiles its stripped upload copy.
-# The owner's first QuantConnect Cloud backtest is the real test of each
-# folder's own QuantConnect API calls.
-# research/edge-search is syntax-checked the same way; its timing script is
-# also run against a stand-in AlgorithmImports (research/edge-search/README.md).
+# The research checks that stay in the build: research/edge-search, the
+# search that produced Boost and Momentum. Its scripts that import
+# AlgorithmImports cannot be imported outside QuantConnect's own
+# environment, so they are syntax-checked here with python3 -m py_compile;
+# its timing script is also run against a stand-in AlgorithmImports
+# (research/edge-search/README.md).
+# The Turtle, Sublime and futures research (research/history/) is kept as
+# history and is not built or tested here; to run it, check out the tag
+# turtle-final (research/history/README.md).
 research-test:
-	cd research/qc-cloud && python3 -m unittest discover -s . -p "test_*.py"
-	python3 -m py_compile research/qc-cloud/main.py
-	cd research/qc-cloud-sublime && python3 -m unittest discover -s . -p "test_*.py"
-	cd research/qc-cloud-futures && python3 -m unittest discover -s . -p "test_*.py"
-	python3 -m py_compile research/qc-cloud-futures/main.py
 	cd research/edge-search/timing && python3 -m unittest discover -s . -p "test_*.py"
 	cd research/edge-search && python3 -m unittest test_followup test_parity_remaining
 	cd research/edge-search/tax && python3 -m unittest test_tax_drag test_custodial
@@ -120,7 +108,6 @@ research-test:
 	python3 -m py_compile research/edge-search/etf-trend/main.py research/edge-search/etf-trend/main_oos.py \
 		research/edge-search/factors/main.py research/edge-search/timing/main.py \
 		research/edge-search/riskparity/main.py research/edge-search/bh-rsp/main.py
-	cd research/futures-local && python3 -m unittest discover -s . -p "test_*.py"
 
 # Shell tests for the deploy rehearsal, the provisioner's architecture
 # rules and the server's build (no Docker needed; test-build.sh

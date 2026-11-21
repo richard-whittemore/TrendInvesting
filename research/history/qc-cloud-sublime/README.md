@@ -6,7 +6,7 @@ A **free, research-only** check of one question: does Sublime-style trend
 trading on US stocks beat buying and holding SPY, after realistic costs, over
 QuantConnect's free 1998-to-date US equity history?
 
-It is the Sublime counterpart of `research/qc-cloud/`, the Turtle Baseline
+It is the Sublime counterpart of `research/history/qc-cloud/`, the Turtle Baseline
 check. That check matched the production Go engine's fills on AAPL
 2003–2014, and on the top 200 US stocks, 1998–2015, it lost: CAGR −5.7 %
 against SPY's +6.1 %. Variants with a market filter or smaller Units
@@ -36,13 +36,13 @@ not a parity check. No market data is committed here.
 
 ## How to run it on QuantConnect
 
-The steps match `research/qc-cloud/README.md`, "How to run it". In short:
+The steps match `research/history/qc-cloud/README.md`, "How to run it". In short:
 
-1. From the repository root, run `python3 research/qc-cloud-sublime/build_upload.py`.
+1. From the repository root, run `python3 research/history/qc-cloud-sublime/build_upload.py`.
    It prints each stripped file's size and fails if either is at or over
    32,000 characters.
 2. In QuantConnect's Algorithm Lab, create a new Python project. Replace its
-   `main.py` with `research/qc-cloud-sublime/dist/main.py`, then add a file
+   `main.py` with `research/history/qc-cloud-sublime/dist/main.py`, then add a file
    named exactly `rules.py` with `dist/rules.py`'s contents. **Paste the
    `dist/` copies, never the originals.**
 3. Save the project and click **Backtest**.
@@ -55,7 +55,7 @@ If the run times out, lower `UNIVERSE_SIZE` (200 by default) to 100.
 
 Read the backtest's **statistics panel**, not the Logs tab: the Free plan
 caps logs at 10 KB. Each figure is a runtime statistic with a short value and
-one key per item. The keys match `research/qc-cloud`'s:
+one key per item. The keys match `research/history/qc-cloud`'s:
 
 - `OVERALL`: CAGR, max drawdown, and CAGR ÷ max drawdown (ADR 0012's
   primary metric).
@@ -84,7 +84,7 @@ The run covered the top 200 US stocks by dollar volume, with $1M starting capita
 | Run | CAGR | Max drawdown | Return / drawdown |
 |---|---|---|---|
 | Sublime control (this folder) | +1.45% | 13.6% | 0.107 |
-| Turtle Baseline (`research/qc-cloud`) | −5.74% | 87% | — |
+| Turtle Baseline (`research/history/qc-cloud`) | −5.74% | 87% | — |
 | Turtle + SPY above its 200-day SMA | −0.35% | 52% | — |
 | Turtle, 0.1% Unit Volatility Fraction | −0.26% | 36% | — |
 | Turtle, both of the above | −1.26% | 31% | — |
@@ -95,7 +95,7 @@ The run covered the top 200 US stocks by dollar volume, with $1M starting capita
 - **Late start:** it holds cash from 1998 to 2002, because the prior-year-high and weekly 200-bar rules need about 5 years of history.
 - **By period (CAGR):** 2003–07 +1.98%, 2008–09 −0.85%, 2009–15 +2.63%.
 
-It beats every Turtle stock variant in the table on both return and drawdown (the Turtle variants were temporary cloud builds of `research/qc-cloud`, run on the same universe and span, 2026-09-26), but still trails SPY by about 4.6 points a year. That's mostly because it rarely has much capital invested. Sublime's proprietary pieces are proxies here (see the provenance tags below), so read this as a lower bound on the real methodology rather than a verdict on it.
+It beats every Turtle stock variant in the table on both return and drawdown (the Turtle variants were temporary cloud builds of `research/history/qc-cloud`, run on the same universe and span, 2026-09-26), but still trails SPY by about 4.6 points a year. That's mostly because it rarely has much capital invested. Sublime's proprietary pieces are proxies here (see the provenance tags below), so read this as a lower bound on the real methodology rather than a verdict on it.
 
 ## The rules, with provenance
 
@@ -106,7 +106,7 @@ section 3 gives.
 
 | Rule | Implementation | Tag |
 |---|---|---|
-| Universe | `research/qc-cloud`'s monthly top 200 US common stocks by dollar volume. A held or working symbol stays subscribed. | Carried infrastructure |
+| Universe | `research/history/qc-cloud`'s monthly top 200 US common stocks by dollar volume. A held or working symbol stays subscribed. | Carried infrastructure |
 | 3: price ≥ $20 [V 01:13:32] | Raw close at the Signal | DISCLOSED |
 | 3: volume > 1 M shares [V 00:59:58] | 20-day median raw share volume ≥ 1,000,000 | DISCLOSED (window: open question) |
 | 3: 5–10 years of history [M p.54] | ≥ 1,260 completed daily bars (the lower end) | DISCLOSED |
@@ -305,7 +305,7 @@ Every run includes the universe re-entry fix. Periods are CAGR; the drawdown is 
 RISK_ATH was rerun (backtest `e252031b`) after its upper risk ceilings were restricted to an all-time high in full bloom. Every reported figure was identical. The run does not publish ceiling-rejection counts, so this shows only that the change made no difference to the results, not that the ceilings never bound.
 
 **Conclusion.** No variant comes close to SPY. The best, CH252, trails it by 4.7 points a year. The corrected base rules (BASE_BELOW, LAST_YEAR) add trades but cut the average win, and neither reading of "uber expensive" (WIDE, PRICE_CAP) helps. None is promoted to the control: the owner approved promoting a *winner*, and nothing here wins.
-## Deviations from `research/qc-cloud`'s infrastructure
+## Deviations from `research/history/qc-cloud`'s infrastructure
 
 The rest is carried over unchanged:
 - whole raw-share Units at the raw tick;
@@ -329,7 +329,7 @@ What differs:
    fill-chained (no ADR 0011 amendment).
 3. **Exit Orders rest below the bar they were decided after.** LEAN
    evaluates an amended order against the bar it was amended after
-   (`research/qc-cloud` Deviations #20). So an amendment only ever raises an
+   (`research/history/qc-cloud` Deviations #20). So an amendment only ever raises an
    Exit Order, and rests it at least a raw tick below that bar's low
    (`rules.exit_stop_price`). The only effect is on a day that sets the new
    20-bar low: that evening the order rests one tick under the channel.
@@ -350,7 +350,7 @@ What differs:
    LEAN liquidates a delisting itself. The Campaign closes at the last
    close, counted as `Decline exit: holding vanished`.
 7. **The Sublime filters apply in fixed mode too.** They are strategy rules,
-   not universe membership. `research/qc-cloud` skips eligibility in fixed
+   not universe membership. `research/history/qc-cloud` skips eligibility in fixed
    mode only to match a Go run.
 8. **A partial fill on an Exit Order, then cancelled, shrinks the position.**
    `Campaign.reduce_unit` realizes the shares that sold and reduces the
@@ -433,5 +433,5 @@ not a fault in the run.
 
 ## Reading the results against costs
 
-`research/qc-cloud/README.md`, "Reading the results against costs", applies
+`research/history/qc-cloud/README.md`, "Reading the results against costs", applies
 unchanged. This is not financial advice.
