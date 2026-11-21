@@ -47,3 +47,6 @@ __pycache__/
 *.transcript.md
 *.transcript.srt
 *.mov
+
+# Local agent tooling (worktrees, settings); never part of the repository
+.claude/
