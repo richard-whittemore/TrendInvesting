@@ -75,6 +75,9 @@ fi
 # change cannot alter it: how long IBC waits for the login dialog to appear
 # before restarting TWS. IBC 3.24.2 has no setting for a refused login; the
 # bounded retry is start-gateway.sh's.
+# IBC 3.24.2 config.ini documents primary: the existing session continues
+# and the new one ends; if another session ends it, it reconnects automatically.
+# See docs/manual/server.md, "When another login takes the Gateway's session".
 # Values go to awk through the environment, never the command line (ps).
 IBC_V_IbLoginId=$userid \
 IBC_V_IbPassword=$password \
@@ -86,6 +89,7 @@ IBC_V_ColdRestartTime=${TI_GATEWAY_COLD_RESTART:-09:00} \
 IBC_V_ReloginAfterSecondFactorAuthenticationTimeout=yes \
 IBC_V_AcceptNonBrokerageAccountWarning=yes \
 IBC_V_LoginDialogDisplayTimeout=60 \
+IBC_V_ExistingSessionDetectedAction=primary \
 IBC_V_CommandServerPort=0 \
 IBC_V_AcceptIncomingConnectionAction=reject \
 IBC_V_TrustedTwsApiClientIPs='' \

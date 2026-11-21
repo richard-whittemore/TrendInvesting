@@ -1020,6 +1020,39 @@ username. The two Gateways are switched off differently:
   (`sudo ti-maintenance start`) for a short sign-in. After you
   sign out, `sudo systemctl start ti-gateway` brings it back.
 
+## When another login takes the Gateway's session
+
+A phone login using the Gateway's IBKR username previously left the Gateway
+waiting at the “Existing session detected” dialog: IBC's `manual` setting
+left that choice to a person.
+
+Every Gateway now uses `ExistingSessionDetectedAction=primary`. IBC 3.24.2's
+`config.ini` documents that the existing session continues and the new one
+ends; if another session ends the existing session, it reconnects automatically.
+This applies to Boost's `ti-gateway` and each `ti-gateway@<instance>`.
+
+The urgent page “IB Gateway session used by another login” (with the instance
+name for a separate Gateway) means another login, such as the IBKR app or
+website, used that Gateway's username. The Gateway is set to take the session
+back by itself, so no restart is normally needed. Stop using its username
+anywhere else. If a Gateway logged-out page follows, follow that page instead.
+This notice does not say the Gateway is down and does not keep a logged-out
+incident open. The reporter resolves the notice immediately after delivery.
+
+To look at the account, use the dashboard, or use a separate IBKR username
+for the app with access to the account. Keep the Gateway's username for the
+Gateway alone. Decide this choice again before live trading: live uses one
+login for every account, so a competing login can affect all of them.
+
+Each Gateway's owning reporter reads its journal every five minutes and pages
+each new “Existing session detected; event=Opened” line once. It keeps the
+newest seen timestamp and pending delivery receipts in its existing Gateway
+state. On installation without that timestamp, it records older lines as seen
+and pages only lines from the last 15 minutes, so installing it never pages
+an old event. An unreadable journal fails the
+check; it never means there was no event. The notice does not change login,
+logout or account evidence (ADR 0019).
+
 ## The Gateway is logged out
 
 **Gateway healer.** When an adapter exits 3 and its own invocation journal

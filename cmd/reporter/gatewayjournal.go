@@ -44,6 +44,7 @@ const (
 // hold no login event at all (silent), or neither (logged in).
 type gatewayEvidence struct {
 	out, silent bool
+	sessions    []time.Time
 	resetWait   bool
 	said        string
 	// ibkrUnreachable selects wording only, from this firing's evidence; it
@@ -72,7 +73,8 @@ var (
 	ibcEvent = regexp.MustCompile(`Unrecognized Username or Password|LoginState is LOGGED_OUT|Login has completed|login retries stopped|gateway-start: starting IBC|gateway-start: cannot start IBC`)
 	// resetWaitEvent reads reset-wait evidence separately from login events
 	// (ADR 0019, "Alerting"); other start-script messages cannot imply logout.
-	resetWaitEvent = regexp.MustCompile(`gateway-start: reset wait:`)
+	sessionDetectedEvent = regexp.MustCompile(`Existing session detected; event=Opened`)
+	resetWaitEvent       = regexp.MustCompile(`gateway-start: reset wait:`)
 	// Adapter starts end preceding loss evidence; only losses
 	// in the current invocation count (docs/manual/server.md, "The Gateway is
 	// logged out"; ADR 0019, "Alerting"). Within an invocation, only restoration
@@ -274,6 +276,24 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 		}
 		if len(diagnostics) > 0 {
 			ev.said += "; " + strings.Join(diagnostics, "; ")
+		}
+		// Session notices never participate in login evidence (docs/manual/server.md,
+		// "When another login takes the Gateway's session"). A read fault still
+		// fails the firing without suppressing an established outage.
+		sessions, err := journalQuery(journalctl, unit, sessionDetectedEvent)
+		if err == nil {
+			for _, line := range sessions {
+				at, parseErr := lineTime(line)
+				if parseErr != nil {
+					err = parseErr
+					break
+				}
+				ev.sessions = append(ev.sessions, at)
+			}
+		}
+		if err != nil {
+			ev.sessions = nil
+			readErr = errors.Join(readErr, err)
 		}
 		return ev, readErr
 	}

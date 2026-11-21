@@ -91,9 +91,10 @@ mkdir -p "$run_dir"
 printf 'TWS_USERID=u\nTWS_PASSWORD=p\n' >"$run_dir/login.env"
 printf '%s\n' '# comment' 'SecondFactorDevice=' 'IbLoginId=' 'IbPassword=' 'TradingMode=live' 'ReadOnlyApi=no' \
   'AutoRestartTime=' 'ColdRestartTime=' 'ReloginAfterSecondFactorAuthenticationTimeout=no' \
-  'AcceptNonBrokerageAccountWarning=no' 'CommandServerPort=7462' \
+  'AcceptNonBrokerageAccountWarning=no' 'CommandServerPort=7462' 'ExistingSessionDetectedAction=manual' \
   'TrustedTwsApiClientIPs=100.64.0.1' 'AcceptIncomingConnectionAction=manual' 'LoginDialogDisplayTimeout=20' >"$work/template.ini"
 RUNTIME_DIRECTORY=$run_dir IBC_TEMPLATE=$work/template.ini "$render" >/dev/null
+grep -qx 'ExistingSessionDetectedAction=primary' "$run_dir/config.ini" || expect "Gateway takes its session back" ExistingSessionDetectedAction=primary "$(grep '^ExistingSessionDetectedAction' "$run_dir/config.ini" || echo missing)"
 grep -qx 'LoginDialogDisplayTimeout=60' "$run_dir/config.ini" || expect "login dialog timeout is pinned to IBC's documented default" LoginDialogDisplayTimeout=60 "$(grep '^LoginDialogDisplayTimeout' "$run_dir/config.ini" || echo missing)"
 grep -qx 'AcceptIncomingConnectionAction=reject' "$run_dir/config.ini" || expect "incoming API connections are rejected" reject "$(grep '^AcceptIncomingConnectionAction' "$run_dir/config.ini" || echo missing)"
 grep -qx 'TrustedTwsApiClientIPs=' "$run_dir/config.ini" || expect "no trusted API client addresses" "TrustedTwsApiClientIPs=" "$(grep '^TrustedTwsApiClientIPs' "$run_dir/config.ini" || echo missing)"
