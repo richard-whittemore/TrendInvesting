@@ -83,6 +83,9 @@ echo "$*" >>"$FAKE_CTL_LOG"
 case $1 in
   list-units)
     test -z "${FAKE_LIST_FAIL:-}" || { echo "Failed to connect to bus" >&2; exit 1; }
+    if [[ "$*" == *active,* ]] && test -n "${FAKE_ENGINE_ACTIVE:-}"; then
+      echo "$FAKE_ENGINE_ACTIVE.service loaded active running"; exit 0
+    fi
     n=$(($(cat "$FAKE_CTL_LOG.lists" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE_CTL_LOG.lists"
     from=${FAKE_ENGINE_BUSY_FROM:-}
     if test -n "${FAKE_ENGINE_BUSY:-}"; then from=1; fi
@@ -250,8 +253,42 @@ all_are() { # description build: every program in bin is that build's
   for p in $programs; do expect "$1: $p" "echo $p $2" "$(installed "$p")"; done
 }
 
+# Engine installation is an explicit fresh-run step (ADR 0027 §6;
+# docs/manual/server.md, Installing a release).
+fresh_server
+engine_before=$(sha "$TI_PREFIX/bin/ti-engine")
+expect "plain release installs" 0 "$(FAKE_ENGINE_ACTIVE=ti-engine@boost run v1.0.0)"
+expect "plain release preserves engine bytes" "$engine_before" "$(sha "$TI_PREFIX/bin/ti-engine")"
+expect "plain release preserves engine BUILD" hand-build "$(cat "$TI_PREFIX/bin/BUILD")"
+grep -q 'engine.*left.*current build' "$work/out" || fail 'plain release does not explain preserved engine'
+expect "split status succeeds" 0 "$(run --status)"
+grep -q '^programs: v1.0.0' "$work/out" || fail 'status lacks programs build'
+grep -q '^engine: hand-build' "$work/out" || fail 'status lacks engine build'
+for unit in ti-engine@boost ti-engine@trad-ira; do
+  expect "active $unit refuses engine release" nonzero "$(nonzero "$(FAKE_ENGINE_ACTIVE=$unit run --engine v1.1.0)")"
+  grep -q "$unit" "$work/out" || fail 'active refusal lacks unit'
+  grep -q 'fresh run' "$work/out" || fail 'active refusal lacks remedy'
+  expect "active refusal preserves engine" "$engine_before" "$(sha "$TI_PREFIX/bin/ti-engine")"
+done
+expect "explicit engine catches up same tag" 0 "$(run --engine v1.0.0)"
+expect "engine catch-up installs bytes" "$(sha "$work/rel/v1.0.0/ti-engine")" "$(sha "$TI_PREFIX/bin/ti-engine")"
+expect "engine catch-up preserves previous" initial "$(state previous)"
+expect "ordinary next release" 0 "$(run v1.1.0)"
+expect "failed engine release" nonzero "$(nonzero "$(run --engine v1.2.0)")"
+expect "failed engine release restores actual engine" 'echo ti-engine v1.0.0' "$(installed ti-engine)"
+expect "failed engine release restores engine identity" v1.0.0 "$(cat "$TI_PREFIX/bin/BUILD")"
+expect "ordinary rollback" 0 "$(run --rollback)"
+expect "ordinary rollback keeps engine" 'echo ti-engine v1.0.0' "$(installed ti-engine)"
+expect "explicit rollback" 0 "$(run --engine --rollback)"
+expect "explicit rollback installs engine" 'echo ti-engine v1.1.0' "$(installed ti-engine)"
+expect "plain rollback of split build" 0 "$(run --rollback)"
+expect "plain rollback keeps differing engine" 'echo ti-engine v1.1.0' "$(installed ti-engine)"
+expect "active rollback refused" nonzero "$(nonzero "$(FAKE_ENGINE_ACTIVE=ti-engine@trad-ira run --engine --rollback)")"
+if grep -E '^(start|stop|restart).*ti-engine' "$work/ctl.log"; then fail 'release controlled engine service'; fi
+
 fresh_server
 expect "no argument is refused" nonzero "$(nonzero "$(run)")"
+grep -q "usage: ti-release" "$work/out" || fail "empty arguments lack usage"
 for bad in ../x main v1/../../x "v1 0" "" --unverified; do
   expect "tag '$bad' is refused" nonzero "$(nonzero "$(run "$bad")")"
 done
@@ -261,7 +298,7 @@ expect "nothing downloaded for a bad tag" none "$(state current)"
 # Installing a build); the boundary is checked before any download.
 long_tag=v$(printf '%064d' 0)
 make_release "$long_tag"
-expect "a 65-character tag is refused" nonzero "$(nonzero "$(run "$long_tag")")"
+expect "a 65-character tag is refused" nonzero "$(nonzero "$(run --engine "$long_tag")")"
 grep -q 'is not a release tag' "$work/out" || fail 'overlong tag bypassed tag validation'
 test ! -s "$work/curl.log" || fail 'overlong tag reached downloads'
 all_are "overlong tag leaves bin untouched" hand
@@ -269,25 +306,25 @@ expect "overlong tag leaves release state untouched" none "$(state current)"
 fresh_server
 boundary_tag=v$(printf '%063d' 0)
 make_release "$boundary_tag"
-expect "a 64-character tag installs" 0 "$(run "$boundary_tag")"
+expect "a 64-character tag installs" 0 "$(run --engine "$boundary_tag")"
 all_are "maximum-length release identity" "$boundary_tag"
 fresh_server
 
 # An engine unit mid-restart: refused, nothing installed or restarted.
-expect "an engine mid-restart is refused" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY=1 run v1.0.0)")"
+expect "an engine mid-restart is refused" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY=1 run --engine v1.0.0)")"
 grep -qi "mid-restart" "$work/out" || fail "the refusal does not say why: $(cat "$work/out")"
 grep -q "ti-engine@boost" "$work/out" || fail "the refusal does not name the unit"
 expect "no program installed" "echo ti-dashboard hand" "$(installed ti-dashboard)"
 if grep -q '^restart' "$work/ctl.log"; then fail "something was restarted despite the refusal"; fi
 
 # systemd that cannot be asked counts as busy (fail closed).
-expect "a failing systemctl list-units is refused" nonzero "$(nonzero "$(FAKE_LIST_FAIL=1 run v1.0.0)")"
+expect "a failing systemctl list-units is refused" nonzero "$(nonzero "$(FAKE_LIST_FAIL=1 run --engine v1.0.0)")"
 expect "nothing installed when systemd cannot be asked" "echo ti-dashboard hand" "$(installed ti-dashboard)"
 expect "no release recorded when systemd cannot be asked" none "$(state current)"
 
 # An engine that starts restarting during the download is caught by the check
 # just before the swap.
-expect "an engine that goes mid-restart during the download is refused" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY_FROM=2 run v1.0.0)")"
+expect "an engine that goes mid-restart during the download is refused" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY_FROM=2 run --engine v1.0.0)")"
 grep -qi "mid-restart" "$work/out" || fail "the late refusal does not say why: $(cat "$work/out")"
 expect "nothing installed after the late refusal" "echo ti-dashboard hand" "$(installed ti-dashboard)"
 not_current "no release recorded after the late refusal" v1.0.0
@@ -296,7 +333,7 @@ if grep -q '^restart' "$work/ctl.log"; then fail "something was restarted despit
 # A corrupted program: checksum mismatch, bin untouched.
 make_release v0.9.0
 printf 'tampered\n' >>"$work/rel/v0.9.0/operator"
-expect "a checksum mismatch is refused" nonzero "$(nonzero "$(run v0.9.0)")"
+expect "a checksum mismatch is refused" nonzero "$(nonzero "$(run --engine v0.9.0)")"
 grep -q "operator" "$work/out" || fail "the mismatch does not name the program"
 expect "bin untouched after a mismatch" "echo operator hand" "$(installed operator)"
 not_current "no release recorded after a mismatch" v0.9.0
@@ -304,20 +341,20 @@ not_current "no release recorded after a mismatch" v0.9.0
 # A program missing from checksums.txt.
 make_release v0.9.1
 grep -v journal-query "$work/rel/v0.9.1/checksums.txt" >"$work/c" && mv "$work/c" "$work/rel/v0.9.1/checksums.txt"
-expect "an unlisted program is refused" nonzero "$(nonzero "$(run v0.9.1)")"
+expect "an unlisted program is refused" nonzero "$(nonzero "$(run --engine v0.9.1)")"
 
 # A program that is not a Linux program for this machine, with matching
 # checksums and attestation: refused the way provision.sh services refuses it.
 make_release v0.9.2
 fake_program "$work/rel/v0.9.2/ti-engine" "echo ti-engine other-arch" "$other_byte"
 reseal v0.9.2
-expect "a program for another machine is refused" nonzero "$(nonzero "$(run v0.9.2)")"
+expect "a program for another machine is refused" nonzero "$(nonzero "$(run --engine v0.9.2)")"
 grep -q "ti-engine" "$work/out" || fail "the architecture refusal does not name the program: $(cat "$work/out")"
 expect "bin untouched after an architecture refusal" "echo ti-engine hand" "$(installed ti-engine)"
 make_release v0.9.3
 printf '#!/bin/sh\necho not elf\n' >"$work/rel/v0.9.3/operator"
 reseal v0.9.3
-expect "a program that is not ELF is refused" nonzero "$(nonzero "$(run v0.9.3)")"
+expect "a program that is not ELF is refused" nonzero "$(nonzero "$(run --engine v0.9.3)")"
 expect "bin untouched after a non-ELF refusal" "echo operator hand" "$(installed operator)"
 grep -q 'elf_machine()' "$script" || fail "release.sh has no elf_machine check"
 expect "release.sh's ELF check is provision.sh's" \
@@ -325,7 +362,7 @@ expect "release.sh's ELF check is provision.sh's" \
   "$(sed -n '/^elf_machine() {/,/^}/p' "$script")"
 
 # An attestation that does not verify.
-expect "a failed attestation is refused" nonzero "$(nonzero "$(FAKE_GH_FAIL=1 run v1.0.0)")"
+expect "a failed attestation is refused" nonzero "$(nonzero "$(FAKE_GH_FAIL=1 run --engine v1.0.0)")"
 expect "bin untouched after a failed attestation" "echo ti-dashboard hand" "$(installed ti-dashboard)"
 
 # A consistent tamper: a program and its checksum line both replaced. The
@@ -333,19 +370,19 @@ expect "bin untouched after a failed attestation" "echo ti-dashboard hand" "$(in
 make_release v0.9.4
 fake_program "$work/rel/v0.9.4/operator" "echo operator evil"
 awk -v s="$(sha "$work/rel/v0.9.4/operator")" '$2 == "operator" { $1 = s } { print $1 "  " $2 }' "$work/rel/v0.9.4/checksums.txt" >"$work/c" && mv "$work/c" "$work/rel/v0.9.4/checksums.txt"
-expect "a consistent tamper is refused" nonzero "$(nonzero "$(run v0.9.4)")"
+expect "a consistent tamper is refused" nonzero "$(nonzero "$(run --engine v0.9.4)")"
 expect "bin untouched after a consistent tamper" "echo operator hand" "$(installed operator)"
 
 # An older release's programs and bundle served under a newer tag: the
 # attestation names the older tag's commit, not this tag's, so it is refused.
 make_release v0.9.5
 cp "$work/rel/v1.0.0/"* "$work/rel/v0.9.5/"
-expect "an older release substituted under a newer tag is refused" nonzero "$(nonzero "$(run v0.9.5)")"
+expect "an older release substituted under a newer tag is refused" nonzero "$(nonzero "$(run --engine v0.9.5)")"
 expect "bin untouched after a substitution" "echo ti-engine hand" "$(installed ti-engine)"
 not_current "no release recorded after a substitution" v0.9.5
 
 # Without gh: refused, nothing installed, saying how to install it.
-expect "without gh the install is refused" nonzero "$(nonzero "$(TI_GH=$work/stub/no-such-gh run v1.0.0)")"
+expect "without gh the install is refused" nonzero "$(nonzero "$(TI_GH=$work/stub/no-such-gh run --engine v1.0.0)")"
 grep -q "gh" "$work/out" || fail "the refusal without gh does not name gh: $(cat "$work/out")"
 expect "bin untouched without gh" "echo ti-engine hand" "$(installed ti-engine)"
 not_current "no release recorded without gh" v1.0.0
@@ -356,17 +393,17 @@ not_current "no release recorded without gh" v1.0.0
 make_release v0.9.6
 for st in ahead diverged; do
   set_compare v0.9.6 "{\"status\":\"$st\"}"
-  expect "a tag whose commit is $st of main is refused" nonzero "$(nonzero "$(run v0.9.6)")"
+  expect "a tag whose commit is $st of main is refused" nonzero "$(nonzero "$(run --engine v0.9.6)")"
   grep -q "main" "$work/out" || fail "the $st refusal does not say main: $(cat "$work/out")"
   expect "bin untouched when the commit is $st of main" "echo ti-engine hand" "$(installed ti-engine)"
   not_current "no release recorded when the commit is $st of main" v0.9.6
 done
 set_compare v0.9.6 '{"status":"identical"}'
-expect "a tag at main's head installs" 0 "$(run v0.9.6)"
+expect "a tag at main's head installs" 0 "$(run --engine v0.9.6)"
 fresh_server
 for body in 'not json' '[]' '{}' '{"status":["behind"]}' '{"status":"behindish"}' ''; do
   set_compare v0.9.6 "$body"
-  expect "a compare answer '$body' is refused" nonzero "$(nonzero "$(run v0.9.6)")"
+  expect "a compare answer '$body' is refused" nonzero "$(nonzero "$(run --engine v0.9.6)")"
   expect "bin untouched after the compare answer '$body'" "echo ti-engine hand" "$(installed ti-engine)"
 done
 # The branch lookup is checked as strictly: a tag object, a short or non-hex
@@ -375,13 +412,13 @@ good_main=$(cat "$work/api/repos/$slug/git/ref/heads/main")
 set_compare v0.9.6 '{"status":"identical"}'
 for body in 'not json' '{}' '[]' '' '{"object":{"sha":"'"$main_sha"'","type":"tag"}}' '{"object":{"sha":"abc123","type":"commit"}}' '{"object":{"sha":"'"$main_sha"'0","type":"commit"}}' '{"object":{"sha":"'"${main_sha:0:39}"'","type":"commit"}}' '{"object":{"sha":"'"$(echo "$main_sha" | tr a-f A-F)"'","type":"commit"}}' '{"object":{"type":"commit"}}' '{"object":{"sha":"'"$main_sha"'"}}' '{"object":"x"}'; do
   printf '%s\n' "$body" >"$work/api/repos/$slug/git/ref/heads/main"
-  expect "a main lookup answer '$body' is refused" nonzero "$(nonzero "$(run v0.9.6)")"
+  expect "a main lookup answer '$body' is refused" nonzero "$(nonzero "$(run --engine v0.9.6)")"
   grep -q "whether .* is on main.*try again later" "$work/out" || fail "the main lookup answer '$body' does not say to try again later: $(cat "$work/out")"
   expect "bin untouched after the main lookup answer '$body'" "echo ti-engine hand" "$(installed ti-engine)"
 done
 printf '%s\n' "$good_main" >"$work/api/repos/$slug/git/ref/heads/main"
 rm -f "$work/api/repos/$slug/compare/$main_sha...$(str_sha commit-v0.9.6)"
-expect "no compare answer is refused" nonzero "$(nonzero "$(run v0.9.6)")"
+expect "no compare answer is refused" nonzero "$(nonzero "$(run --engine v0.9.6)")"
 not_current "no release recorded without a compare answer" v0.9.6
 
 # A tag named main must not stand in for the branch: the comparison is made
@@ -391,7 +428,7 @@ make_release v0.9.8
 set_compare v0.9.8 '{"status":"diverged"}'
 printf '{"status":"behind"}\n' >"$work/api/repos/$slug/compare/main...$(str_sha commit-v0.9.8)"
 fresh_server
-expect "a tag called main does not vouch for an off-main commit" nonzero "$(nonzero "$(run v0.9.8)")"
+expect "a tag called main does not vouch for an off-main commit" nonzero "$(nonzero "$(run --engine v0.9.8)")"
 expect "bin untouched under a shadowing main tag" "echo ti-engine hand" "$(installed ti-engine)"
 rm -f "$work/api/repos/$slug/compare/main...$(str_sha commit-v0.9.8)"
 
@@ -400,11 +437,11 @@ rm -f "$work/api/repos/$slug/compare/main...$(str_sha commit-v0.9.8)"
 make_release v0.9.9
 set_compare v0.9.9 '{"status":"diverged"}'
 fresh_server
-expect "a commit off main is refused" nonzero "$(nonzero "$(run v0.9.9)")"
+expect "a commit off main is refused" nonzero "$(nonzero "$(run --engine v0.9.9)")"
 grep -q "not on main" "$work/out" || fail "the off-main refusal does not say so: $(cat "$work/out")"
 if grep -qi "try again" "$work/out"; then fail "the off-main refusal suggests retrying: $(cat "$work/out")"; fi
 rm -f "$work/api/repos/$slug/compare/$main_sha...$(str_sha commit-v0.9.9)"
-expect "an unreadable compare answer is refused" nonzero "$(nonzero "$(run v0.9.9)")"
+expect "an unreadable compare answer is refused" nonzero "$(nonzero "$(run --engine v0.9.9)")"
 grep -qi "try again later" "$work/out" || fail "the unreachable-API refusal has no retry hint: $(cat "$work/out")"
 if grep -q "not on main" "$work/out"; then fail "the unreachable-API refusal claims the commit is off main: $(cat "$work/out")"; fi
 set_compare v0.9.9 '{"status":"behind"}'
@@ -417,7 +454,7 @@ for body in '[]' 'not json' '{"object":{"type":"commit","sha":"../../x"}}' '{"ob
   printf '%s\n' "$body" >"$api/ref/tags/v0.9.7"
   printf '%s\n' "$body" >"$api/tags/$(str_sha tagself)"
   : >"$work/gh.log"
-  expect "a malformed tag answer '$body' is refused" nonzero "$(nonzero "$(run v0.9.7)")"
+  expect "a malformed tag answer '$body' is refused" nonzero "$(nonzero "$(run --engine v0.9.7)")"
   expect "gh not called for the tag answer '$body'" 0 "$(wc -l <"$work/gh.log" | tr -d ' ')"
   expect "bin untouched after the tag answer '$body'" "echo ti-engine hand" "$(installed ti-engine)"
   not_current "no release recorded after the tag answer '$body'" v0.9.7
@@ -426,13 +463,13 @@ done
 # gh's own message reaches the operator (an old gh, a login prompt, no trust
 # root) so a tooling fault is not reported as a tampered release; a token in
 # it never does.
-expect "a gh that fails with a message is refused" nonzero "$(nonzero "$(FAKE_GH_STDERR='unknown flag: --source-ref token ghp_abcdefghijklmnopqrstuvwxyz0123456789ab' run v1.0.0)")"
+expect "a gh that fails with a message is refused" nonzero "$(nonzero "$(FAKE_GH_STDERR='unknown flag: --source-ref token ghp_abcdefghijklmnopqrstuvwxyz0123456789ab' run --engine v1.0.0)")"
 grep -q "unknown flag: --source-ref" "$work/out" || fail "gh's message is not shown: $(cat "$work/out")"
 if grep -q "ghp_abcdefghijklmnop" "$work/out"; then fail "a token in gh's message was printed"; fi
 expect "bin untouched after a gh failure" "echo ti-engine hand" "$(installed ti-engine)"
 
 : >"$work/curl.log"
-expect "a download over the size cap is refused" nonzero "$(nonzero "$(TI_RELEASE_MAX_BYTES=20 run v1.0.0)")"
+expect "a download over the size cap is refused" nonzero "$(nonzero "$(TI_RELEASE_MAX_BYTES=20 run --engine v1.0.0)")"
 expect "bin untouched after an oversized download" "echo ti-engine hand" "$(installed ti-engine)"
 test -s "$work/curl.log" || fail "curl was not called"
 if grep -v -- '--max-time' "$work/curl.log"; then fail "a download has no --max-time"; fi
@@ -440,7 +477,7 @@ if grep -v -- '--max-filesize' "$work/curl.log"; then fail "a download has no --
 
 # An install step that fails partway (a rename onto bin/ti-reporter): the
 # install stops, what was swapped is put back, the release is not recorded.
-expect "an install whose rename fails is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/bin/ti-reporter run v1.0.0)")"
+expect "an install whose rename fails is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/bin/ti-reporter run --engine v1.0.0)")"
 all_are "a failed rename puts the hand build back" hand
 not_current "no release recorded after a failed rename" v1.0.0
 rm -f "$TI_PREFIX/bin/ti-reporter.failed-once"
@@ -449,26 +486,26 @@ rm -f "$TI_PREFIX/bin/ti-reporter.failed-once"
 # build's folder): the old build is put back and the release is not recorded,
 # so asking for the tag again installs it.
 fresh_server
-expect "a release whose save fails is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 run v1.0.0)")"
+expect "a release whose save fails is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 run --engine v1.0.0)")"
 all_are "a failed save puts the hand build back" hand
 not_current "no release recorded after a failed save" v1.0.0
 rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
-expect "the tag installs when asked again" 0 "$(run v1.0.0)"
+expect "the tag installs when asked again" 0 "$(run --engine v1.0.0)"
 all_are "the tag after a failed save" v1.0.0
 
 # A save that fails, with the kept build moved back: the TAG note beside it is
 # removed from its new place, and a failing removal never decides the outcome.
 fresh_server
-expect "v1.0.0 installs for the TAG case" 0 "$(run v1.0.0)"
-expect "v1.1.0 installs for the TAG case" 0 "$(run v1.1.0)"
-expect "a failed save is nonzero (TAG removed)" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 run v1.0.0)")"
+expect "v1.0.0 installs for the TAG case" 0 "$(run --engine v1.0.0)"
+expect "v1.1.0 installs for the TAG case" 0 "$(run --engine v1.1.0)"
+expect "a failed save is nonzero (TAG removed)" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 run --engine v1.0.0)")"
 test -f "$TI_PREFIX/releases/v1.0.0/checksums.txt" || fail "the kept build was not moved back"
 test ! -e "$TI_PREFIX/releases/v1.0.0/TAG" || fail "a stray TAG is left in the moved-back build"
 rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
 fresh_server
-expect "v1.0.0 installs for the TAG rm case" 0 "$(run v1.0.0)"
-expect "v1.1.0 installs for the TAG rm case" 0 "$(run v1.1.0)"
-expect "a failed save with a failing TAG removal is nonzero" nonzero "$(nonzero "$(FAKE_RM_FAIL="$TI_PREFIX/releases/*/TAG" FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 run v1.0.0)")"
+expect "v1.0.0 installs for the TAG rm case" 0 "$(run --engine v1.0.0)"
+expect "v1.1.0 installs for the TAG rm case" 0 "$(run --engine v1.1.0)"
+expect "a failed save with a failing TAG removal is nonzero" nonzero "$(nonzero "$(FAKE_RM_FAIL="$TI_PREFIX/releases/*/TAG" FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 run --engine v1.0.0)")"
 test -f "$TI_PREFIX/releases/v1.0.0/checksums.txt" || fail "a failing TAG removal lost the only copy of the build: $(cat "$work/out")"
 test ! -e "$TI_PREFIX/releases/.replaced" || fail "the build is still at .replaced after a successful move back"
 rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
@@ -477,10 +514,10 @@ rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
 # the tag being released again held the previous build): that build is kept
 # under a .rescue name, an ALERT names it, and the exit is non-zero.
 fresh_server
-expect "v1.0.0 installs" 0 "$(run v1.0.0)"
-expect "v1.1.0 installs" 0 "$(run v1.1.0)"
+expect "v1.0.0 installs" 0 "$(run --engine v1.0.0)"
+expect "v1.1.0 installs" 0 "$(run --engine v1.1.0)"
 expect "previous is v1.0.0" v1.0.0 "$(state previous)"
-expect "a failed save with a failed restore is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 run v1.0.0)")"
+expect "a failed save with a failed restore is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 run --engine v1.0.0)")"
 grep -q "ALERT" "$work/out" || fail "no ALERT for the lost build: $(cat "$work/out")"
 grep -q "$TI_PREFIX/releases/.rescue-v1.0.0" "$work/out" || fail "the ALERT does not name the rescued build: $(cat "$work/out")"
 test -f "$TI_PREFIX/releases/.rescue-v1.0.0/checksums.txt" || fail "the kept build was deleted"
@@ -489,11 +526,11 @@ rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
 # An earlier incident left a .rescue folder for the tag: the rescue goes to a
 # new name, never inside the old folder.
 fresh_server
-expect "v1.0.0 installs again" 0 "$(run v1.0.0)"
-expect "v1.1.0 installs again" 0 "$(run v1.1.0)"
+expect "v1.0.0 installs again" 0 "$(run --engine v1.0.0)"
+expect "v1.1.0 installs again" 0 "$(run --engine v1.1.0)"
 mkdir -p "$TI_PREFIX/releases/.rescue-v1.0.0"
 echo old >"$TI_PREFIX/releases/.rescue-v1.0.0/marker"
-expect "a failed save beside an old rescue is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 run v1.0.0)")"
+expect "a failed save beside an old rescue is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 run --engine v1.0.0)")"
 test -f "$TI_PREFIX/releases/.rescue-v1.0.0/marker" || fail "the old rescue folder was disturbed"
 test ! -e "$TI_PREFIX/releases/.rescue-v1.0.0/.replaced" || fail "the kept build was moved inside the old rescue folder"
 rescued=$(find "$TI_PREFIX/releases" -maxdepth 1 -name ".rescue-v1.0.0.*" | head -1)
@@ -505,14 +542,14 @@ rm -rf "$TI_PREFIX"/releases/.rescue-v1.0.0*
 # The rescue rename fails too: the kept build stays at .replaced, the ALERT
 # names it, and the next release refuses to start until it is moved aside.
 fresh_server
-expect "v1.0.0 installs a third time" 0 "$(run v1.0.0)"
-expect "v1.1.0 installs a third time" 0 "$(run v1.1.0)"
-expect "a failed save with no rescue is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 FAKE_MV_FAIL2=$TI_PREFIX/releases/.rescue run v1.0.0)")"
+expect "v1.0.0 installs a third time" 0 "$(run --engine v1.0.0)"
+expect "v1.1.0 installs a third time" 0 "$(run --engine v1.1.0)"
+expect "a failed save with no rescue is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 FAKE_MV_FAIL2=$TI_PREFIX/releases/.rescue run --engine v1.0.0)")"
 grep -q "ALERT" "$work/out" || fail "no ALERT when the rescue also failed: $(cat "$work/out")"
 grep -q "$TI_PREFIX/releases/.replaced" "$work/out" || fail "the ALERT does not name .replaced: $(cat "$work/out")"
 test -f "$TI_PREFIX/releases/.replaced/checksums.txt" || fail "the kept build did not survive the exit trap"
 rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
-expect "a later release refuses while .replaced exists" nonzero "$(nonzero "$(run v1.3.0)")"
+expect "a later release refuses while .replaced exists" nonzero "$(nonzero "$(run --engine v1.3.0)")"
 if ! grep -q "ALERT" "$work/out" || ! grep -q "$TI_PREFIX/releases/.replaced" "$work/out"; then fail "the refusal does not name .replaced: $(cat "$work/out")"; fi
 test -f "$TI_PREFIX/releases/.replaced/checksums.txt" || fail "a later release deleted the kept build"
 expect "bin untouched by the refused release" "echo ti-engine v1.1.0" "$(installed ti-engine)"
@@ -637,7 +674,7 @@ mv "$TI_PREFIX/releases/.replaced" "$TI_PREFIX/releases/aside"
 mkdir -p "$TI_PREFIX/releases/.replaced"
 echo "v1.0.0" >"$TI_PREFIX/releases/previous"
 rm -rf "$TI_PREFIX/releases/v1.0.0"
-expect "a release refuses over a .replaced with no TAG" nonzero "$(nonzero "$(run v1.3.0)")"
+expect "a release refuses over a .replaced with no TAG" nonzero "$(nonzero "$(run --engine v1.3.0)")"
 grep -q "probably v1.0.0, whose folder is missing" "$work/out" || fail "the refusal does not name the probable tag: $(cat "$work/out")"
 expect "--status with a .replaced with no TAG" 0 "$(run --status)"
 grep -q "probably v1.0.0, whose folder is missing" "$work/out" || fail "--status does not name the probable tag: $(cat "$work/out")"
@@ -646,7 +683,7 @@ mv "$TI_PREFIX/releases/aside" "$TI_PREFIX/releases/.replaced"
 
 # A rescue folder never blocks a run; only .replaced does.
 mv "$TI_PREFIX/releases/.replaced" "$TI_PREFIX/releases/aside"
-expect "the release goes ahead once .replaced is moved aside, a rescue present" 0 "$(run v1.3.0)"
+expect "the release goes ahead once .replaced is moved aside, a rescue present" 0 "$(run --engine v1.3.0)"
 test -d "$TI_PREFIX/releases/.rescue-v9.9.9" || fail "a release removed the rescue folder"
 expect "--status with nothing kept" 0 "$(run --status)"
 grep -q "\.replaced: none" "$work/out" || fail "--status does not say .replaced is clear: $(cat "$work/out")"
@@ -656,7 +693,7 @@ rm -rf "$TI_PREFIX/releases/.rescue-v9.9.9"
 # there) says another release is running, not a false ALERT, and touches
 # neither.
 mkdir -p "$TI_PREFIX/releases/.lock" "$TI_PREFIX/releases/.replaced"
-expect "a run while another holds the lock is refused" nonzero "$(nonzero "$(run v1.4.0)")"
+expect "a run while another holds the lock is refused" nonzero "$(nonzero "$(run --engine v1.4.0)")"
 grep -q "another ti-release is running" "$work/out" || fail "the lock message is missing: $(cat "$work/out")"
 if grep -q "ALERT" "$work/out"; then fail "a false ALERT during a legitimate swap: $(cat "$work/out")"; fi
 test -d "$TI_PREFIX/releases/.replaced" && test -d "$TI_PREFIX/releases/.lock" || fail "the refused run disturbed the lock or .replaced"
@@ -682,8 +719,8 @@ for identity in missing empty slash overlong nul trailing-nul extra-newline embe
     boundary) expected=$(printf '%064d' 0); printf '%s\n' "$expected" >"$TI_PREFIX/bin/BUILD" ;;
   esac
   cp -R "$TI_PREFIX/bin" "$work/initial-$identity"
-  expect "release snapshots $identity BUILD" 0 "$(run v1.0.0)"
-  expect "rollback with $identity BUILD succeeds" 0 "$(run --rollback)"
+  expect "release snapshots $identity BUILD" 0 "$(run --engine v1.0.0)"
+  expect "rollback with $identity BUILD succeeds" 0 "$(run --engine --rollback)"
   printf '%s\n' "$expected" >"$work/expected-BUILD"
   cmp -s "$work/expected-BUILD" "$TI_PREFIX/bin/BUILD" || fail "rollback with $identity BUILD did not restore $expected"
   for p in $programs; do
@@ -696,7 +733,7 @@ done
 
 # The first release.
 fresh_server
-expect "the first release installs" 0 "$(run v1.0.0)"
+expect "the first release installs" 0 "$(run --engine v1.0.0)"
 all_are "the first release" v1.0.0
 test -x "$TI_PREFIX/bin/ti-engine" || fail "ti-engine is not executable"
 expect "current is v1.0.0" v1.0.0 "$(state current)"
@@ -708,32 +745,32 @@ if grep -E '^(restart|stop|start|kill).*ti-engine' "$work/ctl.log"; then fail "t
 if grep -E '^(restart|stop|start).*ti-reporter' "$work/ctl.log"; then fail "the reporter was restarted"; fi
 expect "gh verified each program once" "$(for p in $programs; do echo "verify $p"; done | sort)" "$(sort "$work/gh.log.verified")"
 expect "gh was called once per program" 6 "$(grep -c '^attestation verify' "$work/gh.log")"
-grep -q "next fresh run" "$work/out" || fail "the output does not say the engine takes the build at the next fresh run"
+grep -q "approved fresh run" "$work/out" || fail "the output does not require an approved fresh run"
 grep -q "v1.0.0" "$work/out" || fail "the output does not name the new tag"
 grep -qi "changed" "$work/out" || fail "the output does not say what changed"
 
 # The same tag again changes nothing.
 : >"$work/ctl.log"
-expect "the same tag again succeeds" 0 "$(run v1.0.0)"
+expect "the same tag again succeeds" 0 "$(run --engine v1.0.0)"
 grep -qi "already" "$work/out" || fail "the repeat does not say it is already installed"
 if grep -q '^restart' "$work/ctl.log"; then fail "a repeat restarted the dashboard"; fi
 
 # --unverified (the rehearsal container only): installs without gh, warning
 # loudly that the attestation was not checked.
 fresh_server
-expect "--unverified is refused on a server (no rehearsal marker)" nonzero "$(nonzero "$(TI_GH=$work/stub/no-such-gh run --unverified v1.0.0)")"
+expect "--unverified is refused on a server (no rehearsal marker)" nonzero "$(nonzero "$(TI_GH=$work/stub/no-such-gh run --unverified --engine v1.0.0)")"
 grep -q "rehearsal" "$work/out" || fail "the --unverified refusal does not say why: $(cat "$work/out")"
 expect "bin untouched by a refused --unverified" "echo ti-engine hand" "$(installed ti-engine)"
 not_current "no release recorded by a refused --unverified" v1.0.0
 if "$script" 2>&1 | grep -q -- '--unverified'; then fail "the usage line advertises --unverified"; fi
-expect "--unverified installs without gh in the rehearsal" 0 "$(TI_REHEARSAL=1 TI_GH=$work/stub/no-such-gh run --unverified v1.0.0)"
+expect "--unverified installs without gh in the rehearsal" 0 "$(TI_REHEARSAL=1 TI_GH=$work/stub/no-such-gh run --unverified --engine v1.0.0)"
 grep -q "WARNING" "$work/out" || fail "--unverified does not warn: $(cat "$work/out")"
 grep -qi "attestation not verified" "$work/out" || fail "--unverified does not say the attestation was not verified"
 all_are "--unverified" v1.0.0
 
 # A second release keeps the first as the previous build; the hand-installed
 # one is dropped.
-expect "the second release installs" 0 "$(run v1.1.0)"
+expect "the second release installs" 0 "$(run --engine v1.1.0)"
 expect "current is v1.1.0" v1.1.0 "$(state current)"
 expect "previous is v1.0.0" v1.0.0 "$(state previous)"
 test ! -e "$TI_PREFIX/releases/initial" || fail "the older build was not pruned"
@@ -741,7 +778,7 @@ test ! -e "$TI_PREFIX/releases/initial" || fail "the older build was not pruned"
 # A release whose dashboard does not come back: reported, and the previous
 # build is put back, so nothing is left half-installed.
 : >"$work/ctl.log"
-expect "a failed verify is nonzero" nonzero "$(nonzero "$(run v1.2.0)")"
+expect "a failed verify is nonzero" nonzero "$(nonzero "$(run --engine v1.2.0)")"
 grep -qi "dashboard" "$work/out" || fail "the verify failure does not name the dashboard"
 all_are "a failed dashboard puts v1.1.0 back" v1.1.0
 expect "current is still v1.1.0" v1.1.0 "$(state current)"
@@ -749,7 +786,7 @@ expect "previous is still v1.0.0" v1.0.0 "$(state previous)"
 expect "the dashboard was restarted twice" 2 "$(grep -c '^restart ti-dashboard' "$work/ctl.log")"
 
 # A dashboard that comes up and then stops within the settle is a failure.
-expect "a dashboard that does not stay active is nonzero" nonzero "$(nonzero "$(run v1.4.0)")"
+expect "a dashboard that does not stay active is nonzero" nonzero "$(nonzero "$(run --engine v1.4.0)")"
 all_are "a flapping dashboard puts v1.1.0 back" v1.1.0
 expect "current is still v1.1.0 after a flap" v1.1.0 "$(state current)"
 
@@ -757,35 +794,35 @@ expect "current is still v1.1.0 after a flap" v1.1.0 "$(state current)"
 # it is damaged it could not be put back, so nothing is installed.
 cp "$TI_PREFIX/releases/v1.1.0/ti-reporter" "$work/keep"
 printf 'x\n' >>"$TI_PREFIX/releases/v1.1.0/ti-reporter"
-expect "a release over a damaged kept build is refused" nonzero "$(nonzero "$(run v1.3.0)")"
+expect "a release over a damaged kept build is refused" nonzero "$(nonzero "$(run --engine v1.3.0)")"
 all_are "bin untouched over a damaged kept build" v1.1.0
 mv "$work/keep" "$TI_PREFIX/releases/v1.1.0/ti-reporter"
 
 # Rollback.
 : >"$work/ctl.log"
-expect "rollback succeeds" 0 "$(run --rollback)"
+expect "rollback succeeds" 0 "$(run --engine --rollback)"
 all_are "rollback" v1.0.0
 expect "current is v1.0.0 after rollback" v1.0.0 "$(state current)"
 expect "previous is v1.1.0 after rollback" v1.1.0 "$(state previous)"
 grep -q '^restart ti-dashboard' "$work/ctl.log" || fail "rollback did not restart the dashboard"
 if grep -E '^(restart|stop|start|kill).*ti-engine' "$work/ctl.log"; then fail "rollback touched the engine"; fi
-grep -q "next fresh run" "$work/out" || fail "rollback does not say the engine keeps its build until the next fresh run"
+grep -q "approved fresh run" "$work/out" || fail "rollback does not require an approved fresh run"
 
 # Rollback refuses a damaged previous build, and while an engine is mid-restart.
 printf 'x\n' >>"$TI_PREFIX/releases/v1.1.0/ti-reporter"
-expect "rollback to a damaged build is refused" nonzero "$(nonzero "$(run --rollback)")"
+expect "rollback to a damaged build is refused" nonzero "$(nonzero "$(run --engine --rollback)")"
 expect "bin untouched after the refused rollback" "echo ti-reporter v1.0.0" "$(installed ti-reporter)"
-expect "an engine mid-restart blocks rollback" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY=1 run --rollback)")"
-expect "a late engine restart blocks rollback" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY_FROM=2 run --rollback)")"
+expect "an engine mid-restart blocks rollback" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY=1 run --engine --rollback)")"
+expect "a late engine restart blocks rollback" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY_FROM=2 run --engine --rollback)")"
 
 # A saved tagged build must list all five programs: only the hand-installed
 # build may lack one, so a lost checksum line cannot mix two builds.
 fresh_server
-run v1.0.0 >/dev/null
-run v1.1.0 >/dev/null
+run --engine v1.0.0 >/dev/null
+run --engine v1.1.0 >/dev/null
 cp "$TI_PREFIX/releases/v1.0.0/checksums.txt" "$work/keep"
 grep -v journal-query "$work/keep" >"$TI_PREFIX/releases/v1.0.0/checksums.txt"
-expect "rollback to a build missing a checksum line is refused" nonzero "$(nonzero "$(run --rollback)")"
+expect "rollback to a build missing a checksum line is refused" nonzero "$(nonzero "$(run --engine --rollback)")"
 all_are "bin untouched after a refusal for a missing checksum line" v1.1.0
 mv "$work/keep" "$TI_PREFIX/releases/v1.0.0/checksums.txt"
 
@@ -793,7 +830,7 @@ mv "$work/keep" "$TI_PREFIX/releases/v1.0.0/checksums.txt"
 # if it is damaged it could not be put back, so nothing changes.
 printf 'x\n' >>"$TI_PREFIX/releases/v1.1.0/ti-reporter"
 : >"$work/ctl.log"
-expect "rollback over a damaged current build is refused" nonzero "$(nonzero "$(run --rollback)")"
+expect "rollback over a damaged current build is refused" nonzero "$(nonzero "$(run --engine --rollback)")"
 all_are "bin untouched over a damaged current build" v1.1.0
 if grep -q '^restart' "$work/ctl.log"; then fail "rollback restarted the dashboard over a damaged current build"; fi
 grep -q "v1.1.0" "$work/out" || fail "the refusal does not name the current build: $(cat "$work/out")"
@@ -808,36 +845,36 @@ make_five() { # TAG: the saved build as an older ti-release kept it
   grep -v ti-gateway-start "$TI_PREFIX/releases/$1/checksums.txt" >"$work/five" && mv "$work/five" "$TI_PREFIX/releases/$1/checksums.txt"
 }
 fresh_server
-run v1.0.0 >/dev/null
+run --engine v1.0.0 >/dev/null
 make_five v1.0.0
-expect "an upgrade from a saved five-program release succeeds" 0 "$(run v1.1.0)"
-expect "rollback to a saved five-program release is refused" nonzero "$(nonzero "$(run --rollback)")"
+expect "an upgrade from a saved five-program release succeeds" 0 "$(run --engine v1.1.0)"
+expect "rollback to a saved five-program release is refused" nonzero "$(nonzero "$(run --engine --rollback)")"
 grep -qi "roll forward" "$work/out" || fail "the refusal does not tell the owner to roll forward: $(cat "$work/out")"
 grep -q "v1.1.0" "$work/out" || fail "the refusal does not name the tag to roll forward to: $(cat "$work/out")"
 all_are "bin untouched by the refused rollback" v1.1.0
 
 # A failed upgrade from a five-program release puts the previous starter back.
 fresh_server
-run v1.0.0 >/dev/null
+run --engine v1.0.0 >/dev/null
 make_five v1.0.0
 fake_program "$TI_PREFIX/bin/ti-gateway-start" "echo ti-gateway-start previous"
-expect "an upgrade whose dashboard fails is refused" nonzero "$(nonzero "$(run v1.2.0)")"
+expect "an upgrade whose dashboard fails is refused" nonzero "$(nonzero "$(run --engine v1.2.0)")"
 expect "the previous starter is put back after the failed upgrade" "echo ti-gateway-start previous" "$(installed ti-gateway-start)"
 
 # An upgrade that was interrupted left the original starter with the build; a
 # retry that then fails puts that one back, not the candidate it had installed.
 fresh_server
-run v1.0.0 >/dev/null
+run --engine v1.0.0 >/dev/null
 make_five v1.0.0
 fake_program "$TI_PREFIX/releases/v1.0.0/.starter-installed" "echo ti-gateway-start original"
 fake_program "$TI_PREFIX/bin/ti-gateway-start" "echo ti-gateway-start candidate-from-the-interrupted-upgrade"
-expect "a retried upgrade whose dashboard fails is refused" nonzero "$(nonzero "$(run v1.2.0)")"
+expect "a retried upgrade whose dashboard fails is refused" nonzero "$(nonzero "$(run --engine v1.2.0)")"
 expect "the original starter is put back, not the interrupted candidate" "echo ti-gateway-start original" "$(installed ti-gateway-start)"
 
 # A copy of the starter that is cut short is not the original: a cp that fails
 # after writing part of the file leaves nothing a retry would trust.
 fresh_server
-run v1.0.0 >/dev/null
+run --engine v1.0.0 >/dev/null
 make_five v1.0.0
 fake_program "$TI_PREFIX/bin/ti-gateway-start" "echo ti-gateway-start installed"
 mkdir -p "$work/shim"
@@ -852,21 +889,21 @@ rm -f "$work/shim/once"
 s=0; PATH="$work/shim:$PATH" "$script" v1.2.0 >"$work/out" 2>&1 || s=$?
 expect "an upgrade whose starter copy is cut short is refused" nonzero "$(nonzero "$s")"
 expect "nothing was installed over the starter" "echo ti-gateway-start installed" "$(installed ti-gateway-start)"
-expect "the retry whose dashboard fails is refused" nonzero "$(nonzero "$(PATH="$work/shim:$PATH" run v1.2.0)")"
+expect "the retry whose dashboard fails is refused" nonzero "$(nonzero "$(PATH="$work/shim:$PATH" run --engine v1.2.0)")"
 expect "the installed starter, not a partial copy, is put back" "echo ti-gateway-start installed" "$(installed ti-gateway-start)"
 
 # A hand-installed build (initial) without the starter is refused as a rollback target too.
 fresh_server
 rm "$TI_PREFIX/bin/ti-gateway-start"
-run v1.0.0 >/dev/null
-expect "rollback to a hand build without the starter is refused" nonzero "$(nonzero "$(run --rollback)")"
+run --engine v1.0.0 >/dev/null
+expect "rollback to a hand build without the starter is refused" nonzero "$(nonzero "$(run --engine --rollback)")"
 
 # A saved build that carries the marker but lost the starter's line is damaged.
 fresh_server
-run v1.0.0 >/dev/null
-run v1.1.0 >/dev/null
+run --engine v1.0.0 >/dev/null
+run --engine v1.1.0 >/dev/null
 grep -v ti-gateway-start "$TI_PREFIX/releases/v1.0.0/checksums.txt" >"$work/five" && mv "$work/five" "$TI_PREFIX/releases/v1.0.0/checksums.txt"
-expect "rollback to a six-program build missing its starter line is refused" nonzero "$(nonzero "$(run --rollback)")"
+expect "rollback to a six-program build missing its starter line is refused" nonzero "$(nonzero "$(run --engine --rollback)")"
 grep -q "is not listed in checksums.txt" "$work/out" || fail "the refusal does not say the build is damaged: $(cat "$work/out")"
 if grep -qi "roll forward" "$work/out"; then fail "a damaged six-program build was treated as an old five-program one: $(cat "$work/out")"; fi
 all_are "bin untouched by a refusal for a damaged six-program build" v1.1.0
@@ -874,32 +911,32 @@ all_are "bin untouched by a refusal for a damaged six-program build" v1.1.0
 fresh_server
 rm "$work/rel/v1.3.0/ti-gateway-start"
 grep -v ti-gateway-start "$work/rel/v1.3.0/checksums.txt" >"$work/five" && mv "$work/five" "$work/rel/v1.3.0/checksums.txt"
-expect "a freshly fetched release without the sixth program is refused" nonzero "$(nonzero "$(run v1.3.0)")"
+expect "a freshly fetched release without the sixth program is refused" nonzero "$(nonzero "$(run --engine v1.3.0)")"
 make_release v1.3.0
 
 # Rollback with no previous build.
 fresh_server
-expect "rollback with nothing to roll back to is refused" nonzero "$(nonzero "$(run --rollback)")"
+expect "rollback with nothing to roll back to is refused" nonzero "$(nonzero "$(run --engine --rollback)")"
 
 # Rollback to a hand-installed build that lacked a program: the programs it
 # had are put back, and the one it lacked is left as it is (nothing removed).
 fresh_server
 rm "$TI_PREFIX/bin/journal-query"
-expect "a release over a hand build lacking a program installs" 0 "$(run v1.0.0)"
-expect "rollback to a hand build lacking a program succeeds" 0 "$(run --rollback)"
+expect "a release over a hand build lacking a program installs" 0 "$(run --engine v1.0.0)"
+expect "rollback to a hand build lacking a program succeeds" 0 "$(run --engine --rollback)"
 for p in ti-engine ti-reporter ti-dashboard operator; do expect "$p back to the hand build" "echo $p hand" "$(installed "$p")"; done
 expect "the program the hand build lacked is left" "echo journal-query v1.0.0" "$(installed journal-query)"
 
 # A rollback whose dashboard does not come back puts the current build back
 # and records nothing, so the server still holds the build state names.
 fresh_server
-run v1.2.0 >/dev/null || true
-run v1.1.0 >/dev/null
-run v1.2.0 >/dev/null || true
+run --engine v1.2.0 >/dev/null || true
+run --engine v1.1.0 >/dev/null
+run --engine v1.2.0 >/dev/null || true
 # current is v1.1.0, previous is the hand build; make the previous bad.
 fake_program "$TI_PREFIX/releases/initial/ti-dashboard" "echo BAD"
 (cd "$TI_PREFIX/releases/initial" && : >checksums.txt && for p in $programs; do printf '%s  %s\n' "$(sha "$p")" "$p" >>checksums.txt; done)
-expect "a rollback whose dashboard does not return fails" nonzero "$(nonzero "$(run --rollback)")"
+expect "a rollback whose dashboard does not return fails" nonzero "$(nonzero "$(run --engine --rollback)")"
 grep -qi "dashboard" "$work/out" || fail "the rollback failure does not name the dashboard"
 all_are "a failed rollback puts the current build back" v1.1.0
 expect "current is still v1.1.0 after a failed rollback" v1.1.0 "$(state current)"
@@ -908,15 +945,15 @@ expect "previous is still initial after a failed rollback" initial "$(state prev
 # Releasing the previous build's tag again, when its dashboard then fails,
 # keeps that build's folder, so --rollback still works.
 fresh_server
-run v1.3.0 >/dev/null
-run v1.1.0 >/dev/null
+run --engine v1.3.0 >/dev/null
+run --engine v1.1.0 >/dev/null
 expect "previous is v1.3.0" v1.3.0 "$(state previous)"
 fake_program "$work/rel/v1.3.0/ti-dashboard" "echo BAD"
 reseal v1.3.0
-expect "re-releasing the previous tag with a bad dashboard fails" nonzero "$(nonzero "$(run v1.3.0)")"
+expect "re-releasing the previous tag with a bad dashboard fails" nonzero "$(nonzero "$(run --engine v1.3.0)")"
 all_are "the failed re-release puts v1.1.0 back" v1.1.0
 test -d "$TI_PREFIX/releases/v1.3.0" || fail "the previous build's folder was removed by a failed release"
-expect "rollback after the failed re-release succeeds" 0 "$(run --rollback)"
+expect "rollback after the failed re-release succeeds" 0 "$(run --engine --rollback)"
 all_are "rollback to the kept v1.3.0" v1.3.0
 make_release v1.3.0
 
@@ -969,7 +1006,7 @@ fi
 lines_of() { grep -E "$1" "$work/ctl.log" | tr '\n' ';'; }
 line_no() { grep -n -m1 -E "$1" "$work/ctl.log" | cut -d: -f1; }
 fresh_server
-expect "a release installs inside a window" 0 "$(TI_RELEASE_NOW=120 run v1.0.0)"
+expect "a release installs inside a window" 0 "$(TI_RELEASE_NOW=120 run --engine v1.0.0)"
 expect "the window is the wait (none at 2 minutes past) plus five minutes, opened once" "MAINT start 300s;" "$(lines_of '^MAINT start')"
 expect "the window is closed once" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
 if test "$(line_no '^MAINT start')" -ge "$(line_no '^restart ti-dashboard')"; then fail "the window opened after the install began"; fi
@@ -982,7 +1019,7 @@ for pair in "0 60" "30 30" "59 1" "60 0" "239 0" "240 120" "299 61"; do
   read -r past want <<<"$pair"
   fresh_server
   n=$((n + 1))
-  expect "release at $past s past a mark installs" 0 "$(TI_RELEASE_NOW=$((1000 * 300 + past)) run v1.0.0)"
+  expect "release at $past s past a mark installs" 0 "$(TI_RELEASE_NOW=$((1000 * 300 + past)) run --engine v1.0.0)"
   if test "$want" -eq 0; then
     expect "no wait at $past s past a mark" "" "$(lines_of '^SLEEP')"
   else
@@ -996,36 +1033,36 @@ done
 # A release that fails verification (the dashboard does not stay up) closes
 # the window as well.
 fresh_server
-expect "a failed release is nonzero" nonzero "$(nonzero "$(run v1.2.0)")"
+expect "a failed release is nonzero" nonzero "$(nonzero "$(run --engine v1.2.0)")"
 expect "a failed release closes the window" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
 # A refusal after the window opened closes it too (an engine goes mid-restart
 # just before the swap).
 fresh_server
-expect "a late refusal is nonzero" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY_FROM=2 run v1.0.0)")"
+expect "a late refusal is nonzero" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY_FROM=2 run --engine v1.0.0)")"
 expect "a late refusal closes the window it opened" "MAINT start 300s;MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT (start|end)')"
 # A window that cannot be opened stops the install before it begins.
 fresh_server
-expect "no window, no install" nonzero "$(nonzero "$(FAKE_MAINT_FAIL=start run v1.0.0)")"
+expect "no window, no install" nonzero "$(nonzero "$(FAKE_MAINT_FAIL=start run --engine v1.0.0)")"
 expect "nothing installed without a window" "echo ti-dashboard hand" "$(installed ti-dashboard)"
 if grep -q '^restart' "$work/ctl.log"; then fail "something was restarted without a window"; fi
 # Without the script beside it, ti-release says how to install it.
 fresh_server
-expect "no ti-maintenance, no install" nonzero "$(nonzero "$(TI_MAINTENANCE=$work/stub/no-such-maintenance run v1.0.0)")"
+expect "no ti-maintenance, no install" nonzero "$(nonzero "$(TI_MAINTENANCE=$work/stub/no-such-maintenance run --engine v1.0.0)")"
 grep -q "ti-maintenance" "$work/out" || fail "the refusal does not name ti-maintenance: $(cat "$work/out")"
 expect "nothing installed without ti-maintenance" "echo ti-dashboard hand" "$(installed ti-dashboard)"
 # A window the owner opened by hand is used, not replaced, extended or ended.
 fresh_server
-expect "a release inside a hand-opened window installs" 0 "$(FAKE_MAINT_OPEN=1 run v1.0.0)"
+expect "a release inside a hand-opened window installs" 0 "$(FAKE_MAINT_OPEN=1 run --engine v1.0.0)"
 expect "it opens no window of its own" "" "$(lines_of '^MAINT (start|end)')"
 expect "and no maintenance end of any form ran" 0 "$(grep -c '^MAINT end' "$work/ctl.log" || true)"
 grep -q "already open" "$work/out" || fail "ti-release does not say it is using the open window: $(cat "$work/out")"
 fresh_server
-expect "a failed release inside a hand-opened window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run v1.2.0)")"
+expect "a failed release inside a hand-opened window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run --engine v1.2.0)")"
 expect "a failed release leaves the hand-opened window alone" "" "$(lines_of '^MAINT (start|end)')"
 # A hand-opened window that ends before the swap is not relied on: ti-release
 # opens a window of its own right before it installs, and ends only that one.
 fresh_server
-expect "a release whose borrowed window expired still installs" 0 "$(FAKE_MAINT_OPEN=first run v1.0.0)"
+expect "a release whose borrowed window expired still installs" 0 "$(FAKE_MAINT_OPEN=first run --engine v1.0.0)"
 expect "it opens a window of its own once the borrowed one is gone" "MAINT start 300s;" "$(lines_of '^MAINT start')"
 expect "it ends only its own window, by id" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
 if test "$(line_no '^MAINT start')" -ge "$(line_no '^restart ti-dashboard')"; then fail "the window of its own was opened after the install began"; fi
@@ -1033,47 +1070,47 @@ if test "$(line_no '^MAINT start')" -ge "$(line_no '^restart ti-dashboard')"; th
 # needs 120 seconds of window before it swaps, waits for a shorter one to end,
 # then opens a window of its own; never two at once.
 fresh_server
-expect "a release in a window with 30 seconds left installs" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 run v1.0.0)"
+expect "a release in a window with 30 seconds left installs" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 run --engine v1.0.0)"
 expect "it waited for the short window to end" "SLEEP 31;" "$(lines_of '^SLEEP')"
 expect "then opened one of its own" "MAINT start 300s;" "$(lines_of '^MAINT start')"
 if test "$(line_no '^SLEEP')" -ge "$(line_no '^MAINT start')"; then fail "its own window was opened before the short one ended"; fi
 fresh_server
-expect "a release in a window with 120 seconds left installs" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=120 run v1.0.0)"
+expect "a release in a window with 120 seconds left installs" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=120 run --engine v1.0.0)"
 expect "120 seconds is enough" "" "$(lines_of '^MAINT (start|end)')"
 # A window that appears between the check and the start (start is refused,
 # status 3) is checked again: with enough left it is used, with too little it
 # is waited out and replaced by one of our own.
 fresh_server
-expect "a release when a window appears with 600 seconds left" 0 "$(FAKE_MAINT_START3=600 run v1.0.0)"
+expect "a release when a window appears with 600 seconds left" 0 "$(FAKE_MAINT_START3=600 run --engine v1.0.0)"
 expect "the window that appeared is checked, used and no maintenance end of any form ran" 0 "$(grep -c '^MAINT end' "$work/ctl.log" || true)"
 expect "it asked how long was left" 1 "$(grep -c '^MAINT left' "$work/ctl.log")"
 fresh_server
-expect "a release when a window appears with 30 seconds left" 0 "$(FAKE_MAINT_START3=30 run v1.0.0)"
+expect "a release when a window appears with 30 seconds left" 0 "$(FAKE_MAINT_START3=30 run --engine v1.0.0)"
 expect "it waited the short one out" "SLEEP 31;" "$(lines_of '^SLEEP')"
 expect "it then started its own, ending only that one" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
 # The same when it is the start after the wait that is refused: the short
 # window that appeared is not enough either, so it is waited out in turn.
 fresh_server
-expect "a release when a short window appears during the wait" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_MAINT_START3=40 run v1.0.0)"
+expect "a release when a short window appears during the wait" 0 "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_MAINT_START3=40 run --engine v1.0.0)"
 expect "both short windows were waited out" "SLEEP 31;SLEEP 41;" "$(lines_of '^SLEEP')"
 fresh_server
-expect "windows that keep appearing short stop the release" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_MAINT_START3=40 FAKE_MAINT_START3_ALWAYS=1 run v1.0.0)")"
+expect "windows that keep appearing short stop the release" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_MAINT_START3=40 FAKE_MAINT_START3_ALWAYS=1 run --engine v1.0.0)")"
 expect "nothing installed" "echo ti-dashboard hand" "$(installed ti-dashboard)"
 # An engine that starts restarting during the wait is caught: the guard is
 # asked again after the wait, right before the swap.
 fresh_server
-expect "an engine that goes mid-restart during the wait is refused" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_BUSY_AFTER_SLEEP=1 run v1.0.0)")"
+expect "an engine that goes mid-restart during the wait is refused" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 FAKE_MAINT_LEFT=30 FAKE_BUSY_AFTER_SLEEP=1 run --engine v1.0.0)")"
 expect "nothing installed after the wait" "echo ti-dashboard hand" "$(installed ti-dashboard)"
 # A window this run did not open is never ended, however the run goes.
 fresh_server
-expect "a failed release in a borrowed window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run v1.2.0)")"
+expect "a failed release in a borrowed window is nonzero" nonzero "$(nonzero "$(FAKE_MAINT_OPEN=1 run --engine v1.2.0)")"
 expect "a borrowed window is not ended: no maintenance end of any form ran" 0 "$(grep -c '^MAINT end' "$work/ctl.log" || true)"
 # A rollback is an install too.
 fresh_server
-expect "a first release" 0 "$(run v1.0.0)"
-expect "a second release" 0 "$(run v1.1.0)"
+expect "a first release" 0 "$(run --engine v1.0.0)"
+expect "a second release" 0 "$(run --engine v1.1.0)"
 : >"$work/ctl.log"
-expect "a rollback" 0 "$(run --rollback)"
+expect "a rollback" 0 "$(run --engine --rollback)"
 expect "a rollback opens a window" "MAINT start 300s;" "$(lines_of '^MAINT start')"
 expect "a rollback closes it" "MAINT end --id 0123456789abcdef;" "$(lines_of '^MAINT end')"
 # --install puts ti-maintenance beside ti-release.
