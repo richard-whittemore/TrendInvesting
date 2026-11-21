@@ -790,11 +790,28 @@ if fd is not None:
 			})
 		}
 		t.Cleanup(stop)
-		line, err := bufio.NewReader(out).ReadString('\n')
-		if err != nil {
-			t.Fatalf("relay._lock child: %v", err)
+		// A relay lock that lost its non-blocking flag would wait forever on
+		// a lock the healer holds: report that instead of stalling the suite.
+		type reply struct {
+			line string
+			err  error
 		}
-		return strings.TrimSpace(line), stop
+		got := make(chan reply, 1)
+		go func() {
+			line, err := bufio.NewReader(out).ReadString('\n')
+			got <- reply{line, err}
+		}()
+		select {
+		case r := <-got:
+			if r.err != nil {
+				t.Fatalf("relay._lock child: %v", r.err)
+			}
+			return strings.TrimSpace(r.line), stop
+		case <-time.After(10 * time.Second):
+			// End only this test's own child, so stop's Wait returns.
+			_ = cmd.Process.Kill()
+			return "no reply within 10s (relay._lock blocked)", stop
+		}
 	}
 
 	t.Run("a running relay blocks the healer until it lets go", func(t *testing.T) {
@@ -839,8 +856,9 @@ if fd is not None:
 			t.Fatal(err)
 		}
 		if got, stop := start(lock); got != "busy" {
-			stop()
+			// Release first: a blocked child can exit only once it gets the lock.
 			release()
+			stop()
 			t.Fatalf("relay._lock = %q while the healer holds the lock", got)
 		} else {
 			stop()
