@@ -38,7 +38,18 @@ const (
 	// about this time plus gatewayPagesAfter (docs/manual/server.md,
 	// "The Gateway is logged out"; ADR 0019, "Alerting").
 	gatewayLinkLossAfter = 3 * time.Hour
+	// gatewayLineAllowance is how far ahead of the firing's clock a journal
+	// line may be dated and still count as written by then: the firing reads
+	// its clock before its journal reads, and gateway-start gives a refusal the
+	// same allowance (docs/manual/server.md, "The retry is bounded"). A line
+	// further ahead was written before the clock stepped back; it may keep an
+	// incident open but never resolves one or delays its detection
+	// (docs/manual/server.md, "The Gateway is logged out").
+	gatewayLineAllowance = 2 * time.Minute
 )
+
+// datedAhead reports whether a line's time is beyond the allowance ahead of now.
+func datedAhead(at, now time.Time) bool { return at.After(now.Add(gatewayLineAllowance)) }
 
 // gatewayEvidence is what the journals show: logged out (out), or that they
 // hold no login event at all (silent), or neither (logged in).
@@ -57,6 +68,15 @@ type gatewayEvidence struct {
 	// by one newer than the outage's start, never by older events that remain
 	// once the evidence of the outage has rotated away.
 	recoveredAt time.Time
+	// ahead names a line dated beyond gatewayLineAllowance that holds an open
+	// incident open: such a line never resolves an incident
+	// (docs/manual/server.md, "The Gateway is logged out").
+	ahead string
+	// resetEnd is the end of the reset night of the newest refused-login reset
+	// wait that no completed login, nor another start state inside that night,
+	// has superseded; the logged-out grace counts from it
+	// (docs/manual/server.md, "The retry is bounded").
+	resetEnd time.Time
 }
 
 // gatewayChecker reads the evidence as of now. An IBC-established outage may
@@ -167,17 +187,24 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 				if err != nil {
 					return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
 				}
-				if at.After(newestLogin) {
+				if at.After(newestLogin) && !datedAhead(at, now) {
 					newestLogin = at
 				}
 			}
 		}
 		// Insert qualifying reset evidence by timestamp; unrelated
-		// gateway-start diagnostics never participate in login state.
+		// gateway-start diagnostics never participate in login state. A reset
+		// dated ahead has no known place, so it only holds an incident open; a
+		// login dated ahead never hides a reset placed after it.
+		var ahead string
 		for _, reset := range resets {
 			at, err := lineTime(reset)
 			if err != nil {
 				return gatewayEvidence{}, fmt.Errorf("reporter: reset wait time: %w", err)
+			}
+			if datedAhead(at, now) {
+				ahead = "IBC's journal holds a reset wait dated ahead of the clock: " + reset
+				continue
 			}
 			if !at.After(newestLogin) {
 				continue
@@ -188,7 +215,7 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 				if err != nil {
 					return gatewayEvidence{}, err
 				}
-				if !previous.After(at) {
+				if !previous.After(at) || (datedAhead(previous, now) && strings.Contains(ibc[i-1], "Login has completed")) {
 					break
 				}
 				i--
@@ -196,6 +223,37 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 			ibc = append(ibc, "")
 			copy(ibc[i+1:], ibc[i:])
 			ibc[i] = reset
+		}
+		// The grace after a refused-login reset wait counts from its night's
+		// end, unless a login or another start state inside that night
+		// superseded it; the retry at the night's end does not.
+		var resetEnd time.Time
+		for _, line := range ibc {
+			switch {
+			case strings.Contains(line, "Login has completed"):
+				resetEnd = time.Time{}
+			case strings.Contains(line, "gateway-start: reset wait: login refused at"):
+				at, err := lineTime(line)
+				if err != nil {
+					return gatewayEvidence{}, fmt.Errorf("reporter: reset wait time: %w", err)
+				}
+				loc, err := loadNewYork()
+				if err != nil {
+					return gatewayEvidence{}, err
+				}
+				resetEnd = resetNightEnd(at.In(loc))
+			case strings.Contains(line, "gateway-start:") && !resetEnd.IsZero():
+				at, err := lineTime(line)
+				if err != nil {
+					return gatewayEvidence{}, err
+				}
+				// A start dated ahead supersedes the night too: its time
+				// cannot place it after the night's end (server.md, "The
+				// Gateway is logged out").
+				if at.Before(resetEnd) || datedAhead(at, now) {
+					resetEnd = time.Time{}
+				}
+			}
 		}
 		var reasons []string
 		var recovered time.Time
@@ -223,8 +281,12 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 				if err != nil {
 					return gatewayEvidence{}, fmt.Errorf("reporter: the gateway check could not read IBC's login time: %w", err)
 				}
-				recovered = at
 				resetWait = false
+				if datedAhead(at, now) {
+					ahead = "IBC's newest login event is dated ahead of the clock: " + ibc[n-1]
+				} else {
+					recovered = at
+				}
 			} else {
 				reasons = append(reasons, "IBC's newest login event: "+ibc[n-1])
 			}
@@ -242,7 +304,7 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 				diagnostics = append(diagnostics, err.Error())
 				continue
 			}
-			since, line, restored, err := lostSince(lines)
+			since, line, restored, lostAhead, err := lostSince(lines, now)
 			if err != nil {
 				err = fmt.Errorf("reporter: the gateway check could not read %s's link events: %w", unit, err)
 				if !ibcOut {
@@ -255,11 +317,14 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 			if restored.After(recovered) {
 				recovered = restored
 			}
+			if lostAhead != "" && ahead == "" {
+				ahead = unit + " reports a loss dated ahead of the clock with no restoration since: " + lostAhead
+			}
 			if !since.IsZero() && now.Sub(since) >= gatewayLinkLossAfter {
 				reasons = append(reasons, fmt.Sprintf("%s has reported IBKR's servers lost (1100/2110) with no restoration since, for over %s: %s", unit, gatewayLinkLossAfter, line))
 			}
 		}
-		ev := gatewayEvidence{recoveredAt: recovered}
+		ev := gatewayEvidence{recoveredAt: recovered, ahead: ahead, resetEnd: resetEnd}
 		switch {
 		case len(reasons) > 0:
 			ev.out, ev.resetWait = true, resetWait
@@ -289,6 +354,12 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 					err = parseErr
 					break
 				}
+				// The notice cursor never passes the clock: a dialog dated ahead
+				// waits until its time (server.md, "When another login takes the
+				// Gateway's session").
+				if at.After(now) {
+					continue
+				}
 				ev.sessions = append(ev.sessions, at)
 			}
 		}
@@ -300,33 +371,41 @@ func gatewayJournalChecker(journalctl string, adapters []string, targets ...gate
 	}
 }
 
-// lostSince returns the current invocation's uninterrupted loss, its first
-// line, and the newest restoration/reconciliation time (docs/manual/server.md,
-// "The Gateway is logged out"; ADR 0019, "Alerting"). Lines must be filtered
-// by linkEvent in journal order. Starts end loss evidence without inventing
-// positive recovery evidence; repeated losses keep their first time even
-// across plain connects within an invocation.
-func lostSince(lines []string) (since time.Time, first string, restored time.Time, err error) {
+// lostSince returns the current invocation's uninterrupted loss, its line,
+// the newest restoration/reconciliation time, and a loss dated ahead of now
+// that no restoration has ended (docs/manual/server.md, "The Gateway is logged
+// out"; ADR 0019, "Alerting"). Lines must be filtered by linkEvent in journal
+// order. Starts end loss evidence without inventing positive recovery
+// evidence; repeated losses keep the earliest time even across plain connects
+// within an invocation. A line dated beyond gatewayLineAllowance ahead of now
+// neither starts the loss clock nor ends a loss: it can only hold an incident
+// open.
+func lostSince(lines []string, now time.Time) (since time.Time, first string, restored time.Time, ahead string, err error) {
 	for _, l := range lines {
 		at, err := lineTime(l)
 		if err != nil {
-			return time.Time{}, "", time.Time{}, err
+			return time.Time{}, "", time.Time{}, "", err
 		}
 		if strings.Contains(l, "state=connectivity-lost") {
-			if since.IsZero() {
+			switch {
+			case datedAhead(at, now):
+				if ahead == "" {
+					ahead = l
+				}
+			case since.IsZero() || at.Before(since):
 				since, first = at, l
 			}
 			continue
 		}
 		if strings.Contains(l, "ibkr adapter starting") {
-			since, first = time.Time{}, ""
+			since, first, ahead = time.Time{}, "", ""
 		}
-		if strings.Contains(l, "state=connected reason=restored") || strings.Contains(l, "ibkr reconciled client_id=") {
-			since, first = time.Time{}, ""
+		if (strings.Contains(l, "state=connected reason=restored") || strings.Contains(l, "ibkr reconciled client_id=")) && !datedAhead(at, now) {
+			since, first, ahead = time.Time{}, "", ""
 			restored = at
 		}
 	}
-	return since, first, restored, nil
+	return since, first, restored, ahead, nil
 }
 
 // gatewayUnitSample is what systemd says of the selected Gateway: how many times

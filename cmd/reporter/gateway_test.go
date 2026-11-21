@@ -558,7 +558,7 @@ func TestGatewayRepeatedReconnectKeepsFirstLossAndPages(t *testing.T) {
 				at := firstLoss.Add(time.Duration(max(0, cycle-1)) * 5 * time.Minute)
 				lines = append(lines, stamp(at, conn), stamp(at, linkLost))
 				g.adapter(lines...)
-				since, _, _, err := lostSince(lines)
+				since, _, _, _, err := lostSince(lines, at)
 				if err != nil {
 					t.Fatal(err)
 				}

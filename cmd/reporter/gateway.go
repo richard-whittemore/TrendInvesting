@@ -291,9 +291,15 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 	open := h.Since != nil || (deliveredAnywhere(seen, key) && !h.Resolving)
 	// An equal time counts as newer: the journal's times are to the
 	// microsecond, and a login in the same instant as the firing is a login.
-	if !skipped && !out && open && (h.Since == nil || ev.recoveredAt.Before(*h.Since)) {
+	// A line dated ahead of the clock never resolves (docs/manual/server.md,
+	// "The Gateway is logged out").
+	if !skipped && !out && open && (h.Since == nil || ev.ahead != "" || ev.recoveredAt.Before(*h.Since)) {
 		out = true
-		said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as logged out. " + said
+		if ev.ahead != "" {
+			said = ev.ahead + " (after a clock step); it cannot close the outage, still treated as logged out. " + said
+		} else {
+			said = "no completed login or restored link newer than the outage's start is in the journals (the evidence may have rotated away); still treated as logged out. " + said
+		}
 		if h.Since == nil {
 			t := now
 			h.Since = &t
@@ -373,7 +379,13 @@ func (target gatewayTarget) step(path string, check gatewayChecker, sample func(
 		a = report.GatewayResetWaitAlert(host, now, said)
 	}
 	a = target.present(a)
-	if !ev.resetWait && (sched.inWindow(now) || now.Sub(sched.graceFrom(*h.Since, now)) < gatewayPagesAfter) {
+	// After a reset wait the grace counts from its night's end, the announced
+	// retry (docs/manual/server.md, "The retry is bounded").
+	grace := sched.graceFrom(*h.Since, now)
+	if ev.resetEnd.After(grace) {
+		grace = ev.resetEnd
+	}
+	if !ev.resetWait && (sched.inWindow(now) || now.Sub(grace) < gatewayPagesAfter) {
 		if p := policyOf(policies); p != nil {
 			_, _, _, policyErr := p.routeAndCancel(senders, a, seen, sent, now, gatewayRemindEvery)
 			retErr = errors.Join(retErr, policyErr)
