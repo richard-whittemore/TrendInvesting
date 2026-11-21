@@ -257,6 +257,17 @@ func channelKey(channel, alertKey string) string { return channel + "|" + alertK
 // record saves the state, so a run stopped midway has saved every delivery
 // it made. The error joins every channel failure and every failed save.
 func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, every time.Duration, record func() error, policies ...*pagingPolicy) error {
+	// Account changes are routine notices, never pages, even when the
+	// paging delay is bypassed (manual, "The history across restarts").
+	if a.Kind == kindAccountChanged {
+		var routine []sender
+		for _, s := range senders {
+			if s.name() != "pagerduty" && s.name() != "pushover" {
+				routine = append(routine, s)
+			}
+		}
+		senders = routine
+	}
 	var policyErr error
 	if p := policyOf(policies); p != nil {
 		key := channelKey("escalation", a.Key)
