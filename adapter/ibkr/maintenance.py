@@ -78,6 +78,14 @@ class MaintenanceSchedule:
         nonexistent boundary rolls forward across the DST gap. Compare UTC
         instants, never subtract local datetimes across a clock change.
         """
+        return self.window_end_and_zone(now)[0]
+
+    def window_end_and_zone(self, now):
+        """(end, zone) of the union containing now, or (None, None).
+
+        The zone is the configured zone of the window whose end is returned, so
+        a journal line can render the end as the owner wrote it.
+        """
         intervals = []
         for days, start, end, zone in self.windows:
             today = now.astimezone(zone).date()
@@ -86,19 +94,20 @@ class MaintenanceSchedule:
                 if day.weekday() not in days:
                     continue
                 finish = day + timedelta(days=int(end <= start))
-                intervals.append((_boundary(day, start, zone, False), _boundary(finish, end, zone, True)))
+                intervals.append((_boundary(day, start, zone, False), _boundary(finish, end, zone, True), zone))
         merged = []
-        for start, end in sorted(intervals):
+        for start, end, zone in sorted(intervals, key=lambda row: row[:2]):
             if merged and start <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+                if end > merged[-1][1]:
+                    merged[-1] = (merged[-1][0], end, zone)
             else:
-                merged.append((start, end))
-        for start, end in merged:
+                merged.append((start, end, zone))
+        for start, end, zone in merged:
             if start <= now < end:
                 if end - start > timedelta(days=8):
                     raise ConfigError("maintenance windows must leave a weekly gap and a finite end")
-                return end
-        return None
+                return end, zone
+        return None, None
 
 
 def _boundary(day, clock, zone, ending):

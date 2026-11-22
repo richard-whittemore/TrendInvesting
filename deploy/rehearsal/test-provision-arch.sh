@@ -230,7 +230,7 @@ if FAKE_MIGRATION_REFUSED=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services; t
   fail "services acknowledged success after migration refused"
 fi
 said "before installing Gateway" || fail "migration refusal does not explain that Gateway files were preserved"
-if called "install "; then fail "migration refusal installed files"; fi
+if grep -v "secrets.sh /usr/local/sbin/ti-secrets" "$work/calls" | grep -q "^install "; then fail "migration refusal installed files"; fi
 if called "init-gateway-login"; then fail "migration refusal wrote the selector"; fi
 FAKE_LIVE=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "coordinated Gateway install failed"
 python3 - "$work/calls" <<'PYCODE' || fail "Gateway install/reload ordering differs"
@@ -238,7 +238,12 @@ from pathlib import Path
 import sys
 calls = Path(sys.argv[1]).read_text().splitlines()
 migration = calls.index("secrets-migrate")
-first_install = next(i for i, call in enumerate(calls) if call.startswith("install "))
+# The new ti-secrets and ti-unlock are in place before the login rename, so an
+# interrupted run cannot leave an old ti-unlock to delete the unlocked login.
+tool = next(i for i, call in enumerate(calls) if call.endswith("secrets.sh /usr/local/sbin/ti-secrets"))
+link = calls.index("ln -sfn ti-secrets /usr/local/sbin/ti-unlock")
+assert tool < link < migration, (tool, link, migration)
+first_install = next(i for i, call in enumerate(calls) if call.startswith("install ") and "secrets.sh" not in call)
 staging = next(i for i, call in enumerate(calls) if "libexec/stage-gateway-login.sh" in call)
 unit = next(i for i, call in enumerate(calls) if "systemd/ti-gateway.service" in call)
 assert migration < first_install <= staging < unit

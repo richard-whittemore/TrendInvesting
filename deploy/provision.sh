@@ -805,6 +805,12 @@ $busy"
     done
     test "$accepted" = 1 || die "unsupported Gateway selector; run sudo ti-gateway-login joint before provisioning services"
   fi
+  # The owner's secrets tools: ti-unlock after each boot, ti-secrets to edit
+  # a file or change the passphrase (docs/manual/server.md). Installed before
+  # the login rename, so an interrupted run cannot leave an old ti-unlock that
+  # deletes the unlocked ibkr-login-joint.env (docs/runbooks/gateway-login.md).
+  install -m 0755 "$here/secrets.sh" /usr/local/sbin/ti-secrets
+  ln -sfn ti-secrets /usr/local/sbin/ti-unlock
   # Complete migration before installing Gateway files (ADR 0028;
   # docs/runbooks/gateway-login.md). A refusal preserves the installed service.
   if ! secrets_migrate; then
@@ -965,10 +971,6 @@ $busy"
   # and empty, the reader names the line to fill in (ti-flex@.service).
   write_stub "$etc/accounts/trad-ira.env" "$here/etc/accounts/trad-ira.env.example"
   write_stub "$etc/accounts/roth-ira.env" "$here/etc/accounts/roth-ira.env.example"
-  # The owner's secrets tools: ti-unlock after each boot, ti-secrets to edit
-  # a file or change the passphrase (docs/manual/server.md).
-  install -m 0755 "$here/secrets.sh" /usr/local/sbin/ti-secrets
-  ln -sfn ti-secrets /usr/local/sbin/ti-unlock
   secrets_migrate
   if mac_mini; then ensure_operator_user 2003; else ensure_operator_user; fi
   install -d -o ti-trader -g ti-trader -m 0750 \

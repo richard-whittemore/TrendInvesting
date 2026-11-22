@@ -116,8 +116,15 @@ func (f files) Read() (gatewayheal.Inputs, error) {
 	out.Counter = raw
 	return out, err
 }
+
+// openNoFollow opens path refusing a final symbolic link, close-on-exec so no
+// systemctl child inherits a lock or an evidence file (server.md, Gateway healer).
+func openNoFollow(path string, flags int, perm uint32) (int, error) {
+	return syscall.Open(path, flags|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, perm)
+}
+
 func regularRead(path string) ([]byte, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	fd, err := openNoFollow(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		// Name the file: a journal line that says only "no such file" cannot
 		// be acted on. errors.Is(err, os.ErrNotExist) still holds.
@@ -230,6 +237,15 @@ func (s diskState) Load() (gatewayheal.State, error) {
 	return state, nil
 }
 func (s diskState) Save(state gatewayheal.State) error {
+	// "Never restarted" is the absence of the file, which Load reads as the
+	// zero state; a zero state written out would be refused as incomplete
+	// (server.md, Gateway healer).
+	if state == (gatewayheal.State{}) {
+		if err := os.Remove(filepath.Join(s.dir, "last-restart.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return s.syncDir()
+	}
 	raw, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -251,6 +267,11 @@ func (s diskState) Save(state gatewayheal.State) error {
 	if err := os.Rename(f.Name(), filepath.Join(s.dir, "last-restart.json")); err != nil {
 		return err
 	}
+	return s.syncDir()
+}
+
+// syncDir makes a rename or removal in the state directory durable.
+func (s diskState) syncDir() error {
 	dir, err := os.Open(s.dir)
 	if err != nil {
 		return err
@@ -309,11 +330,11 @@ func (g relayGuard) Acquire() (func(), error) {
 }
 
 func lockFile(path string, uid uint32, create bool, busy error) (func(), error) {
-	flags := syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+	flags := syscall.O_RDONLY | syscall.O_NONBLOCK
 	if create {
 		flags |= syscall.O_CREAT
 	}
-	fd, err := syscall.Open(path, flags, 0o600)
+	fd, err := openNoFollow(path, flags, 0o600)
 	if err != nil {
 		return nil, err
 	}

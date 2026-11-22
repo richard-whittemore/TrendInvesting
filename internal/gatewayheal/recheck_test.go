@@ -1,6 +1,7 @@
 package gatewayheal
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -25,13 +26,13 @@ func TestGatewayReplacementDuringEvidencePreventsRestart(t *testing.T) {
 	}
 	assertRun(t, r, "logged-out")
 }
-func TestDurableSaveCrossingWindowRetainsReservation(t *testing.T) {
+func TestDurableSaveCrossingWindowReleasesReservation(t *testing.T) {
 	r := fixture()
 	r.at = time.Date(2026, 11, 3, 4, 39, 59, 0, time.UTC)
 	r.onSave = func() { r.at = r.at.Add(2 * time.Second) }
 	assertRun(t, r, "window")
-	if r.state.LastRestart.IsZero() {
-		t.Fatal("reservation discarded")
+	if !r.state.LastRestart.IsZero() {
+		t.Fatal("reservation kept although no restart was issued")
 	}
 }
 func TestLastAdapterStatusCrossingWindowPreventsStart(t *testing.T) {
@@ -552,4 +553,30 @@ func TestRestartCompletionSaveFailureStopsRecovery(t *testing.T) {
 		t.Fatal("completion save failure ignored")
 	}
 	assertSafetyTrace(t, r, eligibleRows("reserve-restart", "restart"), []string{"restart " + GatewayUnit})
+}
+
+// When the final gate refuses, the release of the reservation is itself a
+// durable write: a failure to save it is returned, and still no restart is
+// issued (server.md, Gateway healer).
+func TestAFailedReservationReleaseIsReportedWithoutARestart(t *testing.T) {
+	r := fixture()
+	r.at = time.Date(2026, 11, 3, 4, 39, 59, 0, time.UTC)
+	saves := 0
+	r.onSave = func() {
+		saves++
+		if saves == 1 {
+			// The reservation is saved; then the window opens and the release fails.
+			r.at = r.at.Add(2 * time.Second)
+			return
+		}
+		r.saveErr = errors.New("synthetic save failure")
+	}
+	if err := r.run(); err == nil || !strings.Contains(err.Error(), "synthetic save failure") {
+		t.Fatalf("run() = %v, want the failed release reported", err)
+	}
+	for _, c := range r.calls {
+		if strings.HasPrefix(c, "restart ") {
+			t.Fatalf("a restart was issued: %v", r.calls)
+		}
+	}
 }

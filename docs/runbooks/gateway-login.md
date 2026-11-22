@@ -109,6 +109,10 @@ explicit `TWS_READONLY_API`. It copies exactly the selected
 `RuntimeDirectory` as `login.env`, mode 0600 and owned by `ti-gateway`.
 The source open refuses symbolic links. A missing, empty, linked or unreadable
 selected file refuses with exit 64, naming both the file and selector.
+A missing `ti-gateway` user, a failure to write `login.env` into the runtime
+directory (space or permissions) and a failure to hand it to `ti-gateway` each
+refuse with exit 64 and a message of their own, which does not send you to edit
+the secret. The script's path overrides are honoured only where `TI_REHEARSAL=1`.
 `InaccessiblePaths=/run/trend-investing/secrets` hides the unlocked directory
 from Gateway. The unit's `secrets.env` assertion refuses startup while locked.
 The renderer reads the staged `login.env`. systemd removes the runtime

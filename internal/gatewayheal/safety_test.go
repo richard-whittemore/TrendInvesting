@@ -315,6 +315,7 @@ func TestEveryMutationRechecksAfterItsAuditWrite(t *testing.T) {
 			t.Run(fmt.Sprintf("target-%d/%s", target, change), func(t *testing.T) {
 				r := allFailedRig()
 				started := r.at
+				before := r.state
 				rows := eligibleRows("reserve-restart", "restart")
 				var calls []string
 				step := "before-restart"
@@ -365,8 +366,14 @@ func TestEveryMutationRechecksAfterItsAuditWrite(t *testing.T) {
 					t.Fatal(err)
 				}
 				assertSafetyTrace(t, r, rows, calls)
-				if r.state.LastRestart != started {
-					t.Fatal("refusal discarded the durable reservation")
+				if target < 0 {
+					// No restart was issued, so the reservation is released and a
+					// peer healer does not stand down as same-incident.
+					if r.state != before {
+						t.Fatalf("refusal before any restart kept the reservation: %+v", r.state)
+					}
+				} else if r.state.LastRestart != started {
+					t.Fatal("refusal after the restart discarded the durable reservation")
 				}
 			})
 		}
