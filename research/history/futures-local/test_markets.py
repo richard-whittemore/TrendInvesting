@@ -31,7 +31,7 @@ class MarketTableTests(unittest.TestCase):
                 self.assertIn(market.roll_day, range(1, 29))
 
     def test_correlation_groups_match_the_qc_version_where_both_list_a_market(self):
-        # research/qc-cloud-futures/main.py's CORRELATION_GROUPS, keyed by
+        # research/history/qc-cloud-futures/main.py's CORRELATION_GROUPS, keyed by
         # CME/ICE root ticker; markets.py names the same market's ticker.
         shared = {"GC": ("metals-precious", "metals"), "SI": ("metals-precious", "metals"),
                   "HG": ("metals-base", "metals"), "CL": ("energy-petroleum", "energy"),

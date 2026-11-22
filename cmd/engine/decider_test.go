@@ -11,7 +11,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
-	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 // stubEnvelope is a minimal, individually-valid event.Envelope for a test
@@ -422,33 +422,25 @@ func TestWireGuardAwaitIdleWaitsForAnInFlightCall(t *testing.T) {
 	}
 }
 
-// TestDeciderRefusesABarBeforeConfiguration exercises the fail-closed rule
-// that an unconfigured engine refuses inputs rather than sizing against
-// nothing, at the level internal/strategy.Reducer itself enforces it: a
-// real Reducer that has never been given a configuration input rejects a
-// bar outright, and this command's Decider must carry that refusal through
-// as an error rather than absorb it. run (engine.go) makes this unreachable
-// in ordinary operation by always applying the configuration input before
-// transport.Listen is ever called (decision 2); this test pins the guard
-// directly, independent of that ordering.
+// TestDeciderRefusesABarBeforeConfiguration checks that an unconfigured
+// target-weight handler fails closed through the wire (ADR 0026).
 func TestDeciderRefusesABarBeforeConfiguration(t *testing.T) {
-	cfg := testConfiguration(t)
-	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "test-build")
-	reducer, err := strategy.NewReducer(strategyVersion, cfg)
+	cfg := boostConfiguration(t, boostConfigPath)
+	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, "test-build")
+	reducer, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: mustTestAsOf(t)})
 	if err != nil {
 		t.Fatalf("construct the reducer: %v", err)
 	}
 	guard, engine, recorder := newTestWiring(t, reducer)
-	decide := newDecider(guard, engine, recorder, strategyVersion, event.ConfigurationHash(cfg), nil)
+	decide := newDecider(guard, engine, recorder, strategyVersion, event.TargetWeightConfigurationHash(cfg), nil)
 
-	bar := flatBar("TEST", 0)
-	envelope := barEnvelope(t, bar, 1, strategyVersion, event.ConfigurationHash(cfg))
+	envelope := boostBarEnvelope(t, 0, 1, strategyVersion, event.TargetWeightConfigurationHash(cfg))
 
 	reply, err := decide(context.Background(), envelope)
 	if err == nil {
 		t.Fatal("decide succeeded against an unconfigured reducer; want an error")
 	}
-	if !strings.Contains(err.Error(), "configuration event") {
+	if !strings.Contains(err.Error(), "before the configuration") {
 		t.Errorf("error = %v, want it to name the missing configuration event", err)
 	}
 	if reply.ID != "" || reply.Type != "" || reply.Payload != nil {

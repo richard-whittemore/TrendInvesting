@@ -8,10 +8,10 @@ This folder is a small, local, standard-library Python backtester. It runs Faith
 - a 1% Unit, a 2N stop and ½N Adds;
 - Faith's four Unit caps and the drawdown rule for the Notional Account.
 
-It exists because the QuantConnect Cloud run in `research/qc-cloud-futures` was unusable. QuantConnect's free futures data covers only ES before 2007, and roll fills on sparse contracts distorted the P&L (that folder's README, "Cloud result").
+It exists because the QuantConnect Cloud run in `research/history/qc-cloud-futures` was unusable. QuantConnect's free futures data covers only ES before 2007, and roll fills on sparse contracts distorted the P&L (that folder's README, "Cloud result").
 
-- **The rule core is `research/qc-cloud-futures/rules.py`, imported, not copied.** `backtest.py` puts that folder on `sys.path`.
-- **`research/qc-cloud-futures/main.py` is the spec** for everything around the rule core: the Session order, entries, Adds, exits, Unit caps, the Notional Account, Strength ranking and slippage. "Differences from main.py" below lists every place this file departs from it.
+- **The rule core is `research/history/qc-cloud-futures/rules.py`, imported, not copied.** `backtest.py` puts that folder on `sys.path`.
+- **`research/history/qc-cloud-futures/main.py` is the spec** for everything around the rule core: the Session order, entries, Adds, exits, Unit caps, the Notional Account, Strength ranking and slippage. "Differences from main.py" below lists every place this file departs from it.
 - **It is research only.** It is not the production Go engine, and makes no claim of parity with it.
 
 **No market data is committed.** Pinnacle's files live outside the repository. The tests use only small synthetic series built inside the test files.
@@ -29,7 +29,7 @@ It exists because the QuantConnect Cloud run in `research/qc-cloud-futures` was 
 The Pinnacle CLC files live in `~/Desktop/Trend_Investing/data/pinnacle/DATA/CLCDATA/`, outside the repository. Run the in-sample default, 1980 to 2015, with and without T-bill interest and with the S&P benchmark:
 
 ```sh
-python3 research/futures-local/backtest.py \
+python3 research/history/futures-local/backtest.py \
   --interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv --benchmark SP
 ```
 
@@ -168,7 +168,7 @@ Without interest: 2,095 Campaigns, a 21.7% win rate, an average win of +7.88R an
 ## Held-out result (2015-01-02 to 2025-10-31, `--allow-holdout`, 2026-09-28)
 
 ```sh
-python3 research/futures-local/backtest.py --start 2015-01-01 --end 2025-10-31 --allow-holdout \
+python3 research/history/futures-local/backtest.py --start 2015-01-01 --end 2025-10-31 --allow-holdout \
   --interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv --benchmark SP
 ```
 
@@ -276,7 +276,7 @@ Excluded (full list and reasons in `tsmom_markets.EXCLUDED`):
 ## In-sample result (2026-09-28)
 
 ```sh
-python3 research/futures-local/tsmom.py --interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv
+python3 research/history/futures-local/tsmom.py --interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv
 ```
 
 1985-01-02 to 2015-12-31, all costs, reconcile OK in all eight runs. The Sharpe ratio is the monthly return in excess of T-bills; without interest the return is already an excess return.
@@ -341,7 +341,7 @@ Four fixes change these numbers from the previous in-sample table (10% target, w
 ### Held-out result (2016-01-04 to 2025-10-31, `--allow-holdout`)
 
 ```sh
-python3 research/futures-local/tsmom.py --start 2016-01-01 --end 2025-10-31 \
+python3 research/history/futures-local/tsmom.py --start 2016-01-01 --end 2025-10-31 \
   --equity 1000000 --portfolio-target 0.10 \
   --interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv --allow-holdout
 ```

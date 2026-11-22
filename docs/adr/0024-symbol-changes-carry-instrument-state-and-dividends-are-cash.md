@@ -180,3 +180,13 @@ No golden journal or decision-corpus entry changed (`git status`/`git diff --sta
 `cmd/backtest/symbol_change_chain_test.go` gained `TestASymbolChangeCycleIsRefusedRatherThanHanging` (finding 1: refused, and provably cannot hang, since Kahn's algorithm terminates regardless of the graph), `TestADividendOnAnIntermediateChainInstrumentIsDeliveredBeforeTheDestinationsBar` (finding 2), and `TestEqualTimeRenamesAreDeliveredInDependencyOrder` (finding 3). `TestASymbolChangeChainIsFullyDeliveredBeforeTheDestinationsBar` (the second amendment's own regression test) and `TestCorporateActionsAreDeliveredInATotalOrder` (`cmd/backtest/split_test.go`, updated only to call `effectiveOrder` in place of the removed `inEffectiveOrder`) both continue to pass unchanged, confirming the new design subsumes the old one rather than merely patching around it.
 
 No RulesVersion bump, no corpus change: this amendment touches only `cmd/backtest`'s corporate-action delivery, outside `internal/strategy`'s own decision surface, and changes no reducer decision for any existing fixture.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle is retired to history. This ADR is not retired,
+because §1 still governs: the `market.corporate-action` dividend and
+symbol-change kinds, at schema version 3, are read by the live engine's
+reconciliation (ADR 0019); a target-weight book applies dividends and
+splits and refuses a symbol change (`docs/manual/reconciliation.md`).
+Moot: the rules that move a Turtle `*instrumentState`, credit the Turtle
+reducer's cash, and inform the fill simulator.

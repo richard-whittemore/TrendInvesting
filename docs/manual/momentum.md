@@ -257,9 +257,10 @@ through the server with the engine's `-as-of` option (2026-10-28 owner decision)
 Follow [Rehearsing a month](../runbooks/missed-rebalance.md#rehearsing-a-month)
 and record both halves in the [IRA drill checklist](../runbooks/ira-drill-checklist.md).
 The paper account must be free for the IRA: Boost live or paused (2026-10-29).
-The real IRA is No Borrow Margin with fractional trading enabled; the shipped
-minimum-lot dry-run configuration remains a rehearsal configuration until the
-fractional adapter and reporting surfaces are ready (ADR 0026, D7-F amendment).
+The real IRA is No Borrow Margin with fractional trading enabled, and the
+shipped IRA configuration trades fractional shares (D7-F, increment 0.0001;
+ADR 0026, D7-F amendment). The minimum-lot rule is kept for whole-share
+accounts only ([minimum lot](momentum-minimum-lot.md)).
 
 With D7-F (`execution.share_quantity: "fractional"`), the engine plans
 fractional quantities for both phases. It divides each trade value by the

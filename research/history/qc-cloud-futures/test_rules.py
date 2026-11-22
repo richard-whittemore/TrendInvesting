@@ -6,7 +6,7 @@ sources -- transcribe them, don't invent them").
 
 Run with:
 
-    python3 -m unittest discover -s research/qc-cloud-futures -p "test_*.py"
+    python3 -m unittest discover -s research/history/qc-cloud-futures -p "test_*.py"
 
 or via `make research-test` from the repository root.
 
@@ -202,7 +202,7 @@ class ProtectiveStopGoldenTests(unittest.TestCase):
         # other figure (Units 1-3 at 27.70) depends on their own entry
         # prices, which the secondary source available to this repository
         # does not state, so only the figure Methodology_Analysis.md quotes
-        # directly is asserted here (mirrors research/qc-cloud/test_rules.py).
+        # directly is asserted here (mirrors research/history/qc-cloud/test_rules.py).
         self.assertAlmostEqual(
             rules.protective_stop_level(30.80, 1.20, direction=1, stop_multiple=rules.STOP_MULTIPLE),
             28.40)

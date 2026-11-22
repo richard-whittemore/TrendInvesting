@@ -502,6 +502,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		case err != nil:
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
 		case due:
+			for _, notice := range alerts {
+				if notice.Kind == kindAccountChanged {
+					a.Body += "Equity vs " + *benchmark + ": " + notice.Body + "\n"
+				}
+			}
 			a.Body += notDelivering(setAside)
 			if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record, policy); err != nil {
 				failures = append(failures, err)
@@ -758,9 +763,10 @@ func readJournal(path, instance string, now time.Time, ackWithin time.Duration, 
 	alerts = append(alerts, report.UnreadReportAlerts(account, unread)...)
 	alerts = append(alerts, report.IncompleteSellAlerts(instance, entries, strategy)...)
 	alerts = append(alerts, report.UnacknowledgedAlerts(orders, now, ackWithin, func(key string) bool { return deliveredAnywhere(seen, key) })...)
-	history = report.EarlierRunsOf(path, raw, recoverLogFile)
-	if history.Broken != nil {
-		alerts = append(alerts, report.HistoryUnavailableAlert(account, history, now))
+	var notice *report.Alert
+	history, notice = reporterHistory(path, raw, account, now)
+	if notice != nil {
+		alerts = append(alerts, *notice)
 	}
 	return history, envelopes, account, alerts, nil
 }

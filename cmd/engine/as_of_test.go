@@ -13,10 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
-	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
 
@@ -43,21 +42,21 @@ func TestAsOfMakesJournalDeterministic(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cfg := testConfiguration(t)
+			cfg := boostConfiguration(t, boostConfigPath)
 			payload, err := json.Marshal(cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
-			hash := event.ConfigurationHash(cfg)
-			version := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, buildinfo.Version)
+			hash := event.TargetWeightConfigurationHash(cfg)
+			version := event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, "test-build")
 			var previous journal.Verification
 			var previousBytes []byte
 			for attempt := range 2 {
 				path := filepath.Join(t.TempDir(), "journal.jsonl")
 				socket := filepath.Join(shortSocketDir(t), "engine.sock")
 				stop := startEngineInvocation(t, func(ctx context.Context, out io.Writer) error {
-					return parseAndRun(ctx, []string{"-socket", socket, "-config", testConfigPath,
-						"-out", path, "-mode", "backtest", "-as-of", tc.asOf}, out)
+					return parseAndRunWithBuild(ctx, []string{"-socket", socket, "-config", boostConfigPath,
+						"-out", path, "-log", path + ".log", "-mode", modeDryRun, "-as-of", tc.asOf}, out, "test-build")
 				})
 				if tc.bars > 0 {
 					client, err := transport.Dial(socket)
@@ -66,12 +65,7 @@ func TestAsOfMakesJournalDeterministic(t *testing.T) {
 					}
 					t.Cleanup(func() { _ = client.Close() })
 					for day := range tc.bars {
-						bar := flatBar("TEST", day)
-						sequence := configurationSequence + 1 + 2*uint64(day)
-						for _, input := range []event.Envelope{
-							barEnvelope(t, bar, sequence, version, hash),
-							sessionClosedEnvelope(t, bar, sequence+1, version, hash),
-						} {
+						for _, input := range sessionInputs(t, day, version, hash) {
 							if _, err := client.Decide(context.Background(), input); err != nil {
 								t.Fatal(err)
 							}
@@ -118,17 +112,20 @@ func TestAsOfMakesJournalDeterministic(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(inputs) != 1+2*tc.bars || len(decisions) != 2*tc.bars {
+				var decidedDays []int
+				for day := range tc.bars {
+					if !flatBar("SPY", day).PeriodEnd.Before(asOf) {
+						decidedDays = append(decidedDays, day)
+					}
+				}
+				if len(inputs) != 1+2*tc.bars || len(decisions) != len(decidedDays) {
 					t.Fatalf("unexpected inputs/decisions: %d/%d", len(inputs), len(decisions))
 				}
-				for day := range tc.bars {
-					if decision := decisions[2*day]; decision.Type != event.SetupEvaluatedEventType {
-						t.Errorf("decision %d type = %q, want %q", 2*day, decision.Type, event.SetupEvaluatedEventType)
-					}
-					assertEmptyWatchlist(t, decisions[2*day+1], flatBar("TEST", day).PeriodEnd)
+				for i, day := range decidedDays {
+					assertWithheldBoostTarget(t, decisions[i], flatBar("SPY", day).PeriodEnd)
 				}
 				configuration := inputs[0]
-				if configuration.Type != event.ConfigurationEventType ||
+				if configuration.Type != event.TargetWeightConfigurationEventType ||
 					!configuration.EventTime.Equal(asOf) || !configuration.RecordedAt.Equal(asOf) {
 					t.Errorf("configuration must carry declared start %s in both timestamps: %+v", asOf, configuration)
 				}
@@ -172,18 +169,26 @@ func TestAsOfRefusesInvalidStartup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			socket := filepath.Join(shortSocketDir(t), "engine.sock")
 			path := filepath.Join(t.TempDir(), "journal.jsonl")
-			args := append([]string{"-socket", socket, "-config", testConfigPath, "-out", path, "-mode", "backtest"}, tc.args...)
+			args := append([]string{"-socket", socket, "-config", boostConfigPath, "-out", path, "-log", path + ".log", "-mode", modeDryRun}, tc.args...)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			var out bytes.Buffer
-			err := parseAndRun(ctx, args, &out)
+			var err error
+			if tc.name == "missing" {
+				// The default entry point reports missing required flags even
+				// on an unstamped build; timestamp parsing needs a stamped
+				// dry-run invocation (ADRs 0012 and 0016).
+				err = parseAndRun(ctx, args, &out)
+			} else {
+				err = parseAndRunWithBuild(ctx, args, &out, "test-build")
+			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("startup error = %v, want %q", err, tc.want)
 			}
 			if strings.Contains(out.String(), "listening on") {
 				t.Error("invalid start reached socket readiness")
 			}
-			for _, target := range []string{socket, path} {
+			for _, target := range []string{socket, path, path + ".log"} {
 				if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
 					t.Errorf("invalid start created %s (stat: %v)", target, err)
 				}

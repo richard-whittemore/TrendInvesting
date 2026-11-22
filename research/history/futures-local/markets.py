@@ -38,11 +38,11 @@ the yen x 10,000).
 franc (FR) contract; both stay in the table with ``excluded`` set so the
 portfolio's full list is still visible.
 
-**Correlation groups** reuse research/qc-cloud-futures/main.py's
+**Correlation groups** reuse research/history/qc-cloud-futures/main.py's
 ``CORRELATION_GROUPS`` wherever that table lists the same market. Faith's
 own disclosed pairs are heating oil/crude, gold/silver, CHF/DEM and
 T-bill/Eurodollar [T p.16]; every other grouping is that table's own
-considered, unverified choice (research/qc-cloud-futures/README.md,
+considered, unverified choice (research/history/qc-cloud-futures/README.md,
 "Correlation groups").
 
 **TO-VERIFY.** ``to_verify`` names any field the files and the manual did

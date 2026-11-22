@@ -1,6 +1,6 @@
 # ADR 0012: Experiment protocol — span, regime windows, out-of-sample discipline, and what "winning" means
 
-- Status: Accepted
+- Status: Retired by [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md) (2026-11-21): kept as history. Before that: Accepted
 - Date: 2026-09-08
 
 ## Context

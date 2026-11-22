@@ -80,6 +80,7 @@ func comparableDecisions(t *testing.T, path string) []comparableDecision {
 // its composition to drift from it) over a bars fixture, runs this
 // command's own engine over the identical bars, and compares the
 // Setup-evaluated decisions each one's journal recorded.
+// Covers the retired Turtle reducer (ADR 0002): cmd/backtest decides Turtle.
 func TestServerDecisionsMatchBacktestForTheSameBars(t *testing.T) {
 	if testing.Short() {
 		t.Skip("shells out to `go run ./cmd/backtest`; skipped in -short")

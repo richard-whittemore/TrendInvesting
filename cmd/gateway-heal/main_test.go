@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -762,4 +765,141 @@ func TestReleasingTheFirstReservationLeavesALoadableState(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "last-restart.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("last-restart.json still present: %v", err)
 	}
+}
+
+// The healer's flock and relay.py's own _lock must exclude each other, in both
+// directions, on the same pending.json.lock inode (ADR 0026 point 8). The
+// relay side is the real relay._lock, run in a child Python process, never a
+// stand-in: a different lock call there would pass the Go-only tests above.
+func TestRelayGuardAndRelayPyLockExcludeEachOther(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("python3 is required to run relay.py's real lock: ", err)
+	}
+	relayDir, err := filepath.Abs(filepath.Join("..", "..", "adapter", "ibkr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const script = `import sys
+sys.path.insert(0, sys.argv[1])
+import relay
+fd = relay._lock(relay.PendingInput(sys.argv[2]).lock_path)
+print("held" if fd is not None else "busy", flush=True)
+if fd is not None:
+    sys.stdin.readline()
+`
+	setup := func() (root, lock string) {
+		root = t.TempDir()
+		for _, name := range []string{"boost", "trad-ira", "roth-ira"} {
+			if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return root, filepath.Join(root, "boost", "pending.json.lock")
+	}
+	// start runs relay._lock on the lock file of the pending file whose lock
+	// is given, as the relay derives it (PendingInput.lock_path), in a child this test started, and
+	// returns its first line of output and a function that ends the child.
+	start := func(lock string) (string, func()) {
+		cmd := exec.Command(python, "-I", "-c", script, relayDir, strings.TrimSuffix(lock, ".lock"))
+		in, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		var once sync.Once
+		stop := func() {
+			once.Do(func() {
+				_ = in.Close()
+				_ = cmd.Wait()
+			})
+		}
+		t.Cleanup(stop)
+		// A relay lock that lost its non-blocking flag would wait forever on
+		// a lock the healer holds: report that instead of stalling the suite.
+		type reply struct {
+			line string
+			err  error
+		}
+		got := make(chan reply, 1)
+		go func() {
+			line, err := bufio.NewReader(out).ReadString('\n')
+			got <- reply{line, err}
+		}()
+		select {
+		case r := <-got:
+			if r.err != nil {
+				t.Fatalf("relay._lock child: %v", r.err)
+			}
+			return strings.TrimSpace(r.line), stop
+		case <-time.After(10 * time.Second):
+			// End only this test's own child, so stop's Wait returns.
+			_ = cmd.Process.Kill()
+			return "no reply within 10s (relay._lock blocked)", stop
+		}
+	}
+
+	t.Run("a running relay blocks the healer until it lets go", func(t *testing.T) {
+		root, lock := setup()
+		for _, name := range []string{"trad-ira", "roth-ira"} {
+			if err := os.WriteFile(filepath.Join(root, name, "pending.json.lock"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, stop := start(lock)
+		defer stop()
+		if got != "held" {
+			t.Fatalf("relay._lock = %q on a free lock", got)
+		}
+		release, err := (relayGuard{root: root, account: "boost"}).Acquire()
+		if release != nil {
+			release()
+		}
+		if !errors.Is(err, gatewayheal.ErrOrderBusy) {
+			t.Fatalf("healer acquired a lock relay.py holds: %v", err)
+		}
+		stop()
+		release, err = (relayGuard{root: root, account: "boost"}).Acquire()
+		if err != nil {
+			t.Fatalf("healer refused after relay.py let go: %v", err)
+		}
+		release()
+	})
+
+	t.Run("the healer blocks relay.py until it lets go", func(t *testing.T) {
+		root, lock := setup()
+		if err := os.WriteFile(lock, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"trad-ira", "roth-ira"} {
+			if err := os.WriteFile(filepath.Join(root, name, "pending.json.lock"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		release, err := (relayGuard{root: root, account: "boost"}).Acquire()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, stop := start(lock); got != "busy" {
+			// Release first: a blocked child can exit only once it gets the lock.
+			release()
+			stop()
+			t.Fatalf("relay._lock = %q while the healer holds the lock", got)
+		} else {
+			stop()
+		}
+		release()
+		got, stop := start(lock)
+		defer stop()
+		if got != "held" {
+			t.Fatalf("relay._lock = %q after the healer released", got)
+		}
+	})
 }

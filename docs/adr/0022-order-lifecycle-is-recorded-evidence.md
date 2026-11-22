@@ -55,3 +55,12 @@ ADR 0017 draws the journal's own closed line between the two: `kind` is `input` 
 - Reconciliation (ADR 0019, still design-only) can rely on `execution.order.lifecycle` being present in the journal for every acknowledgement, amendment, cancellation and refusal a venue reports, in the order it reported them, as one of the "journalled acknowledgements and lifecycle events" its expected-open-orders comparison already assumes.
 - A future venue-specific status this build does not recognise is a schema or contract question (ADR 0015), not something a producer or the reducer may paper over locally.
 - **Glossary.** CONTEXT.md gains **Order lifecycle report**: a venue's account of a change in an order's lifecycle that is not an execution, including a refusal before the order ever rests.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle is retired to history. The decision stands: a lifecycle
+report is a recorded input that moves no position, and an unknown status
+fails closed. The target-weight engine reads its own version of the report
+(ADR 0026). Moot: the clauses about `internal/strategy.applyOrderLifecycle`,
+Campaigns and ADR 0005's stop price, which describe the Turtle reducer and
+its `execution.order.lifecycle` v1.

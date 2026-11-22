@@ -1,6 +1,6 @@
 # ADR 0007: The Notional Account is re-based yearly and recovers only at the yearly start
 
-- Status: Accepted
+- Status: Retired by [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md) (2026-11-21): kept as history. Before that: Accepted
 - Date: 2026-09-08
 
 ## Context

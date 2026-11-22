@@ -17,3 +17,11 @@ Begin with one Go application and a thin Python LEAN adapter on the same host. K
 - Strategy behavior can be tested without LEAN.
 - Operational complexity is constrained during research and paper trading.
 - Components may later be separated without rewriting domain rules if measured scaling or reliability needs justify it.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle and the LEAN backtest path are retired to history. The
+"thin Python LEAN adapter" above was the first adapter; the live adapter is
+the IBKR adapter (ADR 0025). The decision itself stands: one Go application,
+domain packages free of transport and persistence, and thin adapters beside
+it.

@@ -3,7 +3,7 @@ no QuantConnect, no network, no market data.
 
 Run with:
 
-    python3 -m unittest discover -s research/qc-cloud-sublime -p "test_*.py"
+    python3 -m unittest discover -s research/history/qc-cloud-sublime -p "test_*.py"
 
 or `make research-test` from the repository root.
 
@@ -538,7 +538,7 @@ class IndicatorsTests(unittest.TestCase):
 
 
 class PriceViewTests(unittest.TestCase):
-    """ADR 0004, as amended, carried from research/qc-cloud: raw shares, raw
+    """ADR 0004, as amended, carried from research/history/qc-cloud: raw shares, raw
     ticks, and per-share costs on raw shares."""
 
     def test_split_ratio_and_whole_raw_shares(self):

@@ -76,7 +76,7 @@ func TestGatewayAdapterCurrentInvocation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				since, _, _, err := lostSince(filtered)
+				since, _, _, _, err := lostSince(filtered, tuesday(13, 30))
 				if err != nil {
 					t.Fatal(err)
 				}

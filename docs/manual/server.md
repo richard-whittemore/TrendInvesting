@@ -1285,12 +1285,41 @@ login, even after a backward clock change. Among the retained matching
 only on the night it was written, from 23:40 to
 that night’s first 01:00 ET, marked scheduled IBKR interruption,
 with no Pushover. At 01:00 ET, or after another start state, ordinary logout
-handling resumes. An `interrupted by stop` line ends the wait. Gateway outages retain the ten-minute detection grace,
+handling resumes. After a reset wait that ran to 01:00 ET, the ten-minute grace
+counts from 01:00 ET, so the unit's own retry at 01:00 has time to log in
+before a logged-out page; a login, or another start inside the night, ends
+that and the grace counts as usual. An `interrupted by stop` line ends the wait. Gateway outages retain the ten-minute detection grace,
 counted after the restart windows in `/etc/trend-investing/gateway.env`:
 five minutes before to 45 minutes after the nightly restart (23:40–00:30 by
 default), and five minutes before to 30 minutes after the Sunday cold restart
 (08:55–09:30). The IBKR schedule is a separate paging rule. The incident record
 is `host-gateway.json` in `/var/lib/trend-investing/reports/`.
+
+**After a clock step.** If the server's clock is set back (a bad clock at
+boot, then a time correction), the journals can hold lines dated later than
+the time now. The reporter treats a line dated more than two minutes ahead of
+its own clock as written before the step, and lets it hold a Gateway incident
+open but never close one or postpone it. Two minutes is the same allowance the
+Gateway's start program gives a refusal ahead of the clock, and covers a line
+written while the reporter is reading the journals. In practice:
+
+- a completed login, or an adapter's restored link or reconciliation, dated
+  ahead is not recovery: an open logged-out page stays open until a login or
+  restoration dated at or before the present time shows up, or until the
+  clock catches up with the line;
+- a logout, refusal or IBC start dated ahead still counts at once, since it
+  is the newest event in the journal whatever its date;
+- a link loss dated ahead does not start the three-hour clock; the clock runs
+  from the earliest loss not dated ahead, and the loss holds an open page
+  open;
+- a reset-wait line dated ahead never quiets a page and holds an open page
+  open, but does not open one by itself;
+- an "Existing session detected" line dated ahead is noticed once its time is
+  reached, and later real ones are still noticed.
+
+So a clock step can delay the end of a page, never the page itself. To clear
+it sooner, correct the clock (see "The clock", above); the next real login or
+restored link resolves it.
 
 Install the non-secret policy for **both** the timer and the unit-failure hook:
 

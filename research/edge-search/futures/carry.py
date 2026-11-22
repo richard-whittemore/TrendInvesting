@@ -1,5 +1,5 @@
 # Research script, not production code: no ADR citations. Runs locally on
-# the research/futures-local engine and Pinnacle CLC files (never committed);
+# the research/history/futures-local engine and Pinnacle CLC files (never committed);
 # see docs/research/boost-followup-2026-09.md.
 """Futures carry (Koijen, Moskowitz, Pedersen & Vrugt 2018, "Carry", JFE),
 time-series version, on the TSMOM engine: same universe, 40%/sigma sizing,
@@ -19,7 +19,7 @@ import sys, os, bisect
 from dataclasses import replace
 from datetime import date
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-sys.path.insert(0, os.path.join(ROOT, "research", "futures-local"))
+sys.path.insert(0, os.path.join(ROOT, "research", "history", "futures-local"))
 import tsmom, tsmom_markets, loader, rates  # noqa: E402
 
 DATA = os.environ.get("PINNACLE_DIR", os.path.expanduser("~/Desktop/Trend_Investing/data/pinnacle/DATA/CLCDATA"))
