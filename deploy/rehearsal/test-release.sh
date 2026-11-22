@@ -273,8 +273,22 @@ for unit in ti-engine@boost ti-engine@trad-ira; do
   grep -q 'fresh run' "$work/out" || fail 'active refusal lacks remedy'
   expect "active refusal preserves engine" "$engine_before" "$(sha "$TI_PREFIX/bin/ti-engine")"
 done
+# A copy of the installed engine that cannot be kept stops the install before
+# anything is replaced: it is the only way back for a crashed run (ADR 0027 §6).
+if test "$(id -u)" != 0; then
+  mkdir -p "$TI_PREFIX/releases/.engine-before/initial"
+  chmod 0500 "$TI_PREFIX/releases/.engine-before"
+  expect "unkeepable engine copy refuses" nonzero "$(nonzero "$(run --engine v1.0.0)")"
+  grep -q 'could not keep a copy of the installed engine; nothing installed' "$work/out" || fail 'unkeepable copy refusal lacks reason'
+  expect "unkeepable copy preserves engine" "$engine_before" "$(sha "$TI_PREFIX/bin/ti-engine")"
+  expect "unkeepable copy preserves BUILD" hand-build "$(cat "$TI_PREFIX/bin/BUILD")"
+  chmod 0700 "$TI_PREFIX/releases/.engine-before"
+  rm -rf "$TI_PREFIX/releases/.engine-before"
+fi
 expect "explicit engine catches up same tag" 0 "$(run --engine v1.0.0)"
 expect "engine catch-up installs bytes" "$(sha "$work/rel/v1.0.0/ti-engine")" "$(sha "$TI_PREFIX/bin/ti-engine")"
+test ! -e "$TI_PREFIX/releases/.engine-before/pending" || fail 'completed engine install leaves pending marker'
+expect "completed engine install keeps snapshot" "$engine_before" "$(sha "$TI_PREFIX/releases/.engine-before/initial/ti-engine")"
 expect "engine catch-up preserves previous" initial "$(state previous)"
 expect "ordinary next release" 0 "$(run v1.1.0)"
 expect "failed engine release" nonzero "$(nonzero "$(run --engine v1.2.0)")"
@@ -322,6 +336,31 @@ for bad_identity in nul multiline overlong; do
   expect "status with $bad_identity identity" 0 "$(run --status)"
   grep -qx 'engine: invalid' "$work/out" || fail "status accepts $bad_identity identity"
 done
+# Failed-install recovery preserves the original engine across retries
+# (docs/manual/server.md, "If a release fails part way").
+fresh_server
+run v1.0.0 >/dev/null
+engine_before=$(sha "$TI_PREFIX/bin/ti-engine")
+build_before=$(sha "$TI_PREFIX/bin/BUILD")
+saved_engine=$TI_PREFIX/releases/.engine-before
+mkdir -p "$saved_engine/initial"
+cp "$TI_PREFIX/bin/ti-engine" "$TI_PREFIX/bin/BUILD" "$saved_engine/initial/"
+printf '%s  ti-engine\n' "$engine_before" >"$saved_engine/initial/checksums.txt"
+: >"$saved_engine/pending"
+cp "$work/rel/v1.1.0/ti-engine" "$TI_PREFIX/bin/ti-engine"
+expect "interrupted engine retry fails" nonzero "$(nonzero "$(run --engine v1.2.0)")"
+expect "interrupted retry restores original engine bytes" "$engine_before" "$(sha "$TI_PREFIX/bin/ti-engine")"
+expect "interrupted retry restores original BUILD bytes" "$build_before" "$(sha "$TI_PREFIX/bin/BUILD")"
+expect "interrupted retry keeps original snapshot" "$engine_before" "$(sha "$saved_engine/initial/ti-engine")"
+grep -q 'keeping.*pending.*engine snapshot' "$work/out" || fail 'retry does not explain pending snapshot preservation'
+test ! -e "$saved_engine/pending" || fail 'completed engine recovery leaves pending marker'
+expect "recovered engine snapshot status" 0 "$(run --status)"
+grep -qx 'engine before last --engine: hand-build' "$work/out" || fail 'completed recovery loses saved engine identity'
+
+fresh_server
+expect "engine install and recovery both fail" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/bin/ti-engine FAKE_MV_FAIL_N=2 run --engine v1.0.0)")"
+test -f "$TI_PREFIX/releases/.engine-before/pending" || fail 'failed engine recovery loses pending marker'
+
 fresh_server
 run v1.0.0 >/dev/null
 engine_before=$(sha "$TI_PREFIX/bin/ti-engine")
@@ -329,6 +368,9 @@ build_before=$(sha "$TI_PREFIX/bin/BUILD")
 expect "same-tag engine save and programs restore fail" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 run --engine v1.0.0)")"
 expect "same-tag save failure restores engine independently" "$engine_before" "$(sha "$TI_PREFIX/bin/ti-engine")"
 expect "same-tag save failure restores BUILD independently" "$build_before" "$(sha "$TI_PREFIX/bin/BUILD")"
+grep -q 'engine and BUILD.*put back' "$work/out" || fail 'double save failure lacks engine recovery outcome'
+grep -q 'kept build v1.0.0.*NOT put back' "$work/out" || fail 'double save failure lacks programs recovery outcome'
+test ! -e "$TI_PREFIX/releases/.engine-before/pending" || fail 'programs recovery failure leaves completed engine recovery pending'
 grep -Fq 'sudo ti-release --engine <a good tag>' "$work/out" || fail 'engine restore ALERT lacks engine remedy'
 for missing in engine build both; do
   fresh_server

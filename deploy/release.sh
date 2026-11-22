@@ -591,22 +591,36 @@ flush() {
 # put_back NAME: re-check the kept build NAME against its checksums and put it
 # back; says so loudly if it cannot.
 put_back() {
-  local restored=1 remedy='sudo ti-release <a good tag>' d=$releases/.engine-before/initial
+  local restored=1 engine_restored=1 remedy='sudo ti-release <a good tag>' d=$releases/.engine-before/initial
   if test "$engine" = 1; then remedy='sudo ti-release --engine <a good tag>'; fi
-  if check_dir "$releases/$1"; then
-    install_from "$releases/$1" "" 0 || restored=0
-  else
-    log "ALERT: the kept build $1 failed its checksums and was NOT put back; the programs in $bin may be a mix of builds: run $remedy"
-    restored=0
-  fi
   if test "$engine" = 1; then
     if test ! -f "$d/ti-engine"; then
       log "there was no engine before this install"
-      install_from "$d" initial 1 || restored=0
+      install_from "$d" initial 1 || engine_restored=0
     elif ! check_dir "$d" || ! install_from "$d" initial 1; then
+      engine_restored=0
+    fi
+    if test ! -f "$d/BUILD"; then rm -f "$bin/BUILD" || engine_restored=0; fi
+    if test "$engine_restored" = 1; then
+      rm -f "$releases/.engine-before/pending" || engine_restored=0
+    fi
+    if test "$engine_restored" = 1; then
+      log "the engine and BUILD from before this install were put back"
+    else
+      log "ALERT: the engine and BUILD could not be put back; run $remedy"
       restored=0
     fi
-    if test ! -f "$d/BUILD"; then rm -f "$bin/BUILD" || restored=0; fi
+  fi
+  if check_dir "$releases/$1"; then
+    if install_from "$releases/$1" "" 0; then
+      log "the programs from the kept build $1 were put back"
+    else
+      log "ALERT: the programs from the kept build $1 could not be put back; run $remedy"
+      restored=0
+    fi
+  else
+    log "ALERT: the kept build $1 failed its checksums and was NOT put back; the programs in $bin may be a mix of builds: run $remedy"
+    restored=0
   fi
   if test "$restored" = 0; then
     log "ALERT: putting $1 back failed partway; the programs in $bin may be a mix of builds: run $remedy"
@@ -666,17 +680,28 @@ report() { # FROM TO BEFORE_HASHES
 
 # Preserve the actual installed engine for failed-install recovery, since it
 # may differ from releases/current (docs/manual/server.md, Installing a release).
+# A pending snapshot remains the original across retries until installation
+# or engine recovery completes (server manual, "If a release fails part way").
 keep_engine() {
   test "$engine" = 1 || return 0
   local d=$releases/.engine-before/initial
-  rm -rf "$d"
-  mkdir -p "$d"
-  : >"$d/checksums.txt"
-  if test -f "$bin/ti-engine"; then
-    cp "$bin/ti-engine" "$d/ti-engine"
-    printf '%s  ti-engine\n' "$(sha "$d/ti-engine")" >"$d/checksums.txt"
+  if test -f "$releases/.engine-before/pending"; then
+    log "keeping the pending engine snapshot from the unfinished install"
+    return 0
   fi
-  if test -f "$bin/BUILD"; then cp "$bin/BUILD" "$d/BUILD"; fi
+  # The snapshot is the only way back to the engine a crashed run needs, so a
+  # copy that does not match the installed bytes stops the install before
+  # anything is replaced (ADR 0027 §6).
+  local keep_failed="could not keep a copy of the installed engine; nothing installed"
+  if ! rm -rf "$d" || ! mkdir -p "$d" || ! : >"$d/checksums.txt"; then die "$keep_failed"; fi
+  if test -f "$bin/ti-engine"; then
+    if ! cp "$bin/ti-engine" "$d/ti-engine" || ! cmp -s "$bin/ti-engine" "$d/ti-engine"; then die "$keep_failed"; fi
+    if ! printf '%s  ti-engine\n' "$(sha "$d/ti-engine")" >"$d/checksums.txt"; then die "$keep_failed"; fi
+  fi
+  if test -f "$bin/BUILD"; then
+    if ! cp "$bin/BUILD" "$d/BUILD" || ! cmp -s "$bin/BUILD" "$d/BUILD"; then die "$keep_failed"; fi
+  fi
+  : >"$releases/.engine-before/pending" || die "could not mark the engine copy; nothing installed"
 }
 
 before=$(hashes)
@@ -687,6 +712,8 @@ if test "$mode" = release; then
     log "$tag is already installed; nothing to do"
     if test "$engine" = 0; then
       log "the engine was left on its current build: crash recovery needs the build that wrote its durable log (ADR 0027); use --engine only at an owner-approved fresh run"
+    else
+      rm -f "$releases/.engine-before/pending"
     fi
     exit 0
   fi
@@ -795,6 +822,7 @@ if test "$mode" = release; then
   write_state current "$tag"
   rm -f "$releases/$cur/.starter-installed"
   prune "$tag" "$(read_state previous)"
+  if test "$engine" = 1; then rm -f "$releases/.engine-before/pending"; fi
   report "$cur" "$tag" "$before"
   exit 0
 fi
@@ -824,4 +852,5 @@ if ! install_from "$releases/$prev" || ! restart_dashboard_verified; then
 fi
 write_state previous "$cur"
 write_state current "$prev"
+if test "$engine" = 1; then rm -f "$releases/.engine-before/pending"; fi
 report "$cur" "$prev" "$before"
