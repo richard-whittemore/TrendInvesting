@@ -121,3 +121,11 @@ The adapter publishes a split whenever LEAN held a position across it, including
 - Live trading needs the broker's own cash-in-lieu statement to be journalled as this event, with its source transaction identity, before ADR 0019's reconciliation can use it as an explanation. The LEAN adapter's derived figure is a backtest producer's, and is not that evidence.
 - Every journal with a split that touched a held position gains a corporate-action input, and usually one decision. Journals without one are unchanged except for the rules version.
 - ADR 0019's paragraph on position-changing non-fill events now points here for a split's cash in lieu. Other corporate actions (spin-offs, mergers, reverse splits' own adapter support) remain unsupported and halt.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle is retired to history. This ADR is not retired,
+because §1 still governs: the `market.corporate-action` event, its split
+kind and its upcaster are read by the live engine's reconciliation (ADR
+0019). Moot: §2 to §6, which reduce Turtle Units, inform the fill simulator,
+and describe the LEAN adapter's producer.

@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4, and an ended run's never-sent sale is settled for the fresh run's approval; amended 2026-10-27 by the owner ("Flex"): the morning reading stands for the close with the Flex executions proof; noted 2026-10-28: IBKR's Eastern label does not follow daylight saving time, so IB Gateway's clock is checked against the adapter's instead)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4, and an ended run's never-sent sale is settled for the fresh run's approval; amended 2026-10-27 by the owner ("Flex"): the morning reading stands for the close with the Flex executions proof; noted 2026-10-28: IBKR's Eastern label does not follow daylight saving time, so IB Gateway's clock is checked against the adapter's instead; amended 2026-11-21 by ADR 0029: Turtle clauses moot)
 - Date: 2026-09-17
 
 ## In plain English
@@ -1366,3 +1366,11 @@ What changes where: the IBKR adapter only (`loop.py`, `orders.py`,
 `connection.py`, and `delivery.py`'s record, whose batches now carry
 `journal_checked`; an earlier record is still read). The engine, its
 schemas and its rules are unchanged; no RulesVersion change.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle is retired to history. Reconciliation stands for every
+live strategy. Moot: the context's description of the Turtle reducer
+(Campaign Units, `availableCash`, ADR 0005's simulator), and each clause
+that says it does or does not apply to the Turtle reducer. ADR 0005, ADR
+0010, ADR 0012 and ADR 0020, cited above, are retired and read as history.

@@ -50,3 +50,13 @@ Neither `ConfigurationHash` nor `StrategyVersion` falls into ADR 0012's paramete
 - `event.canonicalJSON` is a general-purpose canonical encoder (structs, maps with string keys, slices, and JSON scalars), not `ConfigurationPayload`-specific, so it is directly testable for the two properties that make it trustworthy: independence from Go struct field declaration order, and independence from map insertion order.
 - `internal/strategy.RulesVersion` starts at `1.0.0`. The first ticket that changes a rule (as opposed to refactoring, adding provenance, or fixing a non-rule bug) must bump it and say so in that ticket's Work log — this ADR does not itself define a process for detecting a missed bump, which is a gap worth a future ticket if a rules change ever lands without one.
 - #19 (the backtest command and journal) and #39 (the run registry) can now be built against a concrete, tested derivation for both fields instead of an unspecified opaque string.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle is retired to history. The derivation of both values
+stands for every strategy. Moot: ADR 0012's parameter taxonomy (retired),
+the `turtle-baseline` example, `strategy.NewReducer` and
+`internal/strategy.RulesVersion`, which leave with the Turtle reducer; each
+live strategy declares its own rules version. The stability test's pinned
+fixture moves to a live strategy's configuration in the change that removes
+the reducer.

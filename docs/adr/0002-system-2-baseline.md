@@ -1,6 +1,6 @@
 # ADR 0002: System 2 is the Turtle baseline
 
-- Status: Accepted
+- Status: Retired by [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md) (2026-11-21): kept as history. Before that: Accepted
 - Date: 2026-09-06
 
 ## Context

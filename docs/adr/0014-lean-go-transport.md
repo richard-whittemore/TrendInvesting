@@ -310,3 +310,12 @@ Darwin and Linux and run in the existing Linux CI jobs. Local evidence is in
 [the access-control work log](../development-evidence/decision-socket.md);
 Linux runtime and cross-UID/container enforcement are not inferred from a
 Darwin run or a cross-compilation.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), the LEAN adapter and the transport spike leave the live tree
+in a later change; `turtle-final` keeps both. The socket contract stands:
+the IBKR adapter speaks it (ADR 0025), and the Consequences above that
+concern only LEAN (the container, `Initialize`, `AlgorithmImports`, the bind
+mount) become history with the LEAN adapter. Points 2, 3, 5, 6, 10, 11, 12
+and the access amendment apply to every adapter.

@@ -333,3 +333,12 @@ confirmed login it starts only its own failed adapter. The owner veto is
 `systemctl reset-failed <adapter>`; the same failed invocation must remain
 eligible at each re-check. The manual defines the remaining evidence, locking,
 and recovery-time bounds.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle and the LEAN backtest path are retired to history.
+Point 3, "LEAN stays for backtests and research", is moot: the LEAN adapter
+leaves the live tree in a later change, and the research that produced
+Boost and Momentum ran on QuantConnect Cloud, not on this adapter. The
+consequence that places the live strategies "beside the Turtle reducer" now
+reads: behind the strategy interface of ADR 0029. The rest stands.

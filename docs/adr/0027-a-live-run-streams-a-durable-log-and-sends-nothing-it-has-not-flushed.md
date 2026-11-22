@@ -502,3 +502,11 @@ owner clears it. So:
   the next decision time then decides afresh (target-weight rules version
   1.27.0). `operator approve` reads the strategy from the log and writes
   either shape; `-first-run -strategy momentum` writes an IRA's first run's.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle and the LEAN backtest path are retired to history. The
+durable log stands for every live strategy. Moot: "a Turtle configuration,
+which declares none, runs only as a backtest", and the LEAN adapter's
+end-to-end test as a user of `-mode backtest`. Whether `-mode backtest`
+stays, and for what, is decided in the change that removes them.
