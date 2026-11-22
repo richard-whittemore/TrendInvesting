@@ -731,3 +731,35 @@ func TestPreStartFailureReportsOtherExit(t *testing.T) {
 		})
 	}
 }
+
+// Releasing the first reservation puts back "never restarted", which on disk
+// is the absence of last-restart.json: an empty state written to the file
+// would be refused as incomplete by every later run (server.md, Gateway
+// healer).
+func TestReleasingTheFirstReservationLeavesALoadableState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := diskState{dir: dir, lockDir: dir, uid: uint32(os.Getuid())}
+	prior, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(gatewayheal.State{LastRestart: time.Date(2026, 11, 3, 4, 39, 59, 0, time.UTC), Incident: "inv-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(prior); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load after releasing the first reservation: %v", err)
+	}
+	if got != (gatewayheal.State{}) {
+		t.Fatalf("Load = %+v, want the never-restarted state", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "last-restart.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("last-restart.json still present: %v", err)
+	}
+}

@@ -237,6 +237,15 @@ func (s diskState) Load() (gatewayheal.State, error) {
 	return state, nil
 }
 func (s diskState) Save(state gatewayheal.State) error {
+	// "Never restarted" is the absence of the file, which Load reads as the
+	// zero state; a zero state written out would be refused as incomplete
+	// (server.md, Gateway healer).
+	if state == (gatewayheal.State{}) {
+		if err := os.Remove(filepath.Join(s.dir, "last-restart.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return s.syncDir()
+	}
 	raw, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -258,6 +267,11 @@ func (s diskState) Save(state gatewayheal.State) error {
 	if err := os.Rename(f.Name(), filepath.Join(s.dir, "last-restart.json")); err != nil {
 		return err
 	}
+	return s.syncDir()
+}
+
+// syncDir makes a rename or removal in the state directory durable.
+func (s diskState) syncDir() error {
 	dir, err := os.Open(s.dir)
 	if err != nil {
 		return err
