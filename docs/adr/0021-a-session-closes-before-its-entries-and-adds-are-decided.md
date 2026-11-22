@@ -1,6 +1,6 @@
 # ADR 0021: A Session closes before its Adds and entries are decided
 
-- Status: Proposed (amended 2026-09-24: the LEAN adapter's actual per-slice order)
+- Status: Proposed (amended 2026-09-24: the LEAN adapter's actual per-slice order; amended 2026-11-21 by ADR 0029: Turtle clauses moot)
 - Date: 2026-09-24
 - Relates to: ADR 0005, ADR 0008, ADR 0010, ADR 0011, ADR 0015, ADR 0016, ADR 0019, ADR 0020
 
@@ -203,3 +203,12 @@ This ADR's session boundary, completeness checks and ADR 0010 order are implemen
 3. **The Strength basis under the completed-bar rule.** CONTEXT.md applies the completed-bar rule to every input of a decision. That makes Strength for a Signal on bar *t* equal to `(close(t−1) − close(t−64)) / N(t−1)`, not a figure using *t*'s own close. The resting-order model (ADR 0005) needs the order to exist before *t* opens. ADR 0010's formula does not say which. This ADR reads it as the preceding bars, and that reading needs confirming when #34 is specified.
 
 > **Resolved by the owner's decision of 2026-09-25 (#34; recorded as ADR 0010's own amendment of the same date).** Item 1 — Strength and its tie-breaks — is settled and implemented: `internal/indicator.Strength` and `internal/indicator.MedianDollarVolume` are the shared definitions, `rankSignals` (session.go) sorts by them (descending Strength, then descending dollar volume, then ascending symbol), and an instrument short of either window's history is declined with `event.DeclineReasonInsufficientHistory` rather than ranked. Item 3's own question resolves the same way this section's *t*/*t−1* naming already pointed: the Signal's own bar (this section's *t−1*, ADR 0010's *d*) is the basis, its own close and its own N once that bar has closed — the reading this ADR already adopted provisionally is confirmed, not overturned. Item 2 was superseded in part above (2026-09-24) and needs no further resolution here: the shared budget it named is #220's holds, already implemented, and this ADR's own ranked session-close order is what decides which Signals they fund.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle and `cmd/backtest` are retired to history. This ADR is
+not retired, because §1 still governs: `market.session.closed`, its
+payload, and its fail-closed checks are the session boundary the live engine
+decides at (`docs/manual/market-data.md`). Moot: §2 to §7 and the
+amendments, which order the Turtle reducer's Adds and entries and describe
+`cmd/backtest`'s and the LEAN adapter's producers.

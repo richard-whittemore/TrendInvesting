@@ -5,7 +5,7 @@ transcribe them, don't invent them").
 
 Run with:
 
-    python3 -m unittest discover -s research/qc-cloud -p "test_*.py"
+    python3 -m unittest discover -s research/history/qc-cloud -p "test_*.py"
 
 or, from this directory:
 

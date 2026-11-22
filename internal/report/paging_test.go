@@ -123,7 +123,7 @@ func TestPagingNoticeClassesAndRemedies(t *testing.T) {
 	if a.Kind != KindGatewayResetWait || a.Class(false) != Operational || !a.Repeat || a.Key != GatewayKey("synthetic-host") || !strings.Contains(a.Title, "reset wait") {
 		t.Fatalf("notice=%+v", a)
 	}
-	for _, kind := range []Kind{KindGatewayLoggedOut, KindHistoryUnavailable, KindRestoredLogNewer} {
+	for _, kind := range []Kind{KindGatewayLoggedOut, KindHistoryUnavailable, KindRestoredLogNewer, KindAccountChanged} {
 		if (Alert{Kind: kind}).Class(false) != Operational {
 			t.Fatal(kind)
 		}

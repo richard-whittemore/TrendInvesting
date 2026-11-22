@@ -45,3 +45,11 @@ Because those flushes happen **after** the commit point, a flush that fails leav
 - A rerun that points `-out` at an existing journal is refused before the configuration is read, and the run is not registered: nothing was performed.
 - Two runs of one configuration recorded at the same instant can neither interleave nor overwrite one another, and two branches that each recorded a run merge as two additions.
 - A future writer of evidence — a report, an exported result set — is expected to install it the same way rather than inventing a second mechanism.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), `cmd/backtest`, `internal/registry` and `runs/` leave the live
+tree in a later change; `turtle-final` keeps them and every entry. The
+install rule stands for any writer of evidence (link, never rename; no
+overwrite; the link is the commit point). Moving recorded evidence out of
+the build path into the tag is not rewriting it (AGENTS.md rule 6).

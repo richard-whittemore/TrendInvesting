@@ -1,5 +1,5 @@
 # Research script, not production code: no ADR citations. Runs locally on
-# the research/futures-local engine and Pinnacle CLC files (never committed);
+# the research/history/futures-local engine and Pinnacle CLC files (never committed);
 # see docs/research/boost-followup-2026-09.md.
 """SPY-proxy + TSMOM blends, monthly rebalanced. Research only.
 PROJECT combination: fixed weights chosen before any run (80/20, 60/40,
@@ -10,7 +10,7 @@ import sys, os, math
 from dataclasses import replace
 from datetime import date
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-sys.path.insert(0, os.path.join(ROOT, "research", "futures-local"))
+sys.path.insert(0, os.path.join(ROOT, "research", "history", "futures-local"))
 import tsmom, tsmom_markets, loader, rates  # noqa: E402
 
 DATA = os.environ.get("PINNACLE_DIR", os.path.expanduser("~/Desktop/Trend_Investing/data/pinnacle/DATA/CLCDATA"))

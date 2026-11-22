@@ -31,7 +31,7 @@ func (a Alert) Class(near bool) Class {
 			return CapitalSafety
 		}
 		return Operational
-	case KindGatewayLoggedOut, KindGatewayResetWait, KindHistoryUnavailable, KindRestoredLogNewer:
+	case KindGatewayLoggedOut, KindGatewayResetWait, KindHistoryUnavailable, KindRestoredLogNewer, KindAccountChanged:
 		return Operational
 	default:
 		return CapitalSafety

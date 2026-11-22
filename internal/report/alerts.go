@@ -91,6 +91,10 @@ const (
 	// KindHistoryUnavailable is a chain of runs that cannot be followed back
 	// to the first run: only the equity comparison's history is lost.
 	KindHistoryUnavailable Kind = "history-unavailable"
+	// KindAccountChanged is a chain of runs that ends at an intact earlier log
+	// of another account: a routine note, never a page (alerts-and-dashboard.md,
+	// "The history across restarts").
+	KindAccountChanged Kind = "account-changed"
 	// KindRestoredLogNewer is a log of the chain of runs, restored without
 	// its modification time, that the engine would take for the latest
 	// run at its next start.

@@ -1,6 +1,6 @@
-"""Tests for build_upload.py, the Free-plan upload build (issue #256;
-README.md, "How to run it"). Run via `make research-test`
-(`python3 -m unittest discover -s research/qc-cloud -p "test_*.py"` picks up
+"""Tests for build_upload.py, the Free-plan upload build (README.md, "How
+to run it"). Run via `make research-test`
+(`python3 -m unittest discover -s research/history/qc-cloud-futures -p "test_*.py"` picks up
 every test_*.py in this directory, this one included).
 """
 
@@ -38,6 +38,13 @@ class BuildUploadTests(unittest.TestCase):
     def test_built_rules_py_compiles(self):
         source = (DIST / "rules.py").read_text()
         compile(source, str(DIST / "rules.py"), "exec")
+
+    def test_indentation_is_compacted_to_one_space_per_level(self):
+        # Four-space indentation alone costs thousands of characters
+        # against the Free-plan limit; one space per level is still valid.
+        source = "class A:\n    def f(self):\n        if self:\n            return 'a    b'\n"
+        self.assertEqual(build_upload.strip_source(source),
+                         "class A:\n\n def f(self):\n  if self:\n   return 'a    b'")
 
     def test_full_rules_suite_passes_against_the_built_rules_py(self):
         # Run test_rules.py's own, unmodified suite against dist/rules.py,

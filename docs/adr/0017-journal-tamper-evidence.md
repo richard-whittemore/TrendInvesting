@@ -133,3 +133,13 @@ Before paper trading, each completed run's final `record_hash` — which `journa
 - A journal records the build that produced it, in every envelope's strategy version (ADR 0016). The build identifier is therefore injected at the composition root rather than read from `internal/buildinfo` inside the run, so a test asserting a journal byte for byte fixes it: a golden keyed to the build identifier would assert which machine produced the journal rather than what the platform decided.
 - A journal is written once. `cmd/backtest` refuses a path that already exists rather than truncating it (AGENTS.md rule 6: never rewrite or delete recorded evidence) and installs the journal by hard-linking a completed temporary file into place, so an interrupted run cannot leave a partial journal that reads like a complete one and a concurrent run cannot replace one that already arrived — `rename(2)` replaces a destination silently, `link(2)` fails atomically. There is deliberately no overwrite flag.
 - Nobody should describe this as making the journal immutable. It makes the journal *checkable*.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), `cmd/backtest` and its run registry leave the live tree in a
+later change. The hash chain stands for every journal and durable log. The
+clauses that name `cmd/backtest` (`backtest -verify`, `-max-records`, the
+registry's final-hash anchor) become history with it; `journal-query`
+verifies journals with the same `journal.Verify`
+(`docs/manual/journal-query.md`). Where an end-of-run journal's anchor is
+kept after `runs/` leaves is decided in that change.

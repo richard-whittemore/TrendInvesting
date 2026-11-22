@@ -21,7 +21,7 @@ the Baseline.
 
 This is research-only. It is not the production Go engine
 (internal/strategy, internal/sizing, internal/indicator) and makes no claim
-of bit-for-bit parity with it. research/qc-cloud/README.md lists every known
+of bit-for-bit parity with it. research/history/qc-cloud/README.md lists every known
 and deliberate deviation the cloud environment forces.
 """
 

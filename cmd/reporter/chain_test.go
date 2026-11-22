@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,18 @@ import (
 // recorded straight after the configuration, and returns its final hash.
 func writeChainedLog(t *testing.T, path string, approval event.OperatorRunApprovedPayload) string {
 	t.Helper()
+	return writeAccountChainedLog(t, path, "joint", approval)
+}
+
+func writeAccountChainedLog(t *testing.T, path, account string, approval event.OperatorRunApprovedPayload) string {
+	t.Helper()
 	entries := haltedEntries(t)
+	for i := range entries {
+		e := &entries[i].Envelope
+		e.Payload = bytes.ReplaceAll(e.Payload, []byte(`"joint"`), []byte(`"`+account+`"`))
+		e.PayloadHash = event.HashPayload(e.Payload)
+	}
+	approval.AccountID = account
 	approved := journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 2, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approved:"+filepath.Base(path), t0, approval)}
 	entries = append(entries[:1], append([]journal.Entry{approved}, entries[1:]...)...)
 	var buf syncBuffer
@@ -319,5 +331,118 @@ func TestAFiringThatCannotExamineTheFolderKeepsTheRestoredLogAlertDelivered(t *t
 	}
 	if out := fire(); strings.Contains(out, title) {
 		t.Fatalf("a firing that could not read the folder made the alert go out again:\n%s", out)
+	}
+}
+
+// The case table for the reporter's history notice (manual, "The history
+// across restarts") keeps an approved account change separate from damage.
+// Account       Earlier log   Report
+// same          intact        none
+// same          missing       existing history-unavailable alert
+// same          altered       existing history-unavailable alert
+// other         intact        one routine account-change note; never paged or repeated
+// other         altered       existing history-unavailable alert
+func TestHistoryNoticeCaseTable(t *testing.T) {
+	cases := []struct {
+		name, account, damage       string
+		historyAlert, accountChange bool
+	}{
+		{name: "same account intact", account: "joint"},
+		{name: "same account missing", account: "joint", damage: "missing", historyAlert: true},
+		{name: "same account altered", account: "joint", damage: "altered", historyAlert: true},
+		{name: "other account", account: "earlier-paper", accountChange: true},
+		{name: "other account altered", account: "earlier-paper", damage: "altered", historyAlert: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			previous := filepath.Join(dir, "run1.log")
+			hash := writeAccountChainedLog(t, previous, tc.account, approvalNaming("", ""))
+			current := filepath.Join(dir, "run2.log")
+			writeChainedLog(t, current, approvalNaming("run1.log", hash))
+			switch tc.damage {
+			case "missing":
+				if err := os.Remove(previous); err != nil {
+					t.Fatal(err)
+				}
+			case "altered":
+				changed := approvalNaming("", "")
+				changed.ApprovedBy = "another owner"
+				writeAccountChainedLog(t, previous, tc.account, changed)
+			}
+			history, _, _, alerts, err := readJournal(current, "boost", t0, time.Minute, map[string]bool{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const note = "the equity comparison starts with this run, the first on this account"
+			if tc.accountChange && (history.Broken != nil || len(history.Earlier) != 0) {
+				t.Errorf("account boundary retained a break or another account's history: %+v", history)
+			}
+			var historyCount, changeCount int
+			for _, a := range alerts {
+				if strings.Contains(a.Title, "history of earlier runs") {
+					historyCount++
+					if !strings.Contains(a.Body, "Restore the named earlier log from a backup") {
+						t.Errorf("damaged history lost its restore advice: %s", a.Body)
+					}
+				}
+				if strings.Contains(a.Body, note) {
+					changeCount++
+					if a.Severity != report.Routine || a.Repeat || a.Title != "joint: account changed" {
+						t.Errorf("account-change note = %+v", a)
+					}
+					if strings.Contains(strings.ToLower(a.Body), "restore") || strings.Contains(a.Body, "earlier-paper") {
+						t.Errorf("account-change note carries restore advice or previous account: %s", a.Body)
+					}
+					for _, policy := range []*pagingPolicy{nil, {bypass: true}, {after: 0}} {
+						for _, channel := range []string{"pagerduty", "pushover"} {
+							pager := &policyRecorder{channel: channel}
+							if err := deliver([]sender{pager}, a, map[string]bool{}, map[string]time.Time{}, map[string]int{}, t0, time.Hour, func() error { return nil }, policy); err != nil {
+								t.Fatal(err)
+							}
+							if len(pager.alerts) != 0 {
+								t.Errorf("account-change note reached %s with policy %+v", channel, policy)
+							}
+						}
+					}
+				}
+			}
+			wantHistory, wantChange := 0, 0
+			if tc.historyAlert {
+				wantHistory = 1
+			}
+			if tc.accountChange {
+				wantChange = 1
+			}
+			if historyCount != wantHistory || changeCount != wantChange {
+				t.Errorf("history alerts = %d, account-change notes = %d; want %d, %d", historyCount, changeCount, wantHistory, wantChange)
+			}
+			r := &relay{sent: map[string][]string{}}
+			args := []string{"-journal", current, "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-summary"}
+			for i := 0; i < 3; i++ {
+				var out bytes.Buffer
+				if err := run(args, twoChannels(), func() time.Time { return t0.Add(time.Duration(i+1) * time.Hour) }, &out, &http.Client{Transport: r}); err != nil {
+					t.Fatal(err)
+				}
+				if tc.accountChange && (strings.Contains(out.String(), "history unavailable") || strings.Contains(out.String(), "history of earlier runs")) {
+					t.Errorf("account change reported broken history: %s", out.String())
+				}
+			}
+			own := strings.Join(r.to("ntfy.private.test"), "\n")
+			if tc.accountChange {
+				if strings.Contains(own, "history unavailable") || strings.Contains(own, "history of earlier runs") || strings.Contains(own, "Restore the named earlier log") {
+					t.Errorf("account change carried broken-history advice: %s", own)
+				}
+				if !strings.Contains(own, "Equity vs SPY: Run run2.log: "+note) || !strings.Contains(own, "engine halted") || !strings.Contains(own, "order refused") {
+					t.Errorf("summary starting point or current incident alerts missing: %s", own)
+				}
+			}
+			if got := strings.Count(own, "joint: account changed"); got != wantChange {
+				t.Errorf("delivered account-change notes = %d, want %d: %s", got, wantChange, own)
+			}
+			if strings.Contains(strings.Join(r.to("events.pagerduty.test"), "\n"), note) {
+				t.Error("account change paged")
+			}
+		})
 	}
 }

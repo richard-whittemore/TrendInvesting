@@ -21,6 +21,7 @@ import (
 // build reports, so two different unstamped builds would claim to be one and
 // the rule that a run never resumes across builds (ADR 0027) could not fire.
 // A backtest may still run on one.
+// Covers the retired Turtle reducer (ADR 0002): only backtest accepts an unstamped build.
 func TestAnUnstampedBuildRefusesEveryModeButBacktest(t *testing.T) {
 	for _, mode := range []string{modeDryRun, modePaper, modeLive} {
 		opts := boostOptions(t, t.TempDir())

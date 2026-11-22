@@ -50,3 +50,10 @@ Moving a Campaign's money to the raw view is a change of view for the whole Camp
 - `event.CompletedBarPayload` labels both of its views, but `event.FillPayload` carries no view label at all, so the rule above is upheld by construction and cannot be checked at the event seam. Labelling a fill's price is a schema change and is tracked separately.
 - A realised result is invariant under split adjustment provided the held quantity moves with the price, so adopting the raw view later changes no P&L figure — only the per-share and threshold quantities named above.
 - The first per-share cost or absolute price threshold to be implemented is where the raw view starts being read, and it must state which view each of its inputs is in.
+
+## Amendment (2026-11-21): Turtle and the LEAN backtest path are retired
+
+Under [ADR 0029](0029-strategies-plug-in-through-one-interface-and-turtle-is-retired-to-history.md), Turtle is retired to history. The Entry and Exit Channels, N
+and Sublime features named above are Turtle and Sublime terms, now moot. The
+rule stands for every live strategy: signals see split-adjusted prices, and
+orders, fills and accounting use raw prices, with dividends as cash.

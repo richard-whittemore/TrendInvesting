@@ -3,14 +3,14 @@
 QuantConnect's web IDE caps each pasted file at 32,000 characters
 (README.md, "How to run it"), and main.py/rules.py exceed that once every
 comment and docstring is counted. This script writes stripped copies to
-research/qc-cloud-futures/dist/ (git-ignored: a build artifact, never the source of
+research/history/qc-cloud/dist/ (git-ignored: a build artifact, never the source of
 truth read for comments or run for tests) -- module, class and function
 docstrings removed by walking the parsed AST, comments dropped as an
 unavoidable side effect of regenerating source with ``ast.unparse``.
 
 Usage, from the repository root:
 
-    python3 research/qc-cloud-futures/build_upload.py
+    python3 research/history/qc-cloud/build_upload.py
 
 Standard library only, so this needs nothing installed beyond the Python 3
 (>=3.9, for ``ast.unparse``) already required to run test_rules.py.
@@ -65,19 +65,7 @@ def strip_source(source):
     tree = ast.parse(source)
     _strip_docstrings(tree)
     ast.fix_missing_locations(tree)
-    return _compact_indentation(ast.unparse(tree))
-
-
-def _compact_indentation(source):
-    """Re-indent ``ast.unparse`` output at one space per level instead of
-    four. Safe because ``ast.unparse`` writes one statement per line and
-    renders every string with ``repr`` (no literal newlines inside a
-    string), so leading spaces are always indentation."""
-    lines = []
-    for line in source.split("\n"):
-        stripped = line.lstrip(" ")
-        lines.append(" " * ((len(line) - len(stripped)) // 4) + stripped)
-    return "\n".join(lines)
+    return ast.unparse(tree)
 
 
 def build():

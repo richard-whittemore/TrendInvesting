@@ -10,11 +10,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
-	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
 
@@ -45,26 +44,23 @@ func (r *readySignal) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// TestRunEndToEndOverASocket drives the engine exactly the way the brief's
-// verification asks: "configuration in, bars in, decisions out, journal on
-// disk", over a real Unix-domain socket, with no LEAN or mock in the way —
-// the client is transport.Client, the server is a real transport.Server
-// bound to a real socket file, and the decider behind it is a real
-// strategy.Reducer built from this command's own composition (run).
+// TestRunEndToEndOverASocket checks configuration, inputs, decisions and
+// replayable journal evidence through the real Boost composition (ADRs 0014, 0017 and 0026).
 func TestRunEndToEndOverASocket(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	outPath := filepath.Join(dir, "journal.jsonl")
-	cfg := testConfiguration(t)
-	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "test-build")
-	configurationHash := event.ConfigurationHash(cfg)
+	cfg := boostConfiguration(t, boostConfigPath)
+	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, "test-build")
+	configurationHash := event.TargetWeightConfigurationHash(cfg)
 
 	stop := startEngine(t, options{
-		mode:       modeBacktest,
+		mode:       modeDryRun,
 		socketPath: socketPath,
-		configPath: testConfigPath,
+		configPath: boostConfigPath,
 		asOf:       testAsOf,
 		outPath:    outPath,
+		logPath:    filepath.Join(dir, "run.log"),
 		build:      "test-build",
 	})
 
@@ -72,7 +68,7 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial the engine: %v", err)
 	}
-	const instrument = "TEST"
+	const instrument = "SPY"
 	const barCount = 25
 	for day := range barCount {
 		bar := flatBar(instrument, day)
@@ -84,7 +80,7 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 		// Each bar is followed by the close of its Session (ADR 0021),
 		// below, so every day occupies two sequence numbers.
 		sequence := configurationSequence + 1 + 2*uint64(day)
-		envelope := barEnvelope(t, bar, sequence, strategyVersion, configurationHash)
+		envelope := boostBarEnvelope(t, day, sequence, strategyVersion, configurationHash)
 
 		decision, err := client.Decide(context.Background(), envelope)
 		if err != nil {
@@ -100,11 +96,8 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 		if err := json.Unmarshal(decision.Payload, &payload); err != nil {
 			t.Fatalf("bar %d: decode decisions payload: %v", day, err)
 		}
-		if len(payload.Decisions) != 1 {
-			t.Fatalf("bar %d: got %d decisions, want exactly 1 (a flat bar never breaks out): %+v", day, len(payload.Decisions), payload.Decisions)
-		}
-		if payload.Decisions[0].Type != event.SetupEvaluatedEventType {
-			t.Fatalf("bar %d: decision[0] type = %q, want %q", day, payload.Decisions[0].Type, event.SetupEvaluatedEventType)
+		if len(payload.Decisions) != 0 {
+			t.Fatalf("bar %d: got %d decisions before session close, want none: %+v", day, len(payload.Decisions), payload.Decisions)
 		}
 
 		closed := sessionClosedEnvelope(t, bar, sequence+1, strategyVersion, configurationHash)
@@ -117,9 +110,9 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 			t.Fatalf("bar %d: decode session-close decisions: %v", day, err)
 		}
 		if reply.CausationID != closed.ID || len(closeDecisions.Decisions) != 1 {
-			t.Fatalf("bar %d: session close answered %q with %d decisions, want its own causation and one empty Watchlist", day, reply.CausationID, len(closeDecisions.Decisions))
+			t.Fatalf("bar %d: session close answered %q with %d decisions, want its own causation and one withheld target", day, reply.CausationID, len(closeDecisions.Decisions))
 		}
-		assertEmptyWatchlist(t, closeDecisions.Decisions[0], bar.PeriodEnd)
+		assertWithheldBoostTarget(t, closeDecisions.Decisions[0], bar.PeriodEnd)
 	}
 
 	if err := client.Close(); err != nil {
@@ -129,8 +122,7 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 		t.Fatalf("run returned an error: %v", err)
 	}
 
-	// journal.Verify accepts the journal the server wrote (brief's
-	// verification, bullet 2).
+	// Verify the journal chain before replay (ADR 0017).
 	file, err := os.Open(outPath)
 	if err != nil {
 		t.Fatalf("open the journal: %v", err)
@@ -169,25 +161,19 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	if want := 1 + 2*barCount; len(inputs) != want {
 		t.Errorf("journal holds %d input(s), want %d (1 configuration + %d bars and their session closes)", len(inputs), want, barCount)
 	}
-	if inputs[0].Type != event.ConfigurationEventType {
-		t.Errorf("journal's first input is %q, want %q", inputs[0].Type, event.ConfigurationEventType)
+	if inputs[0].Type != event.TargetWeightConfigurationEventType {
+		t.Errorf("journal's first input is %q, want %q", inputs[0].Type, event.TargetWeightConfigurationEventType)
 	}
-	// One Setup evaluation per bar and one Watchlist per Session close
-	// (ADR 0011); the configuration input itself produces none.
-	if len(decisions) != 2*barCount {
-		t.Fatalf("journal holds %d decision(s), want %d (Setup and Watchlist per Session)", len(decisions), 2*barCount)
+	// A bar waits for its session close; without an account snapshot,
+	// Boost records one withheld target per close (ADR 0026; ADR 0019).
+	if len(decisions) != barCount {
+		t.Fatalf("journal holds %d decision(s), want %d", len(decisions), barCount)
 	}
 	for day := range barCount {
-		if decision := decisions[2*day]; decision.Type != event.SetupEvaluatedEventType {
-			t.Errorf("decision %d type = %q, want %q", 2*day, decision.Type, event.SetupEvaluatedEventType)
-		}
-		assertEmptyWatchlist(t, decisions[2*day+1], flatBar(instrument, day).PeriodEnd)
+		assertWithheldBoostTarget(t, decisions[day], flatBar(instrument, day).PeriodEnd)
 	}
 
-	// The check this whole ticket is about: the journal must replay, not
-	// merely verify structurally. See assertJournalReplays's own doc
-	// comment for why journal.Verify/CheckIdentity/CheckSpan/Split, above,
-	// are not sufficient on their own.
+	// Replay must reproduce the decisions, in addition to structural verification (ADR 0017).
 	assertJournalReplays(t, header, inputs, decisions)
 }
 
@@ -204,16 +190,17 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	outPath := filepath.Join(dir, "journal.jsonl")
-	cfg := testConfiguration(t)
-	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "test-build")
-	configurationHash := event.ConfigurationHash(cfg)
+	cfg := boostConfiguration(t, boostConfigPath)
+	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, "test-build")
+	configurationHash := event.TargetWeightConfigurationHash(cfg)
 
 	stop := startEngine(t, options{
-		mode:       modeBacktest,
+		mode:       modeDryRun,
 		socketPath: socketPath,
-		configPath: testConfigPath,
+		configPath: boostConfigPath,
 		asOf:       testAsOf,
 		outPath:    outPath,
+		logPath:    filepath.Join(dir, "run.log"),
 		build:      "test-build",
 	})
 
@@ -224,7 +211,7 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 	if err != nil {
 		t.Fatalf("dial the first connection: %v", err)
 	}
-	firstBar := barEnvelope(t, flatBar("TEST", 0), configurationSequence+1, strategyVersion, configurationHash)
+	firstBar := boostBarEnvelope(t, 0, configurationSequence+1, strategyVersion, configurationHash)
 	if _, err := first.Decide(context.Background(), firstBar); err != nil {
 		t.Fatalf("first connection: decide: %v", err)
 	}
@@ -237,14 +224,15 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 		t.Fatalf("dial the second connection: %v", err)
 	}
 	defer func() { _ = second.Close() }()
-	// secondBar carries the Sequence wireEngine's cursor would actually
+	// secondBar closes the pending session, an input the handler would
+	// accept if it reached it. It carries the Sequence wireEngine's cursor would actually
 	// accept next (configurationSequence+2, immediately after firstBar's own
 	// configurationSequence+1) — not a value contiguity would refuse on its
 	// own — so that its refusal below can only be MaxConnections: if this
 	// carried a Sequence the engine would reject anyway (a duplicate of
 	// firstBar's, say), the assertion would still pass with MaxConnections
 	// removed entirely, proving nothing about the guard it names.
-	secondBar := barEnvelope(t, flatBar("OTHER", 0), configurationSequence+2, strategyVersion, configurationHash)
+	secondBar := sessionClosedEnvelope(t, flatBar("SPY", 0), configurationSequence+2, strategyVersion, configurationHash)
 	if _, err := second.Decide(context.Background(), secondBar); err == nil {
 		t.Fatal("second connection: decide succeeded; want it refused while the first connection is still open, even though the two never overlapped a call in time")
 	}
@@ -254,7 +242,7 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 	// second connection never reached wireEngine at all, so the first
 	// connection's own next input — the close of firstBar's Session (ADR
 	// 0021) — carries the identical Sequence secondBar used above.
-	nextBarForFirst := sessionClosedEnvelope(t, flatBar("TEST", 0), configurationSequence+2, strategyVersion, configurationHash)
+	nextBarForFirst := sessionClosedEnvelope(t, flatBar("SPY", 0), configurationSequence+2, strategyVersion, configurationHash)
 	if _, err := first.Decide(context.Background(), nextBarForFirst); err != nil {
 		t.Fatalf("first connection after the second was refused: decide: %v", err)
 	}
@@ -278,31 +266,25 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 func TestRunRefusesToStartWithoutAValidConfiguration(t *testing.T) {
 	dir := t.TempDir()
 	badConfig := filepath.Join(dir, "bad-configuration.json")
-	// Zero slippage: ConfigurationPayload.Validate rejects this outright
-	// (ADR 0013).
-	if err := os.WriteFile(badConfig, []byte(`{
-		"strategy_id": "bad",
-		"sizing_mode": "volatility-normalised",
-		"unit_volatility_fraction": 0.005,
-		"stop_multiple": 2,
-		"entry_channel_length": 20,
-		"exit_channel_length": 10,
-		"max_units": 4,
-		"slippage_n": 0,
-		"dollars_per_point": 1,
-		"notional_account": {"starting_equity": 1000000, "rebasing_month": 1, "rebasing_day": 1},
-		"commission": {"per_share": 0, "minimum_per_order": 0, "maximum_fraction_of_trade_value": 0.01}
-	}`), 0o600); err != nil {
-		t.Fatalf("write the bad configuration fixture: %v", err)
+	cfg := boostConfiguration(t, boostConfigPath)
+	// A zero Boost size is invalid under ADR 0026's configured parameters.
+	cfg.Boost.BoostSize = 0
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(badConfig, raw, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
-	err := run(context.Background(), options{
-		mode:       modeBacktest,
+	err = run(context.Background(), options{
+		mode:       modeDryRun,
 		socketPath: socketPath,
 		configPath: badConfig,
 		asOf:       testAsOf,
 		outPath:    filepath.Join(dir, "journal.jsonl"),
+		logPath:    filepath.Join(dir, "run.log"),
 		build:      "test-build",
 	}, &bytes.Buffer{})
 	if err == nil {
@@ -345,11 +327,12 @@ func TestRunReportsAJournalWriteFailureRatherThanExitingClean(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(journalDir, 0o700) })
 
 	stop := startEngine(t, options{
-		mode:       modeBacktest,
+		mode:       modeDryRun,
 		socketPath: socketPath,
-		configPath: testConfigPath,
+		configPath: boostConfigPath,
 		asOf:       testAsOf,
 		outPath:    outPath,
+		logPath:    filepath.Join(dir, "run.log"),
 		build:      "test-build",
 	})
 
@@ -369,21 +352,41 @@ func TestRunReportsAJournalWriteFailureRatherThanExitingClean(t *testing.T) {
 	}
 }
 
-// assertEmptyWatchlist checks ADR 0011's explicit record that a completed
-// Session has no rankable Tier A or Tier B Setups.
-func assertEmptyWatchlist(t *testing.T, envelope event.Envelope, periodEnd time.Time) {
-	t.Helper()
-	if envelope.Type != event.WatchlistPublishedEventType {
-		t.Fatalf("decision type = %q, want %q", envelope.Type, event.WatchlistPublishedEventType)
+// Covers the retired Turtle reducer (ADR 0002): its zero-slippage configuration is invalid (ADR 0013).
+func TestRetiredTurtleConfigurationRefusesZeroSlippage(t *testing.T) {
+	dir := t.TempDir()
+	badConfig := filepath.Join(dir, "bad-configuration.json")
+	// Zero slippage: ConfigurationPayload.Validate rejects this outright
+	// (ADR 0013).
+	if err := os.WriteFile(badConfig, []byte(`{
+		"strategy_id": "bad",
+		"sizing_mode": "volatility-normalised",
+		"unit_volatility_fraction": 0.005,
+		"stop_multiple": 2,
+		"entry_channel_length": 20,
+		"exit_channel_length": 10,
+		"max_units": 4,
+		"slippage_n": 0,
+		"dollars_per_point": 1,
+		"notional_account": {"starting_equity": 1000000, "rebasing_month": 1, "rebasing_day": 1},
+		"commission": {"per_share": 0, "minimum_per_order": 0, "maximum_fraction_of_trade_value": 0.01}
+	}`), 0o600); err != nil {
+		t.Fatalf("write the bad configuration fixture: %v", err)
 	}
-	var payload event.WatchlistPublishedPayload
-	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
-		t.Fatalf("decode Watchlist: %v", err)
+
+	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
+	err := run(context.Background(), options{
+		mode:       modeBacktest,
+		socketPath: socketPath,
+		configPath: badConfig,
+		asOf:       testAsOf,
+		outPath:    filepath.Join(dir, "journal.jsonl"),
+		build:      "test-build",
+	}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("run succeeded with an invalid configuration; want an error")
 	}
-	if err := payload.Validate(); err != nil {
-		t.Fatalf("invalid Watchlist: %v", err)
-	}
-	if !payload.PeriodEnd.Equal(periodEnd) || len(payload.Entries) != 0 {
-		t.Fatalf("Watchlist = %+v, want no entries at %v", payload, periodEnd)
+	if _, statErr := os.Stat(socketPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("a socket was created at %s despite the configuration being invalid; the engine must refuse to bind rather than accept connections it cannot safely answer", socketPath)
 	}
 }

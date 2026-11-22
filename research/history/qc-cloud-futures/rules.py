@@ -1,7 +1,7 @@
 """Faith's original Turtle rules, applied to futures -- the Turtles' own
 market -- long AND short, symmetric (docs/methodology/Methodology_Analysis.md;
 The Original Turtle Trading Rules, Curtis Faith, 2003, cited below as [T
-p.N]). This is a SEPARATE research check from research/qc-cloud (the
+p.N]). This is a SEPARATE research check from research/history/qc-cloud (the
 equity Baseline): that folder halves Faith's Unit Volatility Fraction and
 trades long-only, both adaptations argued in ADR 0003 specifically for a
 long-only, single-regime EQUITY book. Neither argument applies to a
@@ -21,7 +21,7 @@ Every rule below cites Methodology_Analysis.md / The Turtle Rules by page,
 or the ADR it transcribes or symmetrically generalises (Faith's own text is
 written for long entries; this module's short-side mirror is this script's
 own reasoned, documented extension of the same stated rule, never a
-separate source). research/qc-cloud-futures/README.md lists every place
+separate source). research/history/qc-cloud-futures/README.md lists every place
 this differs from Faith's text and from the equity Baseline, and why.
 
 This is research-only. It is not the production Go engine
@@ -609,9 +609,9 @@ class SessionCapLedger:
     are margined: affordability is left to
     QuantConnect's own margin model, which fails an unaffordable order
     outright at placement (``OrderStatus.Invalid``, handled in main.py
-    exactly as research/qc-cloud's own anomaly path releases a reservation
+    exactly as research/history/qc-cloud's own anomaly path releases a reservation
     on that status) rather than modelled here in pure Python -- unlike
-    research/qc-cloud's own ``SessionLedger``, which also reserves cash for
+    research/history/qc-cloud's own ``SessionLedger``, which also reserves cash for
     a CASH account. One ``SessionCapLedger`` is built fresh each Session,
     seeded with the caps already committed by open Campaigns, so every Add
     and entry decided within one session-close pass is checked against
@@ -705,7 +705,7 @@ def stop_limit_fill_price(direction, level, price_cap_value, open_, high, low, s
     """ADR 0005's stop-limit fill rule, symmetric for long and short. LEAN's
     own native stop-limit fill (a) triggers only on a strict cross, not an
     exact touch; (b) applies no slippage. This mirrors
-    research/qc-cloud/main.py's own ``_stop_limit_buy_fill_price`` (ADR
+    research/history/qc-cloud/main.py's own ``_stop_limit_buy_fill_price`` (ADR
     0005 as amended 2026-09-24), generalised to a direction argument so one
     function serves the buy-side entry/Add (``direction=1``) and this
     module's symmetric sell-side short entry/Add (``direction=-1``).
@@ -739,7 +739,7 @@ def stop_limit_fill_price(direction, level, price_cap_value, open_, high, low, s
 
 # ---------------------------------------------------------------------------
 # CAGR, max drawdown, and the primary metric (ADR 0012), instrument- and
-# direction-agnostic -- unchanged from research/qc-cloud.
+# direction-agnostic -- unchanged from research/history/qc-cloud.
 # ---------------------------------------------------------------------------
 
 
