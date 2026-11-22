@@ -8,10 +8,15 @@
 #                              program is a Linux program for this machine,
 #                              and its build attestation, keep the build now
 #                              installed as the previous one, install the five
-#                              programs, restart the dashboard, and say what
+#                              non-engine programs, restart the dashboard, and say what
 #                              changed
-#   sudo ti-release --rollback put the previous build back the same way
-#   ti-release --status        print the current and previous tags and whether a
+#   sudo ti-release --engine v1.2.3
+#                              also install the engine, only with all engine
+#                              instances stopped for an approved fresh run
+#   sudo ti-release --rollback put the previous non-engine build back
+#   sudo ti-release --engine --rollback install the previous programs release's engine
+#   ti-release --status        print the programs and engine builds separately,
+#                              the previous programs tag, and whether a
 #                              kept build (.replaced or .rescue-*) is waiting;
 #                              read-only, takes no lock, needs no root; run it
 #                              with sudo when deciding whether to clear a lock
@@ -44,14 +49,14 @@
 # refusal. The owner protects v* tags with a repository ruleset as well
 # (docs/runbooks/lightsail-deployment.md).
 #
-# The engine is never restarted: a program replaced under a running process
-# leaves that process on the build it started with, and a new engine build
-# takes effect only at the next fresh run the owner approves (a run never
-# resumes across builds, ADR 0027). The reporter is started afresh at each
-# firing and needs no restart. Only the dashboard is restarted, and it must be
-# active and stay active for three checks a second apart. While any engine
-# unit is starting, stopping or reloading, or systemd cannot be asked, the
-# script refuses, installing nothing; it asks again just before the swap.
+# The engine is left untouched unless --engine is given: crash recovery must
+# use the build that wrote the log (ADR 0027 §6; docs/manual/server.md,
+# "Installing a release"). With --engine every engine instance must be stopped
+# for an owner-approved fresh run; this script never stops or starts one.
+# The reporter starts afresh at each firing. Only the dashboard is restarted,
+# and it must stay active for three checks a second apart. A transitioning
+# engine unit, or systemd that cannot be asked, always blocks a release;
+# --engine also refuses active and failed units (ADR 0027 §6). The check is repeated before the swap.
 #
 # Two builds are kept under releases/, each with its checksums.txt: the
 # current one and the previous one (the hand-installed build, on the first
@@ -97,7 +102,7 @@ programs="ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-s
 
 die() { printf 'ti-release: %s\n' "$*" >&2; exit 1; }
 log() { printf 'ti-release: %s\n' "$*"; }
-usage() { echo "usage: ti-release <tag> | --rollback | --status | --install" >&2; exit 1; }
+usage() { echo "usage: ti-release [--engine] <tag> | [--engine] --rollback | --status | --install" >&2; exit 1; }
 
 sha() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
@@ -107,16 +112,24 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 mode=
 tag=
 unverified=0
-if test "${1:-}" = --unverified; then
-  test "${TI_REHEARSAL:-0}" = 1 || die "--unverified is for the rehearsal container only; this is not it, so nothing was installed"
-  unverified=1
-  shift
-  test $# -eq 1 || usage
-fi
+engine=0
+args=()
+for arg in "$@"; do
+  case $arg in
+    --engine) test "$engine" = 0 || usage; engine=1 ;;
+    --unverified)
+      test "${TI_REHEARSAL:-0}" = 1 || die "--unverified is for the rehearsal container only; this is not it, so nothing was installed"
+      test "$unverified" = 0 || usage
+      unverified=1 ;;
+    *) args+=("$arg") ;;
+  esac
+done
+test "${#args[@]}" -gt 0 || usage
+set -- "${args[@]}"
 case ${1:-} in
-  --install) test "$unverified" = 0 && test $# -eq 1 || usage; mode=install ;;
+  --install) test "$engine" = 0 && test "$unverified" = 0 && test $# -eq 1 || usage; mode=install ;;
   --rollback) test "$unverified" = 0 && test $# -eq 1 || usage; mode=rollback ;;
-  --status) test "$unverified" = 0 && test $# -eq 1 || usage; mode=status ;;
+  --status) test "$engine" = 0 && test "$unverified" = 0 && test $# -eq 1 || usage; mode=status ;;
   "" | -*) usage ;;
   *)
     test $# -eq 1 || usage
@@ -145,10 +158,32 @@ kept_tag() {
   fi
 }
 
+# Validate the raw identity before shell substitution can discard bytes
+# (docs/manual/server.md, "Installing a build"). Accept one ASCII line,
+# with an optional final newline, bounded for backup filenames.
+valid_build_identity() {
+  test -f "$1" &&
+    test "$(wc -c <"$1")" -le 65 &&
+    test "$(wc -l <"$1")" -le 1 &&
+    test "$(LC_ALL=C awk 'END {print NR}' "$1")" -eq 1 &&
+    test "$(LC_ALL=C tr -d 'A-Za-z0-9._\n-' <"$1" | wc -c)" -eq 0 &&
+    LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$1"
+}
+
 if test "$mode" = status; then
   st() { cat "$releases/$1" 2>/dev/null || true; }
   echo "current: $(st current)"
   echo "previous: $(st previous)"
+  if valid_build_identity "$bin/BUILD"; then echo "engine: $(cat "$bin/BUILD")"; else echo "engine: invalid"; fi
+  if test -d "$releases/.engine-before"; then
+    if valid_build_identity "$releases/.engine-before/initial/BUILD"; then
+      echo "engine before last --engine: $(cat "$releases/.engine-before/initial/BUILD")"
+    else
+      echo "engine before last --engine: invalid"
+    fi
+  else
+    echo "engine before last --engine: none"
+  fi
   lock_stale=0
   if test -d "$releases/.lock"; then
     lpid=$(cat "$releases/.lock/pid" 2>/dev/null || true)
@@ -257,11 +292,17 @@ fi
 # release then could land between its stop and its start; a systemctl that
 # fails counts as busy (fail closed).
 refuse_if_engine_busy() {
-  local busy
-  if ! busy=$("$systemctl" list-units --plain --no-legend --state=activating,deactivating,reloading 'ti-engine@*' 2>/dev/null); then
+  local busy states=activating,deactivating,reloading
+  # An engine build changes only at an owner-approved fresh run (ADR 0027
+  # §6; docs/manual/server.md, Installing a release).
+  if test "$engine" = 1; then states=active,failed,$states; fi
+  if ! busy=$("$systemctl" list-units --plain --no-legend --state="$states" 'ti-engine@*' 2>/dev/null); then
     die "could not ask systemd whether an engine unit is mid-restart; nothing installed"
   fi
   if test -n "$busy"; then
+    if test "$engine" = 1; then
+      die "engine units are active, failed or mid-restart: $busy. See docs/runbooks/durable-log.md, 'Resume after a crash'; only once the owner has decided it is a fresh run, systemctl reset-failed ti-engine@<instance>. Stop all ti-engine@ instances yourself, then approve a fresh run before retrying --engine; nothing installed"
+    fi
     printf 'ti-release: an engine unit is mid-restart; nothing installed. Wait until it is active or stopped:\n%s\n' "$busy" >&2
     exit 1
   fi
@@ -490,41 +531,35 @@ commit_on_main() {
   test "$main_status" = identical || test "$main_status" = behind || return 1
 }
 
-# Validate the raw identity before shell substitution can discard bytes
-# (docs/manual/server.md, "Installing a build"). Accept one ASCII line,
-# with an optional final newline, bounded for backup filenames.
-valid_build_identity() {
-  test -f "$1" &&
-    test "$(wc -c <"$1")" -le 65 &&
-    test "$(wc -l <"$1")" -le 1 &&
-    test "$(LC_ALL=C awk 'END {print NR}' "$1")" -eq 1 &&
-    test "$(LC_ALL=C tr -d 'A-Za-z0-9._\n-' <"$1" | wc -c)" -eq 0 &&
-    LC_ALL=C grep -qx '[A-Za-z0-9._-]\{1,64\}' "$1"
-}
-
-# install_from DIR: install every program DIR/checksums.txt lists. Each is
+# install_from DIR: install the selected programs DIR/checksums.txt lists.
+# The engine and BUILD move together only with --engine (server manual,
+# "Installing a release"); recovery can explicitly exclude them. Each is
 # written under a temporary name and renamed over the old one, so a running
 # process keeps the file it started from and no half-written program is ever
 # executed; a program the build lacks is left as it is. Every step is checked
 # (this runs where set -e is off) and the installed files are compared with
 # the checksums, so a failed copy or rename returns non-zero.
 install_from() {
-  local dir=$1 p identity=${2:-${1##*/}}
+  local dir=$1 p identity=${2:-${1##*/}} include_engine=${3:-$engine}
   if test "$identity" = initial && valid_build_identity "$dir/BUILD"; then identity=$(cat "$dir/BUILD"); fi
   # Keep the installed identity with the engine for the services backup
   # label (docs/manual/server.md, "Installing a build").
-  install -m 0644 /dev/null "$bin/.BUILD.new" || return 1
-  printf '%s\n' "$identity" >"$bin/.BUILD.new" || return 1
+  if test "$include_engine" = 1; then
+    install -m 0644 /dev/null "$bin/.BUILD.new" || return 1
+    printf '%s\n' "$identity" >"$bin/.BUILD.new" || return 1
+  fi
   for p in $(listed "$dir"); do
+    if test "$p" = ti-engine && test "$include_engine" = 0; then continue; fi
     install -m 0755 "$dir/$p" "$bin/.$p.new" || return 1
     mv -f "$bin/.$p.new" "$bin/$p" || { rm -f "$bin/.$p.new"; return 1; }
   done
-  mv -f "$bin/.BUILD.new" "$bin/BUILD" || return 1
+  if test "$include_engine" = 1; then mv -f "$bin/.BUILD.new" "$bin/BUILD" || return 1; fi
   install -d -m 0755 "$link_dir" || return 1
   for p in operator journal-query; do
     if test -x "$bin/$p"; then ln -sfn "$bin/$p" "$link_dir/$p" || return 1; fi
   done
   for p in $(listed "$dir"); do
+    if test "$p" = ti-engine && test "$include_engine" = 0; then continue; fi
     test "$(sha "$bin/$p")" = "$(awk -v f="$p" '$2 == f { print $1 }' "$dir/checksums.txt")" || { echo "$bin/$p does not match the build just installed" >&2; return 1; }
   done
 }
@@ -556,17 +591,44 @@ flush() {
 # put_back NAME: re-check the kept build NAME against its checksums and put it
 # back; says so loudly if it cannot.
 put_back() {
-  if ! check_dir "$releases/$1"; then
-    log "ALERT: the kept build $1 failed its checksums and was NOT put back; the programs in $bin may be a mix of builds: run sudo ti-release <a good tag>"
-    return 1
+  local restored=1 engine_restored=1 remedy='sudo ti-release <a good tag>' d=$releases/.engine-before/initial
+  if test "$engine" = 1; then remedy='sudo ti-release --engine <a good tag>'; fi
+  if test "$engine" = 1; then
+    if test ! -f "$d/ti-engine"; then
+      log "there was no engine before this install"
+      install_from "$d" initial 1 || engine_restored=0
+    elif ! check_dir "$d" || ! install_from "$d" initial 1; then
+      engine_restored=0
+    fi
+    if test ! -f "$d/BUILD"; then rm -f "$bin/BUILD" || engine_restored=0; fi
+    if test "$engine_restored" = 1; then
+      rm -f "$releases/.engine-before/pending" || engine_restored=0
+    fi
+    if test "$engine_restored" = 1; then
+      log "the engine and BUILD from before this install were put back"
+    else
+      log "ALERT: the engine and BUILD could not be put back; run $remedy"
+      restored=0
+    fi
   fi
-  if ! install_from "$releases/$1"; then
-    log "ALERT: putting $1 back failed partway; the programs in $bin may be a mix of builds: run sudo ti-release <a good tag>"
+  if check_dir "$releases/$1"; then
+    if install_from "$releases/$1" "" 0; then
+      log "the programs from the kept build $1 were put back"
+    else
+      log "ALERT: the programs from the kept build $1 could not be put back; run $remedy"
+      restored=0
+    fi
+  else
+    log "ALERT: the kept build $1 failed its checksums and was NOT put back; the programs in $bin may be a mix of builds: run $remedy"
+    restored=0
+  fi
+  if test "$restored" = 0; then
+    log "ALERT: putting $1 back failed partway; the programs in $bin may be a mix of builds: run $remedy"
     return 1
   fi
   if test -f "$releases/$1/.starter-installed" && ! listed "$releases/$1" | grep -qx ti-gateway-start; then
     if ! install -m 0755 "$releases/$1/.starter-installed" "$bin/.ti-gateway-start.new" || ! mv -f "$bin/.ti-gateway-start.new" "$bin/ti-gateway-start"; then
-      log "ALERT: the previous ti-gateway-start could not be put back; the programs in $bin may be a mix of builds: run sudo ti-release <a good tag>"
+      log "ALERT: the previous ti-gateway-start could not be put back; the programs in $bin may be a mix of builds: run $remedy"
       return 1
     fi
   fi
@@ -609,15 +671,50 @@ report() { # FROM TO BEFORE_HASHES
     if test "$was" = "$now"; then log "  $p: unchanged"; else log "  $p: changed (${was:0:12} -> ${now:0:12})"; fi
   done
   log "the dashboard was restarted and is active; the reporter runs the new build at its next firing"
-  log "the engine was not restarted: a running engine keeps its build, and a new engine build takes effect at the next fresh run you approve"
+  if test "$engine" = 1; then
+    log "the engine build was installed; no engine was stopped or started. Start it yourself only at the approved fresh run (docs/runbooks/durable-log.md)"
+  else
+    log "the engine was left on its current build: crash recovery needs the build that wrote its durable log (ADR 0027); use --engine only at an owner-approved fresh run"
+  fi
+}
+
+# Preserve the actual installed engine for failed-install recovery, since it
+# may differ from releases/current (docs/manual/server.md, Installing a release).
+# A pending snapshot remains the original across retries until installation
+# or engine recovery completes (server manual, "If a release fails part way").
+keep_engine() {
+  test "$engine" = 1 || return 0
+  local d=$releases/.engine-before/initial
+  if test -f "$releases/.engine-before/pending"; then
+    log "keeping the pending engine snapshot from the unfinished install"
+    return 0
+  fi
+  # The snapshot is the only way back to the engine a crashed run needs, so a
+  # copy that does not match the installed bytes stops the install before
+  # anything is replaced (ADR 0027 §6).
+  local keep_failed="could not keep a copy of the installed engine; nothing installed"
+  if ! rm -rf "$d" || ! mkdir -p "$d" || ! : >"$d/checksums.txt"; then die "$keep_failed"; fi
+  if test -f "$bin/ti-engine"; then
+    if ! cp "$bin/ti-engine" "$d/ti-engine" || ! cmp -s "$bin/ti-engine" "$d/ti-engine"; then die "$keep_failed"; fi
+    if ! printf '%s  ti-engine\n' "$(sha "$d/ti-engine")" >"$d/checksums.txt"; then die "$keep_failed"; fi
+  fi
+  if test -f "$bin/BUILD"; then
+    if ! cp "$bin/BUILD" "$d/BUILD" || ! cmp -s "$bin/BUILD" "$d/BUILD"; then die "$keep_failed"; fi
+  fi
+  : >"$releases/.engine-before/pending" || die "could not mark the engine copy; nothing installed"
 }
 
 before=$(hashes)
 
 if test "$mode" = release; then
   cur=$(read_state current)
-  if test "$cur" = "$tag"; then
+  if test "$cur" = "$tag" && { test "$engine" = 0 || { test "$(cat "$bin/BUILD" 2>/dev/null || true)" = "$tag" && cmp -s "$bin/ti-engine" "$releases/$tag/ti-engine"; }; }; then
     log "$tag is already installed; nothing to do"
+    if test "$engine" = 0; then
+      log "the engine was left on its current build: crash recovery needs the build that wrote its durable log (ADR 0027); use --engine only at an owner-approved fresh run"
+    else
+      rm -f "$releases/.engine-before/pending"
+    fi
     exit 0
   fi
   command -v curl >/dev/null 2>&1 || die "curl is not installed"
@@ -680,6 +777,8 @@ if test "$mode" = release; then
     fi
   fi
   ensure_window
+  keep_engine
+  refuse_if_engine_busy
   if ! install_from "$stage" "$tag" || ! restart_dashboard_verified; then
     log "$tag did not install, or the dashboard did not stay up on it; putting $cur back"
     put_back "$cur" || true
@@ -719,10 +818,11 @@ if test "$mode" = release; then
     put_back "$cur" || true
     die "release $tag not recorded; the previous build ($cur) was put back${kept_at:+; ALERT: the kept build is at $kept_at}"
   fi
-  write_state previous "$cur"
+  if test "$cur" != "$tag"; then write_state previous "$cur"; fi
   write_state current "$tag"
   rm -f "$releases/$cur/.starter-installed"
-  prune "$tag" "$cur"
+  prune "$tag" "$(read_state previous)"
+  if test "$engine" = 1; then rm -f "$releases/.engine-before/pending"; fi
   report "$cur" "$tag" "$before"
   exit 0
 fi
@@ -737,9 +837,14 @@ if ! listed "$releases/$prev" | grep -qx ti-gateway-start; then
 fi
 test -n "$cur" && test -d "$releases/$cur" || die "the current build's folder is missing, so it could not be put back; nothing changed"
 check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) failed its checksums, so it could not be put back; nothing changed"
+if test "$engine" = 1 && test "$(cat "$bin/BUILD" 2>/dev/null || true)" != "$cur"; then
+  log "WARNING: installed engine build $(cat "$bin/BUILD" 2>/dev/null || echo unknown) differs from current programs build $cur; --engine --rollback installs the engine from previous programs release $prev, which may not be the engine that was running. Compare engine: with previous: in --status first."
+fi
 open_window
 refuse_if_engine_busy
 ensure_window
+keep_engine
+refuse_if_engine_busy
 if ! install_from "$releases/$prev" || ! restart_dashboard_verified; then
   log "rolling back to $prev failed, or the dashboard did not stay up on it; putting $cur back"
   put_back "$cur" || true
@@ -747,4 +852,5 @@ if ! install_from "$releases/$prev" || ! restart_dashboard_verified; then
 fi
 write_state previous "$cur"
 write_state current "$prev"
+if test "$engine" = 1; then rm -f "$releases/.engine-before/pending"; fi
 report "$cur" "$prev" "$before"

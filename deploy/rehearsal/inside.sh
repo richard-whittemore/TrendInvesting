@@ -959,6 +959,9 @@ ctl_stub=$(mktemp -d)
 cat >"$ctl_stub/systemctl" <<'STUB'
 #!/bin/bash
 echo "$*" >>/root/release-ctl.log
+if test "$1" = list-units && [[ "$*" == *active,* ]] && test -e /root/release-engine-active; then
+  echo 'ti-engine@trad-ira.service loaded active running'
+fi
 exit 0
 STUB
 chmod +x "$ctl_stub/systemctl"
@@ -977,7 +980,8 @@ marker_file=/run/ti-maintenance/maintenance.json
 grep -q WARNING /root/release.out || fail "ti-release --unverified did not warn"
 grep -q 'maintenance window open until' /root/release.out || fail "ti-release did not open a maintenance window: $(cat /root/release.out)"
 test ! -e "$marker_file" || fail "ti-release left its maintenance window open: $(cat "$marker_file")"
-for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
+cmp /root/dist/ti-engine /opt/trend-investing/bin/ti-engine || fail "plain release changed engine"
+for b in ti-reporter ti-dashboard operator journal-query ti-gateway-start; do
   cmp "$rel/v9.9.9/$b" "/opt/trend-investing/bin/$b" || fail "ti-release did not install $b"
 done
 test "$(cat /opt/trend-investing/releases/current)" = v9.9.9 || fail "ti-release did not record the current build"
@@ -989,6 +993,22 @@ for b in ti-engine ti-reporter ti-dashboard operator journal-query ti-gateway-st
 done
 grep -q 'maintenance window open until' /root/release.out || fail "ti-release --rollback did not open a maintenance window"
 test ! -e "$marker_file" || fail "ti-release --rollback left its maintenance window open"
+touch /root/release-engine-active
+if /root/deploy/release.sh --unverified --engine v9.9.9 >/root/release.out 2>&1; then fail "active engine release was allowed"; fi
+grep -q 'fresh run' /root/release.out || fail "active refusal lacks remedy"
+cmp /root/dist/ti-engine /opt/trend-investing/bin/ti-engine || fail "active refusal changed engine"
+rm /root/release-engine-active
+/root/deploy/release.sh --unverified --engine v9.9.9 >/root/release.out 2>&1 || fail "explicit engine release failed"
+cmp "$rel/v9.9.9/ti-engine" /opt/trend-investing/bin/ti-engine || fail "explicit engine release did not install engine"
+/root/deploy/release.sh --status >/root/release.out
+grep -q '^current: v9.9.9' /root/release.out || fail "status lacks programs build"
+grep -q '^engine: v9.9.9' /root/release.out || fail "status lacks engine build"
+/root/deploy/release.sh --rollback >/root/release.out 2>&1 || fail "plain rollback failed"
+cmp "$rel/v9.9.9/ti-engine" /opt/trend-investing/bin/ti-engine || fail "plain rollback changed engine"
+/root/deploy/release.sh --engine --rollback >/root/release.out 2>&1 || fail "explicit engine rollback failed"
+cmp "$rel/v9.9.9/ti-engine" /opt/trend-investing/bin/ti-engine || fail "explicit rollback engine mismatch"
+/root/deploy/release.sh --rollback --engine >/root/release.out 2>&1 || fail "explicit rollback to initial failed"
+cmp /root/dist/ti-engine /opt/trend-investing/bin/ti-engine || fail "explicit rollback did not restore engine"
 unset TI_RELEASE_NOW
 pass "ti-release refuses without gh, installs a fake release with --unverified inside a maintenance window it opens and closes, restarts only the dashboard, and --rollback restores the previous build the same way"
 for f in $(find / -xdev -type f -print0 2>/dev/null | xargs -0 grep -lF -- "$marker" 2>/dev/null || true); do
