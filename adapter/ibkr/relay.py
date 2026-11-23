@@ -1384,7 +1384,7 @@ class Relay:
             # cannot be built, or that the sender would refuse, never reaches
             # the sender's send, so it leaves no mark to stop a restart.
             try:
-                request = self._to_request(order, _session_date({"event_time": envelope.get("recorded_at")}))
+                request = self._to_request(order, _order_session(envelope))
                 self._sender.check(request)
             except SessionOver as err:
                 # Its session is over, so it is never sent: retired here,
@@ -1511,11 +1511,13 @@ def resolve(pending, client_order_id, decision, reason, today=None):
     the sender returned), an unknown decision, an empty reason, a resend of
     an order already allowed one, and a resend of an order not committed in
     today's session. A resend permission can only be withdrawn, by marking
-    the order sent: the owner found it at IBKR after allowing it. The order's committed session is its
-    input's event time as a New York date: the engine commits the order only
-    once it receives that input, so no earlier. A missing or unreadable
-    event time refuses the resend. A resend is recorded as a permission
-    dated today, which the relay acts on only on that date. Each decision is
+    the order sent: the owner found it at IBKR after allowing it. The order's
+    session is _order_session(input), exactly as on exchange: the recorded
+    New York date if no later than the first weekday after the event's New
+    York date, otherwise the event's date (docs/manual/paper-trading.md,
+    "A paper day"). Either time missing or unreadable refuses the resend.
+    A resend is recorded as a permission dated today, which the relay acts
+    on only on that date. Each decision is
     kept with its UTC time and the session date it was judged against.
     today defaults to today in New York.
     """
@@ -1617,7 +1619,7 @@ def _resolve(pending, client_order_id, decision, reason, today):
         raise ResolveRefused("order {} is already allowed to be sent again ({!r}); only --sent is accepted, to "
                              "withdraw that permission if IBKR shows the order".format(client_order_id, mark))
     if decision == DECIDE_RESEND:
-        committed = _session_date(pending.load())
+        committed = _order_session(pending.load())
         if committed != today:
             raise ResolveRefused(
                 "order {} was not committed in today's session ({}; committed {}): an order from an earlier "
@@ -3193,6 +3195,24 @@ def _ends(envelope, client_order_id):
     payload = envelope.get("payload")
     return (_quantity_schema(envelope.get("schema_version"), payload, LIFECYCLE_VERSION, 4) and isinstance(payload, dict)
             and payload.get("client_order_id") == client_order_id and payload.get("status") in LIFECYCLE_TERMINAL)
+
+
+def _order_session(envelope):
+    """Date sends and resends alike (docs/manual/paper-trading.md, "A paper day").
+
+    Use the recorded New York date only on or before the first weekday
+    (Mon-Fri) after the event's New York date; otherwise use the event's
+    date so the sender refuses a stale order. This is weekdays only, not
+    an exchange calendar. Both times must be readable; never guess a date.
+    """
+    event = _session_date(envelope)
+    recorded = _session_date({"event_time": (envelope or {}).get("recorded_at")})
+    if event is None or recorded is None:
+        return None
+    following = event + timedelta(days=1)
+    while following.weekday() >= 5:
+        following += timedelta(days=1)
+    return recorded if recorded <= following else event
 
 
 def _session_date(envelope):

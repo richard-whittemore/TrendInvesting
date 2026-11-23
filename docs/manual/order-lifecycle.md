@@ -111,7 +111,9 @@ the order never leaves the adapter. Since the owner's decision of
 2026-10-22 such an order no longer wedges the run. There are two cases.
 
 **Its session is over.** An order is a limit order for the day it was
-released in. If the adapter could not send it that day (most often because
+released for: the input's recorded New York date if first recorded no later
+than the first weekday after its close, otherwise the close's New York date
+([paper trading](paper-trading.md), "A paper day"). If the adapter could not send it that day (most often because
 the link to IBKR was down until the next day), it is never sent: its limit
 and the engine's checks were for a day that has gone. The adapter now
 **retires it by itself**. It checks IBKR first, as for every order: if IBKR

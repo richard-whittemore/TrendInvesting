@@ -304,6 +304,63 @@ class RelayTests(unittest.TestCase):
         self.assertIsNone(self.pending.load())
         self.assertEqual(self.pending.decisions(), [])
 
+    def test_a_close_first_recorded_after_the_next_weekday_is_retired(self):
+        close = dict(envelope(0), event_time="2026-11-20T21:00:00Z", recorded_at="2026-11-24T11:07:53Z")
+        connect = Restarts({}, {"session:0": [released("tw-1")]})
+        relay = self.recorded_session_relay(connect, date(2026, 11, 24))
+        relay.exchange(close)
+        self.assertEqual(connect.engines[0].asked, ["session:0"])
+        self.assertEqual(self.sent, [])
+        [decision] = self.pending.decisions()
+        self.assertEqual((decision["retired"], decision["retired_by"]), ("session over", "adapter"))
+        self.assertIn("session of 2026-11-20", decision["reason"])
+        self.assertIsNone(self.pending.load())
+
+    def test_orders_recorded_by_the_next_weekday_send_in_the_recorded_session(self):
+        for event_at, recorded_at, today in (
+                ("2026-11-20T21:00:00Z", "2026-11-21T11:00:00Z", date(2026, 11, 21)),
+                ("2026-11-20T21:00:00Z", "2026-11-22T11:00:00Z", date(2026, 11, 22)),
+                ("2026-11-24T21:00:00Z", "2026-11-25T11:00:00Z", date(2026, 11, 25)),
+                ("2026-11-24T15:00:00Z", "2026-11-24T15:01:00Z", date(2026, 11, 24))):
+            with self.subTest(today=today):
+                self.sent.clear()
+                relay = self.recorded_session_relay(Restarts({}, {"session:0": [released("tw-1")]}), today)
+                try:
+                    relay.exchange(dict(envelope(0), event_time=event_at, recorded_at=recorded_at))
+                    self.assertEqual([r.session for r in self.sent], [today])
+                    self.assertEqual(self.pending.decisions(), [])
+                finally:
+                    relay.close()
+
+    def test_an_order_without_readable_event_time_is_refused(self):
+        for event_at in (None, "", "yesterday", "2026-11-23T11:07:53", 123):
+            with self.subTest(event_at=event_at):
+                relay = self.recorded_session_relay(Restarts({}, {"session:0": [released("tw-1")]}), date(2026, 11, 23))
+                try:
+                    with self.assertRaisesRegex(ValueError, "has no session it was released in"):
+                        relay.exchange(dict(envelope(0), event_time=event_at, recorded_at="2026-11-23T11:07:53Z"))
+                    self.assertEqual(self.sent, [])
+                    self.assertEqual(self.pending.handovers(), {})
+                finally:
+                    relay.close()
+                    self.pending.clear()
+
+    def test_a_monday_order_stopped_before_place_order_can_only_be_resent_monday(self):
+        close = dict(envelope(0), event_time="2026-11-20T21:00:00Z", recorded_at="2026-11-23T11:07:53Z")
+        def socket_closed(request):
+            raise NotHandedOver(request.client_order_id)
+        first = self.relay(Restarts({}, {"session:0": [released("tw-1")]}), send=socket_closed,
+                           today=date(2026, 11, 23))
+        with self.assertRaises(NotHandedOver):
+            first.exchange(close)
+        first.close()
+        self.assertEqual(self.pending.not_handed_over()["client_order_id"], "tw-1")
+        with self.assertRaisesRegex(ResolveRefused, "was not committed in today's session"):
+            resolve(self.pending, "tw-1", "resend", "no trace in IBKR", today=date(2026, 11, 24))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"})
+        resolve(self.pending, "tw-1", "resend", "no trace in IBKR", today=date(2026, 11, 23))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "resend:2026-11-23"})
+
     def test_a_close_reasked_next_day_retires_for_its_original_recorded_session(self):
         close = dict(envelope(0), event_time="2026-11-20T21:00:00Z", recorded_at="2026-11-23T11:07:53Z")
         connect = Restarts({}, {"session:0": [released("tw-1")]}, crash_before_reply=["session:0"])
@@ -410,8 +467,8 @@ class RelayTests(unittest.TestCase):
 
     def test_each_request_is_built_with_the_session_of_the_input_that_released_it(self):
         # docs/manual/paper-trading.md, "A paper day": the request carries
-        # the input's recorded New York date, or none without a readable
-        # recorded time, and the sender refuses it in another session.
+        # the input's recorded New York date within the next-weekday bound,
+        # or none without both readable times; the sender refuses another session.
         log = {}
         decisions = {"session:0": [released("tw-1")], "session:1": [released("tw-2")]}
         relay = self.relay(Restarts(log, decisions))
@@ -521,7 +578,7 @@ class RelayTests(unittest.TestCase):
         self.assertIsNone(self.pending.load())
 
     def test_resolving_a_same_session_handover_for_resend_sends_it_once_more(self):
-        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")
+        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z", recorded_at="2026-10-16T20:00:00Z")
         decisions = {"session:0": [released("tw-1")]}
         log = self.stopped_mid_send(inp, decisions)
         resolve(self.pending, "tw-1", "resend", "no trace in IBKR today", today=date(2026, 10, 16))
@@ -537,7 +594,7 @@ class RelayTests(unittest.TestCase):
         # Permission is given on the committed day; an adapter started on a
         # later day must not act on it, since the order may have filled or
         # been cancelled where that day's lists no longer show it.
-        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")
+        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z", recorded_at="2026-10-16T20:00:00Z")
         decisions = {"session:0": [released("tw-1")]}
         log = self.stopped_mid_send(inp, decisions)
         resolve(self.pending, "tw-1", "resend", "no trace in IBKR today", today=date(2026, 10, 16))
@@ -558,7 +615,7 @@ class RelayTests(unittest.TestCase):
     def test_an_order_marked_sent_cannot_be_resolved(self):
         # A "sent" mark is written only once the sender returned: the relay's
         # own proof the order was handed over, which no decision may undo.
-        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")
+        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z", recorded_at="2026-10-16T20:00:00Z")
         decisions = {"session:0": [released("tw-1"), released("tw-2")]}
         log = self.stopped_mid_send(inp, decisions, crash_on="tw-2")
         self.assertEqual(self.pending.handovers(), {"tw-1": "sent", "tw-2": "handing-over"})
@@ -577,7 +634,7 @@ class RelayTests(unittest.TestCase):
         # The owner allowed a resend, then found the order in IBKR's audit
         # trail: the permission must be withdrawable, or the next start that
         # day sends the order again (fail closed, AGENTS.md).
-        inp = dict(envelope(0), event_time="2026-10-16T14:00:00Z")
+        inp = dict(envelope(0), event_time="2026-10-16T14:00:00Z", recorded_at="2026-10-16T14:00:00Z")
         decisions = {"session:0": [released("tw-1")]}
         log = self.stopped_mid_send(inp, decisions)
         resolve(self.pending, "tw-1", "resend", "no trace in IBKR at 10:00", today=date(2026, 10, 16))
@@ -839,7 +896,7 @@ class RelayTests(unittest.TestCase):
         settling.join(timeout=5)
 
     def test_resolve_is_refused_while_an_adapter_holds_the_pending_file(self):
-        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")
+        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z", recorded_at="2026-10-16T20:00:00Z")
         decisions = {"session:0": [released("tw-1")]}
         log = self.stopped_mid_send(inp, decisions)
         running = self.relay(Restarts(log, decisions))
@@ -881,8 +938,11 @@ class RelayTests(unittest.TestCase):
         first.close()
 
     def test_a_resend_is_refused_unless_the_order_was_committed_in_todays_session(self):
-        for inp in (dict(envelope(0), event_time="2026-10-15T20:00:00Z"), envelope(0),
-                    dict(envelope(0), event_time="not a time"), dict(envelope(0), event_time="2026-10-16T16:00:00")):
+        valid = dict(envelope(0), event_time="2026-10-16T20:00:00Z", recorded_at="2026-10-16T20:00:00Z")
+        for inp in (dict(valid, recorded_at="2026-10-15T20:00:00Z"), envelope(0),
+                    dict(valid, event_time="not a time"), dict(valid, event_time="2026-10-16T16:00:00"),
+                    dict(valid, recorded_at="not a time"), dict(valid, recorded_at=None),
+                    dict(valid, event_time="2026-10-13T20:00:00Z")):
             with self.subTest(inp=inp):
                 self.pending.clear()
                 decisions = {"session:0": [released("tw-1")]}
