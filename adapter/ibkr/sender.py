@@ -51,9 +51,10 @@ OrderRequest = namedtuple("OrderRequest", (
 
 client_order_id is the decision's tag, sent to IBKR as orderRef; IBKR's own
 order ID is never part of a request (plan.md section 5). session is the New
-York date of the session the order was released in (its input's event
-time); a released order is a limit order for that session only (ADR 0026
-point 2), so it is never sent in another. quantity_scale retains the released
+York date when the adapter recorded the input that released the order
+(docs/manual/paper-trading.md, "A paper day"); a released order is a limit
+order for that session only (ADR 0026 point 2), so it is never sent in
+another. quantity_scale retains the released
 order's units even for an integral Decimal; reports must use those same
 units (ADR 0026, D7-F).
 """
@@ -318,8 +319,10 @@ def release_to_request(order, mode, con_ids, session=None):
     (ADR 0026 point 3, "Mode"). con_ids maps the engine's instrument ID to
     IBKR's contract ID; an instrument with none is refused, never looked up
     by name. That refusal, and a noninteger wire quantity, raise
-    UnsendableOrder: the order can never be sent as it stands. session is the New York date of the input whose reply released
-    the order; without one the order is refused.
+    UnsendableOrder: the order can never be sent as it stands. session is
+    the New York date when the adapter recorded the input whose reply
+    released the order (docs/manual/paper-trading.md, "A paper day");
+    without one the order is refused.
     """
     if order.get("send") is not True:
         raise ValueError("order {} is not marked to be sent".format(order.get("client_order_id")))

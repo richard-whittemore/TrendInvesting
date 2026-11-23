@@ -29,7 +29,8 @@ from relay import (MAX_CLOSE_TIMEOUT, OUTBOX_SUFFIX, log_chain_next, log_chain_s
                    acknowledge_correction, acknowledge_late_fill, earlier_run, journalled_fills, journalled_reports,
                    main, resolve, resolve_run_ended, retire, run_chain, run_identity, run_logs)
 import relay as relay_module
-from sender import OrderRequest, SendRefused, SessionOver, UnsendableOrder
+from sender import OrderRequest, PaperSender, SendRefused, SessionOver, UnsendableOrder, release_to_request
+from test_connection import Harness
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 
@@ -284,6 +285,58 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(connect.engines[1].asked, ["session:0"], "it asks again for the same input, by its ID")
         self.assertIsNone(self.pending.load())
 
+    def recorded_session_relay(self, connect, today):
+        h = Harness(mode="paper", account_id="DU1234567")
+        h.fake.managed_accounts = ("DU1234567",)
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        sender = PaperSender(h.conn, self.sent.append, today=lambda: today)
+        return self.relay(connect, today=today, send=Sending(self.sent.append, check=sender.check),
+                          mapper=lambda order, session: release_to_request(order, "paper", {"SPY": 756733}, session))
+
+    def test_a_close_delivered_next_morning_sends_for_its_recorded_session(self):
+        # docs/manual/paper-trading.md, "A paper day": the close's order
+        # goes out for the morning's session, when the input was recorded.
+        close = dict(envelope(0), event_time="2026-11-20T21:00:00Z", recorded_at="2026-11-23T11:07:53Z")
+        relay = self.recorded_session_relay(Restarts({}, {"session:0": [released("tw-1")]}), date(2026, 11, 23))
+        relay.exchange(close)
+        self.assertEqual([(r.client_order_id, r.session) for r in self.sent], [("tw-1", date(2026, 11, 23))])
+        self.assertIsNone(self.pending.load())
+        self.assertEqual(self.pending.decisions(), [])
+
+    def test_a_close_reasked_next_day_retires_for_its_original_recorded_session(self):
+        close = dict(envelope(0), event_time="2026-11-20T21:00:00Z", recorded_at="2026-11-23T11:07:53Z")
+        connect = Restarts({}, {"session:0": [released("tw-1")]}, crash_before_reply=["session:0"])
+        first = self.relay(connect, reconnects=0)
+        with self.assertRaises(EngineUnavailable):
+            first.exchange(close)
+        first.close()
+        again = self.recorded_session_relay(connect, date(2026, 11, 24))
+        again.exchange(self.pending.load())
+        self.assertEqual(self.sent, [])
+        [decision] = self.pending.decisions()
+        self.assertEqual((decision["decision"], decision["retired"], decision["retired_by"]),
+                         ("retired", "session over", "adapter"))
+        self.assertIn("2026-11-23", decision["reason"])
+        self.assertIsNone(self.pending.load())
+
+    def test_a_close_without_readable_recorded_at_is_refused(self):
+        for recorded_at in (None, "", "yesterday", "2026-11-23T11:07:53", 123):
+            with self.subTest(recorded_at=recorded_at):
+                close = dict(envelope(0), event_time="2026-11-23T21:00:00Z")
+                if recorded_at is not None:
+                    close["recorded_at"] = recorded_at
+                relay = self.recorded_session_relay(Restarts({}, {"session:0": [released("tw-1")]}), date(2026, 11, 23))
+                try:
+                    with self.assertRaisesRegex(ValueError, "has no session it was released in"):
+                        relay.exchange(close)
+                    self.assertEqual(self.sent, [])
+                    self.assertEqual(self.pending.handovers(), {})
+                    self.assertIn("has no session it was released in", self.pending.refusal()["reason"])
+                finally:
+                    relay.close()
+                    self.pending.clear()
+
     def test_an_input_answered_again_never_sends_its_order_twice(self):
         log = {}
         connect = Restarts(log, {"session:0": [released("tw-1")]})
@@ -356,13 +409,13 @@ class RelayTests(unittest.TestCase):
         self.assertIsNone(self.pending.load())
 
     def test_each_request_is_built_with_the_session_of_the_input_that_released_it(self):
-        # A released order is for its own session (ADR 0026 point 2): the
-        # request carries its input's New York date, or none when the input
-        # has no readable time, and the sender refuses it in another session.
+        # docs/manual/paper-trading.md, "A paper day": the request carries
+        # the input's recorded New York date, or none without a readable
+        # recorded time, and the sender refuses it in another session.
         log = {}
         decisions = {"session:0": [released("tw-1")], "session:1": [released("tw-2")]}
         relay = self.relay(Restarts(log, decisions))
-        relay.exchange(dict(envelope(0), event_time="2026-10-17T01:30:00Z"))
+        relay.exchange(dict(envelope(0), event_time="2026-10-15T20:00:00Z", recorded_at="2026-10-17T01:30:00Z"))
         relay.exchange(envelope(1))
         self.assertEqual([(r.client_order_id, r.session) for r in self.sent],
                          [("tw-1", date(2026, 10, 16)), ("tw-2", None)])

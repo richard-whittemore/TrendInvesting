@@ -138,7 +138,7 @@ class PaperAdapter:
 
     def exchange(self):
         return self.relay.exchange({"id": "session:1", "type": "market.session.closed", "sequence": 3,
-                                    "event_time": SESSION_CLOSED})
+                                    "event_time": SESSION_CLOSED, "recorded_at": SESSION_CLOSED})
 
     def drain(self):
         while self.conn.pump(0) is not None:
@@ -285,7 +285,7 @@ class PaperSendingTests(unittest.TestCase):
         a.conn.connect()
         with self.assertRaises(NotReconciled):
             relay.exchange({"id": "session:1", "type": "market.session.closed", "sequence": 3,
-                            "event_time": SESSION_CLOSED})
+                            "event_time": SESSION_CLOSED, "recorded_at": SESSION_CLOSED})
         self.assertEqual(a.pending.handovers(), {})
         self.assertEqual(a.placed(), 0)
 

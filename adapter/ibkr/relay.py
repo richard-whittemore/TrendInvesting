@@ -1218,7 +1218,8 @@ class Relay:
     open order or execution in either list carrying a released order's client
     order ID means the broker already has that order. to_request maps a
     released order's payload and the session it was released in (its
-    input's event time as a New York date, None when that cannot be read)
+    input's recorded_at as a New York date, None when that cannot be read;
+    docs/manual/paper-trading.md, "A paper day")
     to an OrderRequest; it need refuse nothing the sender's check refuses.
     reconnects bounds how often one exchange reconnects and
     asks again before EngineUnavailable reaches the caller. settled, when
@@ -1383,7 +1384,7 @@ class Relay:
             # cannot be built, or that the sender would refuse, never reaches
             # the sender's send, so it leaves no mark to stop a restart.
             try:
-                request = self._to_request(order, _session_date(envelope))
+                request = self._to_request(order, _session_date({"event_time": envelope.get("recorded_at")}))
                 self._sender.check(request)
             except SessionOver as err:
                 # Its session is over, so it is never sent: retired here,

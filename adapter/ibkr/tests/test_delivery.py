@@ -48,6 +48,7 @@ from loop import BROKER_SNAPSHOT_ATTEMPTS, AdapterLoop, Outbox, ReconcileIncompl
 from relay import RELEASED, EngineUnavailable, OutboxInvalid, PendingInput, read_engine_log
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 from snapshot import BROKER_SNAPSHOT_TYPE
+from sender import SESSION_ZONE
 
 RUN = "engine"
 BAR = "market.bar.completed"
@@ -156,7 +157,9 @@ class DeliveryTests(unittest.TestCase):
             gateway.waited()
         loop = AdapterLoop(config(mode="paper", paper_sending_enabled=True, commission_wait=COMMISSION_WAIT),
                            gateway, engine or self.engine, self.pending, engine_log or self.engine_log,
-                           now=now if callable(now) else (lambda: now), today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0,
+                           now=now if callable(now) else (lambda: now),
+                           today=lambda: (now() if callable(now) else now).astimezone(SESSION_ZONE).date(),
+                           sleep=sleep, monotonic=clock, poll=0,
                            new_id=self.new_id, streams=str(self.streams) if streams else None)
         self.addCleanup(loop.close)
         return loop

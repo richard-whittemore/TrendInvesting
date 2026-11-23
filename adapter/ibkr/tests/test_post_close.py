@@ -53,6 +53,7 @@ from loop import AdapterLoop, ReconcileIncomplete
 from relay import RELEASED
 from reports import FILL_TYPE
 from snapshot import BROKER_SNAPSHOT_TYPE
+from sender import SESSION_ZONE
 
 ACCOUNT_SNAPSHOT = "account.snapshot"
 MARK = "market.mark.recorded"
@@ -104,7 +105,8 @@ class PostCloseTests(unittest.TestCase):
             clock.now += seconds
         loop = AdapterLoop(config(mode="paper", paper_sending_enabled=True, commission_wait=COMMISSION_WAIT),
                            self.fake, engine or self.engine, self.pending, self.engine_log,
-                           now=lambda: RECEIVED, today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0,
+                           now=lambda: RECEIVED, today=lambda: loop._now().astimezone(SESSION_ZONE).date(),
+                           sleep=sleep, monotonic=clock, poll=0,
                            new_id=self.new_id, streams=str(self.streams), cash_ledger=getattr(self, "ledger", None))
         self.addCleanup(loop.close)
         return loop

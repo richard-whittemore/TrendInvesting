@@ -205,7 +205,7 @@ class LoopTests(unittest.TestCase):
             clock.now += seconds
         loop = AdapterLoop(config(**values), fake or self.fake, engine or self.engine, self.pending,
                            engine_log or self.engine_log,
-                           now=lambda: self.received, today=lambda: SESSION, sleep=sleep, monotonic=clock, poll=0,
+                           now=lambda: self.received, today=lambda: RECEIVED.date(), sleep=sleep, monotonic=clock, poll=0,
                            new_id=Ids())
         self.addCleanup(loop.close)
         return loop
