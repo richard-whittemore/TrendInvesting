@@ -168,8 +168,8 @@ class OrderStatusTests(unittest.TestCase):
     def test_commission_report(self):
         t = Tracked()
         t.cb.exec_details(-1, contract(), execution(exec_id="x.01"))
-        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
-        t.cb.commission_report(SimpleNamespace(execId="foreign.01", commission=2.0,
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commissionAndFees=1.0, currency="USD"))
+        t.cb.commission_report(SimpleNamespace(execId="foreign.01", commissionAndFees=2.0,
                                                currency="USD"))
         t.drain()
         self.assertEqual(t.of(CommissionReport),
@@ -180,9 +180,9 @@ class OrderStatusTests(unittest.TestCase):
         # execution's commission report.
         t = Tracked()
         t.cb.exec_details(-1, contract(), execution(exec_id="x.01"))
-        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commissionAndFees=1.0, currency="USD"))
         t.cb.exec_details(4, contract(), execution(exec_id="x.01"))
-        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commissionAndFees=1.0, currency="USD"))
         t.drain()
         self.assertEqual(t.of(CommissionReport),
                          [CommissionReport("x.01", Decimal("1.0"), "USD")])
@@ -197,10 +197,10 @@ class OrderStatusTests(unittest.TestCase):
             reports.append(record)
         t = Tracked(sink)
         t.cb.exec_details(-1, contract(), execution(exec_id="x.01"))
-        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commissionAndFees=1.0, currency="USD"))
         with self.assertRaises(RuntimeError):
             t.drain()
-        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commissionAndFees=1.0, currency="USD"))
         t.drain()
         self.assertEqual([r for r in reports if isinstance(r, CommissionReport)],
                          [CommissionReport("x.01", Decimal("1.0"), "USD")])
@@ -352,7 +352,7 @@ class OrderStatusTests(unittest.TestCase):
         t.cb.exec_details(-1, contract(), execution(exec_id="x.01", time="20261016 09:30:01"))
         with self.assertRaises(ValueError):
             t.drain()
-        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commissionAndFees=1.0, currency="USD"))
         t.drain()
         self.assertEqual(t.reports, [])
 

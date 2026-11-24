@@ -263,7 +263,7 @@ class MorningTests(unittest.TestCase):
         ex = execution(exec_id="0003.dawn.01.01", order_id=0, perm_id=6161, order_ref="", client_id=0,
                        time="20270115 03:00:01 US/Eastern")
         self.fake.executions.append((contract(), ex))
-        self.fake.commissions[ex.execId] = SimpleNamespace(execId=ex.execId, commission="1.00", currency="USD")
+        self.fake.commissions[ex.execId] = SimpleNamespace(execId=ex.execId, commissionAndFees="1.00", currency="USD")
         self.deliver(THURSDAY, loop)
         self.assert_withheld("0003.dawn.01.01")
 
@@ -683,7 +683,7 @@ class MorningTests(unittest.TestCase):
         fields.update(overrides)
         ex = execution(**fields)
         self.fake.callbacks.exec_details(req_id, contract(), ex)
-        self.fake.callbacks.commission_report(SimpleNamespace(execId=ex.execId, commission=1.0, currency="USD"))
+        self.fake.callbacks.commission_report(SimpleNamespace(execId=ex.execId, commissionAndFees=1.0, currency="USD"))
         loop._pump_all()
         return ex
 

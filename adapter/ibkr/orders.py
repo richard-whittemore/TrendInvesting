@@ -423,7 +423,9 @@ class OrderTracker:
         # requested again (reconnect matching), so it is recorded once.
         if report.execId not in self._executions or report.execId in self._commissions:
             return
-        self._sink(CommissionReport(report.execId, to_decimal(report.commission, "commission"),
+        # The pinned ibapi reports it as CommissionAndFeesReport, whose amount
+        # is commissionAndFees (deploy/versions.env); read exactly that field.
+        self._sink(CommissionReport(report.execId, to_decimal(report.commissionAndFees, "commission"),
                                     report.currency))
         self._commissions.add(report.execId)
 

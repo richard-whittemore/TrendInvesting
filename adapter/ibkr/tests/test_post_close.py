@@ -538,7 +538,7 @@ class PostCloseTests(unittest.TestCase):
         ex = execution(exec_id="0002.after.01.01", order_id=0, perm_id=5151, order_ref="", client_id=0,
                        time="20270114 16:30:01 US/Eastern")
         self.fake.executions.append((contract(), ex))
-        self.fake.commissions[ex.execId] = SimpleNamespace(execId=ex.execId, commission="1.00", currency="USD")
+        self.fake.commissions[ex.execId] = SimpleNamespace(execId=ex.execId, commissionAndFees="1.00", currency="USD")
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         for _ in range(40):
             loop.step()
@@ -554,7 +554,7 @@ class PostCloseTests(unittest.TestCase):
         ex = execution(exec_id="0002.auction.01.01", order_id=0, perm_id=5154, order_ref="", client_id=0,
                        time="20270114 16:00:00 US/Eastern")
         self.fake.executions.append((contract(), ex))
-        self.fake.commissions[ex.execId] = SimpleNamespace(execId=ex.execId, commission="1.00", currency="USD")
+        self.fake.commissions[ex.execId] = SimpleNamespace(execId=ex.execId, commissionAndFees="1.00", currency="USD")
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         for _ in range(40):
             loop.step()
@@ -856,7 +856,7 @@ class PostCloseTests(unittest.TestCase):
             loop.step()
         before = len(self.sent(RECONCILIATION))
         self.assertEqual(before, 1, "no reconciliation while the replayed fill awaits its commission")
-        self.fake.callbacks.commission_report(mock.Mock(execId="0001f4e8.t.01.01", commission=Decimal("1.00"),
+        self.fake.callbacks.commission_report(mock.Mock(execId="0001f4e8.t.01.01", commissionAndFees=Decimal("1.00"),
                                                         currency="USD"))
         for _ in range(40):
             loop.step()
