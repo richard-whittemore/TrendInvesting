@@ -589,7 +589,8 @@ class FakeTWS(TWSApi):
         self.executions.append((con, ex))
         self.callbacks.exec_details(-1, con, ex)
         if commission is not None:
-            report = SimpleNamespace(execId=exec_id, commission=commission, currency=currency)
+            # The pinned ibapi's CommissionAndFeesReport (deploy/versions.env).
+            report = SimpleNamespace(execId=exec_id, commissionAndFees=commission, currency=currency)
             self.commissions[exec_id] = report
             self.callbacks.commission_report(report)
         remaining = str(Decimal(str(echo.totalQuantity)) - Decimal(cum_qty))

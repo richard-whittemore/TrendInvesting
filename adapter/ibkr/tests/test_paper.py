@@ -357,7 +357,7 @@ class PaperSendingTests(unittest.TestCase):
         self.assertEqual([r.payload.get("status") for r in a.inputs], ["submitted"], "the cancellation is held")
         a.relay.close()
         # IBKR's commission arrives after the stop, so only its replay brings it.
-        a.h.fake.commissions[exec_id] = SimpleNamespace(execId=exec_id, commission="1.00", currency="USD")
+        a.h.fake.commissions[exec_id] = SimpleNamespace(execId=exec_id, commissionAndFees="1.00", currency="USD")
         b = self.restart(a)
         b.start()
         b.exchange()
@@ -387,14 +387,14 @@ class PaperSendingTests(unittest.TestCase):
         a.h.fake.fill(7, shares="1", price=401.3, exec_id=second, cum_qty="5", commission=None,
                       time="20261017 09:30:02 US/Eastern")
         a.h.fake.open_orders = [o for o in a.h.fake.open_orders if o[0] != 7]
-        report = SimpleNamespace(execId=first, commission="1.00", currency="USD")
+        report = SimpleNamespace(execId=first, commissionAndFees="1.00", currency="USD")
         a.h.fake.commissions[first] = report
         a.h.fake.callbacks.commission_report(report)
         a.drain()
         self.assertEqual([(r.event_type, r.payload.get("fill_id")) for r in a.inputs],
                          [(LIFECYCLE_TYPE, None), (FILL_TYPE, first)], "the cancellation waits for the second")
         a.relay.close()
-        a.h.fake.commissions[second] = SimpleNamespace(execId=second, commission="0.35", currency="USD")
+        a.h.fake.commissions[second] = SimpleNamespace(execId=second, commissionAndFees="0.35", currency="USD")
         b = self.restart(a)
         b.start()
         b.exchange()
@@ -460,7 +460,7 @@ class PaperSendingTests(unittest.TestCase):
         a.h.fake.status(7, "Cancelled", filled="4", remaining="5")
         a.drain()
         a.fail_on = "canceled"
-        report = SimpleNamespace(execId=exec_id, commission="1.00", currency="USD")
+        report = SimpleNamespace(execId=exec_id, commissionAndFees="1.00", currency="USD")
         a.h.fake.commissions[exec_id] = report
         a.h.fake.callbacks.commission_report(report)
         with self.assertRaises(OSError):

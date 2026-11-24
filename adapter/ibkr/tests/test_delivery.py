@@ -1158,7 +1158,7 @@ class DeliveryTests(unittest.TestCase):
         write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
         self.settle(loop, steps=5)
         self.assertEqual(self.types().count(BROKER_SNAPSHOT_TYPE), 1, "the snapshot waits for the fill")
-        self.fake.callbacks.commission_report(mock.Mock(execId="0001f4e8.t.01.01", commission=Decimal("1.00"),
+        self.fake.callbacks.commission_report(mock.Mock(execId="0001f4e8.t.01.01", commissionAndFees=Decimal("1.00"),
                                                         currency="USD"))
         self.settle(loop)
         types = self.types()
@@ -1249,7 +1249,7 @@ class DeliveryTests(unittest.TestCase):
         self.settle(loop, steps=10)
         self.assertNotIn("marketdata:session-closed:2027-01-15", self.ids(),
                          "no stream input goes ahead of a fill the engine has not been told about")
-        self.fake.callbacks.commission_report(mock.Mock(execId="0001f4e8.t.01.01", commission=Decimal("1.00"),
+        self.fake.callbacks.commission_report(mock.Mock(execId="0001f4e8.t.01.01", commissionAndFees=Decimal("1.00"),
                                                         currency="USD"))
         self.settle(loop)
         ids = self.ids()
